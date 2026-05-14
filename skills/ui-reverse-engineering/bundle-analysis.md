@@ -10,7 +10,7 @@
 Modern frameworks code-split aggressively. Page-specific logic lives in lazy-loaded chunks, not the main bundle.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const entries = performance.getEntriesByType('resource');
   const scripts = entries
@@ -30,7 +30,7 @@ mkdir -p tmp/ref/<component>/bundles
 **Step 1: Behavioral detection**
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const html = document.documentElement;
   const body = document.body;
@@ -64,9 +64,9 @@ grep -liE 'new Lenis|smoothWheel|locomotive-scroll|ScrollSmoother|data-scroll' \
 
 ```bash
 # Take 2 screenshots 4s apart — if different, auto-timer exists
-agent-browser screenshot tmp/ref/<component>/timer-t0.png
-agent-browser wait 4000
-agent-browser screenshot tmp/ref/<component>/timer-t1.png
+agent-browser --session <s> screenshot tmp/ref/<component>/timer-t0.png
+agent-browser --session <s> wait 4000
+agent-browser --session <s> screenshot tmp/ref/<component>/timer-t1.png
 
 # Find interval timing in bundles
 grep -oE 'setInterval\([^,]+,\s*[0-9]+' tmp/ref/<component>/bundles/*.js | head -10
@@ -205,7 +205,7 @@ grep -l "preloader\|Preloader\|pre_loader\|splash\|introAnimation" tmp/ref/<c>/b
 
 # Signal 2: DOM class on html/body — broadened with BEM-prefix selectors
 #  → Full protocol: splash-extraction.md "Signal B (BEM-prefix loader element scan)"
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const html = document.documentElement;
   const body = document.body;
   const preloaderEl = document.querySelector('[class*=preloader], [class*=loader], [data-preloader], #js-loader, .o-loader, .m-loader, .a-loader');

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # gsap-to-css.sh — Convert GSAP easing names to CSS cubic-bezier values
 # Usage:
-#   bash scripts/gsap-to-css.sh power5         → cubic-bezier(0.05, 0.86, 0.09, 1)
-#   bash scripts/gsap-to-css.sh all            → print full table
-#   bash scripts/gsap-to-css.sh scan file.js   → find all easings in a bundle
+#   bash scripts/extract/gsap-to-css.sh power5         → cubic-bezier(0.05, 0.86, 0.09, 1)
+#   bash scripts/extract/gsap-to-css.sh all            → print full table
+#   bash scripts/extract/gsap-to-css.sh scan file.js   → find all easings in a bundle
 
 set -eo pipefail
 

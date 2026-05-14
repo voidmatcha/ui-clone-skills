@@ -1,0 +1,8 @@
+interface:
+  display_name: "Visual Debug"
+  short_description: "Compare a reference site and implementation with AE/SSIM, section diffs, and transition checks."
+  brand_color: "#10A37F"
+  default_prompt: "Use visual-debug to compare an implementation against reference captures."
+
+policy:
+  allow_implicit_invocation: true

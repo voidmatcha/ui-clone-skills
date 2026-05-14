@@ -6,15 +6,47 @@ Detect ALL motion on the page: splash/intro, auto-timers, scroll-driven, paralla
 > Step 5 catches hover/click/intersection transitions. Step 6 catches everything that MOVES — with or without input.
 > **If Canvas/Lottie/video/auto-timer detected:** read `dynamic-content-protocol.md` for non-deterministic capture handling.
 
-## 3-Phase strategy
+## 4-Phase strategy
 
 | Phase | Input | Detects |
 |---|---|---|
+| **0 — Runtime dump** | One-shot `eval` against the live page. No video. | Resolved ScrollTrigger pixel offsets, GSAP tween ease functions, `document.getAnimations()` timings, Lenis options, Webflow IX2 timeline IDs |
 | **A — Idle capture** | 8–10s video at page load. No scroll, no mouse. | Splash/intro, auto-timers, CSS animations, video autoplay |
 | **B — Scroll capture** | Full scroll video at 60fps, consistent speed. | Parallax, scale transitions, sticky, clip-path reveals, opacity fades, position changes |
 | **C — Per-element tracking** | Targeted video per section/element from A or B. | Exact transform/opacity/scale at each scroll % |
 
-All 3 phases are MANDATORY.
+All 4 phases are MANDATORY. Phase 0 is cheap (one eval) and recovers runtime-only params that bundle-grep (Step 4) and video phases never see — `"top 80%"` → resolved pixel start, custom cubic-bezier arrow-function ease, IX2 timeline keys.
+
+## Phase 0 — Runtime instrumentation (zero-video)
+
+**Purpose:** capture animation parameters that exist ONLY at runtime — never present as literals in the bundle and not visually recoverable from frames. Examples: ScrollTrigger `start: "top 80%"` resolved to a pixel offset, an `ease` defined as `t => t*t*(3-2*t)`, a Lenis `easing` function composed by user code, Webflow IX2 timeline IDs minted post-mount.
+
+```bash
+PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-}}}}"
+bash "$PLUGIN_ROOT/scripts/extract/extract-animation-runtime.sh" <session> tmp/ref/<component>
+```
+
+Writes `tmp/ref/<component>/animation-runtime-dump.json`:
+
+```json
+{
+  "gsap": { "version": "3.12.5", "ticker": "lagSmoothing-on" },
+  "scrollTrigger": [
+    { "start": 1200, "end": 2400, "scrub": 1, "pin": true,
+      "trigger": "section#hero.full-bleed",
+      "tween": { "duration": 1.2, "ease": "power2.out", "targets": ["h1#title"] } }
+  ],
+  "webAnimations": [
+    { "id": null, "playState": "running", "duration": 800,
+      "delay": 0, "easing": "cubic-bezier(0.4, 0, 0.2, 1)", "target": "div#logo" }
+  ],
+  "lenis": { "duration": 1.2, "easing": "t => Math.min(1, 1.001 - Math.pow(2, -10 * t))", "smoothWheel": true },
+  "ix2": { "timelineCount": 12, "timelineKeys": ["e-1","e-2"], "eventCount": 24 },
+  "generatedAt": "2026-05-14T20:00:00.000Z"
+}
+```
+
+Missing runtimes are emitted as `null` (NOT omitted) so downstream code can do a single shape check. Consult this file when authoring `transition-spec.json` (`transition-spec-rules.md`) — easing/threshold values that bundle-grep misses live here.
 
 ## Phase A — Idle capture (splash + auto-timers)
 

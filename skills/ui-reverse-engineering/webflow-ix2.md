@@ -6,7 +6,7 @@ If you skip this file on a Webflow site, you will lose: every scroll-driven reve
 
 ## Step W-1: Detect IX2
 
-Run this eval immediately after `agent-browser open` and splash completion. **MUST be Step 0.5 — before any other extraction** when Webflow generator is present.
+Run this eval immediately after `agent-browser --session <s> open` and splash completion. **MUST be Step 0.5 — before any other extraction** when Webflow generator is present.
 
 ```bash
 agent-browser --session <s> eval "(() => {

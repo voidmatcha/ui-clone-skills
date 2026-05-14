@@ -55,6 +55,7 @@ One entry per distinct transition. Each entry is **self-contained**:
 4. **Include `reference_frames`** — frame paths that show this transition.
 5. **Convert GSAP easing to CSS** — write both GSAP name and `cubic-bezier()`.
 6. **Include `simultaneous`** — transitions that co-occur with specific delays.
+7. **Consult `animation-runtime-dump.json`** when present — easing functions, resolved ScrollTrigger pixel offsets, Lenis/IX2 timings live there even when bundle-grep misses them. Phase 0 of `animation-detection.md` writes this file.
 
 ## 4. Gate
 
@@ -129,7 +130,7 @@ When a site uses a third-party SDK (UnicornStudio, Spline, Rive, Lottie) to rend
 Run during bundle download to identify SDKs:
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const resources = performance.getEntriesByType('resource');
   const patterns = [
     { name: 'UnicornStudio', match: /unicornstudio|unicornStudio/i, type: 'webgl-scene' },
@@ -157,7 +158,7 @@ Save to `tmp/ref/<c>/external-sdks.json`.
 | Rive | `.riv` | `@rive-app/react-canvas` |
 | Lottie | `.json` | `lottie-react` or `lottie-web` |
 | Three.js | GLTF/GLB | Evaluate `@react-three/fiber` |
-| GSAP premium | N/A | OSS alternatives (see `transition-implementation.md`) |
+| GSAP plugin dependency choice | N/A | Project library / OSS / native alternatives (see `transition-implementation.md`) |
 
 ### Reuse procedure
 

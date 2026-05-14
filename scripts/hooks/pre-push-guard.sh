@@ -1,7 +1,7 @@
 #!/bin/bash
-# Block git push if:
+# Agent pre-push guard. Blocks git push if:
 # 1. skills/ changed without docs/config update,
-# 2. plugin.json and marketplace.json versions are out of sync, or
+# 2. Claude Code/Codex plugin manifests and package versions are out of sync, or
 # 3. pre-push-security.sh finds blockers (secrets, eval, insecure /tmp, etc).
 
 input=$(cat)
@@ -10,24 +10,25 @@ echo "$input" | grep -qE '"command":"[^"]*git[[:space:]]+push' || exit 0
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
 # Security gate (Snyk/Socket-class checks - secrets, eval, /tmp, manifests)
-if [ -f scripts/pre-push-security.sh ]; then
-  if ! bash scripts/pre-push-security.sh --quiet; then
+if [ -f scripts/ci/pre-push-security.sh ]; then
+  if ! bash scripts/ci/pre-push-security.sh --quiet; then
     echo "decision: block" >&2
-    echo "Run 'bash scripts/pre-push-security.sh' (no --quiet) to see details." >&2
+    echo "Run 'bash scripts/ci/pre-push-security.sh' (no --quiet) to see details." >&2
     exit 2
   fi
 fi
 
-# Version sync check: plugin.json, marketplace.json, pyproject.toml, and ui_clone/__init__.py must all match
+# Version sync check: Claude Code plugin, Codex plugin, package metadata, and ui_clone/__init__.py must all match
 plugin_v=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])" 2>/dev/null || echo "")
 market_v=$(python3 -c "import json; print(json.load(open('.claude-plugin/marketplace.json'))['plugins'][0]['version'])" 2>/dev/null || echo "")
+codex_v=$(python3 -c "import json; print(json.load(open('.codex-plugin/plugin.json'))['version'])" 2>/dev/null || echo "")
 pyproj_v=$(python3 -c "import re; m=re.search(r'^version\s*=\s*\"([^\"]+)\"', open('pyproject.toml').read(), re.M); print(m.group(1) if m else '')" 2>/dev/null || echo "")
 init_v=$(python3 -c "import re; m=re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('ui_clone/__init__.py').read()); print(m.group(1) if m else '')" 2>/dev/null || echo "")
-versions="plugin.json=$plugin_v marketplace.json=$market_v pyproject.toml=$pyproj_v ui_clone/__init__.py=$init_v"
-unique=$(printf '%s\n' "$plugin_v" "$market_v" "$pyproj_v" "$init_v" | sort -u | grep -v '^$' | wc -l | tr -d ' ')
+versions="claude-plugin.json=$plugin_v marketplace.json=$market_v codex-plugin.json=$codex_v pyproject.toml=$pyproj_v ui_clone/__init__.py=$init_v"
+unique=$(printf '%s\n' "$plugin_v" "$market_v" "$codex_v" "$pyproj_v" "$init_v" | sort -u | grep -v '^$' | wc -l | tr -d ' ')
 if [ "$unique" != "1" ]; then
   echo "⚠️ Version mismatch: $versions" >&2
-  echo "All four must be bumped together. decision: block" >&2
+  echo "All versioned package/plugin files must be bumped together. decision: block" >&2
   exit 2
 fi
 
@@ -35,9 +36,9 @@ fi
 # Mirrors .github/workflows/ci.yml `test` job so we don't push code that GitHub
 # will reject. Slow (~30-60s) so it runs after the fast checks above.
 # Bypass: UI_RE_SKIP_CI_LOCAL=1 git push (emergency only — same env var ci-local.sh honors).
-if [ -f scripts/ci-local.sh ]; then
-  if ! bash scripts/ci-local.sh --quiet; then
-    echo "⚠️ CI mirror failed — run 'bash scripts/ci-local.sh' to see details." >&2
+if [ -f scripts/ci/ci-local.sh ]; then
+  if ! bash scripts/ci/ci-local.sh --quiet; then
+    echo "⚠️ CI mirror failed — run 'bash scripts/ci/ci-local.sh' to see details." >&2
     echo "Bypass (emergency only): UI_RE_SKIP_CI_LOCAL=1 git push" >&2
     echo "decision: block" >&2
     exit 2
@@ -60,7 +61,7 @@ changed=$(git diff --name-only "$base" HEAD)
 echo "$changed" | grep -q '^skills/' || exit 0
 
 missing=""
-for f in CHANGELOG.md .claude-plugin/plugin.json .claude-plugin/marketplace.json; do
+for f in CHANGELOG.md .claude-plugin/plugin.json .claude-plugin/marketplace.json .codex-plugin/plugin.json; do
   echo "$changed" | grep -q "^$f$" || missing="$missing $f"
 done
 

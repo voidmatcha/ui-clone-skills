@@ -11,7 +11,7 @@
 ## Static state extraction
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const el = document.querySelector('.target');
   if (!el) return JSON.stringify({ error: 'selector not found' });
@@ -31,7 +31,7 @@ agent-browser eval "
 ## Detect trigger type
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const el = document.querySelector('.target');
   if (!el) return JSON.stringify({ error: 'selector not found' });
@@ -51,7 +51,7 @@ agent-browser eval "
 ## Extract CSS keyframes
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const keyframes = {};
   for (const sheet of document.styleSheets) {
@@ -74,7 +74,7 @@ agent-browser eval "
 If cross-origin blocks access:
 ```bash
 # Get stylesheet URLs
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   return JSON.stringify(
     Array.from(document.querySelectorAll('link[rel=stylesheet]')).map(l => l.href)
@@ -93,7 +93,7 @@ Capture before/after computed styles to identify which properties change on hove
 
 ```bash
 # Before hover
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const el = document.querySelector('.target');
   if (!el) return JSON.stringify({ error: 'not found' });
@@ -111,11 +111,11 @@ agent-browser eval "
   return JSON.stringify({ main: window.__before, strokes: window.__beforeStrokes });
 })()"
 
-agent-browser hover .target
-agent-browser wait 600
+agent-browser --session <s> hover .target
+agent-browser --session <s> wait 600
 
 # After hover
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const el = document.querySelector('.target');
   const s = getComputedStyle(el);
@@ -139,7 +139,7 @@ Save delta to `tmp/ref/<effect-name>/hover-delta.json`. Use `transition` value f
 Transitions often cascade to children:
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const parent = document.querySelector('.target');
   if (!parent) return JSON.stringify({ error: 'selector not found' });
@@ -160,7 +160,7 @@ agent-browser eval "
 
 ```bash
 # 1. Set up frame recorder (clears any previous __frames data)
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   window.__frames = [];
   const el = document.querySelector('.target');
@@ -178,19 +178,19 @@ agent-browser eval "
 })()"
 
 # 2. Trigger hover
-agent-browser hover .target
-agent-browser wait 2500
+agent-browser --session <s> hover .target
+agent-browser --session <s> wait 2500
 
 # 3. Retrieve frames
-agent-browser eval "(() => JSON.stringify(window.__frames, null, 2))()"
+agent-browser --session <s> eval "(() => JSON.stringify(window.__frames, null, 2))()"
 ```
 
 ## Frame capture — page-load animations
 
 ```bash
-agent-browser open https://target-site.com
+agent-browser --session <s> open https://target-site.com
 
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   window.__frames = [];
   const el = document.querySelector('.target');
@@ -207,14 +207,14 @@ agent-browser eval "
   return 'Recording load animation...';
 })()"
 
-agent-browser wait 5500
-agent-browser eval "(() => JSON.stringify(window.__frames, null, 2))()"
+agent-browser --session <s> wait 5500
+agent-browser --session <s> eval "(() => JSON.stringify(window.__frames, null, 2))()"
 ```
 
 ## Frame capture — scroll-triggered
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   window.__scrollFrames = [];
   const el = document.querySelector('.target');
@@ -233,14 +233,14 @@ agent-browser eval "
 })()"
 
 agent-browser scroll down 800
-agent-browser wait 2000
-agent-browser eval "(() => JSON.stringify(window.__scrollFrames, null, 2))()"
+agent-browser --session <s> wait 2000
+agent-browser --session <s> eval "(() => JSON.stringify(window.__scrollFrames, null, 2))()"
 ```
 
 ## Analyze captured frames
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const frames = window.__frames;
   if (!frames?.length) return 'No frames captured';

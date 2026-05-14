@@ -67,6 +67,23 @@ agent-browser --session "$SESSION" eval '(() => {
     const tform = cs.transform;
     const initiallyHidden = opacity === 0 || (tform && tform !== "none" && tform !== "matrix(1, 0, 0, 1, 0, 0)");
     if (!initiallyHidden) continue;
+    // Skip elements with no CSS transition — they are static hidden state (closed
+    // overlays, hover-only videos, centering transforms), not reveal animations.
+    const transDurs = (cs.transitionDuration || "").split(",").map(d => parseFloat(d) || 0);
+    const animName = cs.animationName || "none";
+    const hasMotion = transDurs.some(d => d > 0) || animName !== "none";
+    if (!hasMotion) continue;
+    // Skip hover-swap pattern: element has a visible sibling at the same position
+    // (image+video stacked in a card). Those are hover-triggered swaps, not scroll reveals.
+    const siblings = el.parentElement ? Array.from(el.parentElement.children) : [];
+    const hasVisibleSwapSibling = siblings.some(sib => {
+      if (sib === el) return false;
+      const ss = getComputedStyle(sib);
+      if (parseFloat(ss.opacity) === 0 || ss.display === 'none' || ss.visibility === 'hidden') return false;
+      const sr = sib.getBoundingClientRect();
+      return Math.abs(sr.width - r.width) < 2 && Math.abs(sr.height - r.height) < 2 && Math.abs(sr.left - r.left) < 2 && Math.abs(sr.top - r.top) < 2;
+    });
+    if (hasVisibleSwapSibling) continue;
     el.setAttribute("data-reveal-probe", String(n++));
   }
   return n;
@@ -89,7 +106,13 @@ RAW=$(agent-browser --session "$SESSION" eval "(async () => {
     const csPost = getComputedStyle(el);
     const post = { opacity: csPost.opacity, transform: csPost.transform };
 
+    // True stuck = post is STILL in a hidden-init state (opacity 0 or transform != identity).
+    // If post.opacity === '1' AND post.transform is identity/none, the reveal completed —
+    // any non-advance in init↔post just means we re-probed after the animation finished.
+    const postIdentityTransform = !post.transform || post.transform === 'none' || post.transform === 'matrix(1, 0, 0, 1, 0, 0)';
+    const postHidden = parseFloat(post.opacity) === 0 || !postIdentityTransform;
     const stuck =
+      postHidden &&
       (init.opacity === post.opacity && init.transform === post.transform);
     if (!stuck) continue;
 

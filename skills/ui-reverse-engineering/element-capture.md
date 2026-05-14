@@ -45,9 +45,9 @@ agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
 ## Page-load / splash animations — video + frame extraction
 
 ```bash
-agent-browser record start tmp/ref/<effect-name>/ref.webm
-agent-browser wait 3000
-agent-browser record stop
+agent-browser --session <project> record start tmp/ref/<effect-name>/ref.webm
+agent-browser --session <project> wait 3000
+agent-browser --session <project> record stop
 
 ffmpeg -i tmp/ref/<effect-name>/ref.webm -vf fps=60 \
   tmp/ref/<effect-name>/frames/ref/frame-%04d.png -y

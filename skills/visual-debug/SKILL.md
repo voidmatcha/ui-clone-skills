@@ -20,18 +20,28 @@ metadata:
 
 # Visual Debug
 
-Automated visual comparison — original vs implementation. **Zero vision tokens** via AE/SSIM CLI tools.
+Automated post-implementation visual comparison — original vs implementation. **Zero vision tokens** via AE/SSIM CLI tools.
+
+**Primary trigger:** Diagnose post-implementation mismatch between a reference and an implementation, then provide concrete repair guidance.
+**Non-goals:** Do not use this to build or regenerate the React component, orchestrate a full live URL clone, or perform baseline/reference capture; route build/clone work to `ui-reverse-engineering` and capture/reference work to `ui-capture`.
+
+## Boundary and handoff
+
+- **Direct invocation:** Use when reference/implementation evidence already exists and the user asks for mismatch, diff, diagnosis, comparison, or repair guidance.
+- **Routed invocation:** `ui-reverse-engineering` may route here after a failed visual diff, failed post-implementation gate, or completed-state mismatch request.
+- **Missing evidence:** If baseline/reference capture is missing, return to `ui-capture` first; if implementation or regeneration is needed, return to `ui-reverse-engineering` or the active caller pipeline.
+- **Return contract:** Send the caller concrete findings: failing artifact, mismatched selector/region, likely root cause, recommended fix, and verification command. `visual-debug` diagnoses and guides; the caller owns implementation, build, regeneration, and full clone orchestration.
 
 ## When to use
 
 - After implementing a section, before declaring "done"
 - When user says "it's different", "doesn't match"
-- During ui-reverse-engineering Phase C
+- After `ui-reverse-engineering` reports a failed visual diff or post-implementation gate
 - **Instead of** `Read`-ing screenshots for comparison
 
-**HARD RULE:** Never `Read` ref/impl images for comparison. For FAIL positions, use `auto-diagnose.sh` first (zero vision tokens). Only `Read` diff images as fallback if auto-diagnose finds nothing. Exception: Phase E reads ref+impl pairs — and Phase E **must run inside an `Agent` subagent** so its 44K vision tokens stay out of the main context (see Phase E section).
+**HARD RULE:** Never `Read` ref/impl images for comparison. For FAIL positions, use `auto-diagnose.sh` first (zero vision tokens). Only `Read` diff images as fallback if auto-diagnose finds nothing. Exception: Phase E reads ref+impl pairs, and Phase E **must run in a delegated subagent context** so its 44K vision tokens stay out of the main context (see Phase E section).
 
-**Browser cleanup rule (MANDATORY at end of every run):** `agent-browser --session <name> close` for each session you opened. **Never** `close --all` — other Claude sessions may own active browsers. The detailed section near the end of this file may be clipped after auto-compaction; this one-liner is the survival copy.
+**Browser cleanup rule (MANDATORY at end of every run):** `agent-browser --session <name> close` for each session you opened. **Never** `close --all` because other agent-browser sessions may own active browsers. The detailed section near the end of this file may be clipped after auto-compaction; this one-liner is the survival copy.
 
 ## Token rule
 
@@ -58,9 +68,13 @@ fi
 ## Scripts
 
 ```bash
-SCRIPTS_DIR="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}"
-# -L follows symlinks (~/.claude/skills/visual-debug is often a symlink to a real path).
-SCRIPTS_DIR="${SCRIPTS_DIR:-$(find -L ~/.claude/skills -name 'ae-compare.sh' -exec dirname {} \; 2>/dev/null | head -1)}"
+SCRIPTS_DIR="${VISUAL_DEBUG_SCRIPTS_DIR:-}"
+if [ -z "$SCRIPTS_DIR" ]; then
+  for root in "${PLUGIN_ROOT:-}" "${CODEX_PLUGIN_ROOT:-}" "${CLAUDE_PLUGIN_ROOT:-}" "${UI_CLONE_ROOT:-}" "$PWD" "$PWD/.." "$PWD/../.." "${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"; do
+    [ -n "$root" ] && [ -f "$root/skills/visual-debug/scripts/ae-compare.sh" ] && SCRIPTS_DIR=$(cd "$root/skills/visual-debug/scripts" && pwd) && break
+  done
+fi
+[ -n "$SCRIPTS_DIR" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 ```
 
 | Script | Purpose |
@@ -75,10 +89,11 @@ SCRIPTS_DIR="${SCRIPTS_DIR:-$(find -L ~/.claude/skills -name 'ae-compare.sh' -ex
 | `auto-diagnose.sh <session> <orig> <impl> <diff.png>` | **Auto-find mismatched elements** from AE diff image → elementFromPoint → computed-diff with severity |
 | `layout-health-check.sh <session> <orig> <impl> <dir>` | Section height/total height structural check before pixel diff |
 | `stray-absolute-check.sh <session> <impl-url> [w] [h]` | **Catches the "footer disappeared" bug class** — flags `position: absolute` elements with no positioned ancestor (offset resolves against `<body>`). Single URL, no ref needed. See `diagnosis.md` → Root Cause H. |
+| `tailwind-transform-conflict-check.sh <session> <impl-url> [w] [h] [scope]` | **Catches the "transform stacked twice" bug class** — flags elements where computed style has both a non-identity `transform:` (Tailwind v3 shorthand) AND a non-`none` `translate:`/`rotate:`/`scale:` (Tailwind v4 individual properties), which compose on top of each other and double the rendered offset. Set `REF_DIR=...` to write `tailwind-conflict.json` — `verification-plan.sh` includes this as a universal `post-implement` row. See `diagnosis.md` → Root Cause I. |
 | `breakpoint-collision-check.sh <session> <impl-url> [bps]` | **Catches the "broken at exactly 768" bug class** — captures impl at every Tailwind boundary ±1 (default 640/768/1024/1280/1536) and flags widths where `matchMedia(max-width)` and `matchMedia(min-width)` both match, body overflows in isolation, or root font-size jitters. Single URL, no ref needed. Set `REF_DIR=...` env to write `responsive/boundary-collisions.json` for the `boundary` gate. See `diagnosis.md` → Root Cause J. |
 | `font-parity-check.sh <session> <ref-url> <impl-url> <ref-dir>` | **Gates the asset-substitution decision** — extracts primary `font-family` from both ref and impl, writes `<ref-dir>/font-parity.json`. The `font-parity` gate enforces: parity:`match` → PASS; parity:`mismatch` → must be declared in `asset-substitution.json`. Catches the "100% sections FAIL forever" bug when commercial fonts are silently substituted. See `ui-reverse-engineering/asset-substitution.md`. |
 | `paid-features-detect.sh <ref-dir>` | **Early-detects paid font dependencies BEFORE generation** — static-greps `<ref-dir>/bundles/`, `css/`, `fonts.json`, `head.json`, `external-sdks.json` for paid font CDN hosts (Adobe Typekit, Monotype, Hoefler, Linotype, FONTPLUS / TypeSquare in Japan). Writes `<ref-dir>/paid-features.json` with `decision: null` for each finding. The `paid-features` gate (between `bundle` and `spec`) refuses to pass until every entry has `decision` set to one of `use` / `substitute` / `skip`. Catches the "100% sections FAIL forever" bug class when a paid web font silently falls back to the default sans-serif at impl time. **Note:** GSAP plugins are no longer flagged — GSAP became 100% free (including all previously-paid Club plugins) following the Webflow acquisition. |
-| `reveal-trigger-check.sh <session> <impl-url> [w] [h]` | **Catches the "stuck reveal" bug class** — enumerates initially-hidden elements (opacity 0 / non-identity transform), scrolls each into view, fails any whose style never advances. Reports parent-chain with `overflow: hidden` ancestors so the IO+overflow:hidden bug class (took 12 iterations to find on 375.studio) is named on first run. See `ui-reverse-engineering/transition-implementation.md` → IntersectionObserver placement for masked reveals. |
+| `reveal-trigger-check.sh <session> <impl-url> [w] [h]` | **Catches the "stuck reveal" bug class** — enumerates initially-hidden elements (opacity 0 / non-identity transform), scrolls each into view, fails any whose style never advances. Reports parent-chain with `overflow: hidden` ancestors so the IO+overflow:hidden bug class is named on first run instead of after many iterations of pixel-diffing. See `ui-reverse-engineering/transition-implementation.md` → IntersectionObserver placement for masked reveals. |
 | `transition-spec-coverage.sh <component-dir> <impl-src-dir>` | **Static gate: every spec entry has an impl artifact.** Parses `transition-spec.json`, greps the impl source for each entry's id / selector / type-derived hooks (RevealRise, useScrollTrigger, useScroll, etc.), FAILs if any entry has zero hits. Catches the "hover transitions matched while intersection entries were never wired" failure class. |
 | `transition-compare.sh <orig> <impl> <session> [dir]` | **Transition comparison** — idle/hover screenshots + computedStyle + timing diff per element |
 | `tree-diff.sh <session> <orig> <impl> [dir]` | **Exhaustive per-element CSS diff** — walks every visible impl element (≥ MIN_SIZE px), pairs with ref via `elementFromPoint`, runs computed-style diff per pair. Catches mismatches AE misses (wrong font that renders identically, same-box different-style). |
@@ -87,7 +102,7 @@ SCRIPTS_DIR="${SCRIPTS_DIR:-$(find -L ~/.claude/skills -name 'ae-compare.sh' -ex
 | `keyframes-diff.sh <session> <orig> <impl> [dir]` | **`@keyframes` declaration diff** — extracts all keyframe rules from both pages, reports keyframes only on one side and same-name rules with different steps. Catches missing entrance animations, wrong timing curves baked into keyframes. |
 | `scroll-anim-temporal-diff.sh <session> <ref> <impl> <selector> [dir]` | **Phase/frequency diff for scroll-driven repeating animations** — samples each matched element's position at N scroll progress steps on both sides, classifies as single-frequency (traveling wave) vs per-row-frequency vs mixed. Catches the "wave family wrong" bug class that AE/SSIM can't see (animation pixels match in any frozen frame, perceived motion is completely different). **Advisory only — no gate.** Run manually when the impl "feels off" on scroll for repeating elements; the selector arg is required so it can't be auto-invoked. |
 
-**Reference selectors:** `common-selectors.md` — ready-to-use selector sets (typography, CSS reset canaries, Tailwind preflight issues, Naver.com specific, general e-commerce)
+**Reference selectors:** `common-selectors.md` — ready-to-use selector sets (typography, CSS reset canaries, Tailwind preflight issues, news/portal patterns, general e-commerce)
 
 ## Cost ladder — cheapest detection first
 
@@ -237,6 +252,15 @@ See `common-selectors.md` for ready-to-use selector sets by domain.
 
 **Use section-level for ui-reverse-engineering Step 8b/8c.** Use full-page for standalone `/visual-debug` invocations.
 
+**`ONLY_IF_CHANGED=1` (skip if impl unchanged):** when re-running section-compare during iteration, set `ONLY_IF_CHANGED=1` + `IMPL_SRC_DIR=<path-to-impl-source>` to short-circuit if no `*.tsx`/`*.jsx`/`*.ts`/`*.js`/`*.css`/`*.scss` file has changed since the last run. The prior `sections/result.txt` stays in place (Stop gate passes against it).
+
+```bash
+ONLY_IF_CHANGED=1 IMPL_SRC_DIR=~/projects/foo/src \
+  bash $SCRIPTS/section-compare.sh <orig> <impl> <session> "$(pwd)/tmp/ref/<c>"
+```
+
+Hash is SHA-256 of (sorted paths + content) — mtime-resilient. Delete `<ref-dir>/sections/.last-impl-hash` to force a full run. Use this for the second/third/Nth re-run after a fix; skip it on the *first* run after extraction (no prior result.txt to reuse).
+
 ## Escalation diagnostics (when the standard workflow misses the bug)
 
 The standard workflow (AE + DSSIM + `auto-diagnose.sh` + `computed-diff.sh`) catches most mismatches. When AE keeps reporting failures but `auto-diagnose` returns clean — escalate to the **tree-diff family**. These walk *every* element on the page rather than a fixed selector list, so they catch what targeted diagnostics miss.
@@ -273,7 +297,7 @@ NOTE: Quick comparison (Phases A-D) uses zero vision tokens via AE/SSIM diff. Ph
 
 After AE + DSSIM, read every position's ref+impl pair. Judge PASS / PARTIAL / FAIL. Not optional — automated metrics can silently pass wrong results. ~44K tokens.
 
-**Always delegate Phase E to a subagent** (`Agent` tool, `subagent_type: "general-purpose"`). The 44K vision tokens stay in the subagent context — only the verdict table (~500 tokens) returns. See `comparison-fix.md` Phase E section for the exact invocation.
+**Always delegate Phase E to a subagent context.** In Claude Code-style hosts, the `Agent` tool with `subagent_type: "general-purpose"` is one example. Other hosts should use their equivalent delegated-worker mechanism. The 44K vision tokens stay in the subagent context, and only the verdict table (~500 tokens) returns. See `comparison-fix.md` Phase E section for the example invocation.
 
 ## Thresholds
 
@@ -324,9 +348,13 @@ agent-browser --session <session-name> close
 - Close every `--session <name>` you opened during the comparison
 - Run cleanup **before returning control to the user**, even on error/early exit
 - Unclosed sessions spawn Chrome Helper processes (GPU + Renderer) that persist indefinitely
-- **Never use `close --all`** — other Claude sessions may have active browsers. Only close sessions you own.
+- **Never use `close --all`** because other agent-browser sessions may have active browsers. Only close sessions you own.
+
+**Bulk cleanup helper (multi-session sweeps):** if a long verification run accumulated many ad-hoc sessions under a common prefix, use `scripts/verify/cleanup-sessions.sh <prefix>` (dry-run with `--dry`) to close them all in one pass. Refuses prefixes shorter than 3 chars; never matches across other agent-browser sessions.
 
 ## Integration
+
+`visual-debug` owns comparison and diagnosis only. After it identifies a fix target or a PASS/FAIL result, resume the caller's pipeline (`ui-reverse-engineering`, `ui-capture`, or standalone task) for implementation, regeneration, and the next gate.
 
 | Skill | Where |
 |---|---|

@@ -1,5 +1,15 @@
 # Asset Substitution — Declaring Deliberate Differences
 
+> 🚨 **Most common mistake — `structuralOnlySections` MUST be included.**
+> Declaring `fonts` / `images` alone does NOT activate structural-only mode.
+> `section-compare.sh` reads `structuralOnlySections` patterns *separately*;
+> without it, every section still runs strict pixel AE diff and you get
+> 1M+ AE failures even though you declared the substitution. The simplest
+> safe value is `"structuralOnlySections": ["*"]` (wildcard, all sections).
+> The script's forgiving fallback auto-defaults to `["*"]` when fonts/images/videos
+> are declared but no patterns are given — but a warning prints every run.
+> Be explicit.
+
 Some clones must substitute assets the original site uses:
 
 | Original | Why substituted | Replacement |
@@ -92,7 +102,7 @@ The artifact says: *"this difference is deliberate and acknowledged"*. Use it fo
 
 ## Example — Plan B font substitution
 
-A clone of a typography-heavy site whose hero font is a paid Vinhill / OH no Type / Pangram release:
+A clone of a typography-heavy site whose hero font is a paid commercial release:
 
 ```json
 {
@@ -100,7 +110,7 @@ A clone of a typography-heavy site whose hero font is a paid Vinhill / OH no Typ
     {
       "original": "Exat",
       "replacement": "Roboto Flex",
-      "reason": "Vinhill commercial license; clone is showcase-only, no resale",
+      "reason": "commercial license; clone is showcase-only, no resale",
       "axesMatched": ["wdth", "wght", "opsz"]
     }
   ],

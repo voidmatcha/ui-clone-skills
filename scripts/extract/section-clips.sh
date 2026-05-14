@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # section-clips.sh — Capture per-section and per-element clip screenshots
+# Section name keyword → name mapping: shared with extract-assets.sh and
+# extract-section-html.sh. Adding a new keyword? Update all 3.
 # Usage: bash section-clips.sh <session> <output-dir> <side>
 #   session   = agent-browser session name
 #   output-dir = e.g. tmp/ref/mysite

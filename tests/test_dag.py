@@ -1,16 +1,18 @@
 import time
 from pathlib import Path
 
+import pytest
+
 from ui_clone.dag import StalenessIssue, _assert_no_cycles, check_staleness, stale_set
 
 
-def test_stale_set_direct_dependency():
+def test_stale_set_direct_dependency() -> None:
     """structure.json change includes directly dependent extracted.json"""
     result = stale_set("structure.json")
     assert "extracted.json" in result
 
 
-def test_stale_set_transitive():
+def test_stale_set_transitive() -> None:
     """structure.json → section-map.json → component-map.json → extracted.json transitive chain"""
     result = stale_set("structure.json")
     assert "section-map.json" in result
@@ -18,14 +20,14 @@ def test_stale_set_transitive():
     assert "extracted.json" in result
 
 
-def test_stale_set_topological_order():
+def test_stale_set_topological_order() -> None:
     """section-map.json must appear before component-map.json (prerequisite dependency)"""
     result = stale_set("structure.json")
     if "section-map.json" in result and "component-map.json" in result:
         assert result.index("section-map.json") < result.index("component-map.json")
 
 
-def test_interactions_detected_invalidates_hover_css_rules():
+def test_interactions_detected_invalidates_hover_css_rules() -> None:
     """interactions-detected.json change must mark hover-css-rules.json stale.
 
     Regression test for: missing edge interactions-detected → hover-css-rules in DEPS.
@@ -36,13 +38,13 @@ def test_interactions_detected_invalidates_hover_css_rules():
     assert result.index("hover-css-rules.json") < result.index("extracted.json")
 
 
-def test_stale_set_no_dependents():
+def test_stale_set_no_dependents() -> None:
     """Returns empty list when there are no dependents"""
     result = stale_set("extracted.json")
     assert result == []
 
 
-def test_check_staleness_detects_stale(tmp_path: Path):
+def test_check_staleness_detects_stale(tmp_path: Path) -> None:
     """Returns StalenessIssue when parent is newer than child"""
     ref_dir = tmp_path / "ref"
     ref_dir.mkdir()
@@ -64,7 +66,7 @@ def test_check_staleness_detects_stale(tmp_path: Path):
     assert "extracted.json" in stale_names
 
 
-def test_check_staleness_clean(tmp_path: Path):
+def test_check_staleness_clean(tmp_path: Path) -> None:
     """No issue when child is newer than parent"""
     ref_dir = tmp_path / "ref"
     ref_dir.mkdir()
@@ -86,7 +88,7 @@ def test_check_staleness_clean(tmp_path: Path):
     assert "extracted.json" not in stale_names
 
 
-def test_check_staleness_missing_files(tmp_path: Path):
+def test_check_staleness_missing_files(tmp_path: Path) -> None:
     """No issue when files are missing (check_file handles that separately)"""
     ref_dir = tmp_path / "ref"
     ref_dir.mkdir()
@@ -95,7 +97,7 @@ def test_check_staleness_missing_files(tmp_path: Path):
     assert issues == []
 
 
-def test_staleness_issue_has_fix():
+def test_staleness_issue_has_fix() -> None:
     """StalenessIssue.fix field must not be empty"""
     issue = StalenessIssue(
         stale="extracted.json",
@@ -106,7 +108,7 @@ def test_staleness_issue_has_fix():
     assert issue.fix != ""
 
 
-def test_staleness_severity_extracted_is_block(tmp_path: Path):
+def test_staleness_severity_extracted_is_block(tmp_path: Path) -> None:
     """extracted.json staleness is block-level severity"""
     ref_dir = tmp_path / "ref"
     ref_dir.mkdir()
@@ -128,7 +130,7 @@ def test_staleness_severity_extracted_is_block(tmp_path: Path):
     assert any(i.severity == "block" for i in extracted_issues)
 
 
-def test_stale_set_cycle_guard():
+def test_stale_set_cycle_guard() -> None:
     """stale_set returns all affected nodes in an acyclic DAG (cycle guard verification)."""
     # Our DEPS graph is acyclic; stale_set("structure.json") should return all
     # transitively affected nodes without infinite loop.
@@ -141,14 +143,14 @@ def test_stale_set_cycle_guard():
     assert "component-map.json" in result
 
 
-def test_stale_set_bundle_map_transitively_marks_extracted():
+def test_stale_set_bundle_map_transitively_marks_extracted() -> None:
     """bundle-map.json → transition-spec.json → extracted.json transitive chain."""
     result = stale_set("bundle-map.json")
     assert "transition-spec.json" in result
     assert "extracted.json" in result
 
 
-def test_check_staleness_bundle_map_chain(tmp_path: Path):
+def test_check_staleness_bundle_map_chain(tmp_path: Path) -> None:
     """check_staleness detects extracted.json stale when bundle-map.json is newer via transition-spec."""
     import os
 
@@ -180,19 +182,19 @@ def test_check_staleness_bundle_map_chain(tmp_path: Path):
     )
 
 
-def test_stale_set_animation_init_and_svg_text_in_chain():
+def test_stale_set_animation_init_and_svg_text_in_chain() -> None:
     """animation-init-styles.json and svg-text-elements.json both mark extracted.json stale."""
     for parent in ("animation-init-styles.json", "svg-text-elements.json"):
         result = stale_set(parent)
         assert "extracted.json" in result, f"{parent} must transitively mark extracted.json stale"
 
 
-def test_assert_no_cycles_passes_on_current_deps():
+def test_assert_no_cycles_passes_on_current_deps() -> None:
     """DEPS graph must be acyclic — _assert_no_cycles() must not raise."""
     _assert_no_cycles()  # should not raise
 
 
-def test_assert_no_cycles_detects_cycle(monkeypatch):
+def test_assert_no_cycles_detects_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
     """_assert_no_cycles() raises RuntimeError when a cycle is introduced."""
     import ui_clone.dag as dag_module
 
@@ -210,7 +212,7 @@ def test_assert_no_cycles_detects_cycle(monkeypatch):
         dag_module._assert_no_cycles()
 
 
-def test_check_staleness_transitive_propagation(tmp_path: Path):
+def test_check_staleness_transitive_propagation(tmp_path: Path) -> None:
     """check_staleness propagates transitively: bundle-map newer than transition-spec
     must also flag extracted.json as stale even when extracted.json is newer than transition-spec.
 
@@ -252,7 +254,7 @@ def test_check_staleness_transitive_propagation(tmp_path: Path):
     )
 
 
-def test_conftest_fixture_covers_all_deps_artifacts(ref_dir_with_artifacts: Path):
+def test_conftest_fixture_covers_all_deps_artifacts(ref_dir_with_artifacts: Path) -> None:
     """Ensure ref_dir_with_artifacts fixture creates files for every artifact in DEPS.
 
     Prevents silent test breakage when new artifacts are added to the DAG.

@@ -16,10 +16,6 @@
     "should_trigger": true
   },
   {
-    "query": "아직 원본이랑 다르다",
-    "should_trigger": true
-  },
-  {
     "query": "what's still wrong visually? check with AE diff",
     "should_trigger": true
   },
@@ -33,10 +29,6 @@
   },
   {
     "query": "check the computed styles between original and my implementation for the header",
-    "should_trigger": true
-  },
-  {
-    "query": "여전히 원본이랑 좀 달라",
     "should_trigger": true
   },
   {

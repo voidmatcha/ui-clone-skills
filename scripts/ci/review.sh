@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
 # review.sh — Automated review checklist for ui-clone-skills
 # Runs tests, security checks, and content consistency validation.
-# Called by claude-post-push.sh after successful push, or manually.
+# Called by post-push-refresh.sh after successful push, or manually.
 #
-# Usage: bash scripts/review.sh [--quiet]
+# Usage: bash scripts/ci/review.sh [--quiet]
 # Exit: 0 = all pass, 1 = failures found
+#
+# Checklist enforced here (kept in sync with AGENTS.md "Review checklist" pointer):
+#   [] Tests pass
+#   [] Security gate passes
+#   [] Sub-doc step numbers match SKILL.md pipeline
+#   [] Gate artifact checks match sub-doc output timing
+#   [] No stale refs to deleted files (validate-gate.sh, run-pipeline.sh, ui_skills.*)
+#   [] README numbers accurate (sub-doc count, token count, FPS)
+#   [] Cross-skill refs use correct relative paths (../visual-debug/...)
+#   [] Claude/Codex plugin versions match (plugin.json, marketplace.json, codex plugin.json)
+#   [] No hardcoded local paths in SKILL.md (use $SCRIPTS_DIR, $PLUGIN_ROOT)
+#   [] Claude Code and Codex host files valid (AGENTS.md, .codex-plugin/plugin.json, hooks/codex-hooks.json, skills/*/agents/openai.yaml)
+#   [] Section name keyword lists consistent across 3 scripts
 
 set -uo pipefail
 
 QUIET=0
 [ "${1:-}" = "--quiet" ] && QUIET=1
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)" || { echo "review.sh: cannot resolve repo root" >&2; exit 1; }
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)" || { echo "review.sh: cannot resolve repo root" >&2; exit 1; }
 cd "$REPO_ROOT" || { echo "review.sh: cannot cd to $REPO_ROOT" >&2; exit 1; }
 
 ERRORS=0
@@ -40,7 +53,7 @@ fi
 
 # ── 2. Security gate ──
 section "Security"
-if bash scripts/pre-push-security.sh --quiet 2>/dev/null; then
+if bash scripts/ci/pre-push-security.sh --quiet 2>/dev/null; then
   ok "pre-push-security: clean"
 else
   err "pre-push-security: blockers found"
@@ -100,7 +113,7 @@ for STALE in "validate-gate.sh" "run-pipeline.sh" "waapi-scrub-inject.js" "captu
 done
 
 # Old owner name
-DIDIDY=$(grep -rl 'dididy' README.md skills/ .claude-plugin/ 2>/dev/null | grep -v review.sh || true)
+DIDIDY=$(grep -rl 'dididy' README.md skills/ .claude-plugin/ .codex-plugin/ 2>/dev/null | grep -v review.sh || true)
 if [ -z "$DIDIDY" ]; then
   ok "no dididy references (owner is voidmatcha)"
 else
@@ -113,6 +126,131 @@ if [ -z "$WRONG_NPM" ]; then
   ok "no @anthropic-ai/agent-browser refs (correct: agent-browser)"
 else
   err "wrong npm name @anthropic-ai/agent-browser in: $WRONG_NPM"
+fi
+
+# Removed consolidation-local script directory
+STALE_RE_SCRIPT_PREFIX=$(grep -rl 'skills/ui-reverse-engineering/scripts' README.md AGENTS.md skills/ scripts/ hooks/ ui_clone/ .claude-plugin/ .codex-plugin/ 2>/dev/null \
+  | grep -v CHANGELOG | grep -v review.sh || true)
+if [ -z "$STALE_RE_SCRIPT_PREFIX" ]; then
+  ok "no stale skills/ui-reverse-engineering/scripts prefix"
+else
+  err "stale skills/ui-reverse-engineering/scripts prefix found in: $STALE_RE_SCRIPT_PREFIX"
+fi
+
+# ── 4a. Public skill surface ──
+section "Public skill surface"
+
+if python3 - <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+expected = {"ui-reverse-engineering", "ui-capture", "visual-debug"}
+# Internal-only skills (maintainer tooling). Allowed on the filesystem under
+# skills/ but MUST NOT be registered in .claude-plugin/plugin.json `skills`
+# or referenced from .codex-plugin defaultPrompt — that would publish them.
+internal_skills = {"benchmark"}
+errors = []
+
+claude = json.loads(pathlib.Path(".claude-plugin/plugin.json").read_text())
+claude_paths = claude.get("skills")
+if not isinstance(claude_paths, list):
+    errors.append(".claude-plugin/plugin.json skills must be a list")
+else:
+    claude_skills = {pathlib.PurePosixPath(p).name for p in claude_paths if isinstance(p, str)}
+    if claude_skills != expected:
+        errors.append(f"Claude plugin public skills mismatch: {sorted(claude_skills)}")
+
+skill_names = set()
+for path in sorted(pathlib.Path("skills").glob("*/SKILL.md")):
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"^---\n(.*?)\n---", text, re.S)
+    if not match:
+        errors.append(f"{path}: missing YAML frontmatter")
+        continue
+    name = re.search(r"^name:\s*['\"]?([^'\"\n]+)['\"]?\s*$", match.group(1), re.M)
+    if not name:
+        errors.append(f"{path}: missing frontmatter name")
+        continue
+    skill_names.add(name.group(1).strip())
+extras = skill_names - expected - internal_skills
+missing = expected - skill_names
+if extras:
+    errors.append(f"skills/*/SKILL.md unexpected names (add to internal_skills if internal): {sorted(extras)}")
+if missing:
+    errors.append(f"skills/*/SKILL.md missing public names: {sorted(missing)}")
+# Internal skills must NOT appear in Claude plugin public list
+internal_in_public = internal_skills & claude_skills if isinstance(claude_paths, list) else set()
+if internal_in_public:
+    errors.append(f".claude-plugin/plugin.json leaks internal skills publicly: {sorted(internal_in_public)}")
+
+codex = json.loads(pathlib.Path(".codex-plugin/plugin.json").read_text())
+interface = codex.get("interface", {})
+prompt = interface.get("defaultPrompt", "")
+if isinstance(prompt, list):
+    prompt = "\n".join(str(item) for item in prompt)
+codex_text = f"{interface.get('longDescription', '')}\n{prompt}"
+missing_codex = sorted(skill for skill in expected if skill not in codex_text)
+if missing_codex:
+    errors.append(f"Codex prompt/description missing public skill mentions: {missing_codex}")
+
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  ok "public skill set is ui-reverse-engineering, ui-capture, visual-debug"
+else
+  err "public skill surface parity failed"
+fi
+
+# ── 4b. Trigger boundaries ──
+section "Trigger boundaries"
+
+if python3 - <<'PY'
+import pathlib
+import sys
+
+checks = {
+    "ui-reverse-engineering": {
+        "live URL trigger": ("live", "url"),
+        "React build target": ("react",),
+        "capture route-out": ("ui-capture",),
+        "mismatch route-out": ("visual-debug",),
+    },
+    "ui-capture": {
+        "reference evidence trigger": ("reference", "capture"),
+        "screenshot capture": ("screenshot",),
+        "transition capture": ("transition",),
+        "mismatch diagnosis route-out": ("visual-debug", "mismatch"),
+    },
+    "visual-debug": {
+        "reference implementation comparison": ("reference", "implementation"),
+        "comparison/diff trigger": ("compar",),
+        "build route-out": ("ui-reverse-engineering", "build"),
+        "baseline capture route-out": ("ui-capture", "capture"),
+    },
+}
+
+errors = []
+for skill, groups in checks.items():
+    text = pathlib.Path("skills", skill, "SKILL.md").read_text(encoding="utf-8").lower()
+    for label, tokens in groups.items():
+        missing = [token for token in tokens if token not in text]
+        if missing:
+            errors.append(f"{skill}: missing {label} token(s): {', '.join(missing)}")
+
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  ok "public skill trigger boundaries mention required route tokens"
+else
+  err "public skill trigger boundary drift detected"
 fi
 
 # ── 5. Gate-artifact timing ──
@@ -156,9 +294,9 @@ extract_keywords() {
   grep -oE "'\w+','\w+'" "$1" 2>/dev/null | tr -d "'" | sort -u
 }
 
-KW1=$(grep -c "kwMap" scripts/extract-assets.sh 2>/dev/null || echo "0")
-KW2=$(grep -c "kwMap" scripts/extract-section-html.sh 2>/dev/null || echo "0")
-KW3=$(grep -c "kwMap" scripts/section-clips.sh 2>/dev/null || echo "0")
+KW1=$(grep -c "kwMap" scripts/extract/extract-assets.sh 2>/dev/null || echo "0")
+KW2=$(grep -c "kwMap" scripts/extract/extract-section-html.sh 2>/dev/null || echo "0")
+KW3=$(grep -c "kwMap" scripts/extract/section-clips.sh 2>/dev/null || echo "0")
 if [ "$KW1" -gt 0 ] && [ "$KW2" -gt 0 ] && [ "$KW3" -gt 0 ]; then
   ok "all 3 scripts use kwMap pattern"
 else
@@ -178,7 +316,7 @@ else
 fi
 
 # FPS default
-FPS_DEFAULT=$(grep -oE 'FPS="\$\{FPS:-[0-9]+\}"' scripts/video-transition-compare.sh | grep -oE '[0-9]+')
+FPS_DEFAULT=$(grep -oE 'FPS="\$\{FPS:-[0-9]+\}"' scripts/verify/video-transition-compare.sh | grep -oE '[0-9]+')
 if [ "$FPS_DEFAULT" = "60" ]; then
   ok "video-transition-compare.sh FPS default is 60"
 else
@@ -188,7 +326,7 @@ fi
 # ── 8. Hardcoded paths ──
 section "Hardcoded paths"
 # Detect absolute user-home paths (/Users/<name>/ or /home/<name>/)
-HARDCODED=$(grep -rlE '/Users/[a-zA-Z]+/|/home/[a-zA-Z]+/' skills/ scripts/ ui_clone/ 2>/dev/null \
+HARDCODED=$(grep -rlE '/Users/[a-zA-Z]+/|/home/[a-zA-Z]+/' skills/ scripts/ hooks/ ui_clone/ .claude-plugin/ .codex-plugin/ 2>/dev/null \
   | grep -v review.sh | grep -v CHANGELOG | grep -v __pycache__ || true)
 if [ -z "$HARDCODED" ]; then
   ok "no hardcoded absolute paths"
@@ -200,7 +338,7 @@ fi
 section "Shell syntax"
 
 SH_BAD=""
-SH_FILES=$(find scripts skills -name '*.sh' -type f 2>/dev/null)
+SH_FILES=$(find scripts skills hooks -name '*.sh' -type f 2>/dev/null)
 [ -f install.sh ] && SH_FILES="$SH_FILES"$'\n'"install.sh"
 while IFS= read -r f; do
   [ -z "$f" ] && continue
@@ -216,30 +354,32 @@ fi
 # ── 10. Language consistency ──
 section "Language"
 
-# SKILL.md and sub-docs should be English only.
+# Skill docs, trigger fixtures, and CHANGELOG must be English only — no exclusions.
 # `grep -P` is GNU-only — macOS BSD grep silently no-ops, which made this check
 # pass locally while failing on Linux CI. Use python for a portable Unicode scan.
-# Exclude evals (multilingual trigger tests) and font-check examples.
-KOREAN_IN_SKILLS=$(python3 - <<'PY' 2>/dev/null || true
+KOREAN_HITS=$(python3 - <<'PY' 2>/dev/null || true
 import pathlib, re
 hangul = re.compile(r'[\uAC00-\uD7AF]')
+roots = ['skills', 'CHANGELOG.md', 'README.md', 'AGENTS.md', 'CLAUDE.md']
 hits = []
-for p in sorted(pathlib.Path('skills').rglob('*.md')):
-    s = str(p)
-    if '/evals/' in s or s.endswith('asset-extraction.md'):
+for root in roots:
+    rp = pathlib.Path(root)
+    if not rp.exists():
         continue
-    try:
-        if hangul.search(p.read_text(encoding='utf-8', errors='ignore')):
-            hits.append(s)
-    except OSError:
-        pass
+    paths = [rp] if rp.is_file() else sorted(list(rp.rglob('*.md')) + list(rp.rglob('*.json')))
+    for p in paths:
+        try:
+            if hangul.search(p.read_text(encoding='utf-8', errors='ignore')):
+                hits.append(str(p))
+        except OSError:
+            pass
 print('\n'.join(hits))
 PY
 )
-if [ -z "$KOREAN_IN_SKILLS" ]; then
-  ok "skills/ docs are English only"
+if [ -z "$KOREAN_HITS" ]; then
+  ok "skill docs, trigger fixtures, and changelog are English only"
 else
-  err "Korean text found in skill docs: $KOREAN_IN_SKILLS"
+  err "Non-English (Hangul) text found: $KOREAN_HITS"
 fi
 
 # ── Summary ──

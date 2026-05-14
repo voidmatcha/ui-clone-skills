@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/claude-pre-push.sh"
+            "command": "bash scripts/hooks/pre-push-guard.sh"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/claude-post-push.sh"
+            "command": "bash scripts/hooks/post-push-refresh.sh"
           }
         ]
       }

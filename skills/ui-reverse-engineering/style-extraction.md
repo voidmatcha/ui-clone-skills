@@ -39,7 +39,7 @@ if (injected.length > 0) {
 > **Adapt selectors below to your target component.** Replace `.target` with the actual selector identified in Step 1 (dom-extraction.md). The selectors here are starting points — add or remove based on the actual DOM structure.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const selectors = ['.target', '.target h1', '.target p', '.target button'];
   const props = [
@@ -80,7 +80,7 @@ agent-browser eval "
 **This step detects and records the typography scaling system so the implementation can reproduce it.**
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const root = getComputedStyle(document.documentElement);
   const body = getComputedStyle(document.body);
@@ -172,7 +172,7 @@ agent-browser eval "
 If `scalingSystem` is `viewport-scaled` or `em-based`, you MUST compute the em conversion table before proceeding. This is a **blocking gate** — do NOT move to Step 4 or generation without `em-conversion.json`.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const typo = JSON.parse(document.querySelector('#__typography_json')?.textContent || 'null');
   // Re-extract inline if not embedded
@@ -233,7 +233,7 @@ agent-browser eval "
 The key element extraction above captures basic layout properties but misses several CSS effects that are invisible in screenshots yet critical for accurate reproduction. Extract these for EVERY element that has non-default values:
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const result = {};
   const skip = new Set(['none','normal','auto','border-box','rgb(0, 0, 0)','all 0s ease 0s','all','0s']);
@@ -271,7 +271,7 @@ agent-browser eval "
 Many sites coordinate visual transitions (light→dark backgrounds, nav color inversion) by toggling CSS classes on `<body>`. This is invisible in DOM extraction but critical for reproduction.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const bodyS = getComputedStyle(document.body);
   // Check body transition property
@@ -313,7 +313,7 @@ agent-browser eval "
 Many design/architecture sites apply a full-page overlay for visual texture — film grain, noise patterns, paper texture. These are easy to miss because they are `pointer-events: none` and visually subtle, but omitting them makes the implementation look "too clean" compared to the reference.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const overlays = [];
   document.querySelectorAll('*').forEach(el => {
@@ -343,7 +343,7 @@ If any overlays are found, download the background image and add a matching `<di
 ### Extract CSS custom properties (design tokens)
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const vars = {};
   for (const sheet of document.styleSheets) {
@@ -368,7 +368,7 @@ agent-browser eval "
 Decorative SVGs (curves, geometric patterns, dividers) are often unique to the design and cannot be guessed. Extract them verbatim:
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const svgs = document.querySelectorAll('svg');
   const decorative = [...svgs].filter(svg => {
@@ -400,7 +400,7 @@ For elements with stroke-based hover animations (arrow icons, SVG decorations):
 
 ```bash
 # 1. Capture idle state stroke properties
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const el = document.querySelector('<selector>');
   const paths = el.querySelectorAll('path, rect, circle, line');
   return JSON.stringify([...paths].map(p => ({
@@ -412,8 +412,8 @@ agent-browser eval "(() => {
 })()"
 
 # 2. Hover and capture active state
-agent-browser hover "<selector>"
-agent-browser wait 800
+agent-browser --session <s> hover "<selector>"
+agent-browser --session <s> wait 800
 # Re-run same eval — compare values
 ```
 
@@ -440,7 +440,7 @@ If suspicious content is found: **log it to the user**, remove the affected prop
 After extracting all styles, group properties into 5 co-varying design bundles. Bundles capture properties that move together in a design system — changing one without the others breaks visual coherence.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const allEls = document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,a,button,span,div,section,nav,footer,header,li,img,figure,[class*=card],[class*=btn],[class*=title],[class*=label]');
   const seen = { surface: new Map(), shape: new Map(), type: new Map(), tone: new Map(), motion: new Map() };
@@ -528,7 +528,7 @@ Font sizes and element spacing are the #1 source of "looks different" feedback. 
 After extracting per-element styles, extract the **page-level layout**:
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const main = document.querySelector('main, .page-main, [role=main]') || document.body;
   const sections = [...main.children].filter(c => c.offsetHeight > 0 && c.tagName !== 'SCRIPT');
   return JSON.stringify(sections.map(s => {
@@ -558,7 +558,7 @@ Save this as `section-layout.json`. This captures:
 If sections are wrapped in a parent (e.g., `dark-section_wrap`), extract the wrapper's gap/padding:
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   // Find flex/grid containers with gap
   const containers = [...document.querySelectorAll('*')].filter(el => {
     const s = getComputedStyle(el);

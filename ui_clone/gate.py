@@ -1,6 +1,5 @@
 """
 Gate validation for ui-clone pipeline.
-Replaces validate-gate.sh (594 lines of bash).
 
 Usage:
     python -m ui_clone.gate <ref-dir> <gate> [--json]
@@ -12,6 +11,7 @@ Exit: 0=PASS, 1=BLOCKED, 2=usage error
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from itertools import islice
@@ -44,6 +44,157 @@ class CheckResult:
     status: Literal["pass", "fail", "warn"]
     message: str
     fix: str = ""
+
+
+# Valid `verifiedBy` values for known-artifacts.json entries. Entries with
+# any other value are rejected (the underlying FAIL stays a FAIL).
+_VALID_VERIFIED_BY = {
+    "readPixels",
+    "bundle-grep",
+    "manual-frame-cmp",
+    "non-deterministic-ref",
+}
+
+# Required fields per entry. Missing any → rejected.
+_REQUIRED_ARTIFACT_FIELDS = ("name", "verifiedBy", "evidence", "aeThresholdCeiling", "verifiedAt")
+
+# AE growth multiplier — entry rejected if current AE > ceiling × this value.
+_AE_GROWTH_MULTIPLIER = 1.5
+
+# Artifacts that are too easy for an agent to hand-write convincingly. These
+# must carry an evidence trail before code generation is allowed.
+_PROVENANCE_REQUIRED_ARTIFACTS = (
+    "extracted.json",
+    "transition-spec.json",
+    "animation-init-styles.json",
+    "section-map.json",
+    "svg-text-elements.json",
+    "responsive/sizing-expressions.json",
+    "interactions-detected.json",
+    "transition-coverage.json",
+    "component-map.json",
+)
+
+_VALID_PROVENANCE_SOURCES = {
+    "agent-browser-eval",
+    "ui-capture",
+    "computed-style",
+    "dom-snapshot",
+    "bundle-grep",
+    "downloaded-bundle",
+    "visual-measurement",
+    "script",
+    "generated-from-artifacts",
+}
+
+_DISALLOWED_PROVENANCE_SOURCES = {
+    "manual",
+    "handwritten",
+    "guess",
+    "guessed",
+    "assumption",
+    "vision-only",
+    "look-at-only",
+}
+
+
+def _parse_failed_sections(lines: list[str]) -> list[tuple[str, int]]:
+    """Extract (section_name, ae) pairs from sections/result.txt ❌ lines.
+
+    result.txt is a markdown table:
+        | <name> | <ae> | <ae/mpx> | <severity> | ❌ |
+    Returns the failed sections only. Names missing or AE unparseable
+    are still returned (with AE=0) so we don't silently drop failures.
+    """
+    out: list[tuple[str, int]] = []
+    for ln in lines:
+        if "❌" not in ln or not ln.startswith("|"):
+            continue
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        name = cells[0]
+        if not name or name.lower() == "section" or "---" in name:
+            continue
+        try:
+            ae = int(cells[1])
+        except (ValueError, IndexError):
+            ae = 0
+        out.append((name, ae))
+    return out
+
+
+def _parse_all_section_ae(lines: list[str]) -> list[tuple[str, int]]:
+    """Extract (section_name, ae) pairs from result.txt — pass AND fail rows.
+
+    Used by the strict-cap check: a `severity=minor ✅ PASS` row can still
+    carry AE in the hundreds of thousands, large enough to be visually
+    obvious. The classifier's severity is density-based and lenient when
+    impl is small; absolute AE caps catch the cases severity misses.
+    """
+    out: list[tuple[str, int]] = []
+    for ln in lines:
+        if not ln.startswith("|") or "---" in ln:
+            continue
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        name = cells[0]
+        if not name or name.lower() == "section":
+            continue
+        # Skip the **Result:** summary row that has cells[0] = ""
+        ae_str = cells[1]
+        if ae_str in ("", "—", "-"):
+            continue
+        try:
+            ae = int(ae_str)
+        except ValueError:
+            continue
+        out.append((name, ae))
+    return out
+
+
+def _validate_artifact_entry(
+    entry: dict[str, Any], section_ae: dict[str, int]
+) -> tuple[bool, str, str]:
+    """Validate a known-artifacts.json sections[] entry.
+
+    Returns (is_valid, rejection_reason, section_name). Missing or unknown
+    fields → invalid. AE > ceiling × _AE_GROWTH_MULTIPLIER → invalid.
+    Section not in the failed set → invalid (no FAIL to downgrade).
+    """
+    name = str(entry.get("name") or "")
+    if not name:
+        return False, "missing 'name'", ""
+
+    missing = [f for f in _REQUIRED_ARTIFACT_FIELDS if f not in entry]
+    if missing:
+        return False, f"missing field(s): {', '.join(missing)}", name
+
+    verified_by = entry.get("verifiedBy")
+    if verified_by not in _VALID_VERIFIED_BY:
+        return False, f"unknown verifiedBy: {verified_by!r}", name
+
+    if name not in section_ae:
+        return False, "no matching FAIL in sections/result.txt", name
+
+    try:
+        ceiling = float(entry.get("aeThresholdCeiling") or 0)
+    except (TypeError, ValueError):
+        return False, "aeThresholdCeiling not a number", name
+    if ceiling <= 0:
+        return False, "aeThresholdCeiling must be > 0", name
+
+    current_ae = section_ae[name]
+    if current_ae > ceiling * _AE_GROWTH_MULTIPLIER:
+        return (
+            False,
+            f"current AE {current_ae} exceeds ceiling {int(ceiling)} × {_AE_GROWTH_MULTIPLIER} "
+            f"(={int(ceiling * _AE_GROWTH_MULTIPLIER)}) — bug got worse",
+            name,
+        )
+
+    return True, "", name
 
 
 class Gate:
@@ -113,6 +264,114 @@ class Gate:
     def _load_json(self, filename: str) -> dict[str, Any] | None:
         """Load a JSON artifact from ref_dir. Returns None if missing, malformed, or not an object."""
         return _load_json_safe(self.ref_dir / filename)
+
+    def _check_artifact_provenance(self) -> list[CheckResult]:
+        """Require evidence-backed provenance for high-risk extraction artifacts."""
+        path = self.ref_dir / "artifact-provenance.json"
+        results: list[CheckResult] = []
+        if not path.exists():
+            return [
+                CheckResult(
+                    "artifact-provenance.json",
+                    "fail",
+                    "artifact-provenance.json — MISSING (required before pre-generate)",
+                    fix="Write artifact-provenance.json with source/evidence for each generated extraction artifact; rerun the extraction step instead of hand-writing JSON.",
+                )
+            ]
+
+        data = self._load_json("artifact-provenance.json")
+        if data is None:
+            return [
+                CheckResult(
+                    "artifact-provenance.json",
+                    "fail",
+                    "artifact-provenance.json — malformed or not a JSON object",
+                )
+            ]
+
+        raw_entries = data.get("artifacts")
+        if not isinstance(raw_entries, list):
+            return [
+                CheckResult(
+                    "artifact-provenance.json",
+                    "fail",
+                    "artifact-provenance.json — JSON missing required artifacts[] array",
+                )
+            ]
+
+        entries: dict[str, dict[str, Any]] = {}
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            artifact = entry.get("path")
+            if isinstance(artifact, str):
+                entries[artifact] = entry
+
+        for artifact in _PROVENANCE_REQUIRED_ARTIFACTS:
+            entry = entries.get(artifact)
+            label = f"provenance: {artifact}"
+            if entry is None:
+                results.append(
+                    CheckResult(
+                        label,
+                        "fail",
+                        f"artifact-provenance.json — missing provenance for {artifact}",
+                    )
+                )
+                continue
+
+            source = entry.get("source")
+            if not isinstance(source, str) or not source:
+                results.append(CheckResult(label, "fail", f"{artifact} provenance — missing source"))
+                continue
+
+            source_normalized = source.strip().lower()
+            if source_normalized in _DISALLOWED_PROVENANCE_SOURCES:
+                results.append(
+                    CheckResult(
+                        label,
+                        "fail",
+                        f"{artifact} provenance source '{source}' is disallowed; rerun extraction from browser/script evidence",
+                    )
+                )
+                continue
+
+            if source_normalized not in _VALID_PROVENANCE_SOURCES:
+                results.append(
+                    CheckResult(
+                        label,
+                        "fail",
+                        f"{artifact} provenance source '{source}' is unknown; use one of {sorted(_VALID_PROVENANCE_SOURCES)}",
+                    )
+                )
+                continue
+
+            evidence = entry.get("evidence")
+            if not isinstance(evidence, list) or not evidence or not all(isinstance(item, str) and item for item in evidence):
+                results.append(
+                    CheckResult(label, "fail", f"{artifact} provenance — missing non-empty evidence[]")
+                )
+                continue
+
+            missing = [item for item in evidence if not (self.ref_dir / item).exists()]
+            if missing:
+                results.append(
+                    CheckResult(
+                        label,
+                        "fail",
+                        f"{artifact} provenance evidence missing: {', '.join(missing[:3])}",
+                    )
+                )
+                continue
+
+            generated_at = entry.get("generatedAt")
+            if not isinstance(generated_at, str) or not generated_at:
+                results.append(CheckResult(label, "fail", f"{artifact} provenance — missing generatedAt"))
+                continue
+
+            results.append(CheckResult(label, "pass", f"{artifact} provenance ({source_normalized})"))
+
+        return results
 
     # ── Gate functions ──
 
@@ -476,28 +735,50 @@ class Gate:
                 "transition-spec.json (single source of truth)",
             )
         )
+        # verification-plan.json declares site-specific required checks
+        # (hydration, scroll-end-completion, reveal-trigger, etc.) derived from
+        # the signals in extraction artifacts. It must exist by spec time so
+        # gate_post_implement can enforce each declared check; otherwise the
+        # universal `hydration-check` row is silently skipped.
+        plan = self.ref_dir / "verification-plan.json"
+        results.append(
+            self.check_file(
+                plan,
+                "verification-plan.json (run skills/visual-debug/scripts/verification-plan.sh)",
+            )
+        )
 
         # Validate transition-spec structure
         spec = self._load_json("transition-spec.json")
         if spec is not None:
             transitions = spec.get("transitions", [])
-            if transitions:
-                t0 = transitions[0]
-                missing_keys = [k for k in ("id", "trigger", "bundle_branch") if k not in t0]
+            required_transition_keys = (
+                "id",
+                "trigger",
+                "source_chunk",
+                "bundle_branch",
+                "target",
+                "animation",
+                "reference_frames",
+            )
+            for index, transition in enumerate(transitions):
+                missing_keys = [
+                    k for k in required_transition_keys if k not in transition
+                ]
                 if missing_keys:
                     results.append(
                         CheckResult(
-                            "transitions[0] keys",
+                            f"transitions[{index}] keys",
                             "fail",
-                            f"transitions[0] missing required keys: {missing_keys}",
+                            f"transitions[{index}] missing required keys: {missing_keys}",
                         )
                     )
                 else:
                     results.append(
                         CheckResult(
-                            "transitions[0] keys",
+                            f"transitions[{index}] keys",
                             "pass",
-                            f"transitions[0] has id, trigger, bundle_branch ({len(transitions)} total)",
+                            f"transitions[{index}] has required keys ({len(transitions)} total)",
                         )
                     )
 
@@ -698,6 +979,7 @@ class Gate:
         results.append(
             self.check_file(self.ref_dir / "transition-spec.json", "transition-spec.json")
         )
+        results.extend(self._check_artifact_provenance())
 
         # Load once — reused across helpers below
         spec = self._load_json("transition-spec.json")
@@ -791,7 +1073,333 @@ class Gate:
         results.append(
             self.check_dir(self.ref_dir / "static" / "ref", "static/ref screenshots", min_files=5)
         )
+        results.extend(self._check_verification_plan())
+        results.extend(self._check_componentization())
         return results
+
+    def _check_componentization(self) -> list[CheckResult]:
+        """Fail when `impl/src/app/page.tsx` > 200 LOC AND `impl/src/components/`
+        has < 3 files. The c9b638d benchmark showed the agent could pass every
+        other check while shipping a 214-line monolithic page.tsx with no
+        per-section components. Splitting first localizes future fixes.
+
+        Skipped silently when:
+          - impl/ can't be located (regular tmp/ref/ flow with no co-located impl),
+          - page.tsx doesn't exist yet (pre-generation pipelines),
+          - page.tsx exists but is small (≤ 200 LOC).
+        """
+        impl_root = self._find_impl_root()
+        if impl_root is None:
+            return []
+        page = impl_root / "src" / "app" / "page.tsx"
+        if not page.is_file():
+            return []
+        try:
+            page_loc = sum(1 for _ in page.open(encoding="utf-8", errors="replace"))
+        except OSError:
+            return []
+        if page_loc <= 200:
+            return []
+        components_dir = impl_root / "src" / "components"
+        if components_dir.is_dir():
+            try:
+                tsx_files = [
+                    p for p in components_dir.rglob("*.tsx")
+                    if p.is_file() and not p.name.startswith(".")
+                ]
+            except OSError:
+                tsx_files = []
+        else:
+            tsx_files = []
+        if len(tsx_files) >= 3:
+            return []
+        return [
+            CheckResult(
+                "componentization",
+                "fail",
+                f"impl/src/app/page.tsx is {page_loc} LOC and impl/src/components/ "
+                f"has {len(tsx_files)} .tsx file(s) — site is monolithic. The "
+                "benchmark surfaced this exact pattern (c9b638d: 214 LOC / 0 "
+                "components) producing a wall of inline sections that resists "
+                "targeted markup fixes. Split each ref section into its own "
+                "file under src/components/ and import them from page.tsx.",
+                fix=(
+                    "Move each ref section (Hero, StateOfHealth, …) into "
+                    "impl/src/components/<Section>.tsx and render via "
+                    "`<Section />` in page.tsx. Target ≥ 3 component files and "
+                    "page.tsx ≤ 200 lines (mostly imports + layout glue)."
+                ),
+            )
+        ]
+
+    def _find_impl_root(self) -> Path | None:
+        """Locate the impl/ root co-located with this ref_dir.
+
+        Convention: `benchmark/work/<sha>/{ref,impl}/` (benchmark flow) or
+        `apps/<component>/` (legacy). Returns the impl ROOT (containing src/
+        and public/), not impl/public/. None when no candidate exists.
+        """
+        candidates = [
+            self.ref_dir.parent / "impl",                                 # benchmark/work/<sha>/impl
+            self.ref_dir.parent.parent / "apps" / self.ref_dir.name,       # apps/<component>/
+            self.ref_dir.parent.parent / "apps" / self.ref_dir.name / "app",
+        ]
+        for c in candidates:
+            if c.is_dir() and (c / "src").is_dir():
+                return c
+        return None
+
+    def _check_verification_plan(self) -> list[CheckResult]:
+        """Honor tmp/ref/<c>/verification-plan.json — declared site-specific checks.
+
+        Schema:
+          { "schemaVersion": 1,
+            "requiredChecks": [{
+              "id": "<short-id>",
+              "script": "<path/to/script.sh>",
+              "produces": "<artifact relative to ref-dir>",
+              "reason": "<why required>",
+              "severity": "block" | "warn"
+            }] }
+
+        Missing file → returns []. Each required check artifact must exist
+        and contain `"status": "pass"`. Severity "warn" emits a warning that
+        does not block; "block" (default) fails the gate.
+        """
+        plan_path = self.ref_dir / "verification-plan.json"
+        if not plan_path.is_file():
+            return []
+
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            return [
+                CheckResult(
+                    "verification-plan.json",
+                    "warn",
+                    f"verification-plan.json — unreadable ({e}); skipping",
+                )
+            ]
+
+        schema_version = plan.get("schemaVersion")
+        vp_fix = "Run: bash skills/visual-debug/scripts/verification-plan.sh <ref-dir>"
+        if "schemaVersion" not in plan:
+            # Hand-written / hallucinated verification-plan.json (e.g. agent
+            # inventing {component, checks} keys instead of running
+            # verification-plan.sh) used to slip through as a silent warn —
+            # making every declared required check unenforceable. Hard-fail
+            # when no version is declared so the agent must actually run the
+            # script. (Known future versions still degrade gracefully below.)
+            return [
+                CheckResult(
+                    "verification-plan.json",
+                    "fail",
+                    "verification-plan.json — missing `schemaVersion`. "
+                    "The file is hand-written; declared checks would be silently ignored.",
+                    fix=vp_fix,
+                )
+            ]
+        if schema_version != 1:
+            return [
+                CheckResult(
+                    "verification-plan.json",
+                    "warn",
+                    f"verification-plan.json — schemaVersion {schema_version!r} not supported; ignoring",
+                )
+            ]
+
+        if "requiredChecks" not in plan:
+            return [
+                CheckResult(
+                    "verification-plan.json",
+                    "fail",
+                    "verification-plan.json — missing `requiredChecks` key "
+                    "(wrong schema; required by verification-plan.sh output).",
+                    fix=vp_fix,
+                )
+            ]
+        checks = plan.get("requiredChecks") or []
+        if not isinstance(checks, list):
+            return [
+                CheckResult(
+                    "verification-plan.json",
+                    "fail",
+                    f"verification-plan.json — `requiredChecks` must be a list, "
+                    f"got {type(checks).__name__}.",
+                    fix=vp_fix,
+                )
+            ]
+        if not checks:
+            # Empty list is rare-but-legitimate (static site with no JS/scroll
+            # signals). Surface it as a warn so the operator sees that NO
+            # site-specific checks fired, rather than silently passing.
+            return [
+                CheckResult(
+                    "verification-plan.json",
+                    "warn",
+                    "verification-plan.json — `requiredChecks` is empty "
+                    "(verification-plan.sh detected no site-specific checks).",
+                )
+            ]
+
+        out: list[CheckResult] = []
+        for entry in checks:
+            if not isinstance(entry, dict):
+                continue
+            check_id = str(entry.get("id") or "?")
+            produces = entry.get("produces")
+            script = entry.get("script") or ""
+            reason = entry.get("reason") or ""
+            severity = entry.get("severity") or "block"
+
+            if not produces:
+                continue
+            artifact = self.ref_dir / produces
+            label = f"required: {check_id}"
+            fix = f"Run: bash {script}" if script else ""
+
+            if not artifact.is_file():
+                msg = f"{check_id} — produces artifact missing ({produces}). Reason: {reason}"
+                if severity == "warn":
+                    out.append(CheckResult(label, "warn", msg))
+                else:
+                    out.append(CheckResult(label, "fail", msg, fix=fix))
+                continue
+
+            try:
+                raw = artifact.read_text(encoding="utf-8")
+            except OSError:
+                out.append(CheckResult(label, "pass", f"{check_id} (artifact unreadable)"))
+                continue
+
+            # If artifact is JSON with a `status` field, enforce status: "pass".
+            # Non-JSON artifacts (e.g. transitions/result.txt) are scanned for
+            # ❌ FAIL markers — presence-only would let real failures slip past
+            # this gate when section-compare's dedicated parser only watches
+            # sections/result.txt, not transitions/result.txt.
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                fail_lines = sum(1 for line in raw.splitlines() if "❌" in line)
+                if fail_lines > 0:
+                    msg = f"{check_id} — {fail_lines} FAIL line(s) in {produces}. Reason: {reason}"
+                    if severity == "warn":
+                        out.append(CheckResult(label, "warn", msg))
+                    else:
+                        out.append(CheckResult(label, "fail", msg, fix=fix))
+                else:
+                    # transition-compare / video-motion-compare / hover-state /
+                    # keyframes-diff etc — when transition-spec declares any
+                    # transitions, the corresponding result.txt MUST contain
+                    # actual measurement rows (✅ or ❌). An empty / near-empty
+                    # text artifact is the "transition-compare never actually
+                    # ran" gaming pattern (vacuous PASS because no ❌ exists).
+                    if check_id in {
+                        "transition-compare",
+                        "video-motion-compare",
+                        "hover-state-compare",
+                        "keyframes-diff",
+                        "scroll-anim-temporal",
+                    }:
+                        measurement_rows = sum(
+                            1 for line in raw.splitlines()
+                            if ("✅" in line or "❌" in line)
+                            and "result:" not in line.lower()
+                        )
+                        spec_has_transitions = self._transition_spec_count() > 0
+                        if spec_has_transitions and measurement_rows == 0:
+                            msg = (
+                                f"{check_id} — {produces} contains 0 measurement rows "
+                                f"(no ✅/❌ lines) despite transition-spec.json declaring "
+                                f"{self._transition_spec_count()} transition(s). The check "
+                                f"didn't actually run."
+                            )
+                            if severity == "warn":
+                                out.append(CheckResult(label, "warn", msg))
+                            else:
+                                out.append(CheckResult(label, "fail", msg, fix=fix))
+                            continue
+                    out.append(CheckResult(label, "pass", f"{check_id} (text artifact, no FAIL markers)"))
+                continue
+
+            status = data.get("status") if isinstance(data, dict) else None
+            # tree-diff floor — a `status=pass` with `elements_walked` below
+            # the floor is the 5199dd9 gaming pattern: agent ships a near-
+            # empty impl (11 elements walked vs ref's 200) and tree-diff
+            # vacuously passes "0 critical mismatches" because there's
+            # nothing to mismatch. Floor cross-references section-map.json
+            # so a 4-section page doesn't trip the gate.
+            if (
+                check_id == "tree-diff"
+                and status == "pass"
+                and isinstance(data, dict)
+            ):
+                walked = int(data.get("elements_walked") or 0)
+                floor = self._tree_diff_floor()
+                if walked < floor:
+                    msg = (
+                        f"tree-diff — only {walked} elements walked (floor: {floor}). "
+                        f"This is the 'near-empty impl' gaming pattern: with so few "
+                        f"elements to pair, tree-diff vacuously reports 0 mismatches. "
+                        f"Generate real impl content."
+                    )
+                    out.append(CheckResult(label, "fail", msg, fix=fix))
+                    continue
+            if status == "pass":
+                out.append(CheckResult(label, "pass", f"{check_id} (status: pass)"))
+            elif status is None:
+                out.append(CheckResult(label, "pass", f"{check_id} (artifact present, no status field)"))
+            else:
+                count = (data.get("errorCount") or data.get("failureCount") or
+                         data.get("totalStuck") or "?") if isinstance(data, dict) else "?"
+                msg = f"{check_id} — status: {status} ({count} issue(s)). Reason: {reason}"
+                if severity == "warn":
+                    out.append(CheckResult(label, "warn", msg))
+                else:
+                    out.append(CheckResult(label, "fail", msg, fix=fix))
+
+        return out
+
+    def _transition_spec_count(self) -> int:
+        """Number of declared transitions in transition-spec.json.
+
+        Used to gate "transition-compare must have measurement rows" — only
+        applies when the spec actually declared transitions to compare.
+        """
+        spec = self.ref_dir / "transition-spec.json"
+        if not spec.is_file():
+            return 0
+        try:
+            data = json.loads(spec.read_text(encoding="utf-8"))
+            transitions = data.get("transitions") if isinstance(data, dict) else None
+            if isinstance(transitions, list):
+                return len(transitions)
+        except (json.JSONDecodeError, OSError):
+            pass
+        return 0
+
+    def _tree_diff_floor(self) -> int:
+        """Minimum elements_walked tree-diff must achieve to be meaningful.
+
+        Cross-reference section-map.json. The floor is max(30, sections * 5):
+        a real page averages ≥5 visible elements per section (heading, sub-
+        head, paragraph, button, image at minimum). Below 30 absolute, any
+        page is too sparse to call tree-diff a real measurement.
+        """
+        section_map = self.ref_dir / "section-map.json"
+        section_count = 0
+        if section_map.is_file():
+            try:
+                data = json.loads(section_map.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    sections = data.get("sections") or []
+                    if isinstance(sections, list):
+                        section_count = len(sections)
+                elif isinstance(data, list):
+                    section_count = len(data)
+            except (json.JSONDecodeError, OSError):
+                section_count = 0
+        return max(30, section_count * 5)
 
     def gate_boundary(self) -> list[CheckResult]:
         """Check that breakpoint-collision-check.sh has been run and reports no collisions.
@@ -1045,7 +1653,13 @@ class Gate:
         return results
 
     def gate_section_compare(self) -> list[CheckResult]:
-        """Check that section-compare.sh has been run and all sections passed."""
+        """Check that section-compare.sh has been run and all sections passed.
+
+        Honors tmp/ref/<c>/known-artifacts.json: per-section FAILs whose entries
+        validate (required fields present, AE within ceiling × 1.5) are
+        downgraded to PASS in the gate's output. result.txt is never modified.
+        Emits an advisory warning if more than 30% of sections are marked.
+        """
         results = []
         result_file = self.ref_dir / "sections" / "result.txt"
         if not result_file.is_file():
@@ -1053,7 +1667,7 @@ class Gate:
                 CheckResult(
                     "sections/result.txt",
                     "fail",
-                    "sections/result.txt — MISSING (visual-debug/scripts/section-compare.sh has not been run)",
+                    "sections/result.txt — MISSING (skills/visual-debug/scripts/section-compare.sh has not been run)",
                     fix=(
                         f"Run: bash skills/visual-debug/scripts/section-compare.sh "
                         f"<orig-url> <impl-url> <session> {self.ref_dir}"
@@ -1064,19 +1678,292 @@ class Gate:
 
         content = result_file.read_text(encoding="utf-8", errors="replace")
         lines = content.splitlines()
-        fail_count = sum(1 for ln in lines if "❌" in ln)
+        failed_sections = _parse_failed_sections(lines)
         missing_count = sum(1 for ln in lines if "⚠️ MISSING impl" in ln)
 
-        if fail_count == 0 and missing_count == 0:
-            results.append(CheckResult("sections/result.txt", "pass", "All sections PASS"))
+        # SECTION_THRESHOLD gaming detector — d19e28d benchmark exposed an
+        # agent setting SECTION_THRESHOLD=250000 (vs default 2000) so that
+        # AE/Mpx of 88K/228K — nominally `critical` (>20K) — were re-classified
+        # as `minor` and ✅ PASSed. result.txt records both severity AND
+        # AE/Mpx; the canonical bands are ok≤500, minor≤2000, major≤20000,
+        # critical>20000. If we see a row labeled `minor` (or `ok`) whose
+        # AE/Mpx exceeds 2000, the threshold was inflated. Flag this as a
+        # gaming attempt — operators should either (a) re-run via
+        # `python -m ui_clone.measure section-compare` which locks the
+        # threshold, or (b) declare asset-substitution for the affected
+        # sections rather than tuning the classifier.
+        threshold_gaming: list[tuple[str, int, str]] = []
+        _CANON_MINOR_CAP = 2000  # AE/Mpx, mirrors section-compare.sh default
+        for ln in lines:
+            if not ln.startswith("|"):
+                continue
+            cells = [c.strip() for c in ln.strip("|").split("|")]
+            if len(cells) < 5:
+                continue
+            name, _ae, mpx, sev, _status = cells[0], cells[1], cells[2], cells[3], cells[4]
+            if name.lower() == "section" or "---" in name:
+                continue
+            if mpx in ("", "—", "-"):
+                continue
+            try:
+                mpx_n = int(mpx)
+            except ValueError:
+                continue
+            if sev in ("ok", "minor") and mpx_n > _CANON_MINOR_CAP:
+                threshold_gaming.append((name, mpx_n, sev))
+
+        # Apply known-artifacts.json downgrades.
+        artifact_path = self.ref_dir / "known-artifacts.json"
+        downgraded: list[tuple[str, str]] = []  # (section_name, reason)
+        rejected: list[tuple[str, str]] = []    # (section_name, why_rejected)
+        coverage_warning = ""
+
+        if artifact_path.is_file():
+            try:
+                artifact_data = json.loads(artifact_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as e:
+                results.append(
+                    CheckResult(
+                        "known-artifacts.json",
+                        "warn",
+                        f"known-artifacts.json — unreadable ({e}); ignoring",
+                    )
+                )
+                artifact_data = None
+
+            if isinstance(artifact_data, dict):
+                schema_version = artifact_data.get("schemaVersion")
+                if schema_version != 1:
+                    results.append(
+                        CheckResult(
+                            "known-artifacts.json",
+                            "warn",
+                            f"known-artifacts.json — schemaVersion {schema_version!r} not supported; ignoring",
+                        )
+                    )
+                else:
+                    entries = artifact_data.get("sections") or []
+                    section_ae = {name: ae for name, ae in failed_sections}
+                    seen_names: set[str] = set()
+                    for entry in entries if isinstance(entries, list) else []:
+                        if not isinstance(entry, dict):
+                            continue
+                        ok, why, name = _validate_artifact_entry(entry, section_ae)
+                        if name in seen_names:
+                            continue
+                        seen_names.add(name)
+                        if ok:
+                            downgraded.append((name, entry.get("verifiedBy", "?")))
+                        elif name in section_ae:
+                            rejected.append((name, why))
+
+                    # Coverage advisory: >30% of sections marked is suspicious.
+                    total_sections = sum(
+                        1 for ln in lines
+                        if ln.startswith("| ") and "---" not in ln and "Section" not in ln
+                    )
+                    if total_sections > 0:
+                        cov = len(downgraded) / total_sections
+                        if cov > 0.30:
+                            coverage_warning = (
+                                f"known-artifacts.json marks {len(downgraded)}/{total_sections} "
+                                f"({cov:.0%}) of sections as artifacts. Above the 30% advisory "
+                                "threshold — re-verify manual-frame-cmp entries."
+                            )
+
+        downgraded_names = {name for name, _ in downgraded}
+        effective_fails = [
+            (name, ae) for name, ae in failed_sections if name not in downgraded_names
+        ]
+        effective_fail_count = len(effective_fails)
+
+        # STRUCTURAL_ONLY override — a section marked STRUCTURAL_ONLY in
+        # result.txt (asset-substitution skips AE/SSIM) is still gated on
+        # structure-diff.json. Block when EITHER:
+        #   (a) severity == "critical" (DISPLAY_MISMATCH, ratio < 0.05 etc.), OR
+        #   (b) severity == "major" AND HEIGHT_MISMATCH ratio < 0.5
+        # The 077d8c3 benchmark exposed (b) — section-0 ratio=0.35 (impl
+        # 6955px vs ref 19954px = 65% of content missing) was classified
+        # `major`, slipped past the prior `critical`-only guard, and a stub
+        # clone was marked DONE. Anything under half the reference height is
+        # not a substitution; it's a regression. The pixel-bypass is for
+        # legitimate font/image substitution, not for content disappearance.
+        _ratio_re = re.compile(r"ratio=([0-9.]+)")
+        critical_structural: list[str] = []
+        diff_path = self.ref_dir / "sections" / "structure-diff.json"
+        if diff_path.is_file():
+            try:
+                diff_data = json.loads(diff_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                diff_data = None
+            blocked_section_names: set[str] = set()
+            if isinstance(diff_data, list):
+                for entry in diff_data:
+                    if not isinstance(entry, dict):
+                        continue
+                    severity = entry.get("severity")
+                    diff_section = entry.get("section")
+                    if not isinstance(diff_section, str):
+                        continue
+                    if severity == "critical":
+                        blocked_section_names.add(diff_section)
+                        continue
+                    if severity == "major":
+                        issues = entry.get("issues") or []
+                        if not isinstance(issues, list):
+                            continue
+                        min_ratio: float | None = None
+                        for issue in issues:
+                            if not isinstance(issue, str):
+                                continue
+                            m = _ratio_re.search(issue)
+                            if m:
+                                try:
+                                    r = float(m.group(1))
+                                except ValueError:
+                                    continue
+                                if min_ratio is None or r < min_ratio:
+                                    min_ratio = r
+                        if min_ratio is not None and min_ratio < 0.5:
+                            blocked_section_names.add(diff_section)
+            if blocked_section_names:
+                for ln in lines:
+                    if not ln.startswith("|") or "STRUCTURAL_ONLY" not in ln:
+                        continue
+                    cells = [p.strip() for p in ln.split("|")]
+                    if len(cells) < 3:
+                        continue
+                    row_name = cells[1]
+                    if row_name in blocked_section_names:
+                        critical_structural.append(row_name)
+
+        # STRUCTURAL_ONLY ratio cap — `asset-substitution.json` is a legitimate
+        # escape hatch for one or two sections that use commercial fonts /
+        # licensed imagery. The 5199dd9 benchmark exposed a gaming pattern
+        # where the agent marked ALL 9 sections as substituted, getting a
+        # "9 PASS, 9 STRUCTURAL_ONLY" verdict with zero pixel measurement.
+        # Treat substitution above 50% of sections as an obvious bypass.
+        structural_only_count = sum(
+            1 for ln in lines
+            if ln.startswith("|") and "STRUCTURAL_ONLY" in ln
+        )
+        total_section_rows = sum(
+            1 for ln in lines
+            if ln.startswith("| ")
+            and "---" not in ln
+            and "Section" not in ln
+            and ln.strip() != "|"
+        )
+        structural_only_excess = (
+            total_section_rows > 0
+            and structural_only_count >= 3
+            and (structural_only_count / total_section_rows) > 0.5
+        )
+
+        if (
+            effective_fail_count == 0
+            and missing_count == 0
+            and not threshold_gaming
+            and not critical_structural
+            and not structural_only_excess
+        ):
+            if downgraded:
+                msg = f"All sections PASS ({len(downgraded)} known artifact(s) downgraded)"
+            else:
+                msg = "All sections PASS"
+            results.append(CheckResult("sections/result.txt", "pass", msg))
         else:
-            if fail_count > 0:
+            if effective_fail_count > 0:
+                # Tiered escalation: cheap auto-diagnose → tree-diff (style) →
+                # layout-tree-diff (position) → hover-tree-diff (state). The
+                # ad-hoc escalation tools live in skills/visual-debug/scripts/
+                # but are not gate-dispatched — naming them in the fail message
+                # gives the agent a concrete next-step instead of "fix diffs".
+                # See SKILL.md "L3 → L4 escalation" table for the symptom map.
                 results.append(
                     CheckResult(
                         "section failures",
                         "fail",
-                        f"{fail_count} section(s) FAILED — fix diffs in {self.ref_dir}/sections/diff/ "
-                        "and re-run section-compare",
+                        f"{effective_fail_count} section(s) FAILED — fix diffs in "
+                        f"{self.ref_dir}/sections/diff/ and re-run section-compare",
+                        fix=(
+                            "Escalation ladder when AE keeps failing:\n"
+                            "  1. bash skills/visual-debug/scripts/auto-diagnose.sh "
+                            f"<session> <orig> <impl> {self.ref_dir}\n"
+                            "     (locates hotspot elements via pixel clustering)\n"
+                            "  2. bash skills/visual-debug/scripts/tree-diff.sh "
+                            "<session> <orig> <impl>\n"
+                            "     (when auto-diagnose finds nothing: walks every "
+                            "visible element ≥ MIN_SIZE px, pairs by elementFromPoint, "
+                            "diffs computed style)\n"
+                            "  3. bash skills/visual-debug/scripts/layout-tree-diff.sh "
+                            "<session> <orig> <impl>\n"
+                            "     (when tree-diff style matches but element looks "
+                            "misplaced: signature-based pairing reports top/left/w/h "
+                            "delta regardless of reflow)\n"
+                            "  4. bash skills/visual-debug/scripts/hover-tree-diff.sh "
+                            "<session> <orig> <impl>\n"
+                            "     (when sections look static-correct but feel off: "
+                            "every hover-capable pair, idle → CDP :hover → settled)\n"
+                            "  5. bash skills/visual-debug/scripts/dssim-compare.sh "
+                            f"{self.ref_dir}\n"
+                            "     (structural similarity sanity check — catches "
+                            "AE/SSIM disagreement = real layout issue vs sampling noise)"
+                        ),
+                    )
+                )
+            if structural_only_excess:
+                pct = round(100 * structural_only_count / total_section_rows)
+                results.append(
+                    CheckResult(
+                        "structural-only excess",
+                        "fail",
+                        f"{structural_only_count}/{total_section_rows} sections ({pct}%) "
+                        f"are STRUCTURAL_ONLY — asset-substitution.json is being used to "
+                        f"bypass section-compare entirely, not for legitimate font/image "
+                        f"substitution. Cap is 50%.",
+                        fix=(
+                            "Trim asset-substitution.json to only the sections that actually "
+                            "use commercial fonts / licensed imagery. The rest must pass "
+                            "real AE measurement. If the impl genuinely can't match those "
+                            "sections, the fix is to implement them — not to declare them "
+                            "structurally-only-comparable."
+                        ),
+                    )
+                )
+            if threshold_gaming:
+                gamed = ", ".join(
+                    f"{n} (AE/Mpx={mpx}, labeled {sev})" for n, mpx, sev in threshold_gaming[:5]
+                )
+                more = f" + {len(threshold_gaming) - 5} more" if len(threshold_gaming) > 5 else ""
+                results.append(
+                    CheckResult(
+                        "section-threshold gaming",
+                        "fail",
+                        f"{len(threshold_gaming)} section(s) labeled ok/minor with AE/Mpx > 2000 "
+                        f"— SECTION_THRESHOLD was inflated to bypass the classifier: {gamed}{more}",
+                        fix=(
+                            "Re-run section-compare via `python -m ui_clone.measure "
+                            "section-compare <ref-dir> ...` which locks SECTION_THRESHOLD=2000, "
+                            "OR declare asset-substitution.json for the affected sections "
+                            "rather than inflating the threshold."
+                        ),
+                    )
+                )
+            if critical_structural:
+                results.append(
+                    CheckResult(
+                        "structural-only critical override",
+                        "fail",
+                        f"{len(critical_structural)} STRUCTURAL_ONLY section(s) have critical "
+                        f"structure-diff severity and cannot be substituted: "
+                        f"{', '.join(critical_structural)}",
+                        fix=(
+                            "Fix impl layout to match ref (display/height) or remove "
+                            "these sections from asset-substitution.json — the "
+                            "STRUCTURAL_ONLY bypass is for asset/font substitution, "
+                            "NOT for layout regressions."
+                        ),
                     )
                 )
             if missing_count > 0:
@@ -1087,6 +1974,27 @@ class Gate:
                         f"{missing_count} section(s) MISSING impl — implement them and re-run section-compare",
                     )
                 )
+            if downgraded:
+                results.append(
+                    CheckResult(
+                        "known-artifacts downgrades",
+                        "pass",
+                        f"{len(downgraded)} section(s) downgraded via known-artifacts.json: "
+                        + ", ".join(name for name, _ in downgraded),
+                    )
+                )
+
+        for name, reason in rejected:
+            results.append(
+                CheckResult(
+                    f"known-artifact:{name}",
+                    "warn",
+                    f"{name} — known-artifacts.json entry rejected: {reason}",
+                )
+            )
+
+        if coverage_warning:
+            results.append(CheckResult("known-artifacts coverage", "warn", coverage_warning))
 
         return results
 
@@ -1169,11 +2077,18 @@ class Gate:
 
         passed = not any(r.status == "fail" for r in results)
 
-        # Record gate result in pipeline-state.json (only on PASS, skip "all")
-        if passed and gate != "all":
+        # Record gate result in pipeline-state.json. Skip "all" (composite run).
+        # PASS resets the consecutive-fail counter for this gate inside
+        # mark_passed; BLOCKED increments it inside mark_failed when this gate
+        # is the active one. The counter is what the goal card uses to surface
+        # "STUCK after N — read diagnosis.md" so loop drivers don't grind.
+        if gate != "all":
             try:
                 ps = _state.PipelineState.load(self.ref_dir)
-                ps.mark_passed(gate, self.ref_dir)
+                if passed:
+                    ps.mark_passed(gate, self.ref_dir)
+                else:
+                    ps.mark_failed(gate, self.ref_dir)
             except OSError:
                 pass  # Non-fatal — state tracking is best-effort
 

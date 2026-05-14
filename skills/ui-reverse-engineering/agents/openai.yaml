@@ -1,0 +1,8 @@
+interface:
+  display_name: "UI Reverse Engineering"
+  short_description: "Clone a live website URL into React + Tailwind using extracted DOM, CSS, assets, and animation data."
+  brand_color: "#10A37F"
+  default_prompt: "Use ui-reverse-engineering to clone a live website URL into React + Tailwind."
+
+policy:
+  allow_implicit_invocation: true

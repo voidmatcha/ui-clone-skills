@@ -6,8 +6,13 @@ These are **framework-agnostic** — they work on any site using class-based or 
 ## Usage
 
 ```bash
-SCRIPTS="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}"
-SCRIPTS="${SCRIPTS:-$(find -L ~/.claude/skills -name 'ae-compare.sh' -exec dirname {} \; 2>/dev/null | head -1)}"
+SCRIPTS="${VISUAL_DEBUG_SCRIPTS_DIR:-}"
+if [ -z "$SCRIPTS" ]; then
+  for root in "${PLUGIN_ROOT:-}" "${CODEX_PLUGIN_ROOT:-}" "${CLAUDE_PLUGIN_ROOT:-}" "${UI_CLONE_ROOT:-}" "$PWD" "$PWD/.." "$PWD/../.." "${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"; do
+    [ -n "$root" ] && [ -f "$root/skills/visual-debug/scripts/ae-compare.sh" ] && SCRIPTS=$(cd "$root/skills/visual-debug/scripts" && pwd) && break
+  done
+fi
+[ -n "$SCRIPTS" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 bash "$SCRIPTS/computed-diff.sh" <session> <orig-url> <impl-url> \
   "h1" "h2" "h3" "h4" "body" "header" "main" "footer"
 ```
@@ -59,15 +64,14 @@ Catches: margin/padding differences, width mismatches, box-sizing issues
 header  main  footer  nav  aside  section  article
 ```
 
-### Naver.com Specific
-Common mismatches found during pixel-perfect clone work:
+### News / Portal sites
+Common diff-prone selectors on news / portal layouts (notice boxes, partner lists, weather/stock widgets, tabbed content):
 
 ```
-.notice_area .title
-.partner_box .title
-.list_corp
-.addr
-.news_logo
+[class*=notice_area]
+[class*=partner_box]
+[class*=list_corp]
+[class*=news_logo]
 [class*=tab_text]
 [class*=shortcut_item]
 [class*=search_input]
@@ -78,12 +82,11 @@ Common mismatches found during pixel-perfect clone work:
 [class*=link_login]
 [class*=weather_box]
 [class*=stock_box]
-[class*=vibe_box]
 [class*=calendar_box]
 ```
 
-### Navercorp.com Clone Specific
-Selectors confirmed useful for navercorp clone (`localhost:3001` vs `navercorp.com`):
+### Corporate / brand homepage
+Common selectors on corporate hero + masonry grid layouts:
 
 ```
 .header__logo
@@ -98,13 +101,11 @@ Selectors confirmed useful for navercorp clone (`localhost:3001` vs `navercorp.c
 .footer__menu
 ```
 
-**Known navercorp compound-selector traps** — these require `.navercorp.main` on the wrapper:
+**Compound-selector traps** — when site CSS uses `.app.main .target { ... }`, BOTH `app` AND `main` classes must be on the SAME wrapper element. Verify via:
+```bash
+grep -oE '\.[a-z][a-z-]*\.[a-z][a-z-]*' site.css | sort -u
 ```
-.navercorp.main .header__logo      → width:292px (desktop hero) → 104px on scroll
-.navercorp.main .main-title        → font-size:32px (not 16px)
-.navercorp.is-scroll-down.main .header .header__logo  → shrinks logo on scroll
-```
-Always verify wrapper div has BOTH `navercorp` AND `main` classes on the same element.
+A wrapper missing the second class silently breaks every compound-scoped rule (logo sizing, scroll-state typography, etc.).
 
 ### General E-commerce / Portal
 ```

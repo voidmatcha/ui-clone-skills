@@ -1,12 +1,54 @@
 [project]
 name = "ui-clone-skills"
-version = "0.4.9"
+version = "0.4.10"
+description = "Clone any live website URL into React + Tailwind code — Claude Code and Codex plugin with extraction-first verification (real CSS, real animation params from JS bundles, AE/SSIM pixel diff)."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "YONGJAE LEE" }]
 requires-python = ">=3.11"
+keywords = [
+    "claude-code",
+    "claude-code-plugin",
+    "codex",
+    "codex-plugin",
+    "react",
+    "nextjs",
+    "tailwindcss",
+    "ui-cloning",
+    "url-to-react",
+    "website-to-react",
+    "gsap",
+    "framer-motion",
+    "webflow",
+    "visual-regression",
+    "ae-ssim",
+    "agent-browser",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "scikit-image==0.26.0",
     "Pillow==12.2.0",
     "numpy==2.4.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/voidmatcha/ui-clone-skills"
+Repository = "https://github.com/voidmatcha/ui-clone-skills"
+Issues = "https://github.com/voidmatcha/ui-clone-skills/issues"
+Changelog = "https://github.com/voidmatcha/ui-clone-skills/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
@@ -45,6 +87,10 @@ check_untyped_defs = true
 warn_return_any = true
 warn_unused_ignores = true
 exclude = ["^.venv/"]
+
+[tool.basedpyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
 
 [[tool.mypy.overrides]]
 module = "tifffile.*"

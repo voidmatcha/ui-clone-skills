@@ -39,6 +39,7 @@ import json
 import sys
 from pathlib import Path
 
+from ui_clone.goal import build_goal_card
 from ui_clone.hooks._common import find_project_root, load_json_safe
 from ui_clone.state import PipelineState
 
@@ -111,6 +112,10 @@ def _build_message(ref_dir: Path, event_name: str) -> str:
     lines: list[str] = []
     lines.append(f"⚑ UI-RE WIP detected on {event_name}: tmp/ref/{component}/")
     lines.append("")
+    lines.append("Host-neutral goal card for this delegated worker:")
+    lines.append(f"Run: python -m ui_clone.goal tmp/ref/{component}")
+    lines.append(build_goal_card(ref_dir))
+    lines.append("")
     lines.append(
         "Empirical pattern (from JSONL analysis of prior sessions): post-compact and "
         "session-resume are the dominant skip-failure trigger — 73% of past "
@@ -142,9 +147,9 @@ def _build_message(ref_dir: Path, event_name: str) -> str:
         lines.append("  5. bash $SCRIPTS_DIR/transition-compare.sh <orig> <impl> <session>")
     lines.append("")
     lines.append(
-        "$SCRIPTS_DIR resolves to ${CLAUDE_PLUGIN_ROOT}/skills/visual-debug/scripts/ — "
-        "or use: SCRIPTS_DIR=$(find -L ~/.claude/skills -name 'ae-compare.sh' "
-        "-exec dirname {} \\; 2>/dev/null | head -1)"
+        "$SCRIPTS_DIR resolves from VISUAL_DEBUG_SCRIPTS_DIR, PLUGIN_ROOT, "
+        "CODEX_PLUGIN_ROOT, or CLAUDE_PLUGIN_ROOT. If none is set, export "
+        "SCRIPTS_DIR=/path/to/ui-clone-skills/skills/visual-debug/scripts."
     )
     lines.append("")
 

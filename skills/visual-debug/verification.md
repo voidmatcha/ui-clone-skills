@@ -49,7 +49,7 @@ ffmpeg -i <input>.webm -vf fps=60 <output-dir>/frame-%06d.png -y
 ## Shared scroll sequence (use identically in Phase A and B)
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const h = document.body.scrollHeight;
   let pos = 0;
@@ -60,7 +60,7 @@ agent-browser eval "
   };
   step();
 })()"
-agent-browser wait 4000
+agent-browser --session <s> wait 4000
 ```
 
 ## Content-Anchored Screenshot Alignment (MANDATORY)
@@ -76,7 +76,7 @@ agent-browser wait 4000
 ```bash
 # Content-anchored scroll helper
 ANCHOR="Clothing to claim"
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   for (const h of document.querySelectorAll('h1,h2,h3')) {
     if (h.textContent.includes('${ANCHOR}')) {
       window.scrollTo(0, h.getBoundingClientRect().top + window.scrollY - 350);
@@ -93,7 +93,7 @@ The same section may appear at different scroll positions because the pin extend
 
 ```bash
 # Read ScrollTrigger progress in original
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   if (typeof ScrollTrigger !== 'undefined') {
     const triggers = ScrollTrigger.getAll();
     return JSON.stringify(triggers.map(t => ({
@@ -115,10 +115,10 @@ agent-browser eval "(() => {
 
 **Never declare a section "done" or "almost matching" based on your own visual judgment.** Your judgment is unreliable — you consistently overestimate similarity. Instead:
 
-1. Run `auto-verify.sh` — it runs layout-health-check, batch-scroll+AE comparison, and post-implement gate automatically
+1. Run `scripts/verify/auto-verify.sh` — it runs layout-health-check, batch-scroll+AE comparison, and post-implement gate automatically
 2. Run `computed-diff.sh` on key elements (font-size, padding, margin, color)
 3. If ANY AE > 500 or ANY computed value differs by more than 1px → it's NOT done
-4. Only `auto-verify.sh exit 0` + user confirmation = done
+4. Only `scripts/verify/auto-verify.sh exit 0` + user confirmation = done
 
 **Phrases that indicate this anti-pattern (ALL are FORBIDDEN):**
 - "almost matches" / "very close" / "close enough"
@@ -128,7 +128,7 @@ agent-browser eval "(() => {
 - "this is a structural difference, not visual"
 - "the remaining differences are minor"
 
-**Replace with:** Specific `auto-verify.sh` exit code, AE numbers, or `computed-diff.sh` output.
+**Replace with:** Specific `scripts/verify/auto-verify.sh` exit code, AE numbers, or `computed-diff.sh` output.
 
 ---
 
@@ -150,45 +150,45 @@ mkdir -p tmp/ref/<component>/static/{ref,impl,diff}
 mkdir -p tmp/ref/<component>/transitions/{ref,impl}
 mkdir -p tmp/ref/<component>/responsive
 
-agent-browser open https://target-site.com
-agent-browser set viewport 1440 900
+agent-browser --session <s> open https://target-site.com
+agent-browser --session <s> set viewport 1440 900
 
 # Static screenshots at each scroll position
-agent-browser eval "(() => window.scrollTo(0, 0))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/ref/top.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/top.png
 
-agent-browser eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.25))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/ref/25pct.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.25))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/25pct.png
 
-agent-browser eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.5))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/ref/50pct.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.5))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/50pct.png
 
-agent-browser eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.75))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/ref/75pct.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.75))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/75pct.png
 
-agent-browser eval "(() => window.scrollTo(0, document.body.scrollHeight))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/ref/bottom.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/bottom.png
 ```
 
 ### A-C2: Full-page scroll video
 
 ```bash
-agent-browser eval "(() => window.scrollTo(0, 0))()"
-agent-browser wait 500
-agent-browser record start tmp/ref/<component>/ref-scroll.webm
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> record start tmp/ref/<component>/ref-scroll.webm
 
 # Static pause at top
-agent-browser wait 1000
+agent-browser --session <s> wait 1000
 
 # Scroll (use shared sequence above)
 
-agent-browser wait 1000
-agent-browser record stop
+agent-browser --session <s> wait 1000
+agent-browser --session <s> record stop
 
 # Extract at 60 fps
 ffmpeg -i tmp/ref/<component>/ref-scroll.webm -vf fps=60 tmp/ref/<component>/frames/ref/scroll-%06d.png -y
@@ -212,38 +212,38 @@ ffmpeg -i tmp/ref/<component>/ref-scroll.webm -vf fps=60 tmp/ref/<component>/fra
 
 ```bash
 # 1. Measure element rect
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const el = document.querySelector('<selector>');
   el.scrollIntoView({ block: 'center' });
   const r = el.getBoundingClientRect();
   return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
 })()"
-agent-browser wait 500
+agent-browser --session <s> wait 500
 
 # 2. idle state
-agent-browser screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/ref/<name>-idle.png
+agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/ref/<name>-idle.png
 
 # 3. active state
 # css-hover: CDP hover
-agent-browser hover <selector>
+agent-browser --session <s> hover <selector>
 # js-class: classList.add
-# agent-browser eval "document.querySelector('<sel>').classList.add('<cls>')"
+# agent-browser --session <s> eval "document.querySelector('<sel>').classList.add('<cls>')"
 # intersection: classList.add('in-view')
-agent-browser wait <transitionDuration + 100>
-agent-browser screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/ref/<name>-active.png
+agent-browser --session <s> wait <transitionDuration + 100>
+agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/ref/<name>-active.png
 ```
 
 **For scroll-driven / mousemove / auto-timer regions (video):**
 
 ```bash
 # Example: carousel with auto-timer
-agent-browser eval "(() => { document.querySelector('<carousel-selector>').scrollIntoView({ block: 'center' }); })()"
-agent-browser wait 500
-agent-browser record start tmp/ref/<component>/ref-transition-carousel.webm
+agent-browser --session <s> eval "(() => { document.querySelector('<carousel-selector>').scrollIntoView({ block: 'center' }); })()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> record start tmp/ref/<component>/ref-transition-carousel.webm
 
-agent-browser wait 12000  # 2 full cycles
+agent-browser --session <s> wait 12000  # 2 full cycles
 
-agent-browser record stop
+agent-browser --session <s> record stop
 
 # Extract at 60 fps
 ffmpeg -i tmp/ref/<component>/ref-transition-carousel.webm -vf fps=60 tmp/ref/<component>/transitions/ref/carousel-%06d.png -y
@@ -274,43 +274,43 @@ Execute the **identical** three captures on `localhost:<port>`:
 ### B-C1: Full-page static screenshots
 
 ```bash
-agent-browser open http://localhost:<port>
-agent-browser set viewport 1440 900
+agent-browser --session <s> open http://localhost:<port>
+agent-browser --session <s> set viewport 1440 900
 
-agent-browser eval "(() => window.scrollTo(0, 0))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/impl/top.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/top.png
 
-agent-browser eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.25))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/impl/25pct.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.25))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/25pct.png
 
-agent-browser eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.5))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/impl/50pct.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.5))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/50pct.png
 
-agent-browser eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.75))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/impl/75pct.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.75))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/75pct.png
 
-agent-browser eval "(() => window.scrollTo(0, document.body.scrollHeight))()"
-agent-browser wait 500
-agent-browser screenshot tmp/ref/<component>/static/impl/bottom.png
+agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/bottom.png
 ```
 
 ### B-C2: Full-page scroll video
 
 ```bash
-agent-browser eval "(() => window.scrollTo(0, 0))()"
-agent-browser wait 500
-agent-browser record start tmp/ref/<component>/impl-scroll.webm
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> record start tmp/ref/<component>/impl-scroll.webm
 
-agent-browser wait 1000
+agent-browser --session <s> wait 1000
 
 # Scroll (use shared sequence — identical to Phase A)
 
-agent-browser wait 1000
-agent-browser record stop
+agent-browser --session <s> wait 1000
+agent-browser --session <s> record stop
 
 ffmpeg -i tmp/ref/<component>/impl-scroll.webm -vf fps=60 tmp/ref/<component>/frames/impl/scroll-%06d.png -y
 ```
@@ -322,31 +322,31 @@ ffmpeg -i tmp/ref/<component>/impl-scroll.webm -vf fps=60 tmp/ref/<component>/fr
 **For css-hover / js-class / intersection regions (clip screenshot):**
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const el = document.querySelector('<selector>');
   el.scrollIntoView({ block: 'center' });
   const r = el.getBoundingClientRect();
   return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
 })()"
-agent-browser wait 500
+agent-browser --session <s> wait 500
 
-agent-browser screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/impl/<name>-idle.png
+agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/impl/<name>-idle.png
 
-agent-browser hover <selector>  # or classList.add for js-class/intersection
-agent-browser wait <transitionDuration + 100>
-agent-browser screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/impl/<name>-active.png
+agent-browser --session <s> hover <selector>  # or classList.add for js-class/intersection
+agent-browser --session <s> wait <transitionDuration + 100>
+agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/impl/<name>-active.png
 ```
 
 **For scroll-driven / mousemove / auto-timer regions (video — identical to A-C3):**
 
 ```bash
-agent-browser eval "(() => { document.querySelector('<carousel-selector>').scrollIntoView({ block: 'center' }); })()"
-agent-browser wait 500
-agent-browser record start tmp/ref/<component>/impl-transition-carousel.webm
+agent-browser --session <s> eval "(() => { document.querySelector('<carousel-selector>').scrollIntoView({ block: 'center' }); })()"
+agent-browser --session <s> wait 500
+agent-browser --session <s> record start tmp/ref/<component>/impl-transition-carousel.webm
 
-agent-browser wait 12000
+agent-browser --session <s> wait 12000
 
-agent-browser record stop
+agent-browser --session <s> record stop
 
 ffmpeg -i tmp/ref/<component>/impl-transition-carousel.webm -vf fps=60 tmp/ref/<component>/transitions/impl/carousel-%06d.png -y
 ```
@@ -387,7 +387,7 @@ Live services (streaming, news feeds, etc.) change thumbnail URLs frequently. Do
 1. **Select elements**: layout containers, typography carriers, visually distinct elements from each section
 2. **Define states per triggerType**: static → idle; css-hover/js-class → idle + active; intersection → before + after; scroll-driven → before + mid + after
 3. **Measure rect** via `getBoundingClientRect()` on both ref and impl, activating each state first (hover, classList.add, scrollTo)
-4. **Clip screenshot** each element per state: `agent-browser screenshot --clip <x>,<y>,<w>,<h> <path>`
+4. **Clip screenshot** each element per state: `agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> <path>`
 5. **Diff**: `compare -metric AE ref.png impl.png diff.png` (ImageMagick) or `ffmpeg -lavfi "ssim"` — AE = 0 or SSIM >= 0.995 = PASS
 
 ### Phase D2: Numerical Diagnosis
@@ -456,7 +456,7 @@ Compare the results. If any section's top offset differs by more than 50px, ther
 
 1. Extract the exact SVG from the DOM:
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const svg = document.querySelector('<selector>');
   return svg ? svg.outerHTML : 'not found';
 })()"
@@ -473,7 +473,7 @@ Before using arbitrary values like `px-[19px]`, verify they work in the target T
 
 ```bash
 # Quick test after first component renders
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const el = document.querySelector('[class*=\"px-[\"]');
   return el ? getComputedStyle(el).paddingLeft : 'no match or not rendered';
 })()"

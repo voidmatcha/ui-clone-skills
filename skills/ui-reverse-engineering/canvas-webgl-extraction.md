@@ -3,7 +3,7 @@
 ## Identify 3D Engine First
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   var resources = performance.getEntriesByType('resource').map(function(e) { return e.name; });
   return JSON.stringify({
@@ -35,7 +35,7 @@ These engines use scene files that embed state machines, event listeners, and an
 
 ```bash
 # Rive — find .riv file URL
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const resources = performance.getEntriesByType('resource');
   const riv = resources.filter(r => r.name.includes('.riv'));
@@ -43,7 +43,7 @@ agent-browser eval "
 })()"
 
 # Spline — find .splinecode or spline CDN URL
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const resources = performance.getEntriesByType('resource');
   const spline = resources.filter(r => r.name.includes('.splinecode') || r.name.includes('prod.spline'));
@@ -51,7 +51,7 @@ agent-browser eval "
 })()"
 
 # Lottie — find animation JSON URL
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const resources = performance.getEntriesByType('resource');
   const lottie = resources.filter(r => r.name.includes('lottie') || r.name.includes('bodymovin') || r.name.endsWith('.json'));
@@ -83,16 +83,16 @@ For each interaction found, capture reference frames of each state:
 
 ```bash
 # Example: Rive hover state
-agent-browser screenshot tmp/ref/<effect-name>/frames/ref/rive-default.png
-agent-browser hover <canvas-or-wrapper-selector>
-agent-browser wait 800
-agent-browser screenshot tmp/ref/<effect-name>/frames/ref/rive-hover.png
+agent-browser --session <s> screenshot tmp/ref/<effect-name>/frames/ref/rive-default.png
+agent-browser --session <s> hover <canvas-or-wrapper-selector>
+agent-browser --session <s> wait 800
+agent-browser --session <s> screenshot tmp/ref/<effect-name>/frames/ref/rive-hover.png
 
 # Example: Lottie click trigger
-agent-browser screenshot tmp/ref/<effect-name>/frames/ref/lottie-before.png
-agent-browser click <trigger-selector>
-agent-browser wait 2000
-agent-browser screenshot tmp/ref/<effect-name>/frames/ref/lottie-after.png
+agent-browser --session <s> screenshot tmp/ref/<effect-name>/frames/ref/lottie-before.png
+agent-browser --session <s> click <trigger-selector>
+agent-browser --session <s> wait 2000
+agent-browser --session <s> screenshot tmp/ref/<effect-name>/frames/ref/lottie-after.png
 ```
 
 ### Step 4: Document in extracted.json
@@ -129,7 +129,7 @@ agent-browser screenshot tmp/ref/<effect-name>/frames/ref/lottie-after.png
 
 ```bash
 # Find chunk URLs and download them to tmp/ref/<effect-name>/bundles/
-URLS=$(agent-browser eval "
+URLS=$(agent-browser --session <s> eval "
 (() => {
   var scripts = Array.from(document.querySelectorAll('script[src]'))
     .map(function(s) { return s.src; })

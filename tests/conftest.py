@@ -123,6 +123,29 @@ def ref_dir_with_artifacts(ref_dir: Path) -> Path:
     )
     os.utime(ref_dir / "transition-coverage.json", (base_time, base_time))
 
+    provenance_artifacts = [
+        "extracted.json",
+        "transition-spec.json",
+        "animation-init-styles.json",
+        "section-map.json",
+        "svg-text-elements.json",
+        "responsive/sizing-expressions.json",
+        "interactions-detected.json",
+        "transition-coverage.json",
+        "component-map.json",
+    ]
+    (ref_dir / "artifact-provenance.json").write_text(json.dumps({
+        "artifacts": [
+            {
+                "path": artifact,
+                "source": "agent-browser-eval" if artifact != "transition-spec.json" else "bundle-grep",
+                "evidence": [artifact],
+                "generatedAt": "2026-05-14T00:00:00Z",
+            }
+            for artifact in provenance_artifacts
+        ],
+    }))
+
     # Assert the contract is met
     assert (ref_dir / "extracted.json").stat().st_mtime > (
         ref_dir / "structure.json"

@@ -3,12 +3,13 @@
 # must have at least one matching artifact in the impl source tree.
 #
 # Why it matters:
-#   The original 375.studio clone declared "transitions matched" while the
-#   `works-scroll-reveal` (intersection-fade-up) entry was never implemented.
-#   The agent confused "hover/click matched" with "all transitions matched".
-#   This script makes that bookkeeping checkable: parse spec entries, grep the
-#   impl source for hooks that match each entry's `id` / `selector` / `type`,
-#   and FAIL if any entry has zero hits.
+#   It is common for the agent to declare "transitions matched" after
+#   transition-compare.sh passes — but transition-compare only verifies
+#   hover/idle-state diffs. Intersection-driven or scroll-driven entries can be
+#   entirely missing from the impl while the hover sweep stays green. This
+#   script makes that bookkeeping checkable: parse spec entries, grep the impl
+#   source for hooks that match each entry's `id` / `selector` / `type`, and
+#   FAIL if any entry has zero hits.
 #
 #   This is the static counterpart to reveal-trigger-check.sh:
 #     - reveal-trigger-check  → runtime: do reveals actually trigger?
@@ -19,9 +20,9 @@
 # Usage:
 #   bash transition-spec-coverage.sh <component-dir> <impl-src-dir>
 #
-#   <component-dir>: path containing transition-spec.json (e.g. tmp/ref/375studio)
+#   <component-dir>: path containing transition-spec.json (e.g. tmp/ref/<c>)
 #   <impl-src-dir>:  path to the impl source root for the component
-#                    (e.g. apps/showcase/src/projects/375studio)
+#                    (e.g. apps/<app>/src/projects/<c>)
 #
 # Exit: 0 = every spec entry has at least one impl hit, 1 = uncovered entries,
 #       2 = setup error / missing files
@@ -173,6 +174,19 @@ done <<< "$ENTRIES"
 echo ""
 echo "Coverage: $((TOTAL - UNCOVERED)) / $TOTAL"
 echo ""
+
+# JSON sidecar for gate_post_implement (verification-plan dispatch reads this).
+STATUS="pass"
+[ "$UNCOVERED" -gt 0 ] && STATUS="fail"
+cat > "$COMP_DIR/transition-spec-coverage.json" <<JSON
+{
+  "schemaVersion": 1,
+  "status": "$STATUS",
+  "total": $TOTAL,
+  "covered": $((TOTAL - UNCOVERED)),
+  "uncovered": $UNCOVERED
+}
+JSON
 
 if [ "$UNCOVERED" -gt 0 ]; then
   echo "⛔ $UNCOVERED spec entr$([ "$UNCOVERED" -eq 1 ] && echo "y" || echo "ies") have no matching impl artifact."

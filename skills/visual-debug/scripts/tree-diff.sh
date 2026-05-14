@@ -342,6 +342,27 @@ json_path = os.path.join(out_dir, "tree-diff.json")
 with open(json_path, "w") as f:
     json.dump(rows, f, indent=2, default=str)
 
+# ── Status sidecar (gate-readable) ──
+# tree-diff.json is raw-pair data; verification-plan gates need a top-level
+# `status` field to decide pass/fail. Write a separate sidecar that the
+# gate consumer reads. status=fail when any critical/major/layout-major
+# pair exists — same definition as the exit code below.
+status_path = os.path.join(out_dir, "tree-diff-status.json")
+total_fail = counts["critical"] + counts["major"] + counts["layout-major"]
+with open(status_path, "w") as f:
+    json.dump({
+        "schemaVersion": 1,
+        "status": "fail" if total_fail > 0 else "pass",
+        "elements_walked": len(impl),
+        "counts": counts,
+        "errorCount": total_fail,
+        "reason": (
+            f"{total_fail} critical/major element mismatch(es)"
+            if total_fail > 0
+            else f"All {len(impl)} elements within style + layout tolerance"
+        ),
+    }, f, indent=2)
+
 # ── Stdout ──
 print(f"  Walked {len(impl)} elements")
 print(f"  🔴 critical: {counts['critical']}   🟠 major: {counts['major']}   🟣 layout-major: {counts['layout-major']}   🟡 minor: {counts['minor']}   🟦 layout-minor: {counts['layout-minor']}   ⚪ unpaired: {counts['unpaired']}   ✓ ok: {counts['ok']}")

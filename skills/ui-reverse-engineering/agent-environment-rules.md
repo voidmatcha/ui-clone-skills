@@ -66,7 +66,7 @@ Run `agent-browser --help` once at session start to confirm verb syntax.
 
 Common mistakes from prior sessions:
 
-- `agent-browser scrollTo 0 500` — **no such verb.** Use `agent-browser eval "window.scrollTo(0, 500)"` or `agent-browser scroll down 500`.
+- `agent-browser scrollTo 0 500` — **no such verb.** Use `agent-browser --session <s> eval "window.scrollTo(0, 500)"` or `agent-browser scroll down 500`.
 - The valid scroll verbs are `scroll <dir> [px]`, `scrollintoview <sel>`, `mouse wheel <dy> [dx]` — there is no `scrollTo`.
 
 Unknown verbs typically exit with an error rather than silently no-op, but the error is easy to miss in long Bash chains; check exit codes when in doubt.
@@ -98,7 +98,7 @@ Gate validators look for `tmp/ref/<c>/static/ref/`, NOT `tmp/ref/<c>/capture/sta
 
 When the user reports a behavior the `agent-browser` session can NOT reproduce — splash frozen, animation jittery, click handler dead — and the impl source looks correct, the most expensive failure mode is debugging the source code instead of the runtime serving it.
 
-`agent-browser open <url>` cache-busts on each open; the user's tab does not. Long-running dev servers (Next.js + Turbopack / Vite / Webpack) accumulate state — HMR worker wedges, RSS climbs into multi-GB territory, module graph diverges from disk. After 1+ days uptime, the user's tab can be served stale chunks while the agent's fresh-open session sees the current code. The behaviors look like impl bugs but are environment ghosts.
+`agent-browser --session <s> open <url>` cache-busts on each open; the user's tab does not. Long-running dev servers (Next.js + Turbopack / Vite / Webpack) accumulate state — HMR worker wedges, RSS climbs into multi-GB territory, module graph diverges from disk. After 1+ days uptime, the user's tab can be served stale chunks while the agent's fresh-open session sees the current code. The behaviors look like impl bugs but are environment ghosts.
 
 **Triage before opening source code:**
 ```bash
@@ -113,4 +113,4 @@ ps -o etime,rss,command -p <pid>
 - The restart is cheap (≤10s); a wrong-direction debug session is not
 - If the bug reproduces after a fresh server, it is a real bug — proceed to diagnosis
 
-This rule applies to *any* user/agent reproducibility delta, not just splash issues. The asymmetry is structural: `agent-browser open` always gets fresh chunks, the user's tab depends on whatever the dev server's HMR worker last decided to serve.
+This rule applies to *any* user/agent reproducibility delta, not just splash issues. The asymmetry is structural: `agent-browser --session <s> open` always gets fresh chunks, the user's tab depends on whatever the dev server's HMR worker last decided to serve.

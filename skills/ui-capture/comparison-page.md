@@ -1,6 +1,6 @@
 # Comparison Page — Phase 4B
 
-Generate `tmp/ref/capture/compare.html` for side-by-side human review of original vs clone.
+Generate `$OUT_DIR/compare.html` for side-by-side human review of original vs clone.
 
 ## Phase 4A: Pixel-Perfect Visual Gate (MANDATORY — run BEFORE generating compare.html)
 
@@ -9,13 +9,13 @@ Generate `tmp/ref/capture/compare.html` for side-by-side human review of origina
 
 For each section in `regions.json` plus any static-only sections (header, footer, hero):
 1. Follow `visual-debug/verification.md` Phase D1 to capture clip screenshots and run pixel diff
-2. Produce `tmp/ref/capture/pixel-perfect-diff.json` with `"result": "pass"`
+2. Produce `$OUT_DIR/pixel-perfect-diff.json` with `"result": "pass"`
 
 The diff JSON must be embedded in the compare.html output (see HTML structure below).
 
 Gate before generating compare.html:
 ```
-□ pixel-perfect-diff.json exists at tmp/ref/capture/pixel-perfect-diff.json
+□ pixel-perfect-diff.json exists at $OUT_DIR/pixel-perfect-diff.json
 □ All elements status = "pass" (Visual Gate criterion)
 □ mismatches = 0 (Numerical Diagnosis criterion)
 ```
@@ -213,10 +213,10 @@ The raster-path video sweeps all 100 grid points in sequence — no separate PNG
 
 ```bash
 # Copy to project public dir if available
-cp -r tmp/ref/capture public/ui-capture-compare
+cp -r "$OUT_DIR" public/ui-capture-compare
 
 # Or standalone
-npx serve tmp/ref/capture -p 3002
+npx serve "$OUT_DIR" -p 3002
 ```
 
 Present URL to user and wait for feedback (interactive mode) or check pixel-perfect-diff.json (autonomous mode). See SKILL.md Phase 5.
@@ -227,7 +227,7 @@ Present URL to user and wait for feedback (interactive mode) or check pixel-perf
 
 > **Read `report-page.md` before executing this phase.**
 
-When no implementation exists yet, generate `tmp/ref/capture/report.html` instead of `compare.html`. Shows the fullpage screenshot with interactive transition overlays pinned at exact page coordinates.
+When no implementation exists yet, generate `$OUT_DIR/report.html` instead of `compare.html`. In standalone mode with no component, `$OUT_DIR` is `tmp/ref/capture`. Shows the fullpage screenshot with interactive transition overlays pinned at exact page coordinates.
 
 - User calls `/ui-capture <url>` without a local-url → generate `report.html`
 - User calls `/ui-capture <url> vs <local-url>` → generate `compare.html` (default comparison mode)

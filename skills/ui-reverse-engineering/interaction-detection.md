@@ -11,7 +11,7 @@
 ### Classify interaction type
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const el = document.querySelector('.target');
   if (!el) return JSON.stringify({ error: 'selector not found' });
@@ -46,7 +46,7 @@ agent-browser eval "
 
 ```bash
 # 1. Set up recorder before scrolling
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   window.__scrollTransitions = [];
   const candidates = document.querySelectorAll('[class*=fade], [class*=slide], [class*=reveal], [class*=animate], [data-aos]');
@@ -82,16 +82,16 @@ agent-browser eval "
 
 # 2. Scroll through the page
 agent-browser scroll down 300
-agent-browser wait 800
+agent-browser --session <s> wait 800
 agent-browser scroll down 300
-agent-browser wait 800
+agent-browser --session <s> wait 800
 agent-browser scroll down 300
-agent-browser wait 800
+agent-browser --session <s> wait 800
 agent-browser scroll down 300
-agent-browser wait 800
+agent-browser --session <s> wait 800
 
 # 3. Retrieve results
-agent-browser eval "(() => JSON.stringify(window.__scrollTransitions || [], null, 2))()"
+agent-browser --session <s> eval "(() => JSON.stringify(window.__scrollTransitions || [], null, 2))()"
 ```
 
 **Save results to** `tmp/ref/<component>/scroll-transitions.json`
@@ -105,7 +105,7 @@ agent-browser eval "(() => JSON.stringify(window.__scrollTransitions || [], null
 ### Detect mouse-tracking interactions
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const rows = document.querySelectorAll('a, [class*=row], [class*=card], [class*=item]');
   const mouseTracked = [];
@@ -138,7 +138,7 @@ CSS `:hover` only reveals CSS-driven transitions. Many modern sites use **JS-dri
 #### Step 5d-1: Enumerate all hoverable elements
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const results = [];
   const seen = new Set();
@@ -175,7 +175,7 @@ agent-browser eval "
 For each hoverable element, **actually trigger the hover** and compare `getComputedStyle` before and after:
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   // This must be run INTERACTIVELY — use agent-browser hover command instead
   // For each selector from Step 5d-1:
@@ -185,10 +185,10 @@ agent-browser eval "
 ```
 
 **Interactive measurement protocol:**
-1. `agent-browser hover "<selector>"` — trigger hover
+1. `agent-browser --session <s> hover "<selector>"` — trigger hover
 2. Wait 500ms for transition to complete
-3. `agent-browser eval` — read `getComputedStyle` for the target + all children
-4. `agent-browser hover "body"` — move away to deactivate hover
+3. `agent-browser --session <s> eval` — read `getComputedStyle` for the target + all children
+4. `agent-browser --session <s> hover "body"` — move away to deactivate hover
 5. Compare before/after for EVERY property: `transform`, `opacity`, `scale`, `display`, `visibility`, `backgroundColor`, `color`, `borderColor`, `boxShadow`, `clipPath`, `filter`
 
 **Save delta to** `tmp/ref/<component>/hover-deltas.json`:
@@ -222,7 +222,7 @@ agent-browser eval "
 CSS files alone do NOT contain all hover rules. Webflow and many CMS platforms inject hover CSS via **inline `<style>` tags** that aren't in downloaded `.css` files. This is the #1 reason hover transitions are silently missed.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const hoverRules = [];
   for (const sheet of document.styleSheets) {
@@ -258,7 +258,7 @@ For each hoverable element, check if hover changes **DOM content** (not just sty
 - `::before` / `::after` pseudo-elements with new content
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const btns = document.querySelectorAll('[data-text], [data-label], [data-hover-text], [data-btn-inner]');
   return JSON.stringify(Array.from(btns).map(el => ({
@@ -311,153 +311,9 @@ ffmpeg -i tmp/ref/<component>/hover-<element>.webm -vf fps=10 tmp/ref/<component
 
 #### Step 5d-3: JS-driven hover timing extraction (MANDATORY)
 
-CSS hover deltas from Step 5d-2 capture the **what** (which properties change) but NOT the **when** (duration, easing) for JS-driven animations. GSAP `mouseenter`/`mouseleave`, Framer Motion `whileHover`, and vanilla `addEventListener` hover effects have `transitionDuration: 0s` in CSS — the timing lives in JavaScript.
-
-**Detection: Does this element use JS-driven hover?**
-
-After measuring the delta in Step 5d-2, check if the element has CSS transition timing:
-
-```bash
-agent-browser eval "
-(() => {
-  // For each hoverable element from Step 5d-1
-  const selectors = [/* paste selectors from Step 5d-1 results */];
-  const jsHovers = [];
-
-  selectors.forEach(sel => {
-    const el = document.querySelector(sel);
-    if (!el) return;
-    const s = getComputedStyle(el);
-    const hasCSStransition = s.transitionDuration !== '0s' && s.transitionDuration !== '0ms';
-
-    // Check children too — GSAP often animates children, not parent
-    const children = el.querySelectorAll('*');
-    let anyChildHasCSS = false;
-    children.forEach(child => {
-      const cs = getComputedStyle(child);
-      if (cs.transitionDuration !== '0s' && cs.transitionDuration !== '0ms') anyChildHasCSS = true;
-    });
-
-    if (!hasCSStransition && !anyChildHasCSS) {
-      jsHovers.push({ selector: sel, reason: 'no-css-transition' });
-    }
-  });
-
-  return JSON.stringify(jsHovers);
-})()
-"
-```
-
-**For each JS-driven hover, measure timing via `getAnimations()`:**
-
-```bash
-# 1. Set up animation listener before hover
-agent-browser eval "
-(() => {
-  window.__hoverAnimCapture = {};
-
-  window.__captureHoverAnims = function(selector) {
-    const el = document.querySelector(selector);
-    if (!el) return;
-    const allEls = [el, ...el.querySelectorAll('*')];
-    // Snapshot BEFORE hover
-    window.__hoverAnimCapture.before = allEls.map(e => ({
-      sel: e.tagName + '.' + (e.className?.toString().split(' ')[0] || ''),
-      anims: e.getAnimations?.()?.length || 0,
-    }));
-  };
-
-  window.__readHoverAnims = function(selector) {
-    const el = document.querySelector(selector);
-    if (!el) return JSON.stringify({ error: 'not found' });
-    const allEls = [el, ...el.querySelectorAll('*')];
-    const results = [];
-
-    allEls.forEach(e => {
-      const anims = e.getAnimations?.() || [];
-      anims.forEach(anim => {
-        const timing = anim.effect?.getTiming?.() || {};
-        const keyframes = anim.effect?.getKeyframes?.() || [];
-        results.push({
-          target: e.tagName + '.' + (e.className?.toString().split(' ')[0] || ''),
-          duration: timing.duration,
-          easing: timing.easing,
-          delay: timing.delay,
-          fill: timing.fill,
-          keyframes: keyframes.map(kf => {
-            const clean = {};
-            for (const [k, v] of Object.entries(kf)) {
-              if (k !== 'offset' && k !== 'computedOffset' && k !== 'easing' && k !== 'composite') clean[k] = v;
-            }
-            clean.offset = kf.offset;
-            return clean;
-          }),
-        });
-      });
-    });
-
-    return JSON.stringify(results, null, 2);
-  };
-
-  return 'hover animation capture ready';
-})()
-"
-
-# 2. For each JS-driven hover element:
-# a. Prepare capture
-agent-browser eval "(() => window.__captureHoverAnims('<selector>'))()"
-# b. Trigger hover
-agent-browser hover "<selector>"
-# c. Wait for animation to start (50ms is enough for GSAP/Framer)
-agent-browser wait 50
-# d. Read WAAPI animations
-agent-browser eval "(() => window.__readHoverAnims('<selector>'))()"
-# e. Move away
-agent-browser hover "body"
-```
-
-**If `getAnimations()` returns results:** Extract `duration`, `easing`, `keyframes` — these are the exact JS-driven hover values.
-
-**If `getAnimations()` returns empty** (GSAP uses internal tween, not WAAPI):
-
-Fall back to **bundle grep** — search downloaded bundles for the element's selector near hover patterns:
-
-```bash
-# Find mouseenter/mouseleave handlers near known selectors
-grep -B5 -A15 'mouseenter\|mouseleave\|onmouseenter\|pointerenter\|pointerleave' \
-  tmp/ref/<component>/bundles/*.js | \
-  grep -B10 -A10 '<selector-class-fragment>'
-```
-
-Extract `duration`, `ease`/`easing`, and property values from nearby `gsap.to()` or `gsap.fromTo()` calls.
-
-**Save JS hover timing to** `tmp/ref/<component>/hover-timing.json`:
-```json
-{
-  "jsHovers": [
-    {
-      "selector": ".case__item-link",
-      "source": "waapi|bundle-grep",
-      "targets": [
-        {
-          "child": ".case__img-inner",
-          "duration": 700,
-          "easing": "cubic-bezier(0.625, 0.05, 0, 1)",
-          "properties": { "transform": ["none", "scale(1.05)"] }
-        },
-        {
-          "child": ".case__img-hover",
-          "duration": 500,
-          "easing": "cubic-bezier(0.25, 0.1, 0.25, 1)",
-          "properties": { "opacity": ["0", "1"] }
-        }
-      ]
-    }
-  ]
-}
-```
-
-**⛔ Gate:** If Step 5d-2 detected visual deltas but Step 5d-3 found no timing for a JS-driven element, the hover implementation will be missing duration/easing. Flag these in `interactions-detected.json` as `"timingSource": "unknown"` — bundle analysis (Step 5c-a) must resolve them.
+> **If Step 5d-2 measured a hover delta on an element whose `transitionDuration` is `0s`** (the element AND its children) — the timing lives in JavaScript. Read `hover-timing-extraction.md` for the `getAnimations()` capture procedure and the bundle-grep fallback for GSAP internal tweens. Otherwise skip — pure-CSS hovers already have timing in `getComputedStyle`.
+>
+> Output: `tmp/ref/<component>/hover-timing.json`. ⛔ Gate: any element with visual deltas but `timingSource: "unknown"` must be resolved via bundle analysis (Step 5c-a) before generation.
 
 #### Step 5d-4: Hover child cascade detection (MANDATORY)
 
@@ -465,7 +321,7 @@ Step 5d-2 measures the hovered element, but hover effects often cascade to **sib
 
 ```bash
 # For each hoverable element, measure all children before/after hover
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   window.__measureChildren = function(parentSel) {
     const parent = document.querySelector(parentSel);
@@ -499,17 +355,17 @@ agent-browser eval "
 "
 
 # Before hover:
-agent-browser eval "(() => JSON.stringify(window.__measureChildren('<selector>'), null, 2))()"
+agent-browser --session <s> eval "(() => JSON.stringify(window.__measureChildren('<selector>'), null, 2))()"
 # Save as before-children.json
 
-agent-browser hover "<selector>"
-agent-browser wait 500
+agent-browser --session <s> hover "<selector>"
+agent-browser --session <s> wait 500
 
 # After hover:
-agent-browser eval "(() => JSON.stringify(window.__measureChildren('<selector>'), null, 2))()"
+agent-browser --session <s> eval "(() => JSON.stringify(window.__measureChildren('<selector>'), null, 2))()"
 # Save as after-children.json
 
-agent-browser hover "body"
+agent-browser --session <s> hover "body"
 ```
 
 Compare before/after for ALL children. Add changed children to `hover-deltas.json` under the parent's entry.
@@ -521,7 +377,7 @@ Compare before/after for ALL children. Add changed children to `hover-deltas.jso
 ### Detect scroll behavior (snap, smooth, overscroll)
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const results = { snap: [], smooth: [], overscroll: [] };
   const scanned = new Set();

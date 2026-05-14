@@ -17,7 +17,7 @@ Use JS bundle extraction when ANY of these are true:
 ## Step 1: Find the relevant JS chunk
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const scripts = document.querySelectorAll('script[src]');
   return [...scripts].map(s => s.src);
 })()"
@@ -27,7 +27,7 @@ agent-browser eval "(() => {
 
 ```js
 // Search each chunk for animation-related code
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const scripts = document.querySelectorAll('script[src]');
   const findings = [];
 
@@ -65,7 +65,7 @@ agent-browser eval "(() => {
 Once you identify the chunk, extract a **wide context** (500+ chars) around each class name anchor:
 
 ```js
-agent-browser eval "(async () => {
+agent-browser --session <s> eval "(async () => {
   const resp = await fetch('https://site.com/_next/static/chunks/CHUNK_ID.js');
   const text = await resp.text();
 
@@ -136,7 +136,7 @@ Also extract the **CSS module mappings** — they tell you which hashed class co
 `getComputedStyle()` gives resolved pixel values but NOT the original CSS expressions. For responsive layouts you need the actual CSS:
 
 ```js
-agent-browser eval "(async () => {
+agent-browser --session <s> eval "(async () => {
   const links = document.querySelectorAll('link[rel=\"stylesheet\"]');
   const results = [];
   for (const link of links) {

@@ -8,7 +8,11 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from ui_clone.hooks.devtools_errors import (
     _collect_errors,
@@ -22,36 +26,36 @@ from ui_clone.hooks.devtools_errors import (
 # ---------------------------------------------------------------------------
 
 
-def test_extract_session_name_basic():
+def test_extract_session_name_basic() -> None:
     assert _extract_session_name("agent-browser --session my-sess eval '...'") == "my-sess"
 
 
-def test_extract_session_name_quoted():
+def test_extract_session_name_quoted() -> None:
     assert _extract_session_name('agent-browser --session "my session" eval') == "my session"
 
 
-def test_extract_session_name_missing():
+def test_extract_session_name_missing() -> None:
     assert _extract_session_name("agent-browser eval 'something'") is None
 
 
-def test_extract_session_name_with_other_flags():
+def test_extract_session_name_with_other_flags() -> None:
     cmd = "agent-browser --session ref-session close"
     assert _extract_session_name(cmd) == "ref-session"
 
 
-def test_extract_session_name_single_quoted():
+def test_extract_session_name_single_quoted() -> None:
     assert _extract_session_name("agent-browser --session 'my session' eval") == "my session"
 
 
-def test_extract_session_name_at_end_of_string():
+def test_extract_session_name_at_end_of_string() -> None:
     assert _extract_session_name("agent-browser --session trailing") == "trailing"
 
 
-def test_extract_session_name_with_hyphens_and_numbers():
+def test_extract_session_name_with_hyphens_and_numbers() -> None:
     assert _extract_session_name("agent-browser --session ref-2026-05") == "ref-2026-05"
 
 
-def test_extract_session_name_empty_quotes():
+def test_extract_session_name_empty_quotes() -> None:
     """Empty double-quoted session name — unquoted regex grabs '""' as a token."""
     result = _extract_session_name('agent-browser --session "" eval')
     # The double-quoted regex requires [^"]+ (at least 1 char), so it falls through
@@ -64,19 +68,19 @@ def test_extract_session_name_empty_quotes():
 # ---------------------------------------------------------------------------
 
 
-def test_suppressed_resize_observer():
+def test_suppressed_resize_observer() -> None:
     assert _is_suppressed("ResizeObserver loop limit exceeded")
 
 
-def test_suppressed_hmr():
+def test_suppressed_hmr() -> None:
     assert _is_suppressed("[HMR] waiting for update signal")
 
 
-def test_suppressed_ad_blocker():
+def test_suppressed_ad_blocker() -> None:
     assert _is_suppressed("net::ERR_BLOCKED_BY_CLIENT")
 
 
-def test_not_suppressed_real_error():
+def test_not_suppressed_real_error() -> None:
     assert not _is_suppressed("TypeError: Cannot read properties of null")
 
 
@@ -85,27 +89,27 @@ def test_not_suppressed_real_error():
 # ---------------------------------------------------------------------------
 
 
-def test_fix_hint_undefined():
+def test_fix_hint_undefined() -> None:
     msg = "ReferenceError: myVar is not defined"
     assert "import" in _fix_hint(msg) or "scope" in _fix_hint(msg)
 
 
-def test_fix_hint_hydration():
+def test_fix_hint_hydration() -> None:
     msg = "Hydration failed because the initial UI does not match"
     assert "SSR" in _fix_hint(msg) or "useEffect" in _fix_hint(msg)
 
 
-def test_fix_hint_network():
+def test_fix_hint_network() -> None:
     msg = "Failed to fetch https://api.example.com/data"
     assert "CORS" in _fix_hint(msg) or "network" in _fix_hint(msg).lower()
 
 
-def test_fix_hint_chunk_load():
+def test_fix_hint_chunk_load() -> None:
     msg = "ChunkLoadError: Loading chunk 42 failed"
     assert "chunk" in _fix_hint(msg).lower() or "build" in _fix_hint(msg).lower()
 
 
-def test_fix_hint_unknown_falls_back():
+def test_fix_hint_unknown_falls_back() -> None:
     msg = "Some totally unknown error that matches nothing"
     hint = _fix_hint(msg)
     assert "DevTools" in hint or "console" in hint
@@ -116,10 +120,10 @@ def test_fix_hint_unknown_falls_back():
 # ---------------------------------------------------------------------------
 
 
-def _make_agent_browser_mock(outputs: dict[str, str]):
+def _make_agent_browser_mock(outputs: dict[str, str]) -> Any:
     """Return a mock for subprocess.run that maps JS snippet substrings to outputs."""
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd: Any, **kwargs: Any) -> Any:
         js_arg = cmd[-1] if cmd else ""
         for key, output in outputs.items():
             if key in js_arg:
@@ -135,7 +139,7 @@ def _make_agent_browser_mock(outputs: dict[str, str]):
     return fake_run
 
 
-def test_collect_errors_empty(monkeypatch):
+def test_collect_errors_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """No errors in browser → empty list."""
     payload = json.dumps({"errors": [], "count": 0})
     monkeypatch.setattr(
@@ -146,7 +150,7 @@ def test_collect_errors_empty(monkeypatch):
     assert result == []
 
 
-def test_collect_errors_returns_errors(monkeypatch):
+def test_collect_errors_returns_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """Errors present → returned as list."""
     errors = [
         {
@@ -167,7 +171,7 @@ def test_collect_errors_returns_errors(monkeypatch):
     assert result[0]["type"] == "uncaught"
 
 
-def test_collect_errors_suppresses_noise(monkeypatch):
+def test_collect_errors_suppresses_noise(monkeypatch: pytest.MonkeyPatch) -> None:
     """Suppressed errors (ResizeObserver, HMR) are filtered out."""
     errors = [
         {"type": "uncaught", "message": "ResizeObserver loop limit exceeded"},
@@ -184,10 +188,10 @@ def test_collect_errors_suppresses_noise(monkeypatch):
     assert "myFunc" in result[0]["message"]
 
 
-def test_collect_errors_agent_browser_not_found(monkeypatch):
+def test_collect_errors_agent_browser_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """agent-browser not installed → returns empty list (no crash)."""
 
-    def raise_fnf(*args, **kwargs):
+    def raise_fnf(*args: Any, **kwargs: Any) -> None:
         raise FileNotFoundError("agent-browser not found")
 
     monkeypatch.setattr("subprocess.run", raise_fnf)
@@ -195,7 +199,7 @@ def test_collect_errors_agent_browser_not_found(monkeypatch):
     assert result == []
 
 
-def test_collect_errors_invalid_json(monkeypatch):
+def test_collect_errors_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
     """Malformed JSON from agent-browser → returns empty list."""
     monkeypatch.setattr(
         "subprocess.run",
@@ -210,7 +214,7 @@ def test_collect_errors_invalid_json(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def run_hook(stdin_data: str = "", env: dict | None = None):
+def run_hook(stdin_data: str = "", env: dict | None = None) -> Any:
     merged_env = {**os.environ, **(env or {})}
     return subprocess.run(
         [sys.executable, "-m", "ui_clone.hooks.devtools_errors"],
@@ -221,7 +225,7 @@ def run_hook(stdin_data: str = "", env: dict | None = None):
     )
 
 
-def test_hook_no_wip_marker_exits_0(tmp_path):
+def test_hook_no_wip_marker_exits_0(tmp_path: Path) -> None:
     """No WIP marker → exits 0 immediately."""
     sr = tmp_path / "tmp" / "ref"
     sr.mkdir(parents=True)
@@ -233,7 +237,7 @@ def test_hook_no_wip_marker_exits_0(tmp_path):
     assert result.returncode == 0
 
 
-def test_hook_no_session_in_command_exits_0(tmp_path):
+def test_hook_no_session_in_command_exits_0(tmp_path: Path) -> None:
     """Bash command without --session → exits 0 (not a browser command)."""
     sr = tmp_path / "tmp" / "ref"
     sr.mkdir(parents=True)
@@ -245,7 +249,7 @@ def test_hook_no_session_in_command_exits_0(tmp_path):
     assert result.returncode == 0
 
 
-def test_hook_always_exits_0(tmp_path):
+def test_hook_always_exits_0(tmp_path: Path) -> None:
     """Hook is advisory — always exits 0 even when it encounters errors."""
     sr = tmp_path / "tmp" / "ref"
     sr.mkdir(parents=True)
@@ -266,7 +270,7 @@ def test_hook_always_exits_0(tmp_path):
 class TestDevtoolsMainOutput:
     """Tests for main() output formatting when errors are present."""
 
-    def test_errors_printed_with_fix_hints(self, monkeypatch):
+    def test_errors_printed_with_fix_hints(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When errors exist, main() prints formatted error lines with fix hints."""
         import importlib
         import io
@@ -284,8 +288,10 @@ class TestDevtoolsMainOutput:
         monkeypatch.setattr(mod, "_collect_errors", lambda session: fake_errors)
 
         # Set up the environment so main() reaches _collect_errors
-        ref_dir = None
-        def fake_find_project_root():
+        ref_dir: Path | None = None
+
+        def fake_find_project_root() -> Path:
+            assert ref_dir is not None
             return ref_dir.parent.parent.parent
 
         import tempfile
@@ -321,7 +327,7 @@ class TestDevtoolsMainOutput:
         # Should contain fix hints
         assert "→" in output  # fix hint arrow
 
-    def test_more_than_10_errors_shows_truncation_notice(self, monkeypatch):
+    def test_more_than_10_errors_shows_truncation_notice(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When >10 errors, prints truncation notice."""
         import importlib
         import io
@@ -337,8 +343,10 @@ class TestDevtoolsMainOutput:
         monkeypatch.setattr(mod, "_collect_errors", lambda session: fake_errors)
 
         import tempfile
-        ref_dir = None
-        def fake_find_project_root():
+        ref_dir: Path | None = None
+
+        def fake_find_project_root() -> Path:
+            assert ref_dir is not None
             return ref_dir.parent.parent.parent
 
         with tempfile.TemporaryDirectory() as td:

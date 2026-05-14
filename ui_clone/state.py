@@ -34,6 +34,18 @@ class PipelineState:
     completed_steps: list[str] = field(default_factory=list)
     current_gate: str = "reference"
     last_updated: str = ""
+    # Consecutive-failure counts per gate. Bumped on BLOCKED runs of the active
+    # gate, reset to 0 when that gate finally passes. Surfaced in the goal card
+    # so external loop drivers (codex /goal, codex exec, headless claude -p) can detect
+    # "stuck on same gate" before they exhaust max-iterations.
+    gate_fail_counts: dict[str, int] = field(default_factory=dict)
+    # Hard-blocker reasons populated by gates/scripts when they detect a
+    # condition the pipeline cannot work past (e.g., commercial DRM canvas,
+    # auth-gated content, paid font with decision='use' and no substitution).
+    # Non-empty list → goal.py --check-done exits 2 instead of 1, so external
+    # loops stop iterating on an unwinnable target instead of grinding to
+    # max-iterations.
+    unclonable_reasons: list[dict] = field(default_factory=list)
 
     @classmethod
     def load(cls, ref_dir: Path) -> PipelineState:
@@ -49,6 +61,8 @@ class PipelineState:
                 completed_steps=data.get("completed_steps", []),
                 current_gate=data.get("current_gate", "reference"),
                 last_updated=data.get("last_updated", ""),
+                gate_fail_counts=data.get("gate_fail_counts", {}) or {},
+                unclonable_reasons=data.get("unclonable_reasons", []) or [],
             )
         except json.JSONDecodeError:
             return cls(component=ref_dir.name)
@@ -98,6 +112,8 @@ class PipelineState:
                     "completed_steps": self.completed_steps,
                     "current_gate": self.current_gate,
                     "last_updated": self.last_updated,
+                    "gate_fail_counts": self.gate_fail_counts,
+                    "unclonable_reasons": self.unclonable_reasons,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -115,6 +131,9 @@ class PipelineState:
         already_recorded = gate in self.completed_steps
         if not already_recorded:
             self.completed_steps.append(gate)
+
+        # Reset the consecutive-fail counter for this gate now that it passed.
+        fail_reset = self.gate_fail_counts.pop(gate, 0) > 0
 
         # Compute next gate — only advance, never retreat.
         # If current_gate is already ahead of `gate` (e.g. re-running an earlier
@@ -137,7 +156,7 @@ class PipelineState:
                 next_gate = candidate
 
         # Skip write if nothing would change
-        if already_recorded and next_gate == self.current_gate:
+        if already_recorded and next_gate == self.current_gate and not fail_reset:
             return
 
         self.current_gate = next_gate
@@ -157,6 +176,93 @@ class PipelineState:
                     "completed_steps": self.completed_steps,
                     "current_gate": self.current_gate,
                     "last_updated": self.last_updated,
+                    "gate_fail_counts": self.gate_fail_counts,
+                    "unclonable_reasons": self.unclonable_reasons,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+
+    def mark_failed(self, gate: str, ref_dir: Path) -> None:
+        """Increment the consecutive-fail counter for `gate`.
+
+        Only bumps when `gate` is the current_gate — failing a gate earlier
+        than the cursor (e.g. re-running `reference` after pipeline is at
+        `extraction`) does not count as "stuck on the active gate".
+        """
+        if gate not in GATE_ORDER:
+            return
+        if self.current_gate != gate:
+            return
+
+        self.gate_fail_counts[gate] = self.gate_fail_counts.get(gate, 0) + 1
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if not self.started_at:
+            self.started_at = now
+        self.last_updated = now
+
+        path = ref_dir / "pipeline-state.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "component": self.component,
+                    "started_at": self.started_at,
+                    "completed_steps": self.completed_steps,
+                    "current_gate": self.current_gate,
+                    "last_updated": self.last_updated,
+                    "gate_fail_counts": self.gate_fail_counts,
+                    "unclonable_reasons": self.unclonable_reasons,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+
+    def record_unclonable(
+        self, gate: str, reason: str, ref_dir: Path, detail: dict | None = None
+    ) -> None:
+        """Record a hard-blocker that the pipeline cannot work past.
+
+        Deduplicates by (gate, reason). Triggers goal.py --check-done exit
+        code 2 (distinct from 1 = not-yet-done) so external loop drivers can
+        stop on an unwinnable target instead of burning iterations.
+        """
+        for existing in self.unclonable_reasons:
+            if existing.get("gate") == gate and existing.get("reason") == reason:
+                return
+
+        entry: dict = {
+            "gate": gate,
+            "reason": reason,
+            "detected_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if detail is not None:
+            entry["detail"] = detail
+        self.unclonable_reasons.append(entry)
+
+        now = entry["detected_at"]
+        if not self.started_at:
+            self.started_at = now
+        self.last_updated = now
+
+        path = ref_dir / "pipeline-state.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "component": self.component,
+                    "started_at": self.started_at,
+                    "completed_steps": self.completed_steps,
+                    "current_gate": self.current_gate,
+                    "last_updated": self.last_updated,
+                    "gate_fail_counts": self.gate_fail_counts,
+                    "unclonable_reasons": self.unclonable_reasons,
                 },
                 ensure_ascii=False,
                 indent=2,

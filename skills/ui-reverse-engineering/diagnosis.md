@@ -64,7 +64,7 @@ agent-browser --session <ref> eval "document.querySelector('.swiper-slide').inne
 - Swiper slide inner class namespace mismatch (`ReviewList_*` vs `ReviewItem_*`) → all inner elements unstyled even though CSS is loaded
 - Portal elements in wrong container (modal, dropdown outside target)
 
-**Fix:** Always `agent-browser eval "document.querySelector('.target').outerHTML"` on ref BEFORE writing any JSX. Screenshot ref for structural reference. Never infer DOM order from screenshots.
+**Fix:** Always `agent-browser --session <ref> eval "document.querySelector('.target').outerHTML"` on ref BEFORE writing any JSX. Screenshot ref for structural reference. Never infer DOM order from screenshots.
 
 ---
 
@@ -146,7 +146,7 @@ agent-browser --session <impl> eval \
 - Hover JS event listener not firing: missing `mouseenter` dispatch; `mouseover` event wrong
 - SVG rotation double-applied: CSS already rotates `.slider_prev svg { transform: rotate(180deg) }`, JSX adds another → 360° total (both arrows look identical)
 
-**Fix:** Always verify tag name. Check ref HTML: `agent-browser eval "document.querySelector('.selector').outerHTML"`. Grep CSS for existing transforms before adding inline: `grep "\.slider_prev.*transform\|rotate" *.css`.
+**Fix:** Always verify tag name. Check ref HTML: `agent-browser --session <ref> eval "document.querySelector('.selector').outerHTML"`. Grep CSS for existing transforms before adding inline: `grep "\.slider_prev.*transform\|rotate" *.css`.
 
 ---
 
@@ -167,8 +167,16 @@ agent-browser --session <impl> eval "document.querySelector('.target').getAnimat
 grep -E "gsap|Lenis|ScrollTrigger|requestAnimationFrame|transition" tmp/ref/<c>/bundles/*.js | head -20
 
 # 4. Compare timing
-SCRIPTS="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}"
-SCRIPTS="${SCRIPTS:-$(find -L ~/.claude/skills -name 'ae-compare.sh' -exec dirname {} \; 2>/dev/null | head -1)}"
+SCRIPTS="${PLUGIN_ROOT:+$PLUGIN_ROOT/skills/visual-debug/scripts}"
+SCRIPTS="${SCRIPTS:-${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${VISUAL_DEBUG_SCRIPTS_DIR:-}}"
+if [ -z "$SCRIPTS" ]; then
+  for root in "${UI_CLONE_ROOT:-}" "$PWD" "$PWD/.." "$PWD/../.." "${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"; do
+    [ -n "$root" ] && [ -f "$root/skills/visual-debug/scripts/ae-compare.sh" ] && SCRIPTS=$(cd "$root/skills/visual-debug/scripts" && pwd) && break
+  done
+fi
+[ -n "$SCRIPTS" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 bash "$SCRIPTS/transition-compare.sh" <orig-url> <impl-url> <session> tmp/ref/<c>
 ```
 
@@ -180,7 +188,7 @@ bash "$SCRIPTS/transition-compare.sh" <orig-url> <impl-url> <session> tmp/ref/<c
 - **`.effect-data` IntersectionObserver missing** → section blank (all `opacity: 0` by CSS default, JS never adds `active` class)
 - **IO ref on the transformed child of an `overflow: hidden` mask** → `intersect: false` forever, reveal never fires, no console error. IO respects ancestor clipping; a child translated 100% out of its `overflow: hidden` parent has zero visible rect. **Fix:** put the IO ref on the static outer wrapper, apply the transform to an inner child. See `transition-implementation.md` → "IntersectionObserver placement for masked reveals". Quick check: run a manual IO `eval` on the suspected element — if `intersect: false` while `boundingClientRect` is inside `rootBounds`, it's ancestor clipping.
 - **Card stack height not pre-fixed** → `height: auto → 64px` not CSS-animatable; must set `item.style.height = item.offsetHeight + 'px'` before scroll handler runs
-- **JS toggles a subset of a CSS multi-state set** → CSS defines 3+ states for one element (default + `-animateIn` + `-animateOut`, or idle + active + complete), JS controller toggles only one. Removing the active class reverts to *default*, but default ≠ exit state. When default == entry state (animation "from" values baked into the resting CSS — e.g. a non-identity `transform` / `opacity: 0` on the base selector), exit animates *back toward entry direction*, AND any micro-scroll near the section's end-trigger oscillates between in/default → flicker. **Detect (static):** grep CSS for `\.<section>\.\-[a-zA-Z]+ \{` distinct state classes, compare to `classList.toggle('-stateName', ...)` calls in the JS controller — JS must cover the full set. **Detect (runtime, when section-compare PASSes but the bug is reported visually):** static screenshots can't see this — a section can pass section-compare and still oscillate at its boundary, because settled positions inside/before/after the section all look correct; the flicker only exists during the scroll cross. Reproduce by scrolling across the suspect boundary in 100px increments via `agent-browser mouse wheel 100` (×N), screenshotting at each step, then AE-compare consecutive frames — non-zero AE on a "settled" run = state class toggling on/off as `scrollY` crosses the trigger. **Fix:** add the missing branch (e.g. `passedEnd = scrollY >= endTrig; el.classList.toggle('-animateOut', passedEnd)`). Same rule for hybrid controllers that use scroll-position calculation (`scrollY` vs `topAbs ± vh*offset`) instead of pure IntersectionObserver — the position math computes a clean `inRange`/`passedEnd` split, but the class-toggle code often only writes the `inRange` half.
+- **JS toggles a subset of a CSS multi-state set** → CSS defines 3+ states for one element (default + `-animateIn` + `-animateOut`, or idle + active + complete), JS controller toggles only one. Removing the active class reverts to *default*, but default ≠ exit state. When default == entry state (animation "from" values baked into the resting CSS — e.g. a non-identity `transform` / `opacity: 0` on the base selector), exit animates *back toward entry direction*, AND any micro-scroll near the section's end-trigger oscillates between in/default → flicker. **Detect (static):** grep CSS for `\.<section>\.\-[a-zA-Z]+ \{` distinct state classes, compare to `classList.toggle('-stateName', ...)` calls in the JS controller — JS must cover the full set. **Detect (runtime, when section-compare PASSes but the bug is reported visually):** static screenshots can't see this — a section can pass section-compare and still oscillate at its boundary, because settled positions inside/before/after the section all look correct; the flicker only exists during the scroll cross. Reproduce by scrolling across the suspect boundary in 100px increments via `agent-browser --session <s> mouse wheel 100` (×N), screenshotting at each step, then AE-compare consecutive frames — non-zero AE on a "settled" run = state class toggling on/off as `scrollY` crosses the trigger. **Fix:** add the missing branch (e.g. `passedEnd = scrollY >= endTrig; el.classList.toggle('-animateOut', passedEnd)`). Same rule for hybrid controllers that use scroll-position calculation (`scrollY` vs `topAbs ± vh*offset`) instead of pure IntersectionObserver — the position math computes a clean `inRange`/`passedEnd` split, but the class-toggle code often only writes the `inRange` half.
 
 **Fix:** Check `transition-spec.json` for expected easing + duration. Run `transition-compare.sh`. Rule: **RAF drives transform values** (parallax progress); **scroll events drive class changes** (toggle animations). Never mix.
 
@@ -189,8 +197,16 @@ bash "$SCRIPTS/transition-compare.sh" <orig-url> <impl-url> <session> tmp/ref/<c
 When a scroll-triggered reveal "doesn't trigger" — opacity stays 0, transform stays at the initial offset — diagnose in this order. Each step takes seconds and rules out a whole class:
 
 ```bash
-SCRIPTS="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}"
-SCRIPTS="${SCRIPTS:-$(find -L ~/.claude/skills -name 'ae-compare.sh' -exec dirname {} \; 2>/dev/null | head -1)}"
+SCRIPTS="${PLUGIN_ROOT:+$PLUGIN_ROOT/skills/visual-debug/scripts}"
+SCRIPTS="${SCRIPTS:-${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${VISUAL_DEBUG_SCRIPTS_DIR:-}}"
+if [ -z "$SCRIPTS" ]; then
+  for root in "${UI_CLONE_ROOT:-}" "$PWD" "$PWD/.." "$PWD/../.." "${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"; do
+    [ -n "$root" ] && [ -f "$root/skills/visual-debug/scripts/ae-compare.sh" ] && SCRIPTS=$(cd "$root/skills/visual-debug/scripts" && pwd) && break
+  done
+fi
+[ -n "$SCRIPTS" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 
 # 1. Is the reveal even wired in code? (catches "extracted into spec but never implemented")
 bash "$SCRIPTS/transition-spec-coverage.sh" tmp/ref/<component> apps/<app>/src/projects/<component>
@@ -203,6 +219,13 @@ bash "$SCRIPTS/transition-compare.sh" <orig-url> <impl-url> <session> tmp/ref/<c
 ```
 
 **Read the output of step 2 first.** Its parent-chain column names the `overflow: hidden` ancestor — if one is listed, you're hitting the IO+clip bug class. Move the observer ref one level up. Step 3 (`transition-compare`) only meaningfully runs once steps 1 and 2 are clean — it cannot distinguish "easing wrong" from "transition never started".
+
+**Pattern recipes (see `transition-implementation.md` → Anti-pattern catalog):**
+- **A** — IO-fire-once vs scroll-scrub (ref scrubs forward+back, naive impl flips once and stays)
+- **B** — Viewport-aware scroll-scrub offsets (works on laptop, never reaches `progress=1` on mobile / Footer-CTA bug)
+- **C** — `completeAt` headroom for shuffle/stagger tails (last element stuck ~98% because eased curves never reach 1.0)
+- **E** — WAAPI reveal semantics (round-trip scrolling reverses the animation; `finish()` snaps to hidden)
+- **F** — IntersectionObserver + `overflow:hidden` clipping (IO never fires because child is clipped out of every viewport rect)
 
 ---
 
@@ -321,6 +344,8 @@ agent-browser --session <s> eval "
 **Don't:**
 - Don't add a hardcoded large-pixel offset to "push the element to the bottom" — that breaks at every viewport size and on every content change.
 - Don't wrap with a fake fixed-height `position: relative` container just to anchor a stray absolute — that's CSS-by-accident; pick option 1 or 2 instead.
+
+**Pattern recipe:** `transition-implementation.md` → Anti-pattern **G** (Footer-disappeared / stray `position: absolute`) — same root cause, with the framework-agnostic fix pattern restated.
 
 ---
 

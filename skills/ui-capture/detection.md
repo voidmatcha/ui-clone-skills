@@ -38,13 +38,13 @@ Returns `{ scrollType, scrollSelector, totalHeight, viewportHeight, sections[] }
 
 | Trigger type | How to detect | How to activate |
 |---|---|---|
-| `css-hover` | `:hover` rule in stylesheet targeting this element | `agent-browser hover <selector>` |
+| `css-hover` | `:hover` rule in stylesheet targeting this element | `agent-browser --session <project> hover <selector>` |
 | `js-class` | JS adds/removes a class on click/focus/mouseover | Toggle the class directly via eval |
 | `intersection` | `data-in-view`, IntersectionObserver, scroll into viewport | Scroll element into view smoothly |
 | `scroll-driven` | CSS `animation-timeline: scroll()` or JS rAF tracking scrollY | Scroll through the element's scroll range |
 | `mousemove` | `mousemove` event listener, class patterns (parallax/tilt/magnetic) | Dispatch mousemove events across element bounds |
 | `auto-timer` | setInterval, CSS animation without user trigger | Wait for cycles (record passively) |
-| `click-toggle` | `[aria-expanded]`, `role="tab"`, `data-state`, `<details>` | `agent-browser click <selector>` |
+| `click-toggle` | `[aria-expanded]`, `role="tab"`, `data-state`, `<details>` | `agent-browser --session <project> click <selector>` |
 | `click-cycle` | Multiple sibling tabs/pills sharing a parent, each with `role="tab"` or `data-state` | Click each sibling sequentially |
 
 ---
@@ -52,7 +52,7 @@ Returns `{ scrollType, scrollSelector, totalHeight, viewportHeight, sections[] }
 ## Step 2A-1: Scan for all transition candidates
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <project> eval "(() => {
   const results = { scroll: [], hover: [], mousemove: [], timer: [] };
 
   // --- Check stylesheet for :hover rules ---
@@ -156,7 +156,7 @@ agent-browser eval "(() => {
 Elements that change state on click: tabs, accordions, dropdowns, modal triggers, toggles.
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <project> eval "(() => {
   const candidates = document.querySelectorAll(
     'button, [role=\"tab\"], [role=\"button\"], details > summary, ' +
     '[data-toggle], [data-accordion], [aria-expanded], ' +
@@ -179,7 +179,7 @@ agent-browser eval "(() => {
 })()"
 ```
 
-Save to `tmp/ref/capture/click-candidates.json`.
+Save to `$OUT_DIR/click-candidates.json`.
 
 **Deduplication:** If a click candidate overlaps with an existing hover candidate (same selector or bounds within 20px), skip it — it's already captured as `css-hover` or `js-class`.
 
@@ -192,7 +192,7 @@ Save to `tmp/ref/capture/click-candidates.json`.
 For each hover candidate, **actually test** that the effect is visible before including it:
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <project> eval "(() => {
   const el = document.querySelector('<selector>');
   if (!el) return 'not found';
 

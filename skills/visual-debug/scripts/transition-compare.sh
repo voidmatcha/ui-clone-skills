@@ -15,6 +15,12 @@
 
 set -euo pipefail
 
+# Source the timeout shim so macOS gets a working `timeout` cmd even when
+# coreutils isn't installed. See scripts/lib/timeout-shim.sh.
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SHIM="$_SCRIPT_DIR/../../../scripts/lib/timeout-shim.sh"
+[ -f "$_SHIM" ] && . "$_SHIM" || true
+
 VIEW_W="${VIEW_W:-1440}"
 VIEW_H="${VIEW_H:-900}"
 NO_IMAGES="${NO_IMAGES:-0}"
@@ -55,9 +61,11 @@ echo "Implementation: $IMPL_URL"
 echo ""
 
 # ── Open both sites ──
+# `open` may report a navigation timeout on slow third-party sites even when the
+# page eventually loads. Tolerate that — the explicit `wait` below settles state.
 echo "▸ Opening both sites..."
-agent-browser --session "$SESSION_REF" open "$ORIG_URL" 2>&1 | head -1
-agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 | head -1
+agent-browser --session "$SESSION_REF" open "$ORIG_URL" 2>&1 | head -1 || true
+agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 | head -1 || true
 
 agent-browser --session "$SESSION_REF" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1

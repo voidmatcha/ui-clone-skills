@@ -3,6 +3,8 @@ tmp/
 ui-skills-workspace/
 docs/
 .superpowers/
+.sisyphus/
+.serena/
 .claude/
 __pycache__/
 *.pyc
@@ -13,3 +15,7 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .coverage
+# benchmark trend + work artifacts are local-only (maintainer-only, per design).
+benchmark/history/
+benchmark/history.csv
+benchmark/work/

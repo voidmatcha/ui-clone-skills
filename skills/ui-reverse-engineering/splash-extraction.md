@@ -308,7 +308,7 @@ if (n) {
 Before capturing ANY reference screenshots or videos, remove fixed/sticky overlays NOT part of the site's actual UI (header/nav excluded). These corrupt every frame comparison and AE diff.
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const removed = [];
 
   // 1. Dismiss cookie/consent banners via click

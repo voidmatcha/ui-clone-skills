@@ -4,7 +4,7 @@ Capture each region from `regions.json`. Apply trigger type to choose the correc
 
 ## Critical: `record start` behavior
 
-**`agent-browser record start` always creates a fresh browser context** — it navigates to the URL from scratch and resets scroll position to 0, regardless of where the current session is. This means:
+**`agent-browser --session <project> record start` always creates a fresh browser context** — it navigates to the URL from scratch and resets scroll position to 0, regardless of where the current session is. This means:
 
 - Pre-scrolling before `record start` has NO effect on the recording
 - Any `eval` scroll commands issued AFTER `record start` DO work, but only appear in the recording after a delay while the page reloads (~3-5s)
@@ -12,13 +12,13 @@ Capture each region from `regions.json`. Apply trigger type to choose the correc
 
 **Correct pattern for deep-page elements:**
 ```bash
-agent-browser record start <path>.webm   # fresh context, page at y=0
-agent-browser set viewport 1440 900
-agent-browser wait 3000                  # wait for page to load in recording context
-agent-browser eval "(() => { document.querySelector('<selector>').scrollIntoView({block:'start'}); return window.scrollY; })()"
-agent-browser wait 1000                  # wait for scroll to settle in recording
+agent-browser --session <project> record start <path>.webm   # fresh context, page at y=0
+agent-browser --session <project> set viewport 1440 900
+agent-browser --session <project> wait 3000                  # wait for page to load in recording context
+agent-browser --session <project> eval "(() => { document.querySelector('<selector>').scrollIntoView({block:'start'}); return window.scrollY; })()"
+agent-browser --session <project> wait 1000                  # wait for scroll to settle in recording
 # verify with screenshot before proceeding
-agent-browser screenshot /tmp/verify.png
+agent-browser --session <project> screenshot /tmp/verify.png
 # NOW the recording shows the correct position
 ```
 
@@ -32,13 +32,13 @@ The `stdev > 8` method only removes blank frames — but for deep-page sections 
 # Step 1: Before scrolling, note the wall-clock offset from record start.
 # record start happens at t=0; page loads in ~3s; scroll command runs after wait 3000.
 # Measure actual scroll arrival time:
-agent-browser record start <path>.webm
-agent-browser set viewport 1440 900
-agent-browser wait 3000
+agent-browser --session <project> record start <path>.webm
+agent-browser --session <project> set viewport 1440 900
+agent-browser --session <project> wait 3000
 # Save timestamp before scroll (recording elapsed ≈ 3s so far)
 SCROLL_T=3.5   # conservative: 3s load + 0.5s margin
-agent-browser eval "(() => { window.scrollTo(0, <target_y>); return window.scrollY; })()"
-agent-browser wait 1000
+agent-browser --session <project> eval "(() => { window.scrollTo(0, <target_y>); return window.scrollY; })()"
+agent-browser --session <project> wait 1000
 # At this point recording is at ~4.5s — use 4.5 as crop point
 ```
 
@@ -72,11 +72,11 @@ If hero is still visible, increase crop_t by 1.0s and reconvert. Repeat until ta
 ## Before every recording: Fresh state protocol
 
 **Always** ensure clean state before hitting record:
-1. Start recording first: `agent-browser record start <path>.webm`
-2. Set viewport: `agent-browser set viewport 1440 900`
-3. Wait for page load: `agent-browser wait 3000`
+1. Start recording first: `agent-browser --session <project> record start <path>.webm`
+2. Set viewport: `agent-browser --session <project> set viewport 1440 900`
+3. Wait for page load: `agent-browser --session <project> wait 3000`
 4. Scroll to target section via eval
-5. Wait for scroll to settle: `agent-browser wait 1000`
+5. Wait for scroll to settle: `agent-browser --session <project> wait 1000`
 6. Take a screenshot to verify the recording context shows correct content
 7. Proceed with interaction/sweep
 8. After stopping: crop blank start with ffmpeg (see above)
@@ -90,7 +90,7 @@ Two phases: **exploration (video)** → **verification (clip screenshot)**
 ### Step 2B-1: Exploration — identify transition range via video
 
 ```bash
-agent-browser --session <project> record start tmp/ref/capture/transitions/ref/<name>.webm
+agent-browser --session <project> record start $OUT_DIR/transitions/ref/<name>.webm
 agent-browser --session <project> set viewport 1440 900
 agent-browser --session <project> wait 3000
 
@@ -137,7 +137,7 @@ agent-browser --session <project> eval "(() => {
   return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
 })()"
 agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
-  tmp/ref/capture/clip/ref/<name>-before.png
+  $OUT_DIR/clip/ref/<name>-before.png
 
 # mid: midpoint of change (re-measure rect — transform may change size depending on scroll position)
 agent-browser --session <project> eval "(() => window.scrollTo(0, <mid_y>))()"
@@ -148,7 +148,7 @@ agent-browser --session <project> eval "(() => {
   return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
 })()"
 agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
-  tmp/ref/capture/clip/ref/<name>-mid.png
+  $OUT_DIR/clip/ref/<name>-mid.png
 
 # after: after change completes
 agent-browser --session <project> eval "(() => window.scrollTo(0, <settled_y + 50>))()"
@@ -159,7 +159,7 @@ agent-browser --session <project> eval "(() => {
   return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
 })()"
 agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
-  tmp/ref/capture/clip/ref/<name>-after.png
+  $OUT_DIR/clip/ref/<name>-after.png
 ```
 
 > **Role of mid state:** Comparing only before/after cannot verify easing curves. Checking whether transform/opacity values are exactly 50% at mid catches easing differences like linear vs ease-in-out.
@@ -190,7 +190,7 @@ agent-browser --session <project> wait 500
 # Capture idle state
 agent-browser --session <project> screenshot \
   --clip <x>,<y>,<width>,<height> \
-  tmp/ref/capture/clip/ref/<name>-idle.png
+  $OUT_DIR/clip/ref/<name>-idle.png
 
 # Force hover state
 agent-browser --session <project> eval "(() => {
@@ -203,7 +203,7 @@ agent-browser --session <project> wait <transitionDuration + 100>
 # Capture hover state
 agent-browser --session <project> screenshot \
   --clip <x>,<y>,<width>,<height> \
-  tmp/ref/capture/clip/ref/<name>-active.png
+  $OUT_DIR/clip/ref/<name>-active.png
 
 # Release hover
 agent-browser --session <project> eval "(() => {
@@ -213,11 +213,11 @@ agent-browser --session <project> eval "(() => {
 })()"
 ```
 
-> **CSS `:hover` pseudo-class may not be triggered by JS events.** In that case, use `agent-browser hover <selector>` for CDP-level hover, then screenshot immediately:
+> **CSS `:hover` pseudo-class may not be triggered by JS events.** In that case, use `agent-browser --session <project> hover <selector>` for CDP-level hover, then screenshot immediately:
 > ```bash
 > agent-browser --session <project> hover <unique-selector>
 > agent-browser --session <project> wait <transitionDuration + 100>
-> agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/capture/clip/ref/<name>-active.png
+> agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> $OUT_DIR/clip/ref/<name>-active.png
 > agent-browser --session <project> hover body
 > ```
 
@@ -236,7 +236,7 @@ agent-browser --session <project> wait 500
 # Capture idle state
 agent-browser --session <project> screenshot \
   --clip <x>,<y>,<width>,<height> \
-  tmp/ref/capture/clip/ref/<name>-idle.png
+  $OUT_DIR/clip/ref/<name>-idle.png
 
 # Force active state
 agent-browser --session <project> eval "(() => {
@@ -247,7 +247,7 @@ agent-browser --session <project> wait <transitionDuration + 100>
 # Capture active state
 agent-browser --session <project> screenshot \
   --clip <x>,<y>,<width>,<height> \
-  tmp/ref/capture/clip/ref/<name>-active.png
+  $OUT_DIR/clip/ref/<name>-active.png
 
 # Restore original state
 agent-browser --session <project> eval "(() => {
@@ -278,7 +278,7 @@ agent-browser --session <project> wait 300
 # Capture before-animate state (without class)
 agent-browser --session <project> screenshot \
   --clip <x>,<y>,<width>,<height> \
-  tmp/ref/capture/clip/ref/<name>-before.png
+  $OUT_DIR/clip/ref/<name>-before.png
 
 # Force in-view state
 agent-browser --session <project> eval "(() => {
@@ -292,12 +292,12 @@ agent-browser --session <project> wait <transitionDuration + 100>
 # Capture after-animate state
 agent-browser --session <project> screenshot \
   --clip <x>,<y>,<width>,<height> \
-  tmp/ref/capture/clip/ref/<name>-after.png
+  $OUT_DIR/clip/ref/<name>-after.png
 ```
 
 > **If IntersectionObserver adds its own class:** Check the class name first:
 > ```bash
-> agent-browser eval "document.querySelector('<selector>').className"
+> agent-browser --session <project> eval "document.querySelector('<selector>').className"
 > # Scroll to trigger in-view, then check again
 > ```
 > Adjust the eval above with the confirmed class name.
@@ -323,7 +323,7 @@ agent-browser --session <project> wait 500
 # 2. Capture idle state — clip the CONTENT area, not just the button
 # The content area is the sibling/child that changes (panel, dropdown, accordion body)
 agent-browser --session <project> screenshot --clip <content_x>,<content_y>,<content_w>,<content_h> \
-  tmp/ref/capture/transitions/ref/<name>-idle.png
+  $OUT_DIR/transitions/ref/<name>-idle.png
 
 # 3. Click to activate
 agent-browser --session <project> click <selector>
@@ -340,7 +340,7 @@ agent-browser --session <project> eval "(() => {
 
 # 5. Capture active state
 agent-browser --session <project> screenshot --clip <content_x>,<content_y>,<content_w>,<content_h> \
-  tmp/ref/capture/transitions/ref/<name>-active.png
+  $OUT_DIR/transitions/ref/<name>-active.png
 
 # 6. Restore: click again to toggle back (or reload if one-way)
 agent-browser --session <project> click <selector>
@@ -355,13 +355,13 @@ agent-browser --session <project> wait 300
 agent-browser --session <project> click <tab-selector-0>
 agent-browser --session <project> wait 500
 agent-browser --session <project> screenshot --clip <content_x>,<content_y>,<content_w>,<content_h> \
-  tmp/ref/capture/transitions/ref/<name>-state-0.png
+  $OUT_DIR/transitions/ref/<name>-state-0.png
 
 # Click tab 1
 agent-browser --session <project> click <tab-selector-1>
 agent-browser --session <project> wait 500
 agent-browser --session <project> screenshot --clip <content_x>,<content_y>,<content_w>,<content_h> \
-  tmp/ref/capture/transitions/ref/<name>-state-1.png
+  $OUT_DIR/transitions/ref/<name>-state-1.png
 
 # ... repeat for all tabs
 
@@ -411,82 +411,7 @@ agent-browser --session <project> wait 300
 
 ## Step 2C-swap: Click-Content-Swap Transition Capture
 
-For click interactions that **swap page content** (e.g., masonry grid → search results, gallery → detail view). Unlike click-toggle (show/hide a panel) or click-cycle (switch between tabs), content-swap replaces the main content area entirely with an animated transition.
-
-**Detection signal:** Clicking an element changes the URL (pushState), changes column count, or replaces >50% of visible images.
-
-### Capture sequence
-
-```bash
-# 1. Record video of the full transition
-agent-browser --session <project> record start tmp/ref/capture/transitions/ref/content-swap-<name>.webm
-agent-browser --session <project> wait 500
-agent-browser --session <project> eval "(() => {
-  document.querySelector('<click-target>').click();
-  return 'clicked';
-})()"
-agent-browser --session <project> wait 5000
-agent-browser --session <project> record stop
-
-# 2. Extract transition DOM structure at 100ms after click
-#    This is the CRITICAL step — determines implementation architecture
-agent-browser --session <project> eval "(() => {
-  // Re-do: click again from fresh state (or use a different element)
-  // Set up structure capture BEFORE clicking
-  window.__swapStructure = null;
-  document.querySelector('<click-target-2>').click();
-  setTimeout(() => {
-    const panes = document.querySelectorAll('[class*=pane]');
-    window.__swapStructure = {
-      paneCount: panes.length,
-      panes: Array.from(panes).map((p, i) => {
-        const cs = getComputedStyle(p);
-        return {
-          domIndex: i,
-          classes: p.className,
-          zIndex: cs.zIndex,
-          position: cs.position,
-          background: cs.backgroundColor,
-          animationName: cs.animationName,
-          animationDuration: cs.animationDuration,
-          animationDelay: cs.animationDelay,
-          childImages: p.querySelectorAll('img').length,
-        };
-      }),
-    };
-  }, 100);
-  return 'capturing';
-})()"
-agent-browser --session <project> wait 500
-agent-browser --session <project> eval "(() => JSON.stringify(window.__swapStructure, null, 2))()"
-```
-
-**Save to:** `tmp/ref/capture/transitions/ref/content-swap-<name>-structure.json`
-
-### Why this matters
-
-Without this data, you will guess the pane architecture. Every guess leads to one of these failures:
-- Old pane on top → fadeout applied to new content too
-- New pane on top without transparent bg → old pane's fadegray invisible
-- Same images in both panes → color returns during fadeout
-- White flash between states → old pane removed before images load
-
-### regions.json schema
-
-```json
-{
-  "triggerType": "click-content-swap",
-  "selector": "[class*=image_container]",
-  "bounds": { "x": 0, "y": 0, "w": 1440, "h": 900 },
-  "structure": "content-swap-search-structure.json",
-  "captures": {
-    "video": "transitions/ref/content-swap-search.webm",
-    "idle": "transitions/ref/content-swap-search-idle.png",
-    "mid-transition": "transitions/ref/content-swap-search-mid.png",
-    "active": "transitions/ref/content-swap-search-active.png"
-  }
-}
-```
+> **If clicking an element swaps page content** (changes URL via pushState, changes column count, or replaces >50% of visible images) — read `capture-click-content-swap.md` for the video + 100ms-DOM-structure capture procedure and the `content-swap-<name>-structure.json` output. Otherwise skip — toggle/cycle clicks are covered by Steps 2C-toggle / 2C-cycle above.
 
 ---
 
@@ -495,20 +420,20 @@ Without this data, you will guess the pane architecture. Every guess leads to on
 **One video only** — no matrix screenshots. Record a continuous path that covers the whole element:
 
 ```bash
-agent-browser record start tmp/ref/capture/transitions/ref/mousemove-<name>.webm
-agent-browser set viewport 1440 900
-agent-browser wait 3000
+agent-browser --session <project> record start $OUT_DIR/transitions/ref/mousemove-<name>.webm
+agent-browser --session <project> set viewport 1440 900
+agent-browser --session <project> wait 3000
 
 # Scroll to element — use scrollIntoView, check rect.top confirms it's in viewport
-agent-browser eval "(() => { document.querySelector('<selector>').scrollIntoView({block:'start'}); return window.scrollY; })()"
-agent-browser wait 1000
+agent-browser --session <project> eval "(() => { document.querySelector('<selector>').scrollIntoView({block:'start'}); return window.scrollY; })()"
+agent-browser --session <project> wait 1000
 
 # Verify recording shows the element (not blank/wrong page)
-agent-browser screenshot /tmp/mousemove-verify.png
+agent-browser --session <project> screenshot /tmp/mousemove-verify.png
 # Read the screenshot — if it shows the wrong content, the recording context hasn't caught up.
-# In that case: agent-browser wait 2000 and re-verify.
+# In that case: agent-browser --session <project> wait 2000 and re-verify.
 
-agent-browser eval "(() => {
+agent-browser --session <project> eval "(() => {
   const el = document.querySelector('<selector>');
   const r = el.getBoundingClientRect();
 
@@ -539,8 +464,8 @@ agent-browser eval "(() => {
 })()"
 
 # 100 points × 120ms = ~12s
-agent-browser wait 13000
-agent-browser record stop
+agent-browser --session <project> wait 13000
+agent-browser --session <project> record stop
 ```
 
 This single video shows the cursor sweeping the full element in a raster pattern — every region covered, movement visible throughout.
@@ -552,17 +477,17 @@ This single video shows the cursor sweeping the full element in a raster pattern
 Only record if the element visually changes on its own (no user interaction needed):
 
 ```bash
-agent-browser record start tmp/ref/capture/transitions/ref/timer-<name>.webm
-agent-browser set viewport 1440 900
-agent-browser wait 3000
+agent-browser --session <project> record start $OUT_DIR/transitions/ref/timer-<name>.webm
+agent-browser --session <project> set viewport 1440 900
+agent-browser --session <project> wait 3000
 
 # Scroll to element (AFTER record start — record creates fresh context)
-agent-browser eval "(() => { document.querySelector('<selector>').scrollIntoView({block:'center'}); return window.scrollY; })()"
-agent-browser wait 1000
+agent-browser --session <project> eval "(() => { document.querySelector('<selector>').scrollIntoView({block:'center'}); return window.scrollY; })()"
+agent-browser --session <project> wait 1000
 
 # Wait for 2-3 full cycles
-agent-browser wait <interval_ms * 3>
-agent-browser record stop
+agent-browser --session <project> wait <interval_ms * 3>
+agent-browser --session <project> record stop
 ```
 
 ---

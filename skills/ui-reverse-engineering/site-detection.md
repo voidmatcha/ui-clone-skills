@@ -5,7 +5,7 @@ Detect the site's tech stack to choose the right extraction strategy.
 ## Detection script
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const signals = {};
 
   // CSS strategy
@@ -81,7 +81,7 @@ Beyond CSS strategy, choose the **implementation approach** based on site comple
 ### Detection: run this AFTER the signals above
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const signals = {};
   // Count CSS Module hashed classes (e.g., _card_j4aeg_2)
   const allEls = document.querySelectorAll('[class]');
@@ -161,12 +161,15 @@ JS-driven sites set inline styles for two purposes:
 Use `extract-dynamic-styles.sh` to classify:
 
 ```bash
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(find -L ~/.claude/skills -path '*/ui_clone/pipeline.py' 2>/dev/null | head -1 | xargs -I{} dirname "$(dirname "{}")")}"
-if [ -z "$PLUGIN_ROOT" ] && [ -L ~/.claude/skills/ui-reverse-engineering ]; then
-  candidate=$(dirname "$(dirname "$(readlink -f ~/.claude/skills/ui-reverse-engineering)")")
-  [ -f "$candidate/ui_clone/pipeline.py" ] && PLUGIN_ROOT=$candidate
+PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-}}}}"
+if [ -z "$PLUGIN_ROOT" ]; then
+  _marker="$(cat "$HOME/.config/ui-clone-skills/root" 2>/dev/null)"
+  for candidate in "$PWD" "$PWD/.." "$PWD/../.." "$_marker" "${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}" "$HOME"/.claude/plugins/cache/*/ui-clone-skills/*/ "$HOME"/.codex/plugins/cache/*/ui-clone-skills/*/; do
+    [ -n "$candidate" ] && [ -f "$candidate/ui_clone/pipeline.py" ] && PLUGIN_ROOT=$(cd "$candidate" && pwd) && break
+  done
 fi
-bash "$PLUGIN_ROOT/scripts/extract-dynamic-styles.sh" <session> tmp/ref/<component>
+[ -n "$PLUGIN_ROOT" ] || { echo "Set PLUGIN_ROOT=/path/to/ui-clone-skills" >&2; exit 1; }
+bash "$PLUGIN_ROOT/scripts/extract/extract-dynamic-styles.sh" <session> tmp/ref/<component>
 ```
 
 ### React Component approach
@@ -193,7 +196,7 @@ bash "$PLUGIN_ROOT/scripts/extract-dynamic-styles.sh" <session> tmp/ref/<compone
 grep -o '\.[a-z][a-z-]*\.[a-z][a-z-]*' site.css | sort -u | head -30
 ```
 If the CSS uses `.parentClass.childClass .target { ... }`, BOTH classes must be on the SAME element in JSX.
-Example: `.navercorp.main .header__logo` requires `<div className="navercorp main">`, NOT `<div className="navercorp"><main>`.
+Example: `.app.main .header__logo` requires `<div className="app main">`, NOT `<div className="app"><main>`.
 Missing the second class silently breaks ALL rules scoped under that compound selector.
 
 **⚠️ CSS-First scroll-state class trap** — CSS-First sites often use body/wrapper class toggling for scroll states:
@@ -201,7 +204,7 @@ Missing the second class silently breaks ALL rules scoped under that compound se
 grep -o '\(is-scroll-down\|is-scroll-up\|is-scrolled\|is-fixed\|is-show\)[^{]*{[^}]*}' site.css | head -10
 ```
 These classes must be added to the correct DOM element via a JS scroll listener.
-Never assume `header.is-scrolled` — check which element the CSS selector targets. Often it's the page ROOT wrapper (`.navercorp.main.is-scroll-down`), not the header.
+Never assume `header.is-scrolled` — check which element the CSS selector targets. Often it's the page ROOT wrapper (`.app.main.is-scroll-down`), not the header.
 
 ## Extract-Values (obfuscated/Tailwind)
 

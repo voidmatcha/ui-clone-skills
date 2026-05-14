@@ -41,11 +41,11 @@ Real animations use multi-phase timing (e.g., fast 0→50%, slow 50→100%), ste
 Record computed style values at ~16ms intervals during the transition, then sample 11 equally-spaced points:
 
 ```bash
-agent-browser open https://target-site.com
-agent-browser set viewport 1440 900
+agent-browser --session <s> open https://target-site.com
+agent-browser --session <s> set viewport 1440 900
 
 # 1. Set up recorder — adapt '.target' and props to your animation
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   window.__frames = [];
   const el = document.querySelector('.target');
@@ -63,11 +63,11 @@ agent-browser eval "
 })()"
 
 # 2. Trigger hover
-agent-browser hover .target
-agent-browser wait 2500
+agent-browser --session <s> hover .target
+agent-browser --session <s> wait 2500
 
 # 3. Sample 11 equally-spaced points from the recorded frames
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const frames = window.__frames;
   if (!frames?.length) return 'No frames captured';
@@ -87,10 +87,10 @@ Save to `tmp/ref/<effect-name>/measurements.json`.
 Same approach, but start recording immediately after page open:
 
 ```bash
-agent-browser open https://target-site.com
+agent-browser --session <s> open https://target-site.com
 
 # Start recording right away — page-load animations fire on load
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   window.__frames = [];
   const el = document.querySelector('.target');
@@ -107,10 +107,10 @@ agent-browser eval "
   return 'Recording load animation...';
 })()"
 
-agent-browser wait 3500
+agent-browser --session <s> wait 3500
 
 # Sample 11 points
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const frames = window.__frames;
   if (!frames?.length) return 'No frames captured';
@@ -130,11 +130,11 @@ Save to `tmp/ref/<effect-name>/measurements.json`.
 > **Adapt all selectors below to your target.** Replace `<section-selector>` and the animated element selectors with the actual selectors identified during extraction.
 
 ```bash
-agent-browser open https://target-site.com
-agent-browser set viewport 1440 900
+agent-browser --session <s> open https://target-site.com
+agent-browser --session <s> set viewport 1440 900
 
 # Scroll to 11 positions (0%–100%) and measure animated properties at each
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   // Replace with the scroll section that contains the animation
   const section = document.querySelector('<section-selector>');

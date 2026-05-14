@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # download-chunks.sh — Download ALL JS chunks and produce initial analysis
-# Usage: bash scripts/download-chunks.sh <component-dir> <url-list-file>
+# Usage: bash scripts/extract/download-chunks.sh <component-dir> <url-list-file>
 #   url-list-file: one URL per line (output from agent-browser eval)
 # Or pipe URLs:
-#   echo '["https://...js","https://...js"]' | bash scripts/download-chunks.sh <component-dir> -
+#   echo '["https://...js","https://...js"]' | bash scripts/extract/download-chunks.sh <component-dir> -
 #
 # Output:
 #   <component-dir>/bundles/*.js          — downloaded chunks

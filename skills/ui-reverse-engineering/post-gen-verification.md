@@ -29,7 +29,7 @@ Read the diff image and determine whether pixel differences are in **image regio
 - **Image region differences** = live thumbnails, streaming content, dynamic media. Unrelated to layout quality → **treat as PASS**
 - **Layout region differences** (header, navbar, section titles, margins) = actual layout mismatch → **fix required**
 
-**Live service note:** Streaming CDN URLs like `livecloud-thumb.akamaized.net` change every minute. Hardcoded URLs will always differ from current ones. This is NOT a layout issue.
+**Live service note:** Streaming CDN URLs (live-broadcast thumbnail hosts, time-windowed signed asset URLs) change every minute. Hardcoded URLs will always differ from current ones. This is NOT a layout issue.
 
 ---
 
@@ -210,7 +210,7 @@ If it doesn't exist, create it now by clicking through each state on the ref and
 
 ```bash
 # On impl: click carousel arrow, then immediately check all coupled elements
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   // Click arrow
   document.querySelectorAll('[class*=\"carousel-control\"] button')[1]?.click();
@@ -242,9 +242,9 @@ If ANY coupled element didn't update → fix the `goTo()` function.
 ### Step 4: Verify auto-timer doesn't conflict with splash
 ```bash
 # Record first 8 seconds. If carousel rotates during splash overlay → bug.
-agent-browser record start tmp/ref/<c>/splash-timer-check.webm
+agent-browser --session <s> record start tmp/ref/<c>/splash-timer-check.webm
 sleep 8
-agent-browser record stop
+agent-browser --session <s> record stop
 # Extract frames and check: is splash visible in any frame where illustration has rotated?
 ```
 
@@ -255,7 +255,7 @@ agent-browser record stop
 For every section with fixed height (e.g., `style={{ height: N }}`):
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const sections = document.querySelectorAll('section[style*=height], [style*=height]');
   const results = [];
   for (const s of sections) {
@@ -281,7 +281,7 @@ agent-browser eval "(() => {
 For every sticky element in `sticky-elements.json`:
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const results = [];
   for (let y = 0; y <= document.documentElement.scrollHeight; y += 200) {
     window.scrollTo(0, y);
@@ -357,11 +357,11 @@ Hover effects are the most commonly "approximately close but wrong" part of clon
 
 ```bash
 # On ORIGINAL site:
-agent-browser open <original-url>
+agent-browser --session <s> open <original-url>
 # scroll to element
-agent-browser hover "<selector>"
+agent-browser --session <s> hover "<selector>"
 # wait for transition
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const el = document.querySelector('<selector>');
   const s = getComputedStyle(el);
   // Capture all visual properties
@@ -382,9 +382,9 @@ agent-browser eval "(() => {
 ### Step 2: Same measurement on implementation
 
 ```bash
-agent-browser open <impl-url>
-agent-browser hover "<selector>"
-agent-browser eval "/* same property extraction */"
+agent-browser --session <s> open <impl-url>
+agent-browser --session <s> hover "<selector>"
+agent-browser --session <s> eval "/* same property extraction */"
 ```
 
 ### Step 3: Compare
@@ -492,7 +492,16 @@ If the site uses `overflow: hidden` + `translate3d` wrapper:
 ### Run
 
 ```bash
-SCRIPTS_DIR="$(find -L ~/.claude/skills -name 'section-compare.sh' -exec dirname {} \; 2>/dev/null | head -1)"
+SCRIPTS_DIR="${PLUGIN_ROOT:+$PLUGIN_ROOT/skills/visual-debug/scripts}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${VISUAL_DEBUG_SCRIPTS_DIR:-}}"
+if [ -z "$SCRIPTS_DIR" ]; then
+  for root in "${UI_CLONE_ROOT:-}" "$PWD" "$PWD/.." "$PWD/../.." "${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"; do
+    [ -n "$root" ] && [ -f "$root/skills/visual-debug/scripts/section-compare.sh" ] && SCRIPTS_DIR=$(cd "$root/skills/visual-debug/scripts" && pwd) && break
+  done
+fi
+[ -n "$SCRIPTS_DIR" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 bash "$SCRIPTS_DIR/section-compare.sh" <original-url> <impl-url> <session> tmp/ref/<component>
 ```
 
@@ -531,7 +540,16 @@ bash "$SCRIPTS_DIR/section-compare.sh" <original-url> <impl-url> <session> tmp/r
 ### Run
 
 ```bash
-SCRIPTS_DIR="$(find -L ~/.claude/skills -name 'transition-compare.sh' -exec dirname {} \; 2>/dev/null | head -1)"
+SCRIPTS_DIR="${PLUGIN_ROOT:+$PLUGIN_ROOT/skills/visual-debug/scripts}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-${VISUAL_DEBUG_SCRIPTS_DIR:-}}"
+if [ -z "$SCRIPTS_DIR" ]; then
+  for root in "${UI_CLONE_ROOT:-}" "$PWD" "$PWD/.." "$PWD/../.." "${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"; do
+    [ -n "$root" ] && [ -f "$root/skills/visual-debug/scripts/transition-compare.sh" ] && SCRIPTS_DIR=$(cd "$root/skills/visual-debug/scripts" && pwd) && break
+  done
+fi
+[ -n "$SCRIPTS_DIR" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 bash "$SCRIPTS_DIR/transition-compare.sh" <original-url> <impl-url> <session> tmp/ref/<component>
 ```
 

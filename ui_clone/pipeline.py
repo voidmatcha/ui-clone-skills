@@ -1,8 +1,6 @@
 """
 Pipeline status — determines current phase and reports next action.
 
-Replaces run-pipeline.sh (388 lines of bash).
-
 Usage:
     python -m ui_clone.pipeline <url> <component> <session> status [--json]
 Exit: 0 on success, 1 on missing dependencies, 2 on usage error.
@@ -437,7 +435,7 @@ class Pipeline:
         self._check("diff images generated", diff_ok)
 
         if not self.next_phase:
-            self._set_next("4", "Run auto-verify.sh. Gate: post-implement")
+            self._set_next("4", "Run scripts/verify/auto-verify.sh. Gate: post-implement")
 
         print()
         return result

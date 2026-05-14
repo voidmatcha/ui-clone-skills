@@ -21,7 +21,7 @@
 List every `<section>`, `<footer>`, `<header>`, `<nav>`, `<main>`, `<aside>` that is a direct child of the page wrapper (or `<body>`).
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   // Framework-agnostic: works with any site (Webflow, React, Vue, Astro, plain HTML)
   const semanticTags = new Set(['section', 'footer', 'header', 'nav', 'aside', 'main', 'article']);
@@ -93,7 +93,7 @@ agent-browser eval "
 For every significant text element on the page, verify which section it belongs to. This catches elements that visually appear between sections but belong to one or the other.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   // Find the semantic containers — recurse through single-child wrapper divs
   let wrapper = document.querySelector('main, [role=main]') || document.body;
@@ -160,7 +160,7 @@ agent-browser eval "
 Compare actual section heights from the DOM with the reference screenshots.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   let wrapper = document.querySelector('main, [role=main]') || document.body;
   while (wrapper.children.length === 1 && wrapper.children[0].tagName === 'DIV' && wrapper.children[0].offsetHeight > wrapper.offsetHeight * 0.8) {
@@ -195,7 +195,7 @@ agent-browser eval "
 For each section, document the key layout decisions from the extracted data:
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   let wrapper = document.querySelector('main, [role=main]') || document.body;
   while (wrapper.children.length === 1 && wrapper.children[0].tagName === 'DIV' && wrapper.children[0].offsetHeight > wrapper.offsetHeight * 0.8) {

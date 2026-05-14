@@ -3,6 +3,9 @@
 # Records the same interaction on original + implementation, extracts frames at 60fps,
 # runs SSIM batch comparison, outputs pass/fail table.
 #
+# FPS policy: all video frame extraction in this repo uses 60fps. FPS=60 is the
+# canonical default below; override only if a target site renders at a lower rate.
+#
 # Usage:
 #   bash video-transition-compare.sh <session> <orig-url> <impl-url> <output-dir> <action-script>
 #
@@ -13,8 +16,14 @@
 #   output-dir   — where to save frames and results (e.g., tmp/ref/same-energy/transitions)
 #   action-script — path to a shell script that performs the interaction (click, etc.)
 #                   OR one of the built-in actions:
-#                     "splash"  — record page load (no interaction, just load)
-#                     "click:<selector>" — click an element and record transition
+#                     "splash"             — record page load (no interaction)
+#                     "scroll"             — coordinated scroll over RECORD_DURATION
+#                     "click:<selector>"   — click element and record transition
+#                     "hover:<selector>"   — real-mouse hover and record entry arc
+#                     "hover-and-out:<selector>"
+#                                          — hover, record entry arc, move mouse
+#                                            away, record exit arc. Total
+#                                            recording = 2 * RECORD_DURATION.
 #
 # Example:
 #   bash video-transition-compare.sh same-energy https://same.energy/ http://localhost:4001/same-energy \
@@ -86,6 +95,66 @@ perform_action() {
       var el = document.querySelector('$selector');
       if (el) { el.click(); return 'clicked'; }
       return 'not found';
+    })()" --session "$session" 2>&1 | head -1
+    sleep "$RECORD_DURATION"
+  elif [[ "$action" == hover:* ]]; then
+    # Hover motion arc. Uses agent-browser's real mouse hover so the `:hover`
+    # pseudo-class fires (synthetic mouseover events don't trigger CSS :hover).
+    # PRE_ACTION_WAIT lets the page settle before hover so the baseline frames
+    # are clean; RECORD_DURATION after hover captures the full entry transition.
+    # We don't un-hover — entry-arc coverage is the primary value here; exit is
+    # symmetric in most designs and adding move-away would double the per-target
+    # time budget without proportional bug coverage.
+    local selector="${action#hover:}"
+    sleep "$PRE_ACTION_WAIT"
+    agent-browser hover "$selector" --session "$session" 2>&1 | head -1
+    sleep "$RECORD_DURATION"
+  elif [[ "$action" == hover-and-out:* ]]; then
+    # Hover entry + exit arc. Captures the case where the exit transition is
+    # NOT symmetric with entry (different easing on close, hover-delay,
+    # group-hover chain unwind, scaleY-then-translate panel collapses).
+    # Symmetric designs are the common case — entry-only `hover:` is cheaper
+    # and the default for hover-state-compare.sh; this mode is opt-in for
+    # asymmetric designs (Webflow IX2 "On Mouse Leave" handlers, custom
+    # cubic-bezier on exit, etc.) where the entry-only sweep would miss real
+    # divergence. Total recording length is 2 × RECORD_DURATION.
+    #
+    # Mouse-move target (0,0) is chosen because (a) it is always inside the
+    # viewport (so the cursor doesn't land outside the captured frame and
+    # leave :hover stuck on the previous target via Chrome's "last hover
+    # under cursor" behavior), and (b) it is at the top-left corner of the
+    # page where the typical hover target is unlikely to overlap a
+    # second-level element. Pages with full-bleed top-left elements (sticky
+    # header, hero menu) can override via the MOUSE_AWAY_X / MOUSE_AWAY_Y
+    # env vars.
+    local selector="${action#hover-and-out:}"
+    local away_x="${MOUSE_AWAY_X:-0}"
+    local away_y="${MOUSE_AWAY_Y:-0}"
+    sleep "$PRE_ACTION_WAIT"
+    agent-browser hover "$selector" --session "$session" 2>&1 | head -1
+    sleep "$RECORD_DURATION"
+    agent-browser mouse move "$away_x" "$away_y" --session "$session" 2>&1 | head -1
+    sleep "$RECORD_DURATION"
+  elif [[ "$action" == "scroll" ]]; then
+    # Coordinated full-page scroll over RECORD_DURATION. Scrolls by FRACTION of
+    # scrollHeight (not absolute pixels) so a shorter-content impl traverses
+    # the same proportional range as ref. Captures scroll-scrub + IO-reveal
+    # transitions at the recorder's FPS.
+    local steps="${SCROLL_STEPS:-60}"
+    local step_ms
+    step_ms=$(awk -v d="$RECORD_DURATION" -v s="$steps" 'BEGIN{printf "%.0f", (d*1000)/s}')
+    agent-browser eval "(() => {
+      let i = 0;
+      const total = $steps;
+      const interval = $step_ms;
+      const tick = () => {
+        const max = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
+        window.scrollTo({top: (i/total)*max, behavior: 'instant'});
+        i++;
+        if (i <= total) setTimeout(tick, interval);
+      };
+      tick();
+      return 'scroll-started';
     })()" --session "$session" 2>&1 | head -1
     sleep "$RECORD_DURATION"
   elif [[ -f "$action" ]]; then

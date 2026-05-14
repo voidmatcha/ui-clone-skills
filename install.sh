@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ui-clone-skills installer — bootstraps system deps and registers the plugin.
+# ui-clone-skills installer — bootstraps system deps and registers the Claude Code plugin.
 #
 # Usage (one of):
 #   curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh | bash
@@ -9,8 +9,13 @@
 #
 # Flags:
 #   --no-deps        skip system dependency installs (uv/ffmpeg/imagemagick/dssim/agent-browser)
-#   --no-marketplace skip Claude Code marketplace registration
+#   --no-marketplace skip all marketplace registrations
+#   --claude-only    register Claude Code marketplace only (skip Codex)
+#   --codex-only     register Codex marketplace only (skip Claude); --codex is an alias
 #   --yes            assume yes for prompts (e.g. apt sudo install)
+#
+# Default registers BOTH Claude Code and Codex marketplaces. Each registration
+# is skipped automatically if the host CLI ('claude' / 'codex') is absent.
 #
 # Env:
 #   UI_CLONE_REPO    git URL to clone (default: https://github.com/voidmatcha/ui-clone-skills.git)
@@ -57,11 +62,15 @@ PLUGIN_NAME="ui-clone-skills"
 
 NO_DEPS=0
 NO_MARKETPLACE=0
+INSTALL_CLAUDE=1
+INSTALL_CODEX=1
 ASSUME_YES=0
 for arg in "$@"; do
   case "$arg" in
     --no-deps) NO_DEPS=1 ;;
     --no-marketplace) NO_MARKETPLACE=1 ;;
+    --codex|--codex-only) INSTALL_CLAUDE=0 ;;
+    --claude|--claude-only) INSTALL_CODEX=0 ;;
     --yes|-y) ASSUME_YES=1 ;;
     -h|--help)
       awk 'NR==1{next} /^set -euo/{exit} {sub(/^# ?/,""); print}' "$0"
@@ -91,6 +100,12 @@ case "$UNAME" in
 esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+shell_quote() {
+  local quoted
+  quoted=$(printf "%s" "$1" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "$quoted"
+}
 
 # Linux uses sudo for apt; macOS Homebrew does not.
 sudo_run() {
@@ -186,6 +201,56 @@ uv_sync() {
   ok "Python deps resolved"
 }
 
+cache_ttl_notice() {
+  # Print an opt-in notice if ENABLE_PROMPT_CACHING_1H isn't set. Never writes
+  # to the user's shell rc — that's their decision. Enterprise/Pro/Max apply
+  # 1h cache server-side and can ignore this; the notice still prints because
+  # we can't detect plan from the installer.
+  if [ -n "${ENABLE_PROMPT_CACHING_1H:-}" ]; then
+    return
+  fi
+  case "${SHELL:-}" in
+    *zsh)  rc="~/.zshrc" ;;
+    *bash) rc="~/.bashrc" ;;
+    *)     rc="your shell rc" ;;
+  esac
+  printf "\n%sOptional: extend Anthropic prompt cache TTL from 5min → 1h%s\n" "$C_WARN" "$C_RST"
+  cat <<EOF
+
+  This plugin's pipeline benefits from the longer TTL during gates and browser
+  round-trips. Enterprise/Pro/Max apply 1h automatically; on Team/API-key plans
+  the default is 5min. To opt in, add this line to $rc:
+
+      export ENABLE_PROMPT_CACHING_1H=1
+
+  Then **restart Claude Code** — the running process inherits env at launch,
+  not on rc-file edit. See README → Token management.
+EOF
+}
+
+loop_setup_notice() {
+  # Print-only. /plugin install runs inside the Claude app and ~/.codex/config.toml
+  # may already have a [features] section we shouldn't blindly edit.
+  printf "\n%sOptional: enable goal-driven continuation (loop until done)%s\n" "$C_WARN" "$C_RST"
+  cat <<EOF
+
+  Claude Code — open a session with the plugin loaded, then describe the goal.
+  The ui-reverse-engineering skill is auto-loaded so the prompt can be terse:
+      claude --plugin-dir "$REPO_ROOT"
+      > Drive the ui-clone-skills pipeline for tmp/ref/<component> until
+      > python -m ui_clone.goal tmp/ref/<component> --check-done exits 0.
+
+  Codex (CLI ≥ 0.128.0) — enable the native /goal feature:
+      # Append to ~/.codex/config.toml:
+      [features]
+      goals = true
+      # Restart Codex, then in the REPL run:
+      /goal Drive the ui-clone-skills pipeline for tmp/ref/<component> until python -m ui_clone.goal tmp/ref/<component> --check-done exits 0.
+
+  See README → Goal-driven continuation.
+EOF
+}
+
 register_marketplace() {
   if ! have claude; then
     warn "Claude Code CLI ('claude') not found on PATH — skipping marketplace registration."
@@ -198,6 +263,21 @@ register_marketplace() {
     ok "marketplace '$MARKETPLACE_NAME' registered"
   else
     skip "marketplace '$MARKETPLACE_NAME' already registered (or CLI declined re-add)"
+  fi
+}
+
+register_codex_marketplace() {
+  if ! have codex; then
+    warn "Codex CLI ('codex') not found on PATH — skipping Codex marketplace registration."
+    warn "Install Codex CLI, then run: codex plugin marketplace add $(shell_quote "$REPO_ROOT")"
+    return
+  fi
+  act "Registering local repo as Codex marketplace"
+  # `codex plugin marketplace add` exits non-zero if already registered; treat as skip.
+  if codex plugin marketplace add "$REPO_ROOT" >/dev/null 2>&1; then
+    ok "Codex marketplace registered → $REPO_ROOT"
+  else
+    skip "Codex marketplace already registered (or CLI declined re-add)"
   fi
 }
 
@@ -223,20 +303,62 @@ main() {
     warn "--no-deps: skipping system dependency bootstrap"
   fi
 
-  if [ "$NO_MARKETPLACE" -eq 0 ]; then
+  if [ "$NO_MARKETPLACE" -eq 0 ] && [ "$INSTALL_CLAUDE" -eq 1 ]; then
     section "Claude Code plugin"
     register_marketplace
   fi
 
-  section "Done"
-  cat <<EOF
-  Next step (run inside Claude Code):
+  if [ "$NO_MARKETPLACE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 1 ]; then
+    section "Codex plugin"
+    register_codex_marketplace
+  fi
 
-      /plugin install ${PLUGIN_NAME}@${MARKETPLACE_NAME}
+  # Install marker — lets inline preflight bash and shared scripts resolve the
+  # checkout when no PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT/CODEX_PLUGIN_ROOT env var is
+  # set (e.g., SKILL.md ran outside a plugin host). Cheap and idempotent.
+  section "Install marker"
+  if mkdir -p "$HOME/.config/ui-clone-skills" 2>/dev/null && printf '%s\n' "$REPO_ROOT" > "$HOME/.config/ui-clone-skills/root"; then
+    ok "marker → $HOME/.config/ui-clone-skills/root"
+  else
+    warn "Could not write $HOME/.config/ui-clone-skills/root — inline preflight will fall back to glob search."
+  fi
+
+  section "Done"
+  if [ "$NO_MARKETPLACE" -eq 1 ]; then
+    cat <<EOF
+  Next step:
+
+      Add this checkout as a plugin source for your agent host.
+      Claude Code: run install.sh without --no-marketplace, then /plugin install ${PLUGIN_NAME}@${MARKETPLACE_NAME}
+      Codex:       run codex plugin marketplace add $(shell_quote "$REPO_ROOT")
 
   Verify deps:
       agent-browser --version && uv --version && ffmpeg -version | head -1
 EOF
+  else
+    echo "  Next step:"
+    if [ "$INSTALL_CLAUDE" -eq 1 ]; then
+      cat <<EOF
+
+      Claude Code (inside the app):
+          /plugin install ${PLUGIN_NAME}@${MARKETPLACE_NAME}
+EOF
+    fi
+    if [ "$INSTALL_CODEX" -eq 1 ]; then
+      cat <<EOF
+
+      Codex: restart the CLI to pick up the registered marketplace.
+EOF
+    fi
+    cat <<EOF
+
+  Verify deps:
+      agent-browser --version && uv --version && ffmpeg -version | head -1
+EOF
+  fi
+
+  cache_ttl_notice
+  loop_setup_notice
 }
 
 main "$@"

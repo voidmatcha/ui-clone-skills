@@ -25,12 +25,13 @@ def _plugin_root() -> Path:
     """Return the ui-clone-skills plugin root (the directory containing pyproject.toml).
 
     Priority:
-    1. $CLAUDE_PLUGIN_ROOT env var (set by Claude Code hooks)
+    1. Plugin-root env vars set by agent runtimes (generic host, Codex, Claude Code)
     2. Walk up from this file's location looking for pyproject.toml
     """
-    env_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    if env_root and (Path(env_root) / "pyproject.toml").is_file():
-        return Path(env_root)
+    for env_name in ("PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        env_root = os.environ.get(env_name, "")
+        if env_root and (Path(env_root) / "pyproject.toml").is_file():
+            return Path(env_root)
     cur = Path(__file__).resolve()
     while cur != cur.parent:
         if (cur / "pyproject.toml").is_file():
@@ -38,17 +39,11 @@ def _plugin_root() -> Path:
         cur = cur.parent
     raise FileNotFoundError(
         "Cannot find ui-clone-skills plugin root. "
-        "Set CLAUDE_PLUGIN_ROOT or run from within the plugin directory."
+        "Set PLUGIN_ROOT, CODEX_PLUGIN_ROOT, or CLAUDE_PLUGIN_ROOT, or run from within the plugin directory."
     )
 
 
 _cached_project_root: Path | None = None
-
-
-def _reset_project_root_cache() -> None:
-    """Clear the cached project root. Intended for test cleanup."""
-    global _cached_project_root
-    _cached_project_root = None
 
 
 def find_project_root() -> Path:

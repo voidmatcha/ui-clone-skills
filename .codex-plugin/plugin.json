@@ -1,0 +1,70 @@
+{
+  "name": "ui-clone-skills",
+  "version": "0.4.10",
+  "description": "Clone any live website into React + Tailwind code with extraction-first verification — no vision tokens. Three skills: ui-reverse-engineering (URL → React + Tailwind, supports GSAP / Framer Motion / Lenis / Webflow IX2 / Next.js / Tailwind v4), ui-capture (reference + transitions), visual-debug (AE/SSIM diff + computed-style mismatch diagnosis).",
+  "author": {
+    "name": "YONGJAE LEE"
+  },
+  "repository": "https://github.com/voidmatcha/ui-clone-skills",
+  "license": "Apache-2.0",
+  "keywords": [
+    "clone-website",
+    "website-to-react",
+    "url-to-react",
+    "url-to-code",
+    "html-to-react",
+    "website-to-nextjs",
+    "landing-page-clone",
+    "ui-cloning",
+    "reverse-engineering",
+    "react",
+    "next-js",
+    "tailwind",
+    "tailwind-v4",
+    "claude-code",
+    "codex",
+    "animejs",
+    "gsap",
+    "gsap-extraction",
+    "framer-motion",
+    "framer-motion-extraction",
+    "lenis",
+    "agent-browser",
+    "webflow-to-react",
+    "webflow-to-tailwind",
+    "webflow-ix2",
+    "scroll-animation",
+    "canvas",
+    "three-js",
+    "css-extraction",
+    "bundle-analysis",
+    "ae-ssim-diff",
+    "visual-verification",
+    "zero-vision-tokens",
+    "screenshot-to-code-alternative",
+    "v0-alternative",
+    "lovable-alternative",
+    "builder-io-alternative"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/codex-hooks.json",
+  "interface": {
+    "displayName": "ui-clone-skills",
+    "shortDescription": "Clone live website URLs to React + Tailwind — verified, no vision tokens.",
+    "longDescription": "Clones any live website into React + Tailwind code with extraction-first verification — no vision tokens, real CSS/JS bundle analysis instead of screenshots. Exposes the same three public skills as the Claude Code plugin from shared ./skills/: ui-reverse-engineering routes live URLs to React + Tailwind builds (supports GSAP, Framer Motion, Lenis, Webflow IX2, Next.js, Tailwind v4); ui-capture records reference screenshots, scroll evidence, and transitions; visual-debug diagnoses implementation mismatches via AE/SSIM diff and computed-style evidence. Includes lifecycle hooks through hooks/codex-hooks.json -> hooks/shim.sh when Codex plugin hooks are enabled, and uses AGENTS.md as the canonical project guide.",
+    "developerName": "YONGJAE LEE",
+    "category": "Frontend",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/voidmatcha/ui-clone-skills",
+    "defaultPrompt": [
+      "Use ui-reverse-engineering for live URL builds, uncertain routing, partial or failed runs, and completed-state handoff into React + Tailwind.",
+      "Use ui-capture only to capture fresh reference screenshots, scroll evidence, transitions, or implementation clips.",
+      "Use visual-debug only when reference and implementation evidence already exist and the task is AE/SSIM mismatch diagnosis.",
+      "For continuation, run python -m ui_clone.goal <ref-dir> and follow the goal card as one bounded delegated-worker action; stop when current_gate == \"done\" and section comparison is clean. This is not an infinite loop."
+    ],
+    "brandColor": "#10A37F"
+  }
+}

@@ -13,7 +13,7 @@ Detect real breakpoints by sweeping viewport width and measuring layout changes.
 CSS media queries are hints, not ground truth. The layout may break at widths not covered by any `@media` rule.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const breakpoints = [];
   for (const sheet of document.styleSheets) {
@@ -40,13 +40,12 @@ Resize the actual viewport and measure layout at each width. This is the only re
 ```bash
 mkdir -p tmp/ref/<component>/responsive
 
-# Register measure function
-agent-browser eval "
-(() => {
+# Shared measure-function definition. Reused for initial register + every
+# survival re-register below. Adapt the `selectors` list to your component.
+MEASURE_EVAL='(() => {
   window.__responsiveMeasure = function() {
-    // Adapt selectors to your target component — these are starting points
-    const selectors = ['body', 'nav', 'header', 'main', 'footer', 'section', '.hero', '.grid', '.container', '[class*=nav]', '[class*=header]', '[class*=grid]'];
-    const props = ['display', 'flexDirection', 'gridTemplateColumns', 'fontSize', 'padding', 'gap', 'visibility', 'position'];
+    const selectors = ["body", "nav", "header", "main", "footer", "section", ".hero", ".grid", ".container", "[class*=nav]", "[class*=header]", "[class*=grid]"];
+    const props = ["display", "flexDirection", "gridTemplateColumns", "fontSize", "padding", "gap", "visibility", "position"];
     const result = {};
     selectors.forEach(sel => {
       const el = document.querySelector(sel);
@@ -61,42 +60,29 @@ agent-browser eval "
     });
     return result;
   };
-  return 'ready';
-})()"
+  return "ready";
+})()'
+
+# Helper: ensure measure function is registered (re-register if page reloaded).
+ensure_measure() {
+  local check
+  check=$(agent-browser --session <s> eval "(() => typeof window.__responsiveMeasure)()")
+  if [ "$check" != "function" ]; then
+    agent-browser --session <s> eval "$MEASURE_EVAL"
+  fi
+}
+
+# Register measure function for the first time
+agent-browser --session <s> eval "$MEASURE_EVAL"
 
 # Coarse sweep (1440 → 320 in 40px steps ≈ 29 iterations, ~5s total)
 RESULTS="["
 FIRST=true
 for W in $(seq 1440 -40 320); do
-  agent-browser set viewport $W 900
-  agent-browser wait 80
-  # Verify measure function survived (page may reload mid-sweep)
-  CHECK=$(agent-browser eval "(() => typeof window.__responsiveMeasure)()")
-  if [ "$CHECK" != "function" ]; then
-    # Re-register — paste the same eval block from above
-    agent-browser eval "
-(() => {
-  window.__responsiveMeasure = function() {
-    const selectors = ['body', 'nav', 'header', 'main', 'footer', 'section', '.hero', '.grid', '.container', '[class*=nav]', '[class*=header]', '[class*=grid]'];
-    const props = ['display', 'flexDirection', 'gridTemplateColumns', 'fontSize', 'padding', 'gap', 'visibility', 'position'];
-    const result = {};
-    selectors.forEach(sel => {
-      const el = document.querySelector(sel);
-      if (!el) return;
-      const s = getComputedStyle(el);
-      const vals = {};
-      props.forEach(p => vals[p] = s[p]);
-      vals._w = el.offsetWidth;
-      vals._h = el.offsetHeight;
-      vals._visible = el.offsetWidth > 0 && el.offsetHeight > 0;
-      result[sel] = vals;
-    });
-    return result;
-  };
-  return 'ready';
-})()"
-  fi
-  M=$(agent-browser eval "(() => JSON.stringify({ width: window.innerWidth, layout: window.__responsiveMeasure() }))()")
+  agent-browser --session <s> set viewport $W 900
+  agent-browser --session <s> wait 80
+  ensure_measure
+  M=$(agent-browser --session <s> eval "(() => JSON.stringify({ width: window.innerWidth, layout: window.__responsiveMeasure() }))()")
   if [ "$FIRST" = true ]; then FIRST=false; else RESULTS="$RESULTS,"; fi
   RESULTS="$RESULTS$M"
 done
@@ -141,64 +127,17 @@ z.forEach(x => {
 console.log([...widths].sort((a,b) => b - a).join('\n'));
 " > tmp/ref/<component>/responsive/fine-widths.txt
 
-# Verify measure function is still registered (page may have reloaded between passes)
-CHECK=$(agent-browser eval "(() => typeof window.__responsiveMeasure)()")
-if [ "$CHECK" != "function" ]; then
-  agent-browser eval "
-(() => {
-  window.__responsiveMeasure = function() {
-    const selectors = ['body', 'nav', 'header', 'main', 'footer', 'section', '.hero', '.grid', '.container', '[class*=nav]', '[class*=header]', '[class*=grid]'];
-    const props = ['display', 'flexDirection', 'gridTemplateColumns', 'fontSize', 'padding', 'gap', 'visibility', 'position'];
-    const result = {};
-    selectors.forEach(sel => {
-      const el = document.querySelector(sel);
-      if (!el) return;
-      const s = getComputedStyle(el);
-      const vals = {};
-      props.forEach(p => vals[p] = s[p]);
-      vals._w = el.offsetWidth;
-      vals._h = el.offsetHeight;
-      vals._visible = el.offsetWidth > 0 && el.offsetHeight > 0;
-      result[sel] = vals;
-    });
-    return result;
-  };
-  return 'ready';
-})()"
-fi
+# Reuse $MEASURE_EVAL and ensure_measure from Pass 1 (same shell session).
+ensure_measure
 
 # Sweep those widths
 RESULTS="["
 FIRST=true
 while read W; do
-  agent-browser set viewport $W 900
-  agent-browser wait 80
-  # Verify measure function survived (page may reload mid-sweep)
-  CHECK=$(agent-browser eval "(() => typeof window.__responsiveMeasure)()")
-  if [ "$CHECK" != "function" ]; then
-    agent-browser eval "
-(() => {
-  window.__responsiveMeasure = function() {
-    const selectors = ['body', 'nav', 'header', 'main', 'footer', 'section', '.hero', '.grid', '.container', '[class*=nav]', '[class*=header]', '[class*=grid]'];
-    const props = ['display', 'flexDirection', 'gridTemplateColumns', 'fontSize', 'padding', 'gap', 'visibility', 'position'];
-    const result = {};
-    selectors.forEach(sel => {
-      const el = document.querySelector(sel);
-      if (!el) return;
-      const s = getComputedStyle(el);
-      const vals = {};
-      props.forEach(p => vals[p] = s[p]);
-      vals._w = el.offsetWidth;
-      vals._h = el.offsetHeight;
-      vals._visible = el.offsetWidth > 0 && el.offsetHeight > 0;
-      result[sel] = vals;
-    });
-    return result;
-  };
-  return 'ready';
-})()"
-  fi
-  M=$(agent-browser eval "(() => JSON.stringify({ width: window.innerWidth, layout: window.__responsiveMeasure() }))()")
+  agent-browser --session <s> set viewport $W 900
+  agent-browser --session <s> wait 80
+  ensure_measure
+  M=$(agent-browser --session <s> eval "(() => JSON.stringify({ width: window.innerWidth, layout: window.__responsiveMeasure() }))()")
   if [ "$FIRST" = true ]; then FIRST=false; else RESULTS="$RESULTS,"; fi
   RESULTS="$RESULTS$M"
 done < tmp/ref/<component>/responsive/fine-widths.txt
@@ -294,7 +233,7 @@ Pixel-match means matching ref's hand-breaks (and ref typos) verbatim, not "fixi
 Measure ALL key elements at exactly 3 viewport widths: **768, 1280, 1440**.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   window.__sizingMeasure = function() {
     const selectors = [
@@ -341,14 +280,14 @@ agent-browser eval "
 
 # Measure at 3 viewports
 for VP in 768 1280 1440; do
-  agent-browser set viewport $VP 900
-  agent-browser wait 200
-  CHECK=$(agent-browser eval "(() => typeof window.__sizingMeasure)()")
+  agent-browser --session <s> set viewport $VP 900
+  agent-browser --session <s> wait 200
+  CHECK=$(agent-browser --session <s> eval "(() => typeof window.__sizingMeasure)()")
   if [ "$CHECK" != "function" ]; then
     # Re-register (paste above eval)
-    agent-browser eval "(() => { window.__sizingMeasure = function() { /* ... same as above ... */ }; return 'ready'; })()"
+    agent-browser --session <s> eval "(() => { window.__sizingMeasure = function() { /* ... same as above ... */ }; return 'ready'; })()"
   fi
-  agent-browser eval "(() => JSON.stringify({ viewport: window.innerWidth, elements: window.__sizingMeasure() }, null, 2))()" \
+  agent-browser --session <s> eval "(() => JSON.stringify({ viewport: window.innerWidth, elements: window.__sizingMeasure() }, null, 2))()" \
     > tmp/ref/<component>/responsive/sizing-$VP.json
 done
 ```
@@ -516,10 +455,10 @@ console.log(JSON.stringify(findings, null, 2));
 For each detected breakpoint, capture a screenshot and extract computed styles. Replace `<bp-width>` for each breakpoint found:
 
 ```bash
-agent-browser set viewport <bp-width> 900
-agent-browser wait 300
-agent-browser screenshot tmp/ref/<component>/responsive/ref-<bp-width>.png
-agent-browser eval "
+agent-browser --session <s> set viewport <bp-width> 900
+agent-browser --session <s> wait 300
+agent-browser --session <s> screenshot tmp/ref/<component>/responsive/ref-<bp-width>.png
+agent-browser --session <s> eval "
 (() => {
   // Adapt selectors to match your target component
   const selectors = ['body', 'nav', 'header', 'main', 'section', '.hero', '.grid', '.container'];
@@ -557,16 +496,16 @@ Save per-breakpoint styles to `tmp/ref/<component>/responsive/styles-<bp-width>.
 Record a video while stepping down the actual viewport to visually review layout transitions:
 
 ```bash
-agent-browser set viewport 1440 900
-agent-browser record start tmp/ref/<component>/responsive/resize-sweep.webm
+agent-browser --session <s> set viewport 1440 900
+agent-browser --session <s> record start tmp/ref/<component>/responsive/resize-sweep.webm
 
 # Step viewport down in 20px increments
 for W in $(seq 1440 -20 320); do
-  agent-browser set viewport $W 900
-  agent-browser wait 100
+  agent-browser --session <s> set viewport $W 900
+  agent-browser --session <s> wait 100
 done
 
-agent-browser record stop
+agent-browser --session <s> record stop
 
 # Extract frames for review (10fps is sufficient for resize review)
 mkdir -p tmp/ref/<component>/responsive/sweep-frames
@@ -581,12 +520,12 @@ ffmpeg -i tmp/ref/<component>/responsive/resize-sweep.webm -vf fps=10 tmp/ref/<c
 
 ```bash
 # Only if not already captured in Step 4-D:
-agent-browser set viewport 320 900
-agent-browser eval "(() => window.scrollTo(0, 0))()"
-agent-browser screenshot tmp/ref/<component>/responsive/ref-320.png
-agent-browser set viewport 1440 900
-agent-browser eval "(() => window.scrollTo(0, 0))()"
-agent-browser screenshot tmp/ref/<component>/responsive/ref-1440.png
+agent-browser --session <s> set viewport 320 900
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
+agent-browser --session <s> screenshot tmp/ref/<component>/responsive/ref-320.png
+agent-browser --session <s> set viewport 1440 900
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
+agent-browser --session <s> screenshot tmp/ref/<component>/responsive/ref-1440.png
 ```
 
 ### B-R: Implementation responsive screenshots
@@ -594,19 +533,19 @@ agent-browser screenshot tmp/ref/<component>/responsive/ref-1440.png
 Same breakpoints, on localhost:
 
 ```bash
-agent-browser open http://localhost:<port>
+agent-browser --session <s> open http://localhost:<port>
 
 # For each detected breakpoint width:
-agent-browser set viewport <bp-width> 900
-agent-browser eval "(() => window.scrollTo(0, 0))()"
-agent-browser wait 300
-agent-browser screenshot tmp/ref/<component>/responsive/impl-<bp-width>.png
+agent-browser --session <s> set viewport <bp-width> 900
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
+agent-browser --session <s> wait 300
+agent-browser --session <s> screenshot tmp/ref/<component>/responsive/impl-<bp-width>.png
 
 # Extremes
-agent-browser set viewport 320 900
-agent-browser screenshot tmp/ref/<component>/responsive/impl-320.png
-agent-browser set viewport 1440 900
-agent-browser screenshot tmp/ref/<component>/responsive/impl-1440.png
+agent-browser --session <s> set viewport 320 900
+agent-browser --session <s> screenshot tmp/ref/<component>/responsive/impl-320.png
+agent-browser --session <s> set viewport 1440 900
+agent-browser --session <s> screenshot tmp/ref/<component>/responsive/impl-1440.png
 ```
 
 ### C-R: Responsive comparison table

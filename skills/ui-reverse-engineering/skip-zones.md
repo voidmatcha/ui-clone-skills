@@ -56,14 +56,14 @@ Gate check: `pnpm tsc --noEmit` + `computed-diff.sh` on key text elements
 
 | Step | What gets skipped | Consequence | Prevention |
 |---|---|---|---|
-| **Pre-impl DOM read** | Section coded from memory / screenshot reading | Wrong class names, item counts, grouping — user must catch it | `agent-browser eval "document.querySelector('.target').outerHTML"` on ref BEFORE writing any JSX |
+| **Pre-impl DOM read** | Section coded from memory / screenshot reading | Wrong class names, item counts, grouping — user must catch it | `agent-browser --session <ref> eval "document.querySelector('.target').outerHTML"` on ref BEFORE writing any JSX |
 | **7 lineHeight** | Explicit `lineHeight` not set on text elements | Tailwind `leading-normal` (1.5×) applied — text spacing wrong everywhere | Extract exact `lineHeight` for ALL text. Never use `leading-*` — use `style={{ lineHeight: '16.8px' }}` |
 | **7 color opacity** | Text color extracted without alpha channel | Semi-transparent labels rendered at full opacity | Always check ref for `rgba()` — subtitles/event names often use 20–40% opacity |
 | **7 grid height** | Grid cell heights hardcoded in px | Layout breaks at wider viewports — images overflow | Use `aspectRatio` on grid cells, not fixed `height` |
 | **7 dynamic content** | CDN image URLs hardcoded without verification | URLs 404 silently — images show alt text only | `curl -I <url>` every CDN URL after hardcoding |
-| **7 DOM wrapper missing** | Section content placed directly in `<section>` without `.main_inner` wrapper | CSS margin/padding on wrapper collapses; heading inside wrong container | `agent-browser eval "document.querySelector('.section').children[0].className"` — verify wrapper exists |
+| **7 DOM wrapper missing** | Section content placed directly in `<section>` without `.main_inner` wrapper | CSS margin/padding on wrapper collapses; heading inside wrong container | `agent-browser --session <ref> eval "document.querySelector('.section').children[0].className"` — verify wrapper exists |
 | **7 DOM child order** | Implemented by visual reading instead of DOM inspection | Mascot below title when ref has mascot above — DOM order ≠ visual order | `[...document.querySelector('.inner').children].map(c => c.className)` — always verify |
-| **layout viewport meta** | `<meta name="viewport">` not added to layout | Mobile media queries never fire | Add to EVERY layout file. Verify: `agent-browser set viewport 375 812`, reload, screenshot. |
+| **layout viewport meta** | `<meta name="viewport">` not added to layout | Mobile media queries never fire | Add to EVERY layout file. Verify: `agent-browser --session <s> set viewport 375 812`, reload, screenshot. |
 | **7 pagination bar** | Swiper bullet `<span class="bar">` added but CSS `width: 100%` overrides | Bar appears full immediately, no fill animation | Use `requestAnimationFrame` double-tick: `width: 0%` → next tick → `width: 100%` |
 
 ---
@@ -77,7 +77,7 @@ Gate check: `getComputedStyle` on hover states, `getAnimations()` on scroll elem
 | **7 SVG-as-text verbatim** | SVG text recreated with fonts | Kerning, weight, glyph shape all wrong | Copy SVG verbatim from `svg-text-elements.json`. Never recreate with `<span>` + CSS font. |
 | **7 smooth-scroll detection** | `addEventListener('scroll')` used on Lenis/Locomotive site | Scroll-driven effects frozen at init state | Check `scroll-engine.json`. If smooth scroll: use RAF + `getBoundingClientRect()` |
 | **7 JS threshold extraction** | `scrollY > 10` hardcoded for sticky header | Scroll behavior triggers too early/late | Grep bundle: `grep -E "fixed\|scrolled\|is-scroll" tmp/ref/<c>/bundles/*.js`. Never guess. |
-| **7 element type verification** | `<button>` used instead of `<select>` / `<input>` / `<label>` | Wrong width, no native behavior, CSS reset mismatch | `agent-browser eval "document.querySelector('.btn_area').innerHTML"`. Check `tagName`. |
+| **7 element type verification** | `<button>` used instead of `<select>` / `<input>` / `<label>` | Wrong width, no native behavior, CSS reset mismatch | `agent-browser --session <ref> eval "document.querySelector('.btn_area').innerHTML"`. Check `tagName`. |
 | **7 effect-data observer** | Per-element IntersectionObserver not wired | Section renders completely blank (all `opacity: 0` by default) | Wire observer per `.effect-data` element, not just section-level |
 | **7 card stack height** | `.height` left as `auto` when hide-class added | Cards snap instantly — no height transition animation | Set `item.style.height = item.offsetHeight + 'px'` BEFORE any scroll handler runs |
 | **RAF vs scroll event** | RAF loop calls `classList.add/remove` every frame | CSS `transition: height 1.06s` restarts every frame — snap instead of animate | RAF for progress-based transforms. Scroll event for class toggles. |
@@ -113,7 +113,7 @@ Gate check: `section-compare.sh` + `transition-compare.sh` → all PASS
 | **8c transition-compare** | "Hover looks right to me" | Wrong easing, missing hover effect, timing mismatch | `transition-compare.sh` — auto-detects ALL transition elements. Not optional if `interactions-detected.json` exists. |
 | **Phase E LLM review** | "AE=1M+ so layout is broken, no need for LLM" | Section-level bugs hide behind viewport-width AE noise | High AE on embedded layouts is structural, not a code bug. Phase E is ALWAYS mandatory. |
 | **Guessed impl verification** | Any guessed implementation shipped without screenshot comparison | User discovers discrepancy — becomes the QA | Screenshot ref + impl at the exact trigger point. 30 seconds now, 30 minutes saved later. |
-| **Reference item count** | Assumed card count from initial DOM | Missing cards → broken image paths, incomplete feature parity | `agent-browser eval "document.querySelectorAll('.card').length"` on ref before implementing |
+| **Reference item count** | Assumed card count from initial DOM | Missing cards → broken image paths, incomplete feature parity | `agent-browser --session <ref> eval "document.querySelectorAll('.card').length"` on ref before implementing |
 | **Existing-project port check** | Saw 404, assumed page didn't exist | Wasted work on pages that already existed on a different port | `ps aux | grep next` — find the actual port first |
 | **Existing-project JS audit** | Adding pages without checking if site's JS is loaded | All scroll transitions silently missing | Compare `layout.tsx` `<script>` tags vs `document.querySelectorAll('script[src]')` on live ref |
 | **Step 8 self-reported** | Declared "done" based on own code reading | User discovers diffs and has to report them one by one | NEVER declare done without running `section-compare.sh` + screenshots at 375/768/1280 vs ref |

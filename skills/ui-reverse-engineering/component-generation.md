@@ -1,5 +1,11 @@
 # Component Generation — Step 7
 
+> 🚨 **Two hard requirements before you write a single line of JSX:**
+>
+> 1. **Asset transfer is NOT optional.** Run `bash scripts/extract/extract-assets.sh <session> <ref-dir> <impl>/public` to download ref images / fonts / videos into the impl's `public/` directory. Then `bash skills/visual-debug/scripts/asset-transfer-check.sh <ref-dir> <impl>/public` should PASS. Skipping this step produces a clone where every `<img>` is a 404 placeholder and section-compare AE explodes to 1M+. The pipeline now blocks at `post-implement` until `asset-transfer.json` and `image-fidelity.json` both pass.
+>
+> 2. **One component per section — DO NOT write a 300-line monolith `page.tsx`.** Read `component-map.json`; each entry in `sections[]` becomes its own file under `src/projects/<name>/components/sections/<SectionName>.tsx`. The top-level `page.tsx` should be ~40-60 lines of imports + an `<main>` with section components composed in order (plus shared scroll/intro wrappers from `bundle-map.json`). Inlining everything into `page.tsx` is the single largest quality regression observed on the realfood.gov benchmark — the prior successful clone of the same site has 14 component files; the failing one has 0.
+
 ## Input checklist (BLOCKING)
 
 **Do not generate code if ANY of these are missing.** Go back to the step that produces the missing artifact.
@@ -80,10 +86,10 @@ agent-browser --session cake-impl screenshot tmp/ref/<c>/verify-impl-scroll200.p
 6. **Never recreate SVGs from visual appearance.** Use `outerHTML` from `inline-svgs.json` verbatim; convert HTML attributes to JSX (`stroke-width` → `strokeWidth`, `class` → `className`, `fill-rule` → `fillRule`).
 7. **Transitions are part of generation, not a later pass.** A component without its transitions is incomplete. Read `transition-spec.json` entries for the component + implement inline. See `transition-implementation.md`.
 8. **Never guess UI layout.** See SKILL.md rule 12 — capture idle + active screenshots before implementing.
-9. **Never skip features because a library is paid/premium.** Use project animation library or OSS alternatives (see `transition-implementation.md` "GSAP Premium Plugin Alternatives"). Never simplify per-char stagger to whole-block fade.
+9. **Never skip features because you don't want an extra dependency.** Use the project animation library or an OSS alternative (see `transition-implementation.md` "GSAP Plugin Alternatives"). Never simplify per-char stagger to whole-block fade.
 10. **Auto-timers must respect splash phase.** See SKILL.md rule 13b — delay auto-rotate by `splashDuration + 1s`.
 11. **Reset GSAP-baked inline styles.** See `animation-init-styles.json` from dom-extraction.md Step 2.6a.
-12. **Verify DOM structure before implementing interaction.** See SKILL.md rule 12b — use `agent-browser eval` on the live ref, never assume from HTML alone.
+12. **Verify DOM structure before implementing interaction.** See SKILL.md rule 12b. Use `agent-browser --session <s> eval` on the live ref, never assume from HTML alone.
 
 13. **SVG-as-text: never recreate with fonts.** Check `svg-text-elements.json` from dom-extraction Step 2.5b. If a heading/brand text is rendered as SVG `<path>`, copy the SVG verbatim — do NOT recreate with `<span>` + CSS font. SVG path text is pixel-identical; font rendering varies across browsers/OS.
 14. **Smooth scroll breaks `addEventListener('scroll')`.** When `scroll-engine.json` shows Lenis/Locomotive/custom scroll, any scroll-driven effect (parallax, progress tracking) that uses `window.addEventListener('scroll')` or framework `useScroll()` hooks will NOT receive events. Use `requestAnimationFrame` loop + `getBoundingClientRect()` instead:
@@ -172,7 +178,7 @@ diff /tmp/ref-children.txt /tmp/impl-children.txt   # must be identical
 ## Font size accuracy (extract + verify)
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const textEls = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,a,span,button,li,th,td,label')]
     .filter(el => el.offsetHeight > 0 && el.textContent?.trim().length > 0);
   return JSON.stringify(textEls.slice(0, 50).map(el => {
@@ -285,18 +291,11 @@ For each section in `component-map.json`:
    - Rules from this document (font accuracy, CSS var consistency, transition integration)
    - Relevant slice of `transition-implementation.md`
 
-2. Dispatch all sections simultaneously:
-   ```
-   Agent(
-     prompt: "<full section spec + rules inline>",
-     isolation: "worktree",
-     description: "Build <SectionName> component"
-   )
-   ```
+2. Dispatch one isolated delegated worker/subagent per section. Pass the full inline prompt, use worktree isolation where the host supports it, and label the job `Build <SectionName> component`.
 
 3. Each builder produces `src/components/<SectionName>/<SectionName>.tsx` + local sub-components. Passes `python -m ui_clone.gate <ref-dir> post-implement` independently.
 
-**Fallback:** if Agent tool unavailable, generate sequentially with the same spec + rules.
+**Fallback:** if delegated workers/subagents are unavailable, generate sequentially with the same spec + rules.
 
 **Phase 3C — Assembly (sequential):**
 Collect section components from worktree branches → wire imports in `page.tsx` → add cross-section wiring (scroll context, Lenis wrapper) in `component-map.json` order → `pnpm tsc --noEmit` → `python -m ui_clone.gate <ref-dir> post-implement`.
@@ -333,7 +332,7 @@ agent-browser --session <ref|impl> eval "(() => {
 After implementing a section, run `getComputedStyle` on key elements in ref + impl. Compare numerically, not visually.
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const el = document.querySelector('<selector>');
   const s = getComputedStyle(el);
   return JSON.stringify({

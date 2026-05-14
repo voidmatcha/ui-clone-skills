@@ -11,6 +11,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -114,6 +117,29 @@ def _populate_pre_generate_artifacts(ref_dir: Path) -> None:
     )
     os.utime(ref_dir / "extracted.json", (extracted_time, extracted_time))
 
+    provenance_artifacts = [
+        "extracted.json",
+        "transition-spec.json",
+        "animation-init-styles.json",
+        "section-map.json",
+        "svg-text-elements.json",
+        "responsive/sizing-expressions.json",
+        "interactions-detected.json",
+        "transition-coverage.json",
+        "component-map.json",
+    ]
+    (ref_dir / "artifact-provenance.json").write_text(json.dumps({
+        "artifacts": [
+            {
+                "path": artifact,
+                "source": "agent-browser-eval" if artifact != "transition-spec.json" else "bundle-grep",
+                "evidence": [artifact],
+                "generatedAt": "2026-05-14T00:00:00Z",
+            }
+            for artifact in provenance_artifacts
+        ],
+    }))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # pre_generate tests
@@ -126,7 +152,7 @@ class TestPreGenerate:
     def _tool_input(self, file_path: str) -> str:
         return json.dumps({"tool_name": "Write", "tool_input": {"file_path": file_path}})
 
-    def test_no_wip_marker_runs_gate_and_blocks_on_missing_artifacts(self, tmp_path: Path):
+    def test_no_wip_marker_runs_gate_and_blocks_on_missing_artifacts(self, tmp_path: Path) -> None:
         """No WIP marker + incomplete artifacts → gate runs, blocks. Marker is the
         side-effect of a passing gate, not a precondition for enforcement."""
         search_root = make_search_root(tmp_path)
@@ -147,7 +173,7 @@ class TestPreGenerate:
         # Marker not created when gate failed — activation only happens on pass.
         assert not (ref_dir / ".ui-re-active").is_file()
 
-    def test_no_wip_marker_gate_passes_creates_marker_and_prints_activation(self, tmp_path: Path):
+    def test_no_wip_marker_gate_passes_creates_marker_and_prints_activation(self, tmp_path: Path) -> None:
         """No WIP marker + full artifacts → gate passes → marker is created on first
         activation and the stop-gate activation message is printed to stderr."""
         search_root = make_search_root(tmp_path)
@@ -168,7 +194,7 @@ class TestPreGenerate:
         assert marker.is_file()
         assert "stop gate" in result.stderr.lower()
 
-    def test_wip_marker_gate_passes_exits_0(self, tmp_path: Path):
+    def test_wip_marker_gate_passes_exits_0(self, tmp_path: Path) -> None:
         """WIP marker exists but gate.py returns pass → exit 0."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -185,7 +211,7 @@ class TestPreGenerate:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
-    def test_component_path_no_wip_exits_0(self, tmp_path: Path):
+    def test_component_path_no_wip_exits_0(self, tmp_path: Path) -> None:
         """Component path + no WIP marker → exits 0 (no ref dir found via marker)."""
         make_search_root(tmp_path)
         # No active marker, no extracted.json → no ref dir found
@@ -197,7 +223,7 @@ class TestPreGenerate:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
-    def test_wip_marker_gate_fails_outputs_block_json(self, tmp_path: Path):
+    def test_wip_marker_gate_fails_outputs_block_json(self, tmp_path: Path) -> None:
         """WIP marker present + gate fails (missing artifacts) → block JSON."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -220,7 +246,7 @@ class TestPreGenerate:
         assert hook_out.get("permissionDecision") == "deny"
         assert "permissionDecisionReason" in hook_out
 
-    def test_wip_marker_gate_passes_refreshes_marker_silently(self, tmp_path: Path):
+    def test_wip_marker_gate_passes_refreshes_marker_silently(self, tmp_path: Path) -> None:
         """Existing marker + gate passes → marker mtime refreshed, activation
         message NOT re-printed (only first activation prints)."""
         search_root = make_search_root(tmp_path)
@@ -244,7 +270,7 @@ class TestPreGenerate:
         # Activation message NOT re-printed on subsequent edits (avoids spam)
         assert "stop gate" not in result.stderr.lower()
 
-    def test_non_component_path_skips(self, tmp_path: Path):
+    def test_non_component_path_skips(self, tmp_path: Path) -> None:
         """Non-component path → exits 0 regardless of WIP state."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -268,7 +294,7 @@ class TestPreGenerate:
 class TestSectionGate:
     MODULE = "ui_clone.hooks.section_gate"
 
-    def test_no_tmp_ref_exits_0(self, tmp_path: Path):
+    def test_no_tmp_ref_exits_0(self, tmp_path: Path) -> None:
         """No tmp/ref/ directory → exit 0."""
         result = run_hook(
             self.MODULE,
@@ -276,7 +302,7 @@ class TestSectionGate:
         )
         assert result.returncode == 0
 
-    def test_no_wip_marker_exits_0(self, tmp_path: Path):
+    def test_no_wip_marker_exits_0(self, tmp_path: Path) -> None:
         """tmp/ref exists but no .ui-re-active marker → exit 0."""
         make_search_root(tmp_path)
         result = run_hook(
@@ -285,7 +311,7 @@ class TestSectionGate:
         )
         assert result.returncode == 0
 
-    def test_wip_marker_no_result_txt_outputs_block(self, tmp_path: Path):
+    def test_wip_marker_no_result_txt_outputs_block(self, tmp_path: Path) -> None:
         """WIP marker present, no result.txt → block JSON."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -303,7 +329,7 @@ class TestSectionGate:
         assert data.get("decision") == "block"
         assert "reason" in data
 
-    def test_wip_marker_result_txt_no_failures_exits_0(self, tmp_path: Path):
+    def test_wip_marker_result_txt_no_failures_exits_0(self, tmp_path: Path) -> None:
         """WIP marker + pipeline-state at section-compare + result.txt with only ✅ → exit 0."""
         import json as _json
 
@@ -345,7 +371,7 @@ class TestSectionGate:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_wip_marker_result_txt_has_failures_outputs_block(self, tmp_path: Path):
+    def test_wip_marker_result_txt_has_failures_outputs_block(self, tmp_path: Path) -> None:
         """WIP marker + pipeline-state at section-compare + result.txt with ❌ → block JSON."""
         import json as _json
 
@@ -391,7 +417,7 @@ class TestSectionGate:
         assert data.get("decision") == "block"
         assert "FAILED" in data["reason"] or "section-compare" in data["reason"].lower()
 
-    def test_wip_marker_result_txt_has_missing_outputs_block(self, tmp_path: Path):
+    def test_wip_marker_result_txt_has_missing_outputs_block(self, tmp_path: Path) -> None:
         """WIP marker + pipeline-state at section-compare + result.txt with ⚠️ MISSING impl → block JSON."""
         import json as _json
 
@@ -436,7 +462,7 @@ class TestSectionGate:
         data = json.loads(out)
         assert data.get("decision") == "block"
 
-    def test_stale_marker_auto_removed_exits_0(self, tmp_path: Path):
+    def test_stale_marker_auto_removed_exits_0(self, tmp_path: Path) -> None:
         """Stale marker (>3 days) → auto-removed → exit 0."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -452,7 +478,7 @@ class TestSectionGate:
         # Marker should be gone
         assert not marker.exists(), "Stale marker should have been removed"
 
-    def test_stale_days_env_override_keeps_marker_alive(self, tmp_path: Path):
+    def test_stale_days_env_override_keeps_marker_alive(self, tmp_path: Path) -> None:
         """UI_RE_STALE_DAYS env var overrides the 3-day default."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -471,14 +497,41 @@ class TestSectionGate:
         assert data.get("decision") == "block"
         assert marker.exists(), "Marker must not be removed when within custom threshold"
 
-    def test_multiple_active_sessions_enforces_first(self, tmp_path: Path):
-        """Multiple WIP markers → block JSON (enforces against first found)."""
+    def test_multiple_active_sessions_enforces_later_refs(self, tmp_path: Path) -> None:
+        """Multiple WIP markers → later dirty refs still block Stop."""
         search_root = make_search_root(tmp_path)
         ref1 = make_ref_dir(search_root, "session-a")
         ref2 = make_ref_dir(search_root, "session-b")
         set_active_marker(ref1)
         set_active_marker(ref2)
-        # No result.txt in either → should block
+        completed = [
+            "reference",
+            "extraction",
+            "bundle",
+            "paid-features",
+            "spec",
+            "pre-generate",
+            "post-implement",
+            "boundary",
+            "font-parity",
+            "section-compare",
+        ]
+        for ref_dir in (ref1, ref2):
+            (ref_dir / "pipeline-state.json").write_text(
+                json.dumps(
+                    {
+                        "component": ref_dir.name,
+                        "started_at": "2026-01-01T00:00:00Z",
+                        "completed_steps": completed,
+                        "current_gate": "done",
+                        "last_updated": "2026-01-01T01:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+        sections = ref1 / "sections"
+        sections.mkdir()
+        (sections / "result.txt").write_text("| hero | ✅ PASS | ... |\n", encoding="utf-8")
 
         result = run_hook(
             self.MODULE,
@@ -489,6 +542,7 @@ class TestSectionGate:
         assert out
         data = json.loads(out)
         assert data.get("decision") == "block"
+        assert "session-b" in data.get("reason", "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -508,7 +562,7 @@ class TestPostVerify:
             }
         )
 
-    def test_no_ref_dir_exits_0(self, tmp_path: Path):
+    def test_no_ref_dir_exits_0(self, tmp_path: Path) -> None:
         """No tmp/ref dir → skips everything → exit 0."""
         result = run_hook(
             self.MODULE,
@@ -517,7 +571,7 @@ class TestPostVerify:
         )
         assert result.returncode == 0
 
-    def test_non_completion_command_exits_0(self, tmp_path: Path):
+    def test_non_completion_command_exits_0(self, tmp_path: Path) -> None:
         """Non-completion Bash command → exit 0 (advisory-only hook)."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -530,7 +584,7 @@ class TestPostVerify:
         )
         assert result.returncode == 0
 
-    def test_always_exits_0(self, tmp_path: Path):
+    def test_always_exits_0(self, tmp_path: Path) -> None:
         """post_verify is advisory — always exits 0 even on completion signal."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -546,7 +600,7 @@ class TestPostVerify:
         # Always advisory → exit 0
         assert result.returncode == 0
 
-    def test_multi_state_warning_on_click_interactions(self, tmp_path: Path):
+    def test_multi_state_warning_on_click_interactions(self, tmp_path: Path) -> None:
         """Click interactions present + no alt-state captures → warns but exits 0."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -588,14 +642,14 @@ class TestPostVerify:
 class TestSectionGateFullEnforcement:
     """Verifies that section_gate.py runs the gate matching current_gate."""
 
-    def _run_gate_hook(self, ref_dir: Path, monkeypatch) -> tuple[int, str]:
+    def _run_gate_hook(self, ref_dir: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int | str, str]:
         """Invoke section_gate main() directly. Returns (exit_code, stdout)."""
         import importlib
         import io
         from unittest.mock import patch
 
         captured = io.StringIO()
-        exit_code = 0
+        exit_code: int | str = 0
         try:
             with patch("sys.stdout", captured):
                 from ui_clone.hooks import section_gate
@@ -606,7 +660,7 @@ class TestSectionGateFullEnforcement:
             exit_code = e.code or 0
         return exit_code, captured.getvalue()
 
-    def test_no_active_marker_allows(self, tmp_path, monkeypatch):
+    def test_no_active_marker_allows(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """No WIP marker → always allow."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         ref_dir.mkdir(parents=True)
@@ -615,7 +669,7 @@ class TestSectionGateFullEnforcement:
         assert exit_code == 0
         assert "block" not in output.lower()
 
-    def test_extraction_gate_blocked_when_missing_artifacts(self, tmp_path, monkeypatch):
+    def test_extraction_gate_blocked_when_missing_artifacts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """current_gate=extraction with missing artifacts → block."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         ref_dir.mkdir(parents=True)
@@ -639,7 +693,7 @@ class TestSectionGateFullEnforcement:
         assert data.get("decision") == "block"
         assert "extraction" in data.get("reason", "").lower()
 
-    def test_section_compare_pass_when_result_all_pass(self, tmp_path, monkeypatch):
+    def test_section_compare_pass_when_result_all_pass(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """current_gate=section-compare and result.txt all PASS → allow and record state as done."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         ref_dir.mkdir(parents=True)
@@ -684,7 +738,7 @@ class TestSectionGateFullEnforcement:
             "post-done-edit drift hole; stale-marker guard cleans up after 3 days)"
         )
 
-    def test_section_compare_blocks_when_result_txt_missing(self, tmp_path, monkeypatch):
+    def test_section_compare_blocks_when_result_txt_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """current_gate=section-compare with no result.txt → block, even if diff PNGs exist."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         ref_dir.mkdir(parents=True)
@@ -716,8 +770,10 @@ class TestSectionGateFullEnforcement:
         data = json.loads(output) if output.strip().startswith("{") else {}
         assert data.get("decision") == "block", "diff PNGs without result.txt must still block"
         assert "result.txt" in data.get("reason", "").lower()
+        assert "Goal Card: comp" in data.get("reason", "")
+        assert f"python -m ui_clone.goal {ref_dir}" in data.get("reason", "")
 
-    def test_no_pipeline_state_enforces_reference_gate(self, tmp_path, monkeypatch):
+    def test_no_pipeline_state_enforces_reference_gate(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """No pipeline-state.json → enforce reference gate (Bug #2 fix)."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         ref_dir.mkdir(parents=True)
@@ -729,11 +785,11 @@ class TestSectionGateFullEnforcement:
         data = json.loads(output) if output.strip().startswith("{") else {}
         assert data.get("decision") == "block"
         assert "reference" in data.get("reason", "").lower()
+        assert "Goal Card: comp" in data.get("reason", "")
+        assert f"python -m ui_clone.goal {ref_dir}" in data.get("reason", "")
 
-    def test_done_state_always_allows(self, tmp_path, monkeypatch):
-        """current_gate=done → always allow."""
-        ref_dir = tmp_path / "tmp" / "ref" / "comp"
-        ref_dir.mkdir(parents=True)
+    def _write_done_state(self, ref_dir: Path) -> None:
+        ref_dir.mkdir(parents=True, exist_ok=True)
         (ref_dir / ".ui-re-active").touch()
         (ref_dir / "pipeline-state.json").write_text(
             json.dumps(
@@ -744,23 +800,60 @@ class TestSectionGateFullEnforcement:
                         "reference",
                         "extraction",
                         "bundle",
+                        "paid-features",
                         "spec",
                         "pre-generate",
                         "post-implement",
+                        "boundary",
+                        "font-parity",
                         "section-compare",
                     ],
                     "current_gate": "done",
                     "last_updated": "2026-01-01T02:00:00Z",
                 }
-            )
+            ),
+            encoding="utf-8",
         )
+
+    def test_done_state_blocks_when_section_result_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """current_gate=done with missing sections/result.txt → block."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_done_state(ref_dir)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        assert "sections/result.txt" in data.get("reason", "")
+
+    def test_done_state_blocks_when_section_result_dirty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """current_gate=done with dirty sections/result.txt → block."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_done_state(ref_dir)
+        sections = ref_dir / "sections"
+        sections.mkdir()
+        (sections / "result.txt").write_text("| hero | 125 | high | ❌ |\n", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        assert "section-compare" in data.get("reason", "")
+
+    def test_done_state_allows_when_section_result_clean(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """current_gate=done with clean sections/result.txt → allow."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_done_state(ref_dir)
+        sections = ref_dir / "sections"
+        sections.mkdir()
+        (sections / "result.txt").write_text("| hero | ✅ PASS | ... |\n", encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
         assert exit_code == 0
         assert "block" not in output.lower()
 
-    def test_unknown_gate_fails_open(self, tmp_path, monkeypatch):
-        """current_gate with unknown value → fail-open (allow)."""
+    def test_unknown_gate_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """current_gate with unknown value → fail-closed (block)."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         ref_dir.mkdir(parents=True)
         (ref_dir / ".ui-re-active").touch()
@@ -777,14 +870,17 @@ class TestSectionGateFullEnforcement:
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
         assert exit_code == 0
-        assert "block" not in output.lower()
+        assert data.get("decision") == "block"
+        assert "unknown current_gate" in data.get("reason", "")
+        assert "python -m ui_clone.gate" not in data.get("reason", "")
 
 
 class TestNestedGitRepoRoot:
     """Verifies find_project_root finds the correct root based on tmp/ref/ in nested git repos."""
 
-    def test_git_root_without_tmp_ref_falls_through_to_walk(self, tmp_path, monkeypatch):
+    def test_git_root_without_tmp_ref_falls_through_to_walk(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """git root without tmp/ref/ falls through to walk-up logic."""
         import ui_clone.hooks._common as _common
         from ui_clone.hooks._common import find_project_root
@@ -793,7 +889,7 @@ class TestNestedGitRepoRoot:
         monkeypatch.setattr(_common, "_cached_project_root", None)
 
         # Simulate git returning a root that does NOT have tmp/ref/
-        def fake_run(cmd, **kwargs):
+        def fake_run(cmd: Any, **kwargs: Any) -> Any:
             class R:
                 returncode = 0
                 stdout = str(tmp_path) + "\n"
@@ -812,7 +908,7 @@ class TestNestedGitRepoRoot:
         # Should return `sub` (found via walk-up), not `tmp_path` (the fake git root)
         assert result == sub
 
-    def test_git_root_with_tmp_ref_is_returned_directly(self, tmp_path, monkeypatch):
+    def test_git_root_with_tmp_ref_is_returned_directly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """git root with tmp/ref/ is returned directly."""
         import ui_clone.hooks._common as _common
         from ui_clone.hooks._common import find_project_root
@@ -822,7 +918,7 @@ class TestNestedGitRepoRoot:
 
         (tmp_path / "tmp" / "ref").mkdir(parents=True)
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(cmd: Any, **kwargs: Any) -> Any:
             class R:
                 returncode = 0
                 stdout = str(tmp_path) + "\n"
@@ -846,7 +942,7 @@ class TestPostVerifyVerificationNotRun:
             {"tool_name": "Bash", "tool_input": {"command": command}, "tool_response": "ok"}
         )
 
-    def test_no_diff_no_health_warns(self, tmp_path: Path):
+    def test_no_diff_no_health_warns(self, tmp_path: Path) -> None:
         """WIP marker + completion cmd + no diffs/health → warns about verification."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -861,7 +957,7 @@ class TestPostVerifyVerificationNotRun:
         assert result.returncode == 0
         assert "verification" in result.stdout.lower() and "not" in result.stdout.lower()
 
-    def test_enough_diffs_no_warning(self, tmp_path: Path):
+    def test_enough_diffs_no_warning(self, tmp_path: Path) -> None:
         """WIP marker + completion cmd + >=3 diffs + health file → no Check 1 warning."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -892,7 +988,7 @@ class TestPostVerifyBatchCompareFailures:
             {"tool_name": "Bash", "tool_input": {"command": command}, "tool_response": "ok"}
         )
 
-    def test_batch_compare_failures_warns(self, tmp_path: Path):
+    def test_batch_compare_failures_warns(self, tmp_path: Path) -> None:
         """batch-compare-result.txt with ❌ lines → warns about failures."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -918,7 +1014,7 @@ class TestPostVerifyBatchCompareFailures:
         assert "FAILED" in result.stdout or "failed" in result.stdout.lower()
         assert "2" in result.stdout  # 2 failures
 
-    def test_batch_compare_all_pass_no_warning(self, tmp_path: Path):
+    def test_batch_compare_all_pass_no_warning(self, tmp_path: Path) -> None:
         """batch-compare-result.txt with only ✅ → no Check 2 warning."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -945,67 +1041,67 @@ class TestPostVerifyBatchCompareFailures:
 class TestCompletionPatternWordBoundary:
     """Verifies post_verify completion patterns apply word-boundary correctly."""
 
-    def test_commit_substring_not_matched(self):
+    def test_commit_substring_not_matched(self) -> None:
         """Substrings like 'commitment' must not trigger the pattern."""
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert not _is_completion_command("our team's commitment to quality")
 
-    def test_commit_word_matched(self):
+    def test_commit_word_matched(self) -> None:
         """'git commit -m ...' must trigger the pattern."""
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("git commit -m 'fix layout'")
 
-    def test_done_word_matched(self):
+    def test_done_word_matched(self) -> None:
         """'all done' must trigger the pattern."""
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("all done")
 
-    def test_deploy_word_matched(self):
+    def test_deploy_word_matched(self) -> None:
         """'deploy' must trigger the pattern."""
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("deploy to production")
 
-    def test_finish_word_matched(self):
+    def test_finish_word_matched(self) -> None:
         """'finish' alone must trigger the pattern."""
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("finish the work")
 
-    def test_merge_word_matched(self):
+    def test_merge_word_matched(self) -> None:
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("git merge feature-branch")
 
-    def test_push_word_matched(self):
+    def test_push_word_matched(self) -> None:
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("git push origin main")
 
-    def test_complete_word_matched(self):
+    def test_complete_word_matched(self) -> None:
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("mark task complete")
 
-    def test_looks_good_phrase_matched(self):
+    def test_looks_good_phrase_matched(self) -> None:
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("LGTM, looks good to me")
 
-    def test_all_pass_phrase_matched(self):
+    def test_all_pass_phrase_matched(self) -> None:
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert _is_completion_command("tests all pass now")
 
-    def test_unrelated_command_not_matched(self):
+    def test_unrelated_command_not_matched(self) -> None:
         from ui_clone.hooks.post_verify import _is_completion_command
 
         assert not _is_completion_command("npm run dev")
 
-    def test_pushup_substring_not_matched(self):
+    def test_pushup_substring_not_matched(self) -> None:
         """Word-boundary check: 'pushup' must not match the 'push' alternation."""
         from ui_clone.hooks.post_verify import _is_completion_command
 
@@ -1015,7 +1111,7 @@ class TestCompletionPatternWordBoundary:
 class TestGateSubprocessTimeout:
     """Verifies that gate subprocess calls fail-open on TimeoutExpired."""
 
-    def test_pre_generate_run_gate_timeout_fail_open(self, monkeypatch):
+    def test_pre_generate_run_gate_timeout_fail_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """_run_gate in pre_generate fails open (returns passed=True) on TimeoutExpired."""
         import subprocess
         from importlib import reload
@@ -1024,7 +1120,7 @@ class TestGateSubprocessTimeout:
 
         reload(mod)
 
-        def fake_run(*args, **kwargs):
+        def fake_run(*args: Any, **kwargs: Any) -> None:
             raise subprocess.TimeoutExpired(cmd=args[0], timeout=5)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -1032,7 +1128,7 @@ class TestGateSubprocessTimeout:
         assert result.get("passed") is True, "TimeoutExpired must fail-open"
         assert result.get("fail_count") == 0
 
-    def test_section_gate_run_gate_timeout_fail_open(self, monkeypatch):
+    def test_section_gate_run_gate_timeout_fail_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """_run_gate in section_gate fails open (returns passed=True) on TimeoutExpired."""
         import subprocess
         from importlib import reload
@@ -1041,7 +1137,7 @@ class TestGateSubprocessTimeout:
 
         reload(mod)
 
-        def fake_run(*args, **kwargs):
+        def fake_run(*args: Any, **kwargs: Any) -> None:
             raise subprocess.TimeoutExpired(cmd=args[0], timeout=5)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -1053,7 +1149,7 @@ class TestGateSubprocessTimeout:
 class TestComponentPathEnvOverride:
     """Verifies UI_RE_COMPONENT_PATHS env var overrides default component path patterns."""
 
-    def test_default_src_components_matched(self, monkeypatch):
+    def test_default_src_components_matched(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default: /src/components/ is matched."""
         monkeypatch.delenv("UI_RE_COMPONENT_PATHS", raising=False)
         from importlib import reload
@@ -1063,7 +1159,7 @@ class TestComponentPathEnvOverride:
         reload(mod)
         assert mod._is_component_file("/home/user/project/src/components/Hero.tsx")
 
-    def test_default_app_router_page_matched(self, monkeypatch):
+    def test_default_app_router_page_matched(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default: /src/app/**/page.tsx is matched."""
         monkeypatch.delenv("UI_RE_COMPONENT_PATHS", raising=False)
         from importlib import reload
@@ -1073,7 +1169,7 @@ class TestComponentPathEnvOverride:
         reload(mod)
         assert mod._is_component_file("/home/user/project/src/app/(home)/page.tsx")
 
-    def test_default_layout_not_matched(self, monkeypatch):
+    def test_default_layout_not_matched(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default: /src/app/**/layout.tsx is NOT matched (only page.* enforced)."""
         monkeypatch.delenv("UI_RE_COMPONENT_PATHS", raising=False)
         from importlib import reload
@@ -1083,7 +1179,7 @@ class TestComponentPathEnvOverride:
         reload(mod)
         assert not mod._is_component_file("/home/user/project/src/app/(home)/layout.tsx")
 
-    def test_env_override_custom_path_matched(self, monkeypatch):
+    def test_env_override_custom_path_matched(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """UI_RE_COMPONENT_PATHS=/app/components/ → /app/components/Foo.tsx is matched."""
         monkeypatch.setenv("UI_RE_COMPONENT_PATHS", "/app/components/")
         from importlib import reload
@@ -1093,7 +1189,7 @@ class TestComponentPathEnvOverride:
         reload(mod)
         assert mod._is_component_file("/home/user/project/app/components/Foo.tsx")
 
-    def test_env_override_default_not_matched(self, monkeypatch):
+    def test_env_override_default_not_matched(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """UI_RE_COMPONENT_PATHS=/app/components/ → default /src/components/ is NOT matched."""
         monkeypatch.setenv("UI_RE_COMPONENT_PATHS", "/app/components/")
         from importlib import reload
@@ -1103,7 +1199,7 @@ class TestComponentPathEnvOverride:
         reload(mod)
         assert not mod._is_component_file("/home/user/project/src/components/Hero.tsx")
 
-    def test_env_override_multiple_paths(self, monkeypatch):
+    def test_env_override_multiple_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """UI_RE_COMPONENT_PATHS with colon-separated list matches any of the paths."""
         monkeypatch.setenv("UI_RE_COMPONENT_PATHS", "/app/components/:/app/pages/")
         from importlib import reload
@@ -1114,7 +1210,7 @@ class TestComponentPathEnvOverride:
         assert mod._is_component_file("/home/user/project/app/components/Card.tsx")
         assert mod._is_component_file("/home/user/project/app/pages/index.tsx")
 
-    def test_env_override_empty_string_uses_defaults(self, monkeypatch):
+    def test_env_override_empty_string_uses_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """UI_RE_COMPONENT_PATHS='' falls through to built-in defaults."""
         monkeypatch.setenv("UI_RE_COMPONENT_PATHS", "")
         from importlib import reload
@@ -1131,7 +1227,7 @@ class TestComponentPathEnvOverride:
 class TestSectionGateStateVerification:
     """Verify that section_gate only removes the WIP marker when state was persisted."""
 
-    def test_marker_preserved_when_state_not_persisted(self, tmp_path, monkeypatch):
+    def test_marker_preserved_when_state_not_persisted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """If the subprocess gate fails to write state, .ui-re-active must be preserved.
 
         The hook reloads pipeline-state.json after _run_gate and only removes the
@@ -1180,7 +1276,7 @@ class TestSectionGateStateVerification:
             return {"passed": True, "fail_count": 0, "failures": []}
 
         captured = io.StringIO()
-        exit_code = 0
+        exit_code: int | str = 0
         try:
             with patch("sys.stdout", captured):
                 # Reload the module first, then patch the bound name
@@ -1215,7 +1311,7 @@ class TestSessionResume:
 
     MODULE = "ui_clone.hooks.session_resume"
 
-    def test_no_wip_marker_exits_silently(self, tmp_path: Path):
+    def test_no_wip_marker_exits_silently(self, tmp_path: Path) -> None:
         """No active WIP marker → no injection, exit 0 with empty stdout."""
         make_search_root(tmp_path)  # tmp/ref/ exists but no children
         result = run_hook(
@@ -1226,7 +1322,7 @@ class TestSessionResume:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_no_tmp_ref_at_all_exits_silently(self, tmp_path: Path):
+    def test_no_tmp_ref_at_all_exits_silently(self, tmp_path: Path) -> None:
         """No tmp/ref/ directory → exit 0 with empty stdout (cold project)."""
         result = run_hook(
             self.MODULE,
@@ -1236,7 +1332,7 @@ class TestSessionResume:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_wip_marker_emits_additional_context(self, tmp_path: Path):
+    def test_wip_marker_emits_additional_context(self, tmp_path: Path) -> None:
         """Active WIP marker → emit hookSpecificOutput.additionalContext."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root, name="375studio")
@@ -1257,8 +1353,12 @@ class TestSessionResume:
         assert "transition-spec-coverage.sh" in ctx
         # Must mention the post-compact skip pattern explicitly.
         assert "post-compact" in ctx.lower() or "compact" in ctx.lower()
+        # Must include the host-neutral goal card for delegated workers.
+        assert "Goal Card: 375studio" in ctx
+        assert "python -m ui_clone.goal tmp/ref/375studio" in ctx
+        assert "delegated worker" in ctx
 
-    def test_postcompact_payload_detected(self, tmp_path: Path):
+    def test_postcompact_payload_detected(self, tmp_path: Path) -> None:
         """When stdin signals PostCompact, the emitted hookEventName matches."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root, name="375studio")
@@ -1274,7 +1374,7 @@ class TestSessionResume:
         payload = json.loads(result.stdout)
         assert payload["hookSpecificOutput"]["hookEventName"] == "PostCompact"
 
-    def test_sessionstart_default_when_payload_ambiguous(self, tmp_path: Path):
+    def test_sessionstart_default_when_payload_ambiguous(self, tmp_path: Path) -> None:
         """Empty stdin → defaults to SessionStart event name."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root, name="375studio")
@@ -1289,7 +1389,7 @@ class TestSessionResume:
         payload = json.loads(result.stdout)
         assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
-    def test_intersection_trigger_in_spec_includes_reveal_check(self, tmp_path: Path):
+    def test_intersection_trigger_in_spec_includes_reveal_check(self, tmp_path: Path) -> None:
         """transition-spec.json with intersection entry → message must call out
         reveal-trigger-check.sh as REQUIRED (not optional)."""
         search_root = make_search_root(tmp_path)
@@ -1316,7 +1416,7 @@ class TestSessionResume:
         assert "transition-implementation.md" in ctx
         assert "IntersectionObserver placement" in ctx
 
-    def test_done_state_skips_injection(self, tmp_path: Path):
+    def test_done_state_skips_injection(self, tmp_path: Path) -> None:
         """Marker present but state==done → no injection (project finished, nothing to nag).
         Closes spam-on-completed-projects loop now that section_gate no longer
         unlinks the marker on done."""
@@ -1336,7 +1436,7 @@ class TestSessionResume:
             f"Expected silent skip on done state, got: {result.stdout!r}"
         )
 
-    def test_empty_spec_omits_intersection_specific_doc_calls(self, tmp_path: Path):
+    def test_empty_spec_omits_intersection_specific_doc_calls(self, tmp_path: Path) -> None:
         """transition-spec.json absent → omit intersection-specific guidance,
         but keep general gate list."""
         search_root = make_search_root(tmp_path)
@@ -1428,7 +1528,7 @@ class TestPreBash:
 
     MODULE = "ui_clone.hooks.pre_bash"
 
-    def test_no_wip_marker_allows_anything(self, tmp_path: Path):
+    def test_no_wip_marker_allows_anything(self, tmp_path: Path) -> None:
         """No active WIP → hook must not interfere with any bash command."""
         make_search_root(tmp_path)
         result = run_hook(
@@ -1439,7 +1539,7 @@ class TestPreBash:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_non_declaration_command_allowed(self, tmp_path: Path):
+    def test_non_declaration_command_allowed(self, tmp_path: Path) -> None:
         """WIP active but command is read-only (git status) → allow."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1452,7 +1552,7 @@ class TestPreBash:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_git_commit_blocked_when_state_not_done(self, tmp_path: Path):
+    def test_git_commit_blocked_when_state_not_done(self, tmp_path: Path) -> None:
         """WIP + git commit + state != done → deny."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1473,7 +1573,7 @@ class TestPreBash:
         reason = data["hookSpecificOutput"]["permissionDecisionReason"]
         assert "section-compare" in reason or "post-implement" in reason
 
-    def test_git_commit_allowed_when_done_and_result_clean(self, tmp_path: Path):
+    def test_git_commit_allowed_when_done_and_result_clean(self, tmp_path: Path) -> None:
         """WIP + git commit + state == done + result.txt clean → allow."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1489,7 +1589,7 @@ class TestPreBash:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_git_commit_blocked_when_result_has_fail(self, tmp_path: Path):
+    def test_git_commit_blocked_when_result_has_fail(self, tmp_path: Path) -> None:
         """Even with state==done, if result.txt has ❌ FAIL → deny.
         (Catches the case where state.json says done but artifacts say otherwise.)"""
         search_root = make_search_root(tmp_path)
@@ -1509,7 +1609,7 @@ class TestPreBash:
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "FAIL" in data["hookSpecificOutput"]["permissionDecisionReason"]
 
-    def test_git_commit_blocked_when_result_has_missing(self, tmp_path: Path):
+    def test_git_commit_blocked_when_result_has_missing(self, tmp_path: Path) -> None:
         """⚠️ MISSING impl line → deny."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1528,7 +1628,7 @@ class TestPreBash:
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "MISSING" in data["hookSpecificOutput"]["permissionDecisionReason"]
 
-    def test_git_push_blocked_when_state_not_done(self, tmp_path: Path):
+    def test_git_push_blocked_when_state_not_done(self, tmp_path: Path) -> None:
         """git push also triggers the gate."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1545,7 +1645,7 @@ class TestPreBash:
         data = json.loads(out)
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_gh_pr_create_blocked(self, tmp_path: Path):
+    def test_gh_pr_create_blocked(self, tmp_path: Path) -> None:
         """gh pr create is also a declaration-of-done."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1560,7 +1660,7 @@ class TestPreBash:
         out = result.stdout.strip()
         assert out, "expected deny payload"
 
-    def test_skip_env_var_disables_hook(self, tmp_path: Path):
+    def test_skip_env_var_disables_hook(self, tmp_path: Path) -> None:
         """UI_RE_SKIP_BASH_GATE=1 → hook silent, allows anything."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1578,7 +1678,7 @@ class TestPreBash:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_invalid_json_stdin_exits_silently(self, tmp_path: Path):
+    def test_invalid_json_stdin_exits_silently(self, tmp_path: Path) -> None:
         """Garbled stdin → no crash, no block (fail-open on parse errors)."""
         result = run_hook(
             self.MODULE,
@@ -1605,7 +1705,7 @@ class TestPreBashFileWriteBypass:
         d.mkdir(parents=True, exist_ok=True)
         return d / "Hero.tsx"
 
-    def test_cat_redirect_to_component_blocked_when_extraction_incomplete(self, tmp_path: Path):
+    def test_cat_redirect_to_component_blocked_when_extraction_incomplete(self, tmp_path: Path) -> None:
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
         # Marker not required — pre_bash file-write check uses pre-generate gate
@@ -1626,7 +1726,7 @@ class TestPreBashFileWriteBypass:
         reason = data["hookSpecificOutput"]["permissionDecisionReason"]
         assert "Bash write" in reason or "extraction incomplete" in reason
 
-    def test_append_redirect_to_component_blocked(self, tmp_path: Path):
+    def test_append_redirect_to_component_blocked(self, tmp_path: Path) -> None:
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
         write_extracted_json(ref_dir)
@@ -1640,7 +1740,7 @@ class TestPreBashFileWriteBypass:
         assert result.returncode == 0
         assert result.stdout.strip(), "expected block on >> redirect"
 
-    def test_tee_to_component_blocked(self, tmp_path: Path):
+    def test_tee_to_component_blocked(self, tmp_path: Path) -> None:
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
         write_extracted_json(ref_dir)
@@ -1654,7 +1754,7 @@ class TestPreBashFileWriteBypass:
         assert result.returncode == 0
         assert result.stdout.strip(), "expected block on tee redirect"
 
-    def test_sed_inplace_to_component_blocked(self, tmp_path: Path):
+    def test_sed_inplace_to_component_blocked(self, tmp_path: Path) -> None:
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
         write_extracted_json(ref_dir)
@@ -1669,7 +1769,7 @@ class TestPreBashFileWriteBypass:
         assert result.returncode == 0
         assert result.stdout.strip(), "expected block on sed -i"
 
-    def test_redirect_to_non_component_allowed(self, tmp_path: Path):
+    def test_redirect_to_non_component_allowed(self, tmp_path: Path) -> None:
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
         set_active_marker(ref_dir)
@@ -1683,7 +1783,7 @@ class TestPreBashFileWriteBypass:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_dev_null_redirect_ignored(self, tmp_path: Path):
+    def test_dev_null_redirect_ignored(self, tmp_path: Path) -> None:
         """Common process-output redirects must not trip the file-write gate."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1696,7 +1796,7 @@ class TestPreBashFileWriteBypass:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_skip_env_bypass_works(self, tmp_path: Path):
+    def test_skip_env_bypass_works(self, tmp_path: Path) -> None:
         """UI_RE_SKIP_BASH_GATE=1 short-circuits the entire hook."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1710,7 +1810,7 @@ class TestPreBashFileWriteBypass:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_passing_gate_allows_write(self, tmp_path: Path):
+    def test_passing_gate_allows_write(self, tmp_path: Path) -> None:
         """Full extraction artifacts → gate passes → bash redirect to component allowed."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1740,7 +1840,7 @@ class TestPreGeneratePostDoneInvalidation:
     def _tool_input(self, file_path: str) -> str:
         return json.dumps({"tool_name": "Edit", "tool_input": {"file_path": file_path}})
 
-    def test_post_done_edit_demotes_state(self, tmp_path: Path):
+    def test_post_done_edit_demotes_state(self, tmp_path: Path) -> None:
         """current_gate='done' + WIP + component edit → state demoted to section-compare."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
@@ -1766,7 +1866,7 @@ class TestPreGeneratePostDoneInvalidation:
         # Stderr should mention the demotion
         assert "demoted" in result.stderr.lower() or "post-done" in result.stderr.lower()
 
-    def test_post_done_edit_invalidates_result_txt(self, tmp_path: Path):
+    def test_post_done_edit_invalidates_result_txt(self, tmp_path: Path) -> None:
         """post-done edit must rename sections/result.txt → result.txt.stale,
         so the next section-compare gate run can't pass on the prior PASS lines."""
         search_root = make_search_root(tmp_path)
@@ -1794,7 +1894,7 @@ class TestPreGeneratePostDoneInvalidation:
         assert stale.is_file(), "result.txt.stale must capture the prior content"
         assert "PASS" in stale.read_text(encoding="utf-8")
 
-    def test_pre_done_state_unchanged(self, tmp_path: Path):
+    def test_pre_done_state_unchanged(self, tmp_path: Path) -> None:
         """If state is already at section-compare (not done), no demotion happens."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)

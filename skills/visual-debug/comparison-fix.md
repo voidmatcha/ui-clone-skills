@@ -15,7 +15,7 @@ When AE on a section comes back **unusually large** (≥ ~50K, or any number tha
 | Suspect | How to confirm in seconds | Fix at the harness, not in impl |
 |---|---|---|
 | **A. Capture-timing artifact** (snapshot taken mid-animation on one side, settled on the other) | Re-run with a longer settle: `WAIT_SCROLL_SETTLE=1.5 WAIT_REF=12000 WAIT_IMPL=12000 bash section-compare.sh ...`. AE drops by an order of magnitude → it was timing. | Raise the relevant `WAIT_*` env var permanently for this project. Do NOT add `setTimeout`s in impl to "wait for ref". |
-| **B. Programmatic scroll didn't fire custom-scroll handlers** (Lenis / Locomotive / smooth-scroll sites — `window.scrollTo()` skips their scroll-event pipeline, leaving section-state classes such as `is-loaded`, `is-active`, project-scoped `-postX` flags stale on one side and current on the other) | On the failing scroll position, eval `document.body.className` and `document.documentElement.className` on both ref and impl. If the state classes differ, the scroll never propagated. | Switch the harness to native scroll (`agent-browser mouse wheel`) for that target, or accept the desync and add the affected section to a substitute/skip list. |
+| **B. Programmatic scroll didn't fire custom-scroll handlers** (Lenis / Locomotive / smooth-scroll sites — `window.scrollTo()` skips their scroll-event pipeline, leaving section-state classes such as `is-loaded`, `is-active`, project-scoped `-postX` flags stale on one side and current on the other) | On the failing scroll position, eval `document.body.className` and `document.documentElement.className` on both ref and impl. If the state classes differ, the scroll never propagated. | Switch the harness to native scroll (`agent-browser --session <s> mouse wheel`) for that target, or accept the desync and add the affected section to a substitute/skip list. |
 | **C. Per-viewport init lock** (bundle reads `window.innerWidth` once at init; resizing the session after `open` does not re-evaluate. Common with GSAP `ScrollTrigger`, `matchMedia` once-and-cache, container queries baked at boot) | Open a fresh session at the *target* viewport (not 1440 → resize 375). If AE collapses, init was the issue. | Always recreate the session per viewport in multi-viewport sweeps — never `set viewport` after `open` for the run that's compared. |
 | **D. Lazy-load not yet triggered on one side** (lazy `<img>` / `loading="lazy"` / IntersectionObserver-gated content was never scrolled past on one side, leaving height differences and missing pixels) | Force a full-page traverse (`window.scrollTo(0, document.body.scrollHeight); await wait(800); window.scrollTo(0, 0)`) before the section measurement. If heights now match, it was lazy load. | Add the traverse to `layout-health-check.sh` / pre-section-compare warmup; never measure section heights at `scroll=0` on lazy-load-heavy sites. |
 
@@ -54,7 +54,10 @@ done
 **On AE FAIL — use `auto-diagnose.sh` instead of reading diff images:**
 
 ```bash
-SCRIPTS="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}"
+SCRIPTS="${VISUAL_DEBUG_SCRIPTS_DIR:-${PLUGIN_ROOT:+$PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+[ -n "$SCRIPTS" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 bash "$SCRIPTS/auto-diagnose.sh" <session> <orig-url> <impl-url> \
   tmp/ref/<component>/static/diff/<pos>.png
 ```
@@ -151,7 +154,7 @@ Do NOT fix minor issues while critical ones exist — critical fixes often resol
 1. **Run 10-point score first** (see `../ui-reverse-engineering/style-audit.md` scoring section). This tells you what category to fix.
 2. Write one sentence naming the root cause before touching any code: _"The gap exists because X"_
 3. Check if the property belongs to a design bundle (`design-bundles.json`). If yes, verify all sibling properties in the bundle (see `component-generation.md` covariance rules).
-4. If you cannot name the cause, run `agent-browser eval` to inspect computed styles at that moment
+4. If you cannot name the cause, run `agent-browser --session <s> eval` to inspect computed styles at that moment
 5. Targeted fix → re-run scoring → re-run the specific capture that failed → compare
 6. **Score regression → rollback:** If the 10-point score drops after a fix, `git checkout` the component and try a different approach
 7. **Repeated FAIL detection:** If the same scroll position or element FAILs twice consecutively with the same AE range (±200), the diagnosis is wrong. Do NOT try the same approach a third time. Instead:
@@ -165,7 +168,11 @@ Do NOT fix minor issues while critical ones exist — critical fixes often resol
 Before pixel-level comparison, verify the implementation's layout structure matches the original:
 
 ```bash
-bash "$SCRIPTS_DIR/layout-health-check.sh" <session> <orig-url> <impl-url> tmp/ref/<component>
+SCRIPTS="${VISUAL_DEBUG_SCRIPTS_DIR:-${PLUGIN_ROOT:+$PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+[ -n "$SCRIPTS" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
+bash "$SCRIPTS/layout-health-check.sh" <session> <orig-url> <impl-url> tmp/ref/<component>
 ```
 
 **Gate:** Exit code 0 (no critical issues). If exit 1:
@@ -256,7 +263,7 @@ After fixing all defects in the current batch:
 - New defects found → loop back to H1 (iteration count += 1)
 - Same defects persist after fix → diagnosis was wrong. Re-instrument:
   ```bash
-  agent-browser eval "(() => {
+  agent-browser --session <s> eval "(() => {
     const el = document.querySelector('<selector>');
     const s = getComputedStyle(el);
     return JSON.stringify({ /* all relevant properties */ });
@@ -312,7 +319,9 @@ After AE + DSSIM complete, the LLM reads **every position's** ref+impl pair. Thi
 
 #### MANDATORY: delegate to a subagent
 
-Phase E reads ~22 PNG pairs (~44K vision tokens). **Run it inside an `Agent` tool call** so the vision tokens never enter the main context — only the verdict markdown table returns.
+Phase E reads ~22 PNG pairs (~44K vision tokens). **Run it in a delegated subagent context** so the vision tokens never enter the main context, and only the verdict markdown table returns.
+
+Claude Code-style example:
 
 ```
 Agent({
@@ -322,7 +331,7 @@ Agent({
 })
 ```
 
-The subagent has its own context, reads every pair, returns the table. Main context cost: ~500 tokens (the table) instead of ~44K. Do **not** run Phase E inline — that defeats the entire visual-debug "near-zero vision tokens" guarantee for any session that reaches this step.
+The subagent has its own context, reads every pair, returns the table. Main context cost: ~500 tokens (the table) instead of ~44K. Do **not** run Phase E inline, because that defeats the entire visual-debug "near-zero vision tokens" guarantee for any session that reaches this step.
 
 If you skip the subagent and read pairs inline, mark the choice explicitly with the reason ("session is already terminating, no compaction risk") — otherwise default to subagent.
 
@@ -426,7 +435,7 @@ When a visual bug is reported (white flash, wrong timing, layout jump):
 1. Name the root cause in one sentence: _"The white flash happens because X"_
 2. If you cannot name it, instrument:
    ```bash
-   agent-browser eval "
+   agent-browser --session <s> eval "
    (() => {
      const panes = document.querySelectorAll('[class*=pane], [class*=slot]');
      return JSON.stringify([...panes].map(el => {

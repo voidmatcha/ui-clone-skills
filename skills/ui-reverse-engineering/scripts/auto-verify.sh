@@ -1,1 +1,0 @@
-../../../scripts/auto-verify.sh

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # auto-verify.sh — Single verification command that runs all checks
 #
-# Usage: bash auto-verify.sh <session> <orig-url> <impl-url> <ref-dir>
+# Usage: bash scripts/verify/auto-verify.sh <session> <orig-url> <impl-url> <ref-dir>
 #
 # Runs in order:
 #   D0: layout-health-check (structural comparison)
@@ -21,6 +21,7 @@ IMPL_URL="${3:?}"
 REF_DIR="${4:?}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VIEW_W="${VIEW_W:-1440}"
 VIEW_H="${VIEW_H:-900}"
 
@@ -30,23 +31,19 @@ cleanup_browsers() {
 }
 trap cleanup_browsers EXIT
 
-# Resolve visual-debug scripts location
-# Try: sibling skill dir, then installed skills, then fallback find
-VISUAL_DEBUG_SCRIPTS=""
-for candidate in \
-  "$(dirname "$SCRIPT_DIR")/skills/visual-debug/scripts" \
-  "$HOME/.claude/skills/visual-debug/scripts"; do
-  if [ -d "$candidate" ] && [ -f "$candidate/ae-compare.sh" ]; then
-    VISUAL_DEBUG_SCRIPTS="$candidate"
-    break
-  fi
-done
+# Resolve visual-debug scripts location.
+VISUAL_DEBUG_SCRIPTS="${VISUAL_DEBUG_SCRIPTS_DIR:-}"
 if [ -z "$VISUAL_DEBUG_SCRIPTS" ]; then
-  VISUAL_DEBUG_SCRIPTS="$(find "$HOME/.claude/skills" -name 'ae-compare.sh' -exec dirname {} \; 2>/dev/null | head -1 || true)"
+  # cat may fail under set -e if the marker file is absent; trailing `|| true` is required.
+  _marker="$(cat "$HOME/.config/ui-clone-skills/root" 2>/dev/null || true)"
+  _marker="${_marker%$'\r'}"
+  for root in "$REPO_ROOT" "${PLUGIN_ROOT:-}" "${CODEX_PLUGIN_ROOT:-}" "${CLAUDE_PLUGIN_ROOT:-}" "${UI_CLONE_ROOT:-}" "$_marker" "${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}" "$HOME"/.claude/plugins/cache/*/ui-clone-skills/*/ "$HOME"/.codex/plugins/cache/*/ui-clone-skills/*/; do
+    [ -n "$root" ] && [ -f "$root/skills/visual-debug/scripts/ae-compare.sh" ] && VISUAL_DEBUG_SCRIPTS=$(cd "$root/skills/visual-debug/scripts" && pwd) && break
+  done
 fi
 if [ -z "$VISUAL_DEBUG_SCRIPTS" ]; then
   echo "ERROR: visual-debug scripts not found (ae-compare.sh, batch-compare.sh)"
-  echo "Expected at: $(dirname "$SCRIPT_DIR")/skills/visual-debug/scripts/"
+  echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT. Default checked: $REPO_ROOT/skills/visual-debug/scripts/"
   exit 2
 fi
 
@@ -69,6 +66,19 @@ run_check() {
   else
     echo -e "  ${RED}FAIL${NC}"
     TOTAL_FAIL=$((TOTAL_FAIL + 1))
+  fi
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  else
+    "$@"
   fi
 }
 
@@ -104,17 +114,17 @@ echo -e "\n${BOLD}Capturing implementation screenshots...${NC}"
 mkdir -p "$REF_DIR/static/impl" "$REF_DIR/static/diff"
 
 # Capture impl at same scroll positions as ref
-timeout 30 agent-browser open "$IMPL_URL" --session "${SESSION}-verify" 2>/dev/null || true
-timeout 10 agent-browser set viewport $VIEW_W $VIEW_H --session "${SESSION}-verify" 2>/dev/null || true
+run_with_timeout 30 agent-browser open "$IMPL_URL" --session "${SESSION}-verify" 2>/dev/null || true
+run_with_timeout 10 agent-browser set viewport "$VIEW_W" "$VIEW_H" --session "${SESSION}-verify" 2>/dev/null || true
 sleep 5
 
 for pct in 0 10 20 30 40 50 60 70 80 90 100; do
-  timeout 15 agent-browser eval "(()=>{const h=document.documentElement.scrollHeight-window.innerHeight;window.scrollTo(0,h*$pct/100);return $pct})()" --session "${SESSION}-verify" 2>/dev/null || true
+  run_with_timeout 15 agent-browser eval "(()=>{const h=document.documentElement.scrollHeight-window.innerHeight;window.scrollTo(0,h*$pct/100);return $pct})()" --session "${SESSION}-verify" 2>/dev/null || true
   sleep 1
-  timeout 15 agent-browser screenshot "$REF_DIR/static/impl/${pct}pct.png" --session "${SESSION}-verify" 2>/dev/null || true
+  run_with_timeout 15 agent-browser screenshot "$REF_DIR/static/impl/${pct}pct.png" --session "${SESSION}-verify" 2>/dev/null || true
 done
 
-timeout 10 agent-browser --session "${SESSION}-verify" close 2>/dev/null || true
+run_with_timeout 10 agent-browser --session "${SESSION}-verify" close 2>/dev/null || true
 
 # Run batch comparison
 if [ -f "$VISUAL_DEBUG_SCRIPTS/batch-compare.sh" ]; then
@@ -155,7 +165,7 @@ fi
 
 # ── Post-implement gate ──
 run_check "Gate: post-implement" \
-  uv run --project "$(cd "$SCRIPT_DIR/.." && pwd)" python -m ui_clone.gate "$REF_DIR" post-implement
+  uv run --project "$REPO_ROOT" python -m ui_clone.gate "$REF_DIR" post-implement
 
 # ── Summary ──
 echo -e "\n${BOLD}═══ RESULT ═══${NC}"

@@ -126,11 +126,6 @@
     "note": "This is visual-debug, not ui-reverse-engineering — user is comparing existing impl, not starting a new clone"
   },
   {
-    "query": "원본이랑 아직 다르다 확인해줘",
-    "should_trigger": false,
-    "note": "This is visual-debug — user wants comparison, not new extraction"
-  },
-  {
     "query": "run AE diff between original and my implementation",
     "should_trigger": false,
     "note": "This is visual-debug — explicit AE diff request"

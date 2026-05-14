@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # extract-assets.sh — Download video backgrounds, fonts, and other assets from original site
+# Section name keyword → name mapping: shared with extract-section-html.sh and
+# section-clips.sh. Adding a new keyword? Update all 3.
 # Usage: bash extract-assets.sh <session> <output-dir> <public-dir>
 #   session    = agent-browser session name (site must be open)
 #   output-dir = e.g. tmp/ref/mysite

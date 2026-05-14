@@ -28,7 +28,7 @@ Step 5: Resting-state screenshot (1x)  → Sanity check only (idle state, no ani
 Scan the DOM for elements that have animation-related properties set:
 
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const animated = [];
   document.querySelectorAll('*').forEach(el => {
     const s = getComputedStyle(el);
@@ -72,7 +72,7 @@ Use the class names from Step 1 as grep anchors to find animation code in JS bun
 SCRIPTS="$(dirname "$0")/../scripts"
 
 # Get all script URLs
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   return JSON.stringify([...document.querySelectorAll('script[src]')].map(s => s.src));
 })()"
 
@@ -203,7 +203,7 @@ After bundle verification passes, take ONE screenshot of the idle/resting state:
 
 ```bash
 # Freeze all auto-rotation before screenshot
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   // Block future carousel intervals
   const orig = window.setInterval;
   window.setInterval = function(fn, ms) {
@@ -218,7 +218,7 @@ agent-browser eval "(() => {
   return 'frozen for screenshot';
 })()"
 
-agent-browser screenshot tmp/ref/<effect-name>/resting-state-impl.png
+agent-browser --session <s> screenshot tmp/ref/<effect-name>/resting-state-impl.png
 ```
 
 Compare against a single ref resting-state screenshot. This is a **sanity check** — it verifies layout/colors but does NOT validate animation timing or transitions.

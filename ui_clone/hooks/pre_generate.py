@@ -65,7 +65,7 @@ def main() -> None:
 
     # Derive project root from the file being edited when possible.
     # This prevents cross-project ref dir pollution (e.g., editing
-    # navercorp-clone/src/... but hook finds kurlynmart/tmp/ref/).
+    # project-a/src/... but hook finds project-b/tmp/ref/).
     project_root = None
     if file_path:
         fp = Path(file_path).resolve()

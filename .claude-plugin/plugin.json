@@ -1,7 +1,7 @@
 {
   "name": "ui-clone-skills",
-  "version": "0.4.9",
-  "description": "Point at any live website URL. Get production-ready React + Tailwind components that match the original — styles, animations, and responsive behavior. Downloads the actual CSS, greps JS bundles for animation parameters, and extracts Webflow IX2 timelines. Automated visual diff verification (AE/SSIM, no screenshot tokens). Anti-skip gates block phase transitions until extraction is complete.",
+  "version": "0.4.10",
+  "description": "Clone any live website into React + Tailwind code with extraction-first verification — no vision tokens, real CSS/JS bundle analysis instead of screenshots. Three skills: ui-reverse-engineering (URL → React + Tailwind, supports GSAP / Framer Motion / Lenis / Webflow IX2 / Next.js / Tailwind v4), ui-capture (reference screenshots, scroll evidence, transitions), visual-debug (AE/SSIM diff + computed-style mismatch diagnosis). Shared hooks and gates enforce extraction and verification before code generation.",
   "license": "Apache-2.0",
   "author": {
     "name": "YONGJAE LEE"

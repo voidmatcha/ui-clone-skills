@@ -50,7 +50,9 @@ Run `freeze-animations.sh <session>` AFTER page load completes (splash done)
 but BEFORE any screenshot capture:
 
 ```bash
-bash "$SCRIPTS_DIR/freeze-animations.sh" "$SESSION"
+PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-}}}}"
+[ -n "$PLUGIN_ROOT" ] || { echo "Set PLUGIN_ROOT=/path/to/ui-clone-skills" >&2; exit 1; }
+bash "$PLUGIN_ROOT/scripts/verify/freeze-animations.sh" "$SESSION"
 ```
 
 This kills timers, pauses CSS animations, hides canvases.
@@ -60,13 +62,13 @@ This kills timers, pauses CSS animations, hides canvases.
 After freezing, detect which carousel slide is active:
 
 ```bash
-agent-browser eval "(()=>{
+agent-browser --session "$SESSION" eval "(()=>{
   // Find carousel state indicators
   const active = document.querySelector('[class*=active],[aria-current=true],[data-active]');
   const infoCard = document.querySelector('[class*=info-card],[class*=card]');
   const title = infoCard?.querySelector('h2,h3')?.textContent?.trim();
   return JSON.stringify({ activeSlide: title || 'unknown' });
-})()" --session "$SESSION"
+})()"
 ```
 
 Save to `tmp/ref/<component>/capture-state.json`.

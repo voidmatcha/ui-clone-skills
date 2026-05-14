@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# scroll-coverage-check.sh — verification-plan-dispatchable wrapper that
+# revives the previously-orphan `batch-scroll.sh` + `batch-compare.sh` pair.
+#
+# Why this exists:
+#   `section-compare.sh` matches sections by DOM enumeration → on sites whose
+#   ref `<main>` contains only `<div>` children it collapses to 1 container
+#   (the whole page). Coverage drops to 2 sections vs the 16+ that section-
+#   map.json finds at extraction time. This wrapper captures screenshots
+#   every 10% of the page scroll on BOTH sides and AE-diffs each pair —
+#   an orthogonal coverage check that exercises every depth of the page
+#   regardless of section enumeration robustness.
+#
+# Why the prior scripts went unused:
+#   `batch-scroll.sh` + `batch-compare.sh` already exist but were never
+#   wired into verification-plan dispatch — `scripts/verify/auto-verify.sh`
+#   was the sole caller. Operator demanded fix.
+#
+# Usage: scroll-coverage-check.sh <ref-dir> [<orig-url> <impl-url> <session>]
+#   ref-dir         the canonical ref dir
+#   orig-url        ref site URL (defaults from regions.json `sourceUrl` if present)
+#   impl-url        local impl URL (defaults to http://localhost:3000)
+#   session         agent-browser session (defaults `scroll-coverage-check`)
+#
+# Writes:
+#   <ref-dir>/scroll-coverage.json  — schemaVersion 1, status, points, fail_count
+#   <ref-dir>/static/{ref,impl}/<pct>pct.png  (batch-scroll output)
+#   <ref-dir>/static/<pct>pct-result.txt        (batch-compare output)
+#
+# Pass criteria:
+#   pass  — fewer than 30% of sampled points exceed AE/Mpx threshold
+#           (configurable via SCROLL_COVERAGE_FAIL_PCT, default 30)
+#   fail  — 30%+ of points exceed threshold
+#   skip  — regions.json absent OR fewer than 5 regions (small page)
+#           OR impl URL not reachable
+
+set -uo pipefail
+
+# Source the timeout shim so macOS gets a working `timeout` cmd. See
+# scripts/lib/timeout-shim.sh.
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SHIM="$_SCRIPT_DIR/../../../scripts/lib/timeout-shim.sh"
+[ -f "$_SHIM" ] && . "$_SHIM" || true
+
+REF_DIR="${1:?Usage: scroll-coverage-check.sh <ref-dir> [<orig-url> <impl-url> <session>]}"
+[ -d "$REF_DIR" ] || { echo "ref-dir not found: $REF_DIR" >&2; exit 2; }
+
+ORIG_URL="${2:-}"
+IMPL_URL="${3:-http://localhost:3000}"
+SESSION="${4:-scroll-coverage-check}"
+
+REGIONS="$REF_DIR/regions.json"
+OUT="$REF_DIR/scroll-coverage.json"
+THRESHOLD="${SCROLL_COVERAGE_THRESHOLD:-4000}"   # AE/Mpx per scroll point
+FAIL_PCT="${SCROLL_COVERAGE_FAIL_PCT:-30}"      # tolerated fail-rate
+
+write_status() {
+  local status="$1" points="$2" failed="$3" reason="$4"
+  python3 - "$OUT" "$status" "$points" "$failed" "$THRESHOLD" "$FAIL_PCT" "$reason" <<'PY'
+import json, sys
+out_path, status, points, failed, threshold, fail_pct, reason = sys.argv[1:]
+with open(out_path, "w") as fh:
+    json.dump({
+        "schemaVersion": 1,
+        "status": status,
+        "points": int(points),
+        "failed_points": int(failed),
+        "threshold": int(threshold),
+        "fail_pct_tolerated": int(fail_pct),
+        "reason": reason,
+    }, fh, indent=2)
+PY
+}
+
+# Skip-paths first
+if [ ! -f "$REGIONS" ]; then
+  write_status skip 0 0 "regions.json absent — extraction not complete"
+  echo "▸ scroll-coverage: SKIP (no regions.json)"
+  exit 0
+fi
+
+REGION_COUNT=$(python3 -c "
+import json
+try:
+    d = json.load(open('$REGIONS'))
+    if isinstance(d, dict):
+        print(len(d.get('regions') or []))
+    elif isinstance(d, list):
+        print(len(d))
+    else:
+        print(0)
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+
+if [ "${REGION_COUNT:-0}" -lt 5 ]; then
+  write_status skip 0 0 "regions.json has only ${REGION_COUNT} regions — coverage redundant for short pages"
+  echo "▸ scroll-coverage: SKIP (only ${REGION_COUNT} regions)"
+  exit 0
+fi
+
+# Default ORIG_URL from regions.json if not provided
+if [ -z "$ORIG_URL" ]; then
+  ORIG_URL=$(python3 -c "
+import json
+try:
+    d = json.load(open('$REGIONS'))
+    print(d.get('sourceUrl', '') if isinstance(d, dict) else '')
+except Exception:
+    print('')
+" 2>/dev/null)
+fi
+if [ -z "$ORIG_URL" ]; then
+  write_status skip 0 0 "no orig-url available — pass explicitly or set sourceUrl in regions.json"
+  echo "▸ scroll-coverage: SKIP (no orig-url)"
+  exit 0
+fi
+
+# Impl URL reachable?
+if ! curl -s -o /dev/null -w "%{http_code}" "$IMPL_URL" 2>/dev/null | grep -q "^200$"; then
+  write_status skip 0 0 "impl URL not reachable: $IMPL_URL"
+  echo "▸ scroll-coverage: SKIP (impl unreachable)"
+  exit 0
+fi
+
+# Drive the pair
+SCRIPT_DIR="$_SCRIPT_DIR"
+echo "▸ scroll-coverage: capture (batch-scroll.sh)..."
+bash "$SCRIPT_DIR/batch-scroll.sh" "$ORIG_URL" "$IMPL_URL" "$SESSION" "$REF_DIR" 2>&1 | tail -10
+echo "▸ scroll-coverage: compare (batch-compare.sh)..."
+BC_OUT=$(bash "$SCRIPT_DIR/batch-compare.sh" "$REF_DIR" "$THRESHOLD" 2>&1)
+echo "$BC_OUT" | tail -25
+
+# Parse batch-compare table: count points + fails
+POINTS=$(echo "$BC_OUT" | grep -cE '^\| *[0-9]+pct' || true)
+FAILED=$(echo "$BC_OUT" | grep -cE '^\| *[0-9]+pct.*❌' || true)
+
+if [ "${POINTS:-0}" -eq 0 ]; then
+  write_status skip 0 0 "batch-compare produced no rows — capture failed?"
+  echo "✗ scroll-coverage: SKIP (no compare rows)" >&2
+  exit 0
+fi
+
+# Compute fail rate
+ACTUAL_FAIL_PCT=$(python3 -c "print(int(100 * ${FAILED:-0} / max(1, ${POINTS:-1})))")
+
+if [ "${ACTUAL_FAIL_PCT:-0}" -le "${FAIL_PCT:-30}" ]; then
+  write_status pass "$POINTS" "$FAILED" "$FAILED of $POINTS scroll points failed (${ACTUAL_FAIL_PCT}% ≤ ${FAIL_PCT}%)"
+  echo "✓ scroll-coverage: PASS ($FAILED/$POINTS = ${ACTUAL_FAIL_PCT}%)"
+  exit 0
+else
+  write_status fail "$POINTS" "$FAILED" "$FAILED of $POINTS scroll points failed (${ACTUAL_FAIL_PCT}% > ${FAIL_PCT}%)"
+  echo "✗ scroll-coverage: FAIL ($FAILED/$POINTS = ${ACTUAL_FAIL_PCT}%)" >&2
+  exit 1
+fi

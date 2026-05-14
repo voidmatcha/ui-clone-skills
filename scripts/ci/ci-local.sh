@@ -6,7 +6,7 @@
 # only surfaced on GitHub. This is the single source of truth — if you change CI,
 # change this; if you change this, change CI.
 #
-# Usage: bash scripts/ci-local.sh [--quiet]
+# Usage: bash scripts/ci/ci-local.sh [--quiet]
 # Exit:  0 = all pass, non-zero = first failing step
 # Bypass (emergency only): UI_RE_SKIP_CI_LOCAL=1
 
@@ -15,7 +15,7 @@ set -uo pipefail
 QUIET=0
 [ "${1:-}" = "--quiet" ] && QUIET=1
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)" || { echo "ci-local.sh: cannot resolve repo root" >&2; exit 1; }
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)" || { echo "ci-local.sh: cannot resolve repo root" >&2; exit 1; }
 cd "$REPO_ROOT" || { echo "ci-local.sh: cannot cd to $REPO_ROOT" >&2; exit 1; }
 
 if [ "${UI_RE_SKIP_CI_LOCAL:-}" = "1" ]; then
@@ -37,9 +37,9 @@ fi
 # 2. Type check (mypy)
 step "Type check"
 if [ "$QUIET" = "1" ]; then
-  uv run python -m mypy ui_clone/ >/dev/null 2>&1 || fail "mypy"
+  uv run python -m mypy ui_clone/ tests/ >/dev/null 2>&1 || fail "mypy"
 else
-  uv run python -m mypy ui_clone/ || fail "mypy"
+  uv run python -m mypy ui_clone/ tests/ || fail "mypy"
 fi
 
 # 3. Lint check (ruff)
@@ -52,7 +52,7 @@ fi
 
 # 4. Shell syntax check
 step "Shell syntax check"
-for f in scripts/*.sh hooks/*.sh skills/visual-debug/scripts/*.sh; do
+for f in scripts/ci/*.sh scripts/hooks/*.sh scripts/extract/*.sh scripts/verify/*.sh hooks/*.sh skills/visual-debug/scripts/*.sh; do
   bash -n "$f" || fail "shell syntax: $f"
 done
 [ "$QUIET" = "1" ] || echo "  ✓ all shell scripts parse"
@@ -60,9 +60,19 @@ done
 # 5. Review checks
 step "Review checks"
 if [ "$QUIET" = "1" ]; then
-  bash scripts/review.sh --quiet >/dev/null 2>&1 || fail "review.sh"
+  bash scripts/ci/review.sh --quiet >/dev/null 2>&1 || fail "review.sh"
 else
-  bash scripts/review.sh || fail "review.sh"
+  bash scripts/ci/review.sh || fail "review.sh"
+fi
+
+# 6. Drift smoke test — verifies review.sh + pre-push-security.sh still catch
+# known-bad mutations. Prevents the guards rotting silently (regex breaking,
+# denylist entry getting dropped, language scanner no-opping on a platform).
+step "Drift smoke test"
+if [ "$QUIET" = "1" ]; then
+  bash scripts/ci/test-parity.sh >/dev/null 2>&1 || fail "test-parity.sh"
+else
+  bash scripts/ci/test-parity.sh || fail "test-parity.sh"
 fi
 
 [ "$QUIET" = "1" ] || {

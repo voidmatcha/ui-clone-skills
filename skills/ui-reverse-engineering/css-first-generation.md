@@ -7,7 +7,7 @@ Download original CSS, use original class names, override only what React requir
 During Phase 2 extraction, download ALL site-specific CSS:
 
 ```bash
-agent-browser eval "(() => JSON.stringify(
+agent-browser --session <s> eval "(() => JSON.stringify(
   performance.getEntriesByType('resource')
     .filter(e => e.name.match(/\.css(\?|$)/i) && !e.name.includes('shopify') && !e.name.includes('klaviyo'))
     .map(e => e.name)
@@ -31,7 +31,7 @@ grep -oE "url\(['\"]?[^'\")\s]+['\"]?\)" tmp/ref/<component>/css/*.css | \
 
 Common missed assets: background textures (showcase backgrounds), FAQ/feature icons, video posters, Typekit/Adobe Fonts.
 
-Automate with `scripts/extract-assets.sh`.
+Automate with `scripts/extract/extract-assets.sh`.
 
 ## Step 2: Include original CSS in the project
 

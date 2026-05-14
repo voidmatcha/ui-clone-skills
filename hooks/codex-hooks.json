@@ -1,0 +1,72 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-$(cat \"$HOME/.config/ui-clone-skills/root\" 2>/dev/null || true)}}}}\"; if [ -n \"$_R\" ]; then bash \"$_R/hooks/shim.sh\" ui_clone.hooks.pre_generate; fi",
+            "timeout": 30,
+            "statusMessage": "Checking ui-clone extraction gate"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-$(cat \"$HOME/.config/ui-clone-skills/root\" 2>/dev/null || true)}}}}\"; if [ -n \"$_R\" ]; then bash \"$_R/hooks/shim.sh\" ui_clone.hooks.pre_bash; fi",
+            "timeout": 30,
+            "statusMessage": "Checking ui-clone Bash gate"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-$(cat \"$HOME/.config/ui-clone-skills/root\" 2>/dev/null || true)}}}}\"; if [ -n \"$_R\" ]; then bash \"$_R/hooks/shim.sh\" ui_clone.hooks.post_verify; fi",
+            "timeout": 30,
+            "statusMessage": "Checking ui-clone verification state"
+          },
+          {
+            "type": "command",
+            "command": "_R=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-$(cat \"$HOME/.config/ui-clone-skills/root\" 2>/dev/null || true)}}}}\"; if [ -n \"$_R\" ]; then bash \"$_R/hooks/shim.sh\" ui_clone.hooks.devtools_errors; fi",
+            "timeout": 30,
+            "statusMessage": "Checking browser console errors"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-$(cat \"$HOME/.config/ui-clone-skills/root\" 2>/dev/null || true)}}}}\"; if [ -n \"$_R\" ]; then bash \"$_R/hooks/shim.sh\" ui_clone.hooks.section_gate; fi",
+            "timeout": 30,
+            "statusMessage": "Checking ui-clone completion gate"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-$(cat \"$HOME/.config/ui-clone-skills/root\" 2>/dev/null || true)}}}}\"; if [ -n \"$_R\" ]; then bash \"$_R/hooks/shim.sh\" ui_clone.hooks.session_resume; fi",
+            "timeout": 30,
+            "statusMessage": "Loading ui-clone pipeline state"
+          }
+        ]
+      }
+    ]
+  }
+}

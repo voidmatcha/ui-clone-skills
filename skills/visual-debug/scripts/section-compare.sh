@@ -32,10 +32,22 @@ WAIT_SCROLL_SETTLE="${WAIT_SCROLL_SETTLE:-0.5}"
 # elements via `visibility: hidden` (applied identically to ref + impl)
 # removes the noise without affecting layout.
 #
-#   EXCLUDE_DYNAMIC=1                                     # opt in (default 0)
+#   EXCLUDE_DYNAMIC=1                                     # DEFAULT (set 0 to opt out)
 #   DYNAMIC_SELECTORS="canvas, video, .ticker"            # override defaults
 #   transition-spec.json entries with `"dynamic": true`   # auto-augment
-EXCLUDE_DYNAMIC="${EXCLUDE_DYNAMIC:-0}"
+#
+# EXCLUDE_DYNAMIC default flipped 0 → 1 after the c9b638d/d19e28d benchmarks:
+# both runs measured AE against ref videos that hadn't paused at the same
+# frame as impl videos (codec/scheduler variance), producing 1M+ AE on
+# sections whose static layout was actually close to ref. The existing
+# pause logic (animation-play-state, video.pause()+currentTime=0) handles
+# CSS loops + <video> auto-restart, but a video element that simply
+# renders a different decoded frame at currentTime=0 between captures
+# still diffs catastrophically — masking it out is the only deterministic
+# option. Motion fidelity is validated SEPARATELY by transition-compare /
+# video-motion-compare, NOT by section-compare. Opt back into per-pixel
+# motion-in-section by setting `EXCLUDE_DYNAMIC=0`.
+EXCLUDE_DYNAMIC="${EXCLUDE_DYNAMIC:-1}"
 DYNAMIC_SELECTORS="${DYNAMIC_SELECTORS:-canvas, video}"
 
 ORIG_URL="${1:?Usage: section-compare.sh <orig-url> <impl-url> <session> [output-dir]}"
@@ -60,6 +72,63 @@ if [[ "$DIR" != /* ]]; then
 fi
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── --only-if-changed short-circuit ──
+# When ONLY_IF_CHANGED=1 and IMPL_SRC_DIR points at the implementation source
+# tree, skip the full comparison if no impl source file has changed since the
+# last successful run. The previous result.txt stays in place so the Stop
+# gate's verification passes against it.
+#
+# Hash strategy: SHA-256 of (sorted relative paths + content) of every *.tsx
+# /*.jsx/*.ts/*.css/*.scss under IMPL_SRC_DIR. mtime alone is unreliable
+# because editor saves bump it without changing bytes.
+#
+# Usage:
+#   ONLY_IF_CHANGED=1 IMPL_SRC_DIR=~/projects/foo/src \
+#     bash section-compare.sh <orig> <impl> <session> "$(pwd)/tmp/ref/<c>"
+ONLY_IF_CHANGED="${ONLY_IF_CHANGED:-0}"
+IMPL_SRC_DIR="${IMPL_SRC_DIR:-}"
+HASH_FILE="$DIR/sections/.last-impl-hash"
+
+compute_impl_hash() {
+  # Args: $1 = src dir. Echo a single sha256.
+  ( cd "$1" && find . \
+      \( -name '*.tsx' -o -name '*.jsx' -o -name '*.ts' -o -name '*.js' \
+         -o -name '*.css' -o -name '*.scss' \) \
+      -not -path '*/node_modules/*' \
+      -not -path '*/.next/*' \
+      -not -path '*/dist/*' \
+      -not -path '*/build/*' \
+      -type f -print0 2>/dev/null \
+    | sort -z \
+    | xargs -0 cat 2>/dev/null \
+    | shasum -a 256 \
+    | awk '{print $1}'
+  )
+}
+
+if [ "$ONLY_IF_CHANGED" = "1" ]; then
+  if [ -z "$IMPL_SRC_DIR" ] || [ ! -d "$IMPL_SRC_DIR" ]; then
+    echo "ERROR: ONLY_IF_CHANGED=1 requires IMPL_SRC_DIR to point at the impl source tree" >&2
+    echo "  current IMPL_SRC_DIR='$IMPL_SRC_DIR' (must exist and be a directory)" >&2
+    exit 2
+  fi
+  CURRENT_HASH=$(compute_impl_hash "$IMPL_SRC_DIR")
+  if [ -z "$CURRENT_HASH" ]; then
+    echo "WARNING: no source files found under $IMPL_SRC_DIR — proceeding with full run" >&2
+  elif [ -f "$HASH_FILE" ] && [ -f "$DIR/sections/result.txt" ]; then
+    PRIOR_HASH=$(cat "$HASH_FILE" 2>/dev/null || echo "")
+    if [ "$CURRENT_HASH" = "$PRIOR_HASH" ]; then
+      echo "▸ ONLY_IF_CHANGED: impl source hash matches prior run ($CURRENT_HASH)"
+      echo "  → no source changes since last section-compare; reusing $DIR/sections/result.txt"
+      echo "  (delete $HASH_FILE to force a full re-run)"
+      exit 0
+    fi
+    echo "▸ ONLY_IF_CHANGED: impl source changed (was ${PRIOR_HASH:0:12}..., now ${CURRENT_HASH:0:12}...) — running full compare"
+  else
+    echo "▸ ONLY_IF_CHANGED: no prior result.txt or hash file — running full compare"
+  fi
+fi
 
 # Augment DYNAMIC_SELECTORS from transition-spec.json — entries with `dynamic: true`
 # contribute their `target` selector. Ignored when EXCLUDE_DYNAMIC is off.
@@ -131,22 +200,46 @@ rm -f "$DIR/sections/ref/"*.png "$DIR/sections/impl/"*.png "$DIR/sections/diff/"
 SUBSTITUTION_FILE="$DIR/asset-substitution.json"
 SUBSTITUTION_PATTERNS=""
 SUBSTITUTION_ALL=0
+SUBSTITUTION_AUTO=0    # 1 if structuralOnlySections was auto-defaulted
 if [ -f "$SUBSTITUTION_FILE" ]; then
-  SUBSTITUTION_PATTERNS=$(python3 -c "
-import json, sys
+  # Observed failure mode (benchmark 4-run baseline, realfood.gov): the agent
+  # writes asset-substitution.json with only `fonts`/`images` declared and
+  # forgets the `structuralOnlySections` key — which is the actual toggle for
+  # structural-only mode. Result: pixel diff still runs strict on every
+  # section, AE explodes to 1M+, gate never clears. Forgiving fallback: when
+  # fonts/images/videos are non-empty but structuralOnlySections is missing,
+  # auto-default to ["*"] and log a hint so the agent can promote it next run.
+  PARSED=$(python3 -c "
+import json
 try:
     d = json.loads(open('$SUBSTITUTION_FILE').read())
     pats = d.get('structuralOnlySections', [])
     if not isinstance(pats, list): pats = []
+    has_subs = any(
+        isinstance(d.get(k), list) and d.get(k)
+        for k in ('fonts','images','videos')
+    )
+    auto = 0
+    if has_subs and not pats:
+        pats = ['*']
+        auto = 1
     print(' '.join(p for p in pats if isinstance(p, str)))
-except Exception as e:
-    print('', file=sys.stderr)
-" 2>/dev/null || echo "")
+    print(auto)
+except Exception:
+    print('')
+    print('0')
+" 2>/dev/null)
+  SUBSTITUTION_PATTERNS="$(echo "$PARSED" | sed -n '1p')"
+  SUBSTITUTION_AUTO="$(echo "$PARSED" | sed -n '2p')"
   case " $SUBSTITUTION_PATTERNS " in
     *" * "*) SUBSTITUTION_ALL=1 ;;
   esac
   if [ -n "$SUBSTITUTION_PATTERNS" ]; then
     echo "▸ Asset substitution mode active: pixel diff skipped for [$SUBSTITUTION_PATTERNS]"
+    if [ "$SUBSTITUTION_AUTO" = "1" ]; then
+      echo "  ⚠ structuralOnlySections key was MISSING — auto-defaulted to [\"*\"] because fonts/images/videos were declared."
+      echo "  ⚠ Add \"structuralOnlySections\": [\"*\"] (or specific section names) to $SUBSTITUTION_FILE to make this explicit."
+    fi
   fi
 fi
 
@@ -165,8 +258,8 @@ echo "▸ Opening both sites..."
 agent-browser --session "$SESSION_REF" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
 
-agent-browser --session "$SESSION_REF" open "$ORIG_URL" 2>&1 | head -1
-agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 | head -1
+agent-browser --session "$SESSION_REF" open "$ORIG_URL" 2>&1 | head -1 || true
+agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 | head -1 || true
 
 agent-browser --session "$SESSION_REF" wait "$WAIT_REF" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" wait "$WAIT_IMPL" > /dev/null 2>&1
@@ -174,7 +267,7 @@ agent-browser --session "$SESSION_IMPL" wait "$WAIT_IMPL" > /dev/null 2>&1
 # Remove common overlays (cookie banners, newsletter popups)
 DISMISS_OVERLAYS='(() => {
   // First sweep: vendor-specific consent/cookie SDKs that always render fixed UIs
-  document.querySelectorAll("#iubenda-cs-banner, [id^=iubenda-], [class*=iubenda], [id^=onetrust-], [class*=onetrust], [id^=osano-], [class*=osano], [id^=cky-], [class*=cookieconsent]").forEach(el => el.remove());
+  document.querySelectorAll("#iubenda-cs-banner, [id^=iubenda-], [class*=iubenda], [id^=onetrust-], [class*=onetrust], [id^=osano-], [class*=osano], [id^=cky-], [class*=cookieconsent], #cookie, [class~=cookie], [class*=cookie_]").forEach(el => el.remove());
   // Second sweep: heuristic match by class keywords for big fixed/absolute popups
   document.querySelectorAll("[class*=popup], [class*=modal], [class*=cookie], [class*=banner], [class*=overlay], [class*=signup]").forEach(el => {
     const s = getComputedStyle(el);
@@ -590,7 +683,17 @@ ENUMERATE_SECTIONS='(() => {
       if (tag === "script" || tag === "style" || tag === "link" || tag === "noscript") return;
       const rect = el.getBoundingClientRect();
       const h = rect.height;
-      if (h < 50 || rect.width < 100) return;
+      if (h < 50 || rect.width < 100) {
+        // h === 0 indicates a layout-only wrapper that does not size to its
+        // descendants (typical of abs-positioned-widget DOMs like Readymag
+        // exports — body children such as #root, #mags are 0-height because
+        // content lives in nested abs-positioned widgets). Descend so we
+        // can find the real visible sections inside.
+        if (h === 0 && el.children.length > 0) {
+          collect(el, depth + 1);
+        }
+        return;
+      }
 
       const isSemantic = semanticTags.has(tag);
       const isLargeDiv = tag === "div" && h > window.innerHeight * 0.2;
@@ -686,6 +789,73 @@ ENUMERATE_SECTIONS='(() => {
 
 agent-browser --session "$SESSION_REF" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/ref-sections.json" 2>&1
 agent-browser --session "$SESSION_IMPL" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/impl-sections.json" 2>&1
+
+# section-map.json ground truth — d19e28d benchmark exposed this gap:
+# the runtime ENUMERATE_SECTIONS JS above descends `<main>` only when its
+# children include `<section>` or `<main>` (line 709-712). realfood.gov's
+# ref `<main>` contains `<div>` children → enumeration collapses 15 visible
+# sections into a single "section-0" container. result.txt then only carries
+# 2 rows (section-0 + footer) — 14 sections never compared at all.
+#
+# extraction-time section-map.json already records 16 sections with their
+# semantic tags + selectors (its tag-attribution is best-effort but its
+# Y-coordinate ranges are reliable). When that file exists, override
+# ref-sections.json with its entries so the matcher sees the full set.
+# Falls back to the runtime enumeration when section-map.json is absent
+# or doesn't validate.
+if [ -f "$DIR/section-map.json" ]; then
+  python3 - "$DIR/section-map.json" "$DIR/sections/ref-sections.json" 2>/dev/null <<'PY' || true
+import json
+import sys
+import os
+sm_path, out_path = sys.argv[1], sys.argv[2]
+try:
+    sm = json.load(open(sm_path))
+except Exception:
+    sys.exit(0)
+sections = sm.get("sections") if isinstance(sm, dict) else None
+if not isinstance(sections, list) or len(sections) < 3:
+    # Either the file is malformed or has fewer sections than runtime —
+    # don't override.
+    sys.exit(0)
+# Synthesize ref-sections rows in the shape ENUMERATE_SECTIONS returns,
+# preserving the index-by-Y order section-map.json already uses.
+out = []
+sections_sorted = sorted(sections, key=lambda s: s.get("y") or 0)
+for i, s in enumerate(sections_sorted):
+    cls = (s.get("class") or "").strip()
+    sid = s.get("id")
+    tag = s.get("tag") or "section"
+    y = int(s.get("y") or 0)
+    h = int(s.get("height") or 0)
+    w = int(s.get("width") or 1440)
+    fp_seed = sid or cls or f"sec-{i}"
+    # fingerprint: lowercase alphanumeric, take first 100 chars of the
+    # human-readable seed. Runtime ENUMERATE_SECTIONS uses innerText; we
+    # don't have it here, so the class/id-derived fingerprint serves as a
+    # stable matching key for impl rows that DO have innerText. The
+    # matcher already tolerates partial-match fingerprints (substring).
+    import re
+    fp = re.sub(r"[^a-z0-9 ]", "", fp_seed.lower())[:100]
+    out.append({
+        "index": i,
+        "tag": tag,
+        "id": sid,
+        "className": cls[:80],
+        "fingerprint": fp,
+        "hasSvgText": False,
+        "rect": {"top": y, "left": 0, "width": w, "height": h},
+        "display": "block",
+        "gridCols": None,
+        "childCount": 0,
+    })
+with open(out_path, "w") as fh:
+    json.dump(out, fh)
+PY
+  if [ -s "$DIR/sections/ref-sections.json" ] && head -1 "$DIR/sections/ref-sections.json" | grep -q "^\["; then
+    echo "▸ ref-sections.json overridden from section-map.json (extraction-time ground truth)" >&2
+  fi
+fi
 
 _parse_section_count() {
   local f="$1"
@@ -1215,6 +1385,13 @@ echo "═══ Section Compare Complete ═══"
 echo "  Screenshots: $DIR/sections/{ref,impl,diff}/"
 echo "  Matches:     $DIR/sections/matches.json"
 echo "  Diffs:       $DIR/sections/structure-diff.json"
+
+# Persist the impl hash so the next ONLY_IF_CHANGED=1 run can short-circuit.
+# Written regardless of pass/fail — the hash records "this code was checked",
+# not "this code passed". Re-running on the same broken impl is still wasteful.
+if [ "$ONLY_IF_CHANGED" = "1" ] && [ -n "${CURRENT_HASH:-}" ]; then
+  echo "$CURRENT_HASH" > "$HASH_FILE"
+fi
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
   echo ""

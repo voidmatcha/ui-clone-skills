@@ -13,7 +13,7 @@ After DOM structure extraction, extract `<head>` metadata, download visible imag
 
 ```bash
 # Get all site-specific CSS URLs (exclude third-party: shopify infra, klaviyo, analytics)
-agent-browser eval "(() => JSON.stringify(
+agent-browser --session <s> eval "(() => JSON.stringify(
   performance.getEntriesByType('resource')
     .filter(e => e.name.match(/\.css(\?|$)/i))
     .filter(e => {
@@ -82,7 +82,7 @@ cat tmp/ref/<component>/css/*.css | grep -oE '\-\-[a-zA-Z0-9_-]+:\s*[^;}]+' | se
 
 **Gate: After importing original CSS, verify no CSS variable is undefined:**
 ```bash
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const missing = [];
   document.querySelectorAll('*').forEach(el => {
     const s = getComputedStyle(el);
@@ -94,7 +94,7 @@ agent-browser eval "(() => {
 ### Head metadata extraction
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const title = document.title || '';
   const favicon = (() => {
@@ -117,7 +117,7 @@ agent-browser eval "
 Collect URLs of images actually rendered on screen (`height > 0`):
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const images = [];
   document.querySelectorAll('img').forEach(img => {
@@ -135,7 +135,7 @@ agent-browser eval "
 Also collect CSS `background-image` — many sites use these for hero images, section backgrounds, and card images:
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const bgImages = [];
   document.querySelectorAll('*').forEach(el => {
@@ -164,7 +164,7 @@ agent-browser eval "
 Inline SVGs cannot be downloaded as image files — they must be extracted as source code. **Never recreate SVGs from visual appearance.** A "similar" logo SVG is a wrong logo.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const svgs = [];
   document.querySelectorAll('svg').forEach(svg => {
@@ -241,7 +241,7 @@ mkdir -p tmp/ref/<component>/assets
 Custom fonts that fail to load cause cascading layout differences — wrong glyph widths change text wrapping, line heights, and element positions throughout the page. Download all fonts used by the site.
 
 ```bash
-agent-browser eval "
+agent-browser --session <s> eval "
 (() => {
   const fonts = [];
   for (const sheet of document.styleSheets) {
@@ -281,7 +281,7 @@ mkdir -p tmp/ref/<component>/fonts
 
 #### When `document.styleSheets` returns empty (CORS-blocked or JS-injected fonts)
 
-Some sites (e.g. Naver services) inject `@font-face` rules via a separately-fetched CSS file that is CORS-blocked from `cssRules` access. The font-family name appears in `computedStyle` but the font never renders — it silently falls back to the system font.
+Some sites inject `@font-face` rules via a separately-fetched CSS file that is CORS-blocked from `cssRules` access. The font-family name appears in `computedStyle` but the font never renders — it silently falls back to the system font.
 
 **Verify fonts are actually loaded** (always run this after implementing):
 
@@ -304,8 +304,10 @@ Note: `status: 'unloaded'` means the font face is registered but its unicode-ran
 A quick check: does the target font have *any* loaded face?
 
 ```bash
-agent-browser --session <s> eval "document.fonts.check('16px \"Sandoll Nemony2\"', '가나다')"
-# Returns true if the font is available for those characters, false if falling back
+agent-browser --session <s> eval "document.fonts.check('16px \"<Font Family>\"', '<sample-glyphs>')"
+# Returns true if the font is available for those characters, false if falling back.
+# For CJK fonts, pass a few characters from the target subset (e.g. one Hangul
+# triplet or three CJK ideographs). For Latin-only fonts, 'ABC' is sufficient.
 ```
 
 If this returns `false` but `computedStyle.fontFamily` lists the font — no `@font-face` source was loaded. The name is in the cascade but the browser has no file to render it from.
@@ -334,7 +336,7 @@ Sites with full-screen video backgrounds (hero videos, product videos) require t
 
 ```bash
 # Extract video source URLs
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const videos = document.querySelectorAll('video');
   return JSON.stringify([...videos].map((v, i) => ({
     index: i,
@@ -376,7 +378,7 @@ Many sites use Adobe Fonts (Typekit) which loads via a CSS file like `https://us
 
 ```bash
 # 1. Find Typekit CSS URL
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const links = [...document.querySelectorAll('link[href*=typekit]')];
   return JSON.stringify(links.map(l => l.href));
 })()"
@@ -394,7 +396,7 @@ grep -oE 'url\("[^"]+\.woff2[^"]*"\)' tmp/ref/<component>/typekit.css
 **Or use the automated script:**
 
 ```bash
-bash "$PLUGIN_ROOT/scripts/extract-assets.sh" <session> tmp/ref/<component> <public-dir>
+bash "$PLUGIN_ROOT/scripts/extract/extract-assets.sh" <session> tmp/ref/<component> <public-dir>
 ```
 
 This handles videos, Typekit fonts, and CDN fonts in one pass.

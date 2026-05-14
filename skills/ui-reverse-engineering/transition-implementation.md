@@ -2,6 +2,18 @@
 
 When implementing scroll/page-load/interaction transitions extracted from JS bundles.
 
+> 🚨 **Bundle → infrastructure components, not just per-component animations.**
+> Sites built with Lenis/Locomotive scroll, GSAP timelines, IntersectionObserver
+> reveal libraries, or splash-overlay loaders need *shared infrastructure*
+> components (`SmoothScroll`, `IntroAnimation`, `ScrollListener`) before any
+> section component renders. Read `bundle-map.json` → identify these libraries →
+> create the matching infrastructure components FIRST, then wrap `<main>` with
+> them. Skipping this step is the #2 quality regression on the realfood.gov
+> benchmark — the successful prior clone has `SmoothScroll` + `IntroAnimation`
+> + `ScrollListener` wrappers; the failing one has none and falls back to a
+> single `useReveal` IntersectionObserver hook, losing all the scroll-coupled
+> motion the original site has.
+
 ## Core principle
 
 **Transitions are part of component generation, not a separate step.** When generating a component, read `transition-spec.json` + the source bundle file, and implement the transition IN the component — not as a later pass.
@@ -131,7 +143,7 @@ Convert animation library easings to CSS `cubic-bezier`:
 | `power3.out` | `cubic-bezier(0.165, 0.84, 0.44, 1)` |
 | `none` / `linear` | `linear` (or no CSS transition — direct progress mapping) |
 
-Use `scripts/gsap-to-css.sh convert "<easing>"` for automated conversion.
+Use `scripts/extract/gsap-to-css.sh convert "<easing>"` for automated conversion.
 
 ## Bundle parameters are EXACT
 
@@ -252,37 +264,9 @@ const [activeIndex, setActiveIndex] = useState(0);
 
 ---
 
-## GSAP Premium Plugin Alternatives
+## GSAP Plugin Alternatives
 
-When the original site uses GSAP paid/premium plugins, do NOT purchase them or skip the feature. These alternatives are listed in priority order: (1) project-specific animation library if available, (2) open-source npm packages, (3) manual CSS implementation.
-
-### SplitText → `splitting` npm package (or project animation library)
-
-GSAP's SplitText (paid Club plugin) splits text into chars/words/lines for stagger animations. Open-source alternative: [`splitting`](https://splitting.js.org/) npm package — splits text into chars/words/lines with CSS custom properties for index-based stagger. If the project has its own animation library with splitText support, prefer that.
-
-```ts
-// Using splitting (npm install splitting)
-import Splitting from 'splitting'
-
-const result = Splitting({ target: element, by: 'chars' })
-const chars = result[0].chars
-
-// Animate with WAAPI
-chars.forEach((char, i) => {
-  char.style.opacity = '0'
-  char.style.transform = 'translateY(200%)'
-  const anim = char.animate(
-    [
-      { opacity: 0, transform: 'translateY(200%) scaleY(0)' },
-      { opacity: 1, transform: 'translateY(0) scaleY(1)' },
-    ],
-    { delay: i * 100, duration: 1000, fill: 'forwards', easing: 'cubic-bezier(0.16, 1, 0.3, 1)' }
-  )
-  anim.onfinish = () => { char.style.opacity = '1'; char.style.transform = 'none'; anim.cancel() }
-})
-```
-
-**When to use:** Any site with `SplitText.create()` in the bundle.
+> **If `transition-spec.json` references GSAP plugins but the implementation should avoid a GSAP dependency** (SplitText, MorphSVG, ScrollSmoother, DrawSVG, Draggable), read `gsap-alternatives.md` for replacement options (priority: project library -> npm package -> manual CSS). Otherwise skip and continue to the SplitText mask wrapper rules below, which apply to ANY split-text implementation regardless of library.
 
 ### SplitText mask wrapper CSS — strict rules
 
@@ -310,7 +294,7 @@ overflow: clip;          /* or `hidden`, but `clip` doesn't establish a scroll c
 **Verification — before declaring split-text done, measure:**
 
 ```js
-agent-browser eval "(() => {
+agent-browser --session <s> eval "(() => {
   const ref = document.querySelector('.hero-section'); // your textHost on ref
   const impl = document.querySelector('.hero-section'); // same on impl
   return { refH: ref.getBoundingClientRect().height, implH: impl.getBoundingClientRect().height };
@@ -360,7 +344,7 @@ function RevealRise({ children }) {
 **Verification — first thing to check when a reveal "doesn't trigger":**
 
 ```js
-agent-browser eval "(async () => {
+agent-browser --session <s> eval "(async () => {
   const el = document.querySelector('<the moving child selector>')
   return new Promise(r => {
     const o = new IntersectionObserver(([e]) => {
@@ -379,7 +363,7 @@ This applies to any intersection-based reveal that uses a clipping mask: `Reveal
 
 ### Verification per spec-entry trigger type
 
-`transition-spec.json` is a checklist, not a hint. Every entry has a `trigger` (or `type`) field, and **each trigger category has a different verification command** — verifying hover entries does not verify intersection entries, and so on. Reporting "transitions matched" after only running `transition-compare.sh` (which is hover/idle-state only) is the bug class that produced the L878 regression on 375.studio.
+`transition-spec.json` is a checklist, not a hint. Every entry has a `trigger` (or `type`) field, and **each trigger category has a different verification command** — verifying hover entries does not verify intersection entries, and so on. Reporting "transitions matched" after only running `transition-compare.sh` (which is hover/idle-state only) is the bug class where intersection / scroll-driven entries silently never wire up while the hover sweep passes.
 
 Run the matrix in this exact order. Skipping a row = silent omission of that whole category.
 
@@ -394,7 +378,11 @@ Run the matrix in this exact order. Skipping a row = silent omission of that who
 **Coverage gate (run before any of the above):**
 
 ```bash
-bash visual-debug/scripts/transition-spec-coverage.sh \
+SCRIPTS="${VISUAL_DEBUG_SCRIPTS_DIR:-${PLUGIN_ROOT:+$PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+SCRIPTS="${SCRIPTS:-${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/visual-debug/scripts}}"
+[ -n "$SCRIPTS" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
+bash "$SCRIPTS/transition-spec-coverage.sh" \
   tmp/ref/<component> \
   apps/<app>/src/projects/<component>
 ```
@@ -415,67 +403,11 @@ For `stagger.amount`, the per-target step is `amount / (N - 1)`, NOT `amount`. T
 
 **Common bug:** mistaking `amount` for `each` writes per-target step = `amount`. With N=14 lines and `amount: 0.1`, you compute step = 0.1 instead of step = 0.1/13 ≈ 0.0077. Last line's delay is 1.3 instead of 0.1, pushing it past the timeline end. **It never reveals.** Cross-check: with correct semantics, all targets must finish by `base + amount + duration`.
 
-### MorphSVG → Manual SVG path interpolation or rx/ry animation
-
-GSAP's MorphSVG morphs between SVG path shapes. Without the plugin:
-
-1. **For simple rect → circle morphs** (CTA buttons): Animate `rx`/`ry` attributes of the SVG `<rect>` from pill radius to circle radius using `gsap.to()`.
-2. **For complex path morphs**: Use `flubber` (npm package) for path interpolation, or pre-compute intermediate paths and crossfade with opacity.
-
-```ts
-// Simple rect → circle morph (no MorphSVG needed)
-gsap.to(rectElement, {
-  attr: { rx: circleRadius, ry: circleRadius, width: circleSize, height: circleSize },
-  duration: 0.9,
-  ease: 'elastic.out(0.8, 0.8)',
-})
-```
-
-### ScrollSmoother → Lenis (or project library)
-
-GSAP's ScrollSmoother (paid) adds smooth scroll behavior. Alternatives:
-- [`lenis`](https://github.com/darkroomengineering/lenis) npm package — widely used, lightweight, open-source
-- Project-specific smooth scroll library if available
-
-### Draggable → Native pointer events
-
-GSAP's Draggable is actually free, but if not using GSAP at all:
-- Use native `pointerdown`/`pointermove`/`pointerup` events
-- Calculate drag delta and apply transforms
-
-### DrawSVG → CSS stroke-dashoffset animation
-
-```css
-.draw-in {
-  stroke-dasharray: var(--path-length);
-  stroke-dashoffset: var(--path-length);
-  transition: stroke-dashoffset 1s ease-out;
-}
-.draw-in.active {
-  stroke-dashoffset: 0;
-}
-```
-
-### Detection rule
-
-When `transition-spec.json` contains entries referencing GSAP premium plugins, add a note in the spec:
-
-```json
-{
-  "name": "text-reveal-stagger",
-  "gsap_plugin": "SplitText",
-  "oss_alternative": "splitting (npm) or project animation library",
-  "notes": "Replace SplitText.create() with splitting({ target: el, by: 'chars' })"
-}
-```
-
-This ensures the generation step uses the correct alternative without re-discovering it.
-
 ---
 
 ## Card stack (page-stack) pattern
 
-Used on navercorp.com for stacked cards that collapse as user scrolls (`.page-stack`, `.sticky`, `.point-items`).
+Common pattern for stacked cards that collapse as user scrolls (`.page-stack`, `.sticky`, `.point-items`).
 
 ### CSS structure
 
@@ -549,3 +481,145 @@ useEffect(() => {
 - [ ] Check `height` CSS on `.page-stack` (300lvh, 375lvh, etc.)
 - [ ] Confirm images exist for ALL cards (including cards added after initial release)
 - [ ] Add `'use client'` directive — requires `useEffect` + `useRef`
+
+---
+
+## Anti-pattern catalog
+
+Reusable rules distilled from real bugs that were not caught by the generic patterns above. Each entry names the failure mode, why naive code is wrong, and the framework-agnostic fix. Cross-reference these when reading a new bundle — many sites use the same primitives.
+
+### A. IO-fire-once vs scroll-scrub semantics
+
+**Bug class:** The reference uses GSAP `ScrollTrigger` with `scrub: <N>` so the element progresses *with the scrollbar* (forward and backward). The naive impl wires an `IntersectionObserver` that flips `opacity: 0 → 1` once on enter and never reverts. On scroll-up the element stays "on" instead of reverting — looks subtly different.
+
+**Detect in the bundle:** any of `ScrollTrigger.create({ ... scrub: ... })`, `useScroll({ target })` paired with `useTransform`, or `gsap.fromTo(..., { scrollTrigger: { scrub } })`.
+
+**Don't:**
+```ts
+const io = new IntersectionObserver(([e]) => {
+  if (e.isIntersecting) el.classList.add('revealed');
+});
+```
+
+**Do:** drive style directly from a scroll-derived progress, so reversing the scroll reverses the style.
+```ts
+const onScroll = () => {
+  const rect = el.getBoundingClientRect();
+  const p = clamp((window.innerHeight - rect.top) / (window.innerHeight + rect.height), 0, 1);
+  el.style.opacity = String(p);
+  el.style.transform = `translateY(${(1 - p) * 40}px)`;
+};
+window.addEventListener('scroll', onScroll, { passive: true });
+onScroll();
+```
+
+**Invariant to verify:** scroll forward to mid-progress, scroll back, the style should return to its initial value. `scroll-end-completion-check.sh` checks the forward direction; for reversibility you need an explicit playback test or `transition-compare.sh` with a `scrollTo(0)` step.
+
+### B. Viewport-aware scroll-scrub offsets
+
+**Bug class:** A scroll-driven reveal works on the laptop viewport but never reaches `progress=1` on mobile (or vice versa). Symptom: bottom of the page is reached but the element still shows partial style. Root cause is hard-coded scroll offsets that assume a specific viewport.
+
+**Why it happens:** Framer Motion's `useScroll({ target: ref, offset: ['start center', 'end end'] })` resolves `center`/`end` relative to the viewport. For a footer-anchored element with `offset: ['start center', 'end end']`, the scrub completes when the target's `end` (bottom) reaches the viewport's `end` — but if the document is shorter than `targetBottom`, that scroll position is unreachable. GSAP `ScrollTrigger.start: 'bottom 80%'` has the same trap.
+
+**Detect:** during `bundle-verification`, run `scroll-end-completion-check.sh` across the viewport list. Any element flagged as "stuck near maxScroll" is the symptom.
+
+**Fix patterns:**
+1. **Anchor to scroll position, not viewport position.** Use `offset: ['start end', 'end 80%']` (progress=1 when target bottom is 20% from viewport bottom — leaves headroom).
+2. **Cap progress at a lower scroll point.** Use `useScroll` with an `axis: 'y'` container of `document.body`, then clamp using `maxScroll - SAFE_PX` instead of full document end.
+3. **For footer CTAs specifically:** trigger from a sibling section *above* the footer, so footer height changes don't break the offset math.
+
+**Concrete recipe (Framer Motion):**
+```tsx
+const { scrollYProgress } = useScroll({
+  target: ref,
+  // 'end 80%' = scrub finishes when the target bottom is at 80% from viewport top.
+  // Leaves 20vh of bottom-page headroom so short viewports still complete.
+  offset: ['start end', 'end 80%'],
+});
+```
+
+### C. completeAt headroom for shuffle/stagger tails
+
+**Bug class:** An n-element stagger animation has its last element finishing at `progress=1.0`. Due to easing (`easeOut`, `cubic-bezier(.2,.8,.2,1)`), the tail asymptotically approaches its final value. At progress=1 the element is at ~98%, not 100% — visibly off. Tail elements stay "almost there" forever.
+
+**Don't:**
+```ts
+const start = i / n;
+const end = (i + 1) / n;
+const local = clamp((progress - start) / (end - start), 0, 1);
+```
+The last element has `end = 1.0`; eased curves never reach 1.0 at progress=1.0 in practice (capture noise + sub-pixel rounding).
+
+**Do:** introduce a `completeAt` < 1.0 so all elements finish strictly before the scroll ends:
+```ts
+const COMPLETE_AT = 0.92;  // last element finishes at 92% of total progress
+const stride = COMPLETE_AT / n;
+const start = i * stride;
+const end = start + stride;
+const local = clamp((progress - start) / (end - start), 0, 1);
+```
+
+`useScrubStagger` exposes this as the `completeAt` option — keep it ≤ 0.95 for any easing other than linear.
+
+### D. Seeded shuffle for SSR-safe randomness
+
+**Bug class:** `Math.random()` in a render path or `useMemo` produces different values on server vs client → React hydration warning, full re-render, splash/intro animation loses its first frames. `hydration-check.sh` catches this as `Hydration failed because the server rendered HTML didn't match the client`.
+
+**Don't:**
+```ts
+const order = useMemo(() => letters.sort(() => Math.random() - 0.5), [letters]);
+```
+
+**Do:** seed a deterministic PRNG (LCG is fine — we're shuffling 30 items, not generating crypto), or run the randomization inside `useEffect` so server renders the unrandomized order and client patches after mount.
+
+**Pattern (LCG Fisher-Yates):**
+```ts
+function seededShuffle<T>(arr: T[], seed: number): T[] {
+  const a = arr.slice();
+  let s = seed >>> 0;
+  for (let i = a.length - 1; i > 0; i--) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    const j = s % (i + 1);
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+// Same seed on server + client → identical order → no hydration mismatch.
+const order = useMemo(() => seededShuffle(letters, 42), [letters]);
+```
+
+**Picking the seed:** any stable value derivable on both sides — a hash of the prop, the element's index in the parent list, or a literal constant if the shuffle is purely decorative. Never `Date.now()` or `crypto.randomUUID()`.
+
+### E. WAAPI reveal semantics (forward-only vs round-trip)
+
+**Bug class:** The agent implements an IntersectionObserver-driven reveal using Web Animations API (`element.animate(...)`). At first scroll-down everything looks right. Then `section-compare.sh` runs and captures a "scrolled to bottom" state — but because the comparison harness pre-scrolls `top → bottom → top`, the WAAPI animation's `playbackRate=-1` plays the reveal backwards on the way back up, snapping back to the hidden state. The capture is now of the hidden element when it should be revealed.
+
+**Why naive code is wrong:** WAAPI animations have a `play() / reverse()` semantics. If you wire IO to `play()` on enter and `reverse()` on exit, scrolling down past the element then back up triggers the reverse — and `finish()` snaps to the from-state, not the to-state.
+
+**Fix:**
+- **Author reveals as forward-only:** on enter, `animation.play()`; on exit, *do not call reverse*. If you want fade-out on exit, use a separate animation with the same easing.
+- **Or pause and pin at t=0 on hide:** `animation.pause(); animation.currentTime = 0;` — but only call this when the element leaves the viewport going *up* past it (use `IntersectionObserver` with a sentinel above the element).
+
+**Invariant to verify:** scroll to bottom of page, scroll back to top, scroll to the section again — element should still appear in its revealed state. If it has to re-trigger to appear, the reveal is wired incorrectly.
+
+### F. IntersectionObserver + overflow:hidden clipping
+
+**Bug class:** A child element starts at `transform: translateY(80px)` and is supposed to animate to 0 when its parent enters the viewport. The parent has `overflow: hidden`. The child's *initial position* is below its parent's clip box, so the IntersectionObserver fires on the *parent*, but the child is invisible at start. Naive observers attached to the child never fire because the child is clipped out of every viewport rect.
+
+**Detect:** `reveal-trigger-check.sh` lists every initially-hidden element and reports the chain of ancestors with `overflow: hidden`.
+
+**Fix:**
+1. **Attach the IO to a non-clipped ancestor (the section root), and animate child styles when the section fires.** Don't attach IO to the offset child.
+2. **Or use a sentinel:** put a 1×1 invisible div at the parent's actual top, observe that.
+
+### G. Footer-disappeared (stray position:absolute)
+
+**Bug class:** A sticky/footer element renders correctly on long pages but mysteriously moves into the middle of the page on short viewports (mobile). Cause: `position: absolute` with no positioned ancestor — the offset resolves against `<body>`, so on a 600vh page footer sits at top:600vh, but on a 800px viewport it sits inside the visible area.
+
+**Detect:** `stray-absolute-check.sh` flags every `position: absolute` element whose nearest positioned ancestor is `<html>` or `<body>`.
+
+**Fix:** add `position: relative` to the intended container, OR change the element to `position: sticky` / `fixed` if that matches the bundle.
+
+---
+
+These rules cover the non-obvious transition bugs that AE/SSIM and `transition-compare.sh` cannot detect on their own — capture-timing artifacts, scroll-state coupling, hydration-driven first-frame loss, and viewport-dependent offset breakage. None are framework-specific: A–G apply equally to GSAP/Motion/Lenis/native scroll/WAAPI implementations. The detect commands in each entry are scriptable; `verification-plan.sh` selects which ones to actually run based on extraction signals.

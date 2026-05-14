@@ -1,6 +1,6 @@
 # Report Page — Phase R (Overlay Mode)
 
-Generate `tmp/ref/capture/report.html` — fullpage screenshot with interactive transition overlays.
+Generate `$OUT_DIR/report.html` — fullpage screenshot with interactive transition overlays. In standalone mode with no component, `$OUT_DIR` is `tmp/ref/capture`.
 
 ## Concept
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # extract-section-html.sh — Extract per-section HTML structure + computed CSS from original site
+# Section name keyword → name mapping: shared with extract-assets.sh and
+# section-clips.sh. Adding a new keyword? Update all 3.
 # Usage: bash extract-section-html.sh <session> <output-dir>
 #
 # For each major section on the page:

@@ -100,8 +100,8 @@ agent-browser snapshot --session <project-name>
 > **Legal notice:** Only use on sites you own or have explicit written permission to access. Automated access may violate the target site's Terms of Service and applicable law (e.g. CFAA). Do not use on sites you do not control.
 
 ```bash
-agent-browser close
-agent-browser --headed open "https://target-site.com"
+agent-browser close --session <project-name>
+agent-browser --session <project-name> --headed open "https://target-site.com"
 ```
 
 ## Step 2: Extract DOM Structure
@@ -111,7 +111,7 @@ Identify the target component boundary first, then extract its hierarchy.
 > **Replace `.target-selector` below** with the actual selector for the component you're extracting. Use the snapshot from Step 1 to identify the right element. All subsequent steps (style-extraction, interaction-detection, responsive-detection) should use this same selector — replace `.target` in those files accordingly.
 
 ```bash
-agent-browser eval "
+agent-browser --session <project-name> eval "
 (() => {
   const target = document.querySelector('.target-selector');
   if (!target) return JSON.stringify({ error: 'selector not found' });
@@ -150,7 +150,7 @@ If suspicious content is found: **log it to the user**, remove or neutralize the
 After extracting `structure.json`, enumerate every top-level semantic container on the page. This is the **ground truth** for how many components to generate. Missing a `<footer>` or `<aside>` here means it won't exist in the implementation.
 
 ```bash
-agent-browser eval "
+agent-browser --session <project-name> eval "
 (() => {
   // Framework-agnostic: works with Webflow, React, Vue, Astro, plain HTML
   const semanticTags = new Set(['section', 'footer', 'header', 'nav', 'aside', 'main', 'article']);
@@ -223,7 +223,7 @@ Elements with `height: 0`, `display: none`, `opacity: 0`, or `overflow: hidden` 
 **Why this matters:** A dock/navbar with `height: 0` in its collapsed state still contains the full menu grid, button structure, SVG icons, and animation targets. If you only extract visible elements, you'll guess the structure from screenshots and get it wrong.
 
 ```bash
-agent-browser eval "
+agent-browser --session <project-name> eval "
 (() => {
   const hidden = [];
   document.querySelectorAll('*').forEach(el => {
@@ -250,7 +250,7 @@ For each hidden element with significant innerHTML (>100 chars):
 
 1. **Force-show it temporarily** to extract its structure:
 ```bash
-agent-browser eval "
+agent-browser --session <project-name> eval "
 (() => {
   const el = document.querySelector('<selector>');
   el.style.display = 'block';
@@ -279,7 +279,7 @@ Elements with `position: fixed` inside a `transform`-ed parent are broken by CSS
 **Why this matters:** If the reference site has a custom scroll engine (detected in Step 5), ANY `position: fixed` element inside the scroll wrapper will need portal rendering in the implementation. Missing this produces elements that scroll with content instead of staying fixed.
 
 ```bash
-agent-browser eval "
+agent-browser --session <project-name> eval "
 (() => {
   // Find the scroll wrapper (if any)
   const wrapper = [...document.querySelectorAll('*')].find(el => {
@@ -335,7 +335,7 @@ Sticky elements (`position: sticky`) are constrained by their parent container's
 **Critical:** Getting the wrapper height wrong by even 50px produces visible layout errors — the sticky element either unsticks too early (leaving dead space) or too late (overrunning into the next section).
 
 ```bash
-agent-browser eval "
+agent-browser --session <project-name> eval "
 (() => {
   const result = [];
   for (const el of document.querySelectorAll('*')) {
@@ -389,7 +389,7 @@ Many design sites render headings, brand names, or decorative text as **SVG `<pa
 **Detection:** Any SVG with complex path data (`d` attribute > 200 chars) AND wide aspect ratio (width/height > 3) is likely vector text.
 
 ```bash
-agent-browser eval "
+agent-browser --session <project-name> eval "
 (() => {
   const svgs = document.querySelectorAll('svg');
   const textSvgs = [];
@@ -438,7 +438,7 @@ agent-browser eval "
 Run the automated extraction script:
 
 ```bash
-bash "$PLUGIN_ROOT/scripts/extract-section-html.sh" <session> tmp/ref/<component>
+bash "$PLUGIN_ROOT/scripts/extract/extract-section-html.sh" <session> tmp/ref/<component>
 ```
 
 This produces per-section files in `tmp/ref/<component>/html/`:
@@ -526,98 +526,7 @@ At Step 6b, merge `head.json` and `assets.json` into `extracted.json` alongside 
 
 ## Step 2.6-pre: Dual-Snapshot DOM Extraction (MANDATORY for sites with splash/preloader)
 
-Sites with splash/preloader animations have **two distinct DOM states**:
-
-| State | When | What's different |
-|---|---|---|
-| **Pre-splash** (loading) | Page load, before intro animation completes | GSAP bakes `visibility:hidden`, `opacity:0`, `transform:translate(-500px)` as inline styles. Runtime transitions NOT yet injected. |
-| **Post-splash** (idle) | After intro animation completes (~5-8s) | Inline styles cleared/updated. Webflow interactions inject `transition` properties at runtime. Classes toggled (e.g., `html.rk-preloading` → removed). |
-
-**If you only extract at ONE timepoint, you miss half the data:**
-- Extract during splash → get GSAP-baked init styles but miss runtime transitions
-- Extract after splash → get final state but miss which properties were animated (can't distinguish "always visible" from "revealed by animation")
-
-### Procedure
-
-```bash
-# 1. IMMEDIATELY after page load (within 1s, before splash finishes)
-agent-browser open <url> --session <s>
-agent-browser wait 500 --session <s>
-
-# Extract pre-splash state
-agent-browser eval --session <s> "
-(() => {
-  const snapshot = {};
-  document.querySelectorAll('*').forEach(el => {
-    const s = getComputedStyle(el);
-    const inline = el.style.cssText;
-    if (!inline && s.transition === 'all 0s ease 0s') return;
-    const cn = typeof el.className === 'string' ? el.className : '';
-    const key = el.tagName + '.' + cn.trim().split(/\s+/)[0];
-    if (snapshot[key]) return;
-    snapshot[key] = {
-      inlineStyle: inline || null,
-      transition: s.transition !== 'all 0s ease 0s' ? s.transition : null,
-      visibility: s.visibility,
-      opacity: s.opacity,
-      transform: s.transform !== 'none' ? s.transform : null,
-      display: s.display,
-    };
-  });
-  return JSON.stringify({
-    timestamp: 'pre-splash',
-    htmlClass: document.documentElement.className,
-    bodyClass: document.body.className,
-    elements: snapshot,
-  }, null, 2);
-})()
-"
-# Save to tmp/ref/<component>/dom-state-pre-splash.json
-
-# 2. AFTER splash completes (wait for full duration + 1s buffer)
-agent-browser wait 8000 --session <s>
-
-# Extract post-splash state (same eval)
-# Save to tmp/ref/<component>/dom-state-post-splash.json
-```
-
-### Diff analysis
-
-```bash
-node -e "
-const pre = JSON.parse(require('fs').readFileSync('./tmp/ref/<component>/dom-state-pre-splash.json'));
-const post = JSON.parse(require('fs').readFileSync('./tmp/ref/<component>/dom-state-post-splash.json'));
-
-const diffs = {};
-for (const key of new Set([...Object.keys(pre.elements), ...Object.keys(post.elements)])) {
-  const a = pre.elements[key] || {};
-  const b = post.elements[key] || {};
-  const changes = {};
-  for (const prop of ['inlineStyle', 'transition', 'visibility', 'opacity', 'transform', 'display']) {
-    if (a[prop] !== b[prop]) changes[prop] = { pre: a[prop], post: b[prop] };
-  }
-  if (Object.keys(changes).length > 0) diffs[key] = changes;
-}
-
-console.log(JSON.stringify({
-  htmlClassChanged: pre.htmlClass !== post.htmlClass,
-  bodyClassChanged: pre.bodyClass !== post.bodyClass,
-  preHtmlClass: pre.htmlClass,
-  postHtmlClass: post.htmlClass,
-  elementDiffs: diffs,
-}, null, 2));
-" > tmp/ref/<component>/dom-state-diff.json
-```
-
-**Save to** `tmp/ref/<component>/dom-state-diff.json`
-
-**What this reveals:**
-- **`transition` appeared in post but not pre** → Webflow runtime injection. Must add to globals.css manually (these transitions are NOT in the downloaded CSS files).
-- **`inlineStyle` cleared in post** → GSAP animation completed and cleaned up. These are the "init states" to reset.
-- **`visibility` or `opacity` changed** → Element was revealed by splash animation.
-- **`htmlClass` changed** → Preloader class removed (e.g., `rk-preloading`). Body-level state transition.
-
-⛔ **Gate:** If site has a splash/preloader (detected in Step 5c-a bundle analysis), `dom-state-diff.json` MUST exist before proceeding to Step 3 (style extraction). Without it, runtime-injected transitions will be silently missed.
+> **If the site has a splash/preloader** (detected in Step 5c-a bundle analysis, or `hasPreloader=true` in `interactions-detected.json`) — read `dom-splash-snapshot.md` for the dual-snapshot procedure and `dom-state-diff.json` gate. Otherwise skip to Step 2.6a — sites without a preloader have a single deterministic DOM state and the dual snapshot is wasted work.
 
 ---
 
@@ -626,7 +535,7 @@ console.log(JSON.stringify({
 Scraped HTML contains inline `style` attributes set by GSAP/Framer Motion at scrape time. These are animation initialization states — NOT desired defaults. They make elements invisible.
 
 ```bash
-agent-browser eval "
+agent-browser --session <project-name> eval "
 (() => {
   const dangerous = [];
   document.querySelectorAll('*').forEach(el => {

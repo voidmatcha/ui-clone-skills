@@ -7,8 +7,8 @@
     {
       "name": "ui-clone-skills",
       "source": "./",
-      "description": "Point at any live website URL. Get production-ready React + Tailwind components that match the original — styles, animations, and responsive behavior. Downloads the actual CSS, greps JS bundles for GSAP/Framer Motion/Lenis params, and extracts Webflow IX2 timelines. Automated visual diff verification (AE/SSIM) without spending screenshot tokens. Anti-skip gates enforce extraction before code generation. 3 skills, automated pipeline.",
-      "version": "0.4.9",
+      "description": "Clone any live website into React + Tailwind code with extraction-first verification — no vision tokens, real CSS/JS bundle analysis instead of screenshots. Three skills: ui-reverse-engineering (URL → React + Tailwind, supports GSAP / Framer Motion / Lenis / Webflow IX2 / Next.js / Tailwind v4), ui-capture (reference screenshots, scroll evidence, transitions), visual-debug (AE/SSIM diff + computed-style mismatch diagnosis). Shared hooks and gates enforce extraction and verification before code generation.",
+      "version": "0.4.10",
       "author": {
         "name": "YONGJAE LEE"
       },
@@ -17,18 +17,28 @@
       "keywords": [
         "clone-website",
         "website-to-react",
+        "url-to-react",
         "url-to-code",
+        "html-to-react",
+        "website-to-nextjs",
+        "landing-page-clone",
         "ui-cloning",
         "reverse-engineering",
         "react",
+        "next-js",
         "tailwind",
+        "tailwind-v4",
         "claude-code",
         "claude-skills",
         "agent-browser",
         "webflow-to-react",
+        "webflow-to-tailwind",
         "webflow-ix2",
         "gsap",
+        "gsap-extraction",
         "framer-motion",
+        "framer-motion-extraction",
+        "animejs",
         "lenis",
         "locomotive-scroll",
         "scroll-animation",
@@ -41,6 +51,10 @@
         "zero-vision-tokens",
         "screenshot-to-code-alternative",
         "v0-alternative",
+        "lovable-alternative",
+        "builder-io-alternative",
+        "anima-alternative",
+        "plasmic-alternative",
         "figma-alternative"
       ]
     }

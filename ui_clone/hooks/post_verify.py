@@ -67,7 +67,7 @@ def main() -> None:
         print()
         print("⚠️  UI-RE: Verification has NOT been run.")
         print("    Before declaring done, run:")
-        print(f"    bash auto-verify.sh <session> <orig-url> <impl-url> {ref_dir}")
+        print(f"    bash scripts/verify/auto-verify.sh <session> <orig-url> <impl-url> {ref_dir}")
         print()
         sys.exit(0)
 

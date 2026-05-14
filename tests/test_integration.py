@@ -7,7 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
-def test_gate_cli_reference_missing_dir(tmp_path):
+def test_gate_cli_reference_missing_dir(tmp_path: Path) -> None:
     """Direct CLI: missing ref dir → exit 1 (BLOCKED)."""
     result = subprocess.run(
         [sys.executable, "-m", "ui_clone.gate", str(tmp_path / "nonexistent"), "reference"],
@@ -17,7 +17,7 @@ def test_gate_cli_reference_missing_dir(tmp_path):
     assert result.returncode == 1
 
 
-def test_gate_cli_json_output(tmp_path):
+def test_gate_cli_json_output(tmp_path: Path) -> None:
     """--json flag: outputs valid JSON with expected keys."""
     import json
 
@@ -33,7 +33,7 @@ def test_gate_cli_json_output(tmp_path):
     assert "failures" in data
 
 
-def test_gate_cli_all_gate(tmp_path):
+def test_gate_cli_all_gate(tmp_path: Path) -> None:
     """'all' gate: runs all checks without crash, exits 1 on empty dir."""
     result = subprocess.run(
         [sys.executable, "-m", "ui_clone.gate", str(tmp_path), "all"],
@@ -43,7 +43,7 @@ def test_gate_cli_all_gate(tmp_path):
     assert result.returncode == 1
 
 
-def test_pipeline_cli_help():
+def test_pipeline_cli_help() -> None:
     """Pipeline CLI: --help exits 0."""
     result = subprocess.run(
         [sys.executable, "-m", "ui_clone.pipeline", "--help"],
@@ -53,7 +53,7 @@ def test_pipeline_cli_help():
     assert result.returncode == 0
 
 
-def test_no_python3_inline_in_scripts():
+def test_no_python3_inline_in_scripts() -> None:
     """No python3 -c inline JSON in bash scripts (replaced by Python modules)."""
     import re
 
