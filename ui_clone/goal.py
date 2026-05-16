@@ -146,6 +146,88 @@ def _section_compare_status(ref_dir: Path) -> str:
     return f"not satisfied: sections/result.txt has {fail_count} FAIL line(s) and {missing_count} MISSING impl line(s)"
 
 
+def _failing_sections_by_ae(ref_dir: Path, limit: int = 3) -> list[tuple[str, int]]:
+    """Return up to `limit` (section-label, AE/Mpx) pairs from the worst-AE
+    failing rows of sections/result.txt. Used by the visual-judge routing
+    hint when section-compare keeps failing.
+
+    result.txt rows look like:
+        | section-1 | 1227100 | 946836 | critical | ❌ |
+    columns are: name | AE | AE/Mpx | severity | status.
+    """
+    result = ref_dir / "sections" / "result.txt"
+    if not result.is_file():
+        return []
+    failing: list[tuple[str, int]] = []
+    for line in result.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("|") or "❌" not in line:
+            continue
+        parts = [c.strip() for c in line.strip("|").split("|")]
+        if len(parts) < 4:
+            continue
+        name = parts[0]
+        if name.lower() in {"section", "---------"} or name.startswith("-"):
+            continue
+        try:
+            ae_per_mpx = int(parts[2])
+        except (ValueError, IndexError):
+            continue
+        failing.append((name, ae_per_mpx))
+    failing.sort(key=lambda row: row[1], reverse=True)
+    return failing[:limit]
+
+
+def _visual_judge_next_action(ref_dir: Path) -> str | None:
+    """If section-compare has failing rows AND ref/impl section PNGs exist,
+    emit a concrete visual-judge next-action with the worst-AE sections
+    pre-filled. Returns None when there's nothing actionable (no result.txt,
+    no failing rows, or no PNGs).
+
+    The signal architecture: AE/SSIM is precise but a dead gradient when
+    every section is uniformly bad — agents see "all 950k" and quit.
+    visual-judge.sh calls a multimodal LLM on the ref-clip vs impl-clip pair
+    and emits actionable findings (selector_hint + tailwind suggestions).
+    This routes the worker through it instead of leaving discovery to chance.
+    """
+    failing = _failing_sections_by_ae(ref_dir, limit=3)
+    if not failing:
+        return None
+    ref_pngs = ref_dir / "sections" / "ref"
+    impl_pngs = ref_dir / "sections" / "impl"
+    if not ref_pngs.is_dir() or not impl_pngs.is_dir():
+        return None
+    command_ref = str(ref_dir)
+    examples: list[str] = []
+    for name, _ae in failing:
+        ref_png = ref_pngs / f"{name}.png"
+        impl_png = impl_pngs / f"{name}.png"
+        if not ref_png.is_file() or not impl_png.is_file():
+            continue
+        out_json = f"{command_ref}/sections/visual-judge-{name}.json"
+        examples.append(
+            f"bash skills/visual-debug/scripts/visual-judge.sh "
+            f"{command_ref}/sections/ref/{name}.png "
+            f"{command_ref}/sections/impl/{name}.png "
+            f"--label {name} --out {out_json}"
+        )
+    if not examples:
+        return None
+    commands = " && ".join(examples)
+    worst_list = ", ".join(f"{name}(AE/Mpx={ae})" for name, ae in failing)
+    return (
+        "section-compare has failing rows with high AE — AE is uniformly "
+        "catastrophic and offers no gradient. Run visual-judge (multimodal "
+        f"LLM diff) on the worst sections to get actionable findings: {commands}. "
+        f"Worst-AE rows: {worst_list}. After visual-judge writes per-section "
+        "JSON, read each visual-judge-<name>.json (priority_fix + findings[] "
+        "with selector_hint + tailwind suggestions), apply the changes to "
+        "the matching impl/src/components/<Name>.tsx, re-run section-compare "
+        "via skills/visual-debug/scripts/section-compare.sh, and re-route via "
+        f"python -m ui_clone.goal {command_ref}. Repeat until AE/Mpx drops "
+        "below the section-compare critical threshold."
+    )
+
+
 def build_goal_card_data(ref_dir: Path) -> GoalCard:
     """Return deterministic, host-neutral goal card data for a ref directory."""
     state = PipelineState.load(ref_dir)
@@ -161,6 +243,15 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     command_ref = str(ref_dir)
     next_action = step.next_action.replace("<ref-dir>", command_ref)
     evidence = step.required_evidence.replace("<ref-dir>", command_ref)
+
+    # Visual-judge routing: when section-compare has already produced a
+    # result.txt with FAIL rows, AE alone is a dead gradient signal. Override
+    # the generic section-compare next-action with a concrete multimodal-LLM
+    # diff invocation targeting the worst-AE sections.
+    if gate == "section-compare":
+        vj_action = _visual_judge_next_action(ref_dir)
+        if vj_action is not None:
+            next_action = vj_action
 
     # Stuck banner: bumped by gate.py CLI on consecutive BLOCKED runs of the
     # active gate. Once we cross the threshold, the worker is grinding the same

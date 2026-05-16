@@ -131,6 +131,18 @@ Follow the normal ui-reverse-engineering pipeline:
   with locked default env (`EXCLUDE_DYNAMIC=1`, `SECTION_THRESHOLD=2000`) so
   the classifier can't be tuned to mask gaming.
 
+- **Phase 5b — visual-judge iteration (when section-compare fails)**:
+  When `sections/result.txt` has FAIL rows with high AE/Mpx, the AE signal
+  itself is a dead gradient (every section ~950k, no direction). DO NOT
+  quit. `python -m ui_clone.goal <ref-dir>` will route you through
+  `skills/visual-debug/scripts/visual-judge.sh`, which calls a multimodal
+  LLM on each ref-clip vs impl-clip pair and emits actionable findings
+  (`category`, `severity`, `selector_hint`, tailwind suggestions).
+  Apply the `priority_fix` from each `visual-judge-<section>.json` to
+  `impl/src/components/<Name>.tsx`, re-run section-compare, re-route via
+  `python -m ui_clone.goal`. Repeat until result.txt has 0 FAIL rows or
+  the per-section AE/Mpx drops below the section-compare critical threshold.
+
 After every chunk of work, route the next action via:
 
 ```bash

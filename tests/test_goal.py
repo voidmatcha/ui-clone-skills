@@ -96,6 +96,69 @@ def test_goal_card_maps_section_compare_gate(tmp_path: Path) -> None:
     assert "0 MISSING impl lines" in card
 
 
+def test_section_compare_with_failing_rows_routes_to_visual_judge(tmp_path: Path) -> None:
+    """When current_gate=='section-compare' and result.txt has FAIL rows with
+    matching ref/impl section PNGs, the next-action should override the generic
+    section-compare invocation with a concrete visual-judge.sh command.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "realfood"
+    _write_state(ref_dir, "section-compare")
+
+    sections_dir = ref_dir / "sections"
+    ref_pngs = sections_dir / "ref"
+    impl_pngs = sections_dir / "impl"
+    ref_pngs.mkdir(parents=True)
+    impl_pngs.mkdir(parents=True)
+    # Fake PNGs for the top-3 worst-AE rows.
+    for name in ("section-1", "section-4", "section-9"):
+        (ref_pngs / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (impl_pngs / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    (sections_dir / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| section-0 | 174645 | 134757 | critical | ❌ |\n"
+        "| section-1 | 1227100 | 946836 | critical | ❌ |\n"
+        "| section-4 | 1231280 | 950062 | critical | ❌ |\n"
+        "| section-9 | 1228740 | 948102 | critical | ❌ |\n"
+        "\n"
+        "**Result: 0 PASS, 4 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+    # The override engaged — generic section-compare phrasing dropped, concrete
+    # visual-judge commands present.
+    assert "visual-judge.sh" in card
+    # Top-3 worst-AE rows (section-4 950062, section-9 948102, section-1 946836)
+    # appear in command examples — order doesn't matter, presence does.
+    assert "section-1" in card
+    assert "section-4" in card
+    assert "section-9" in card
+    # `selector_hint` and `priority_fix` are documented in the routing message
+    # so the worker knows what to read from the visual-judge output.
+    assert "priority_fix" in card or "selector_hint" in card
+
+
+def test_visual_judge_routing_skips_when_no_result(tmp_path: Path) -> None:
+    """If sections/result.txt is absent (section-compare hasn't run yet), the
+    next-action falls back to the generic section-compare invocation. The
+    override fires only AFTER the first section-compare run has produced FAIL
+    rows — otherwise we'd suggest visual-judge before there's anything to judge.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "hero"
+    _write_state(ref_dir, "section-compare")
+    # No sections/result.txt; PNG dirs absent — override should not fire.
+
+    card = build_goal_card(ref_dir)
+    assert "section-compare.sh" in card
+    assert "visual-judge" not in card
+
+
 def test_goal_card_done_requires_clean_section_compare(tmp_path: Path) -> None:
     from ui_clone.goal import build_goal_card
 
