@@ -820,15 +820,22 @@ if not isinstance(sections, list) or len(sections) < 3:
     sys.exit(0)
 # Synthesize ref-sections rows in the shape ENUMERATE_SECTIONS returns,
 # preserving the index-by-Y order section-map.json already uses.
+#
+# Key compatibility: section-map.json (extraction-time ground truth) uses
+# `top`/`cls`/`height`. Older synthesis code (and some test fixtures) used
+# `y`/`class`/`height`. Read both — bug observed in the 3-round benchmark
+# where every section's rect.top fell back to 0 because the synthesis only
+# read `y`, producing a "phantom ref" with collapsed coords that triggered
+# uniform AE/Mpx ~950k across every section and 632 wasted retry iterations.
 out = []
-sections_sorted = sorted(sections, key=lambda s: s.get("y") or 0)
+sections_sorted = sorted(sections, key=lambda s: s.get("top") or s.get("y") or 0)
 for i, s in enumerate(sections_sorted):
-    cls = (s.get("class") or "").strip()
+    cls = (s.get("cls") or s.get("class") or "").strip()
     sid = s.get("id")
     tag = s.get("tag") or "section"
-    y = int(s.get("y") or 0)
+    y = int(s.get("top") or s.get("y") or 0)
     h = int(s.get("height") or 0)
-    w = int(s.get("width") or 1440)
+    w = int(s.get("width") or s.get("w") or 1440)
     fp_seed = sid or cls or f"sec-{i}"
     # fingerprint: lowercase alphanumeric, take first 100 chars of the
     # human-readable seed. Runtime ENUMERATE_SECTIONS uses innerText; we

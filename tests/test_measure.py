@@ -184,3 +184,34 @@ def test_locked_defaults_exposed_for_audit() -> None:
     assert measure.LOCKED_DEFAULTS["EXCLUDE_DYNAMIC"] == "1"
     assert "SECTION_THRESHOLD" in measure.LOCKED_DEFAULTS
     assert measure.LOCKED_DEFAULTS["SECTION_THRESHOLD"] == "2000"
+
+
+def test_section_compare_synthesis_uses_correct_section_map_keys() -> None:
+    """Regression: section-compare.sh synthesizes ref-sections from
+    section-map.json when ENUMERATE_SECTIONS comes back too lean. The
+    synthesis code MUST read `top`/`cls` keys (the actual schema written by
+    extraction) — not just `y`/`class` (older fallback). The 3-round benchmark
+    hit `gate_fail_counts[post-implement] == 632` because the synthesis only
+    read `y`, collapsed every section's rect.top to 0, and produced phantom-ref
+    coords that triggered uniform AE/Mpx ~950k across all sections. This is
+    the data-key bug that made the prior three benchmark rounds' AE numbers
+    meaningless.
+
+    Locks the key-name reads in section-compare.sh as a guard. If a future
+    refactor drops `s.get("top")` or `s.get("cls")` from the synthesis block,
+    this test fires before the script is re-deployed.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+
+    # The synthesis block must read both schemas (top/y, cls/class) so the
+    # script tolerates whichever the upstream produced. Lock the canonical
+    # patterns; either form fires test failure if dropped.
+    assert 's.get("top") or s.get("y")' in text, (
+        "section-compare.sh synthesis must read s.get('top') with fallback to "
+        "s.get('y') — the 632-retry bug came from reading only 'y'"
+    )
+    assert 's.get("cls") or s.get("class")' in text, (
+        "section-compare.sh synthesis must read s.get('cls') with fallback to "
+        "s.get('class') — section-map.json writes 'cls', not 'class'"
+    )
