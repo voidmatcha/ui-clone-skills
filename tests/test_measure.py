@@ -319,6 +319,29 @@ def test_fix13_dom_extraction_captures_per_node_styles() -> None:
     )
 
 
+def test_fix17_extract_dom_accepts_viewport_flag() -> None:
+    """Fix 17 — extract-dom.sh accepts --viewport WIDTHxHEIGHT so the bench
+    can sweep mobile + desktop in a single pipeline. Mobile capture (e.g.
+    375x812) writes to structure_375x812.json so both structures live on
+    disk for the transpiler / agent to diff. Without this the impl is
+    desktop-only and breaks at small viewports — one of the two original
+    gaps the user surfaced after V12 (the other was transitions, Fix 16).
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "extract-dom.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "--viewport" in text, "extract-dom.sh must accept --viewport flag (Fix 17)"
+    assert "structure_${VIEWPORT}.json" in text, (
+        "viewport-scoped output path must use the WxH suffix (Fix 17)"
+    )
+    assert "agent-browser --session \"$SESSION\" resize" in text, (
+        "extract-dom.sh must resize the agent-browser session before extracting (Fix 17)"
+    )
+    # Schema-guard the WxH form so a typo can't silently produce desktop styles.
+    assert "^[0-9]+x[0-9]+$" in text, (
+        "viewport value must be validated against WIDTHxHEIGHT pattern (Fix 17)"
+    )
+
+
 def test_fix16b_scaffold_to_jsx_consumes_subtrees() -> None:
     """Fix 16b — scaffold-to-jsx.sh must not assign the same DOM subtree to
     multiple sections. V13 (11672af) regressed to ae_avg 881k because

@@ -28,9 +28,15 @@ set -euo pipefail
 REF_DIR=""
 SESSION=""
 TARGET=""
+VIEWPORT=""   # Fix 17 — optional WxH (e.g. 375x812). If set, agent-browser
+              # resizes the session before extracting; output written to
+              # structure_<W>x<H>.json instead of structure.json so a
+              # multi-viewport sweep can keep both desktop and mobile
+              # structures on disk for the transpiler / agent to diff.
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --viewport) VIEWPORT="$2"; shift 2;;
     -h|--help) sed -n '2,22p' "$0"; exit 0;;
     *)
       if [[ -z "$REF_DIR" ]]; then REF_DIR="$1"
@@ -44,7 +50,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$REF_DIR" || -z "$SESSION" || -z "$TARGET" ]]; then
-  echo "usage: extract-dom.sh <ref-dir> <session-name> <target-selector>" >&2
+  echo "usage: extract-dom.sh <ref-dir> <session-name> <target-selector> [--viewport WxH]" >&2
   exit 2
 fi
 if [[ ! -d "$REF_DIR" ]]; then
@@ -55,6 +61,22 @@ if ! command -v agent-browser >/dev/null 2>&1; then
 fi
 
 OUT_PATH="$REF_DIR/structure.json"
+if [[ -n "$VIEWPORT" ]]; then
+  # Validate WxH form so a typo doesn't silently produce desktop styles.
+  if [[ ! "$VIEWPORT" =~ ^[0-9]+x[0-9]+$ ]]; then
+    echo "extract-dom: --viewport must be WIDTHxHEIGHT (e.g. 375x812), got: $VIEWPORT" >&2
+    exit 2
+  fi
+  OUT_PATH="$REF_DIR/structure_${VIEWPORT}.json"
+  W="${VIEWPORT%x*}"; H="${VIEWPORT#*x}"
+  # Resize before extracting. Failure here is fatal — extracting at the
+  # wrong viewport silently produces desktop styles which is worse than
+  # erroring.
+  if ! agent-browser --session "$SESSION" resize --width "$W" --height "$H" >/dev/null 2>&1; then
+    echo "extract-dom: agent-browser resize to ${W}x${H} failed" >&2
+    exit 6
+  fi
+fi
 
 EXTRACT_JS=$(cat <<'JSEOF'
 (() => {
@@ -98,7 +120,7 @@ EXTRACT_JS=$(cat <<'JSEOF'
     'all 0s ease 0s', 'all', '0s', 'ease', '1', 'running', 'forwards', 'backwards',
   ]);
   const extract = (el, depth = 0) => {
-    if (depth > 6) return null;
+    if (depth > 10) return null;
     const s = getComputedStyle(el);
     const text = directText(el);
     const styles = {};
@@ -115,6 +137,15 @@ EXTRACT_JS=$(cat <<'JSEOF'
     };
     if (text) out.text = text;
     if (Object.keys(styles).length) out.styles = styles;
+    // Capture asset/link attrs so the transpiler can emit <img src>, <a href>,
+    // <video poster>, etc. Without these the scaffold renders empty
+    // placeholder boxes for every media element, which inflates section-compare
+    // AE by ~700k per image-heavy section.
+    const ATTR_KEYS = ['src','href','alt','poster','srcset','sizes','type','target','rel','aria-label','title','role','data-src','data-poster'];
+    for (const k of ATTR_KEYS) {
+      const v = el.getAttribute ? el.getAttribute(k) : null;
+      if (v && v.length < 800) out[k] = v;
+    }
     return out;
   };
   return JSON.stringify(extract(target), null, 2);
@@ -136,20 +167,25 @@ agent-browser --session "$SESSION" eval "$EVAL_JS" > "$TMP_OUT" 2>&1 || {
 }
 
 # Validate JSON shape: must have `tag` (root node) and `children`.
+# Newer agent-browser versions JSON-encode the eval return value, so a function
+# that already calls JSON.stringify(...) yields a double-encoded string on disk.
+# Unwrap once if the top-level is a string, then re-write the canonical form.
 if ! python3 -c "
 import json, sys
 d = json.load(open('$TMP_OUT'))
+if isinstance(d, str):
+    d = json.loads(d)
 if not isinstance(d, dict): raise ValueError('top-level must be object')
 if 'tag' not in d: raise ValueError('missing tag — schema mismatch (Fix 14)')
 if 'children' not in d: raise ValueError('missing children — schema mismatch')
+json.dump(d, open('$OUT_PATH', 'w'), indent=2)
 " 2>&1; then
   echo "extract-dom: output failed schema validation" >&2
   head -c 500 "$TMP_OUT" >&2
   rm -f "$TMP_OUT"
   exit 5
 fi
-
-mv "$TMP_OUT" "$OUT_PATH"
+rm -f "$TMP_OUT"
 NODE_COUNT=$(python3 -c "
 import json
 d = json.load(open('$OUT_PATH'))

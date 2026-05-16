@@ -131,6 +131,41 @@ def render(node, indent=2):
     if styles:
         style_attr = f" style={style_to_jsx(styles)}"
 
+    # Asset/link attributes captured by extract-dom (Fix 16c). Emit each as a
+    # JSX attribute with the HTML→JSX rename where needed. Skip empty values.
+    # Without these, <img>/<a>/<video> render as blank placeholders even when
+    # the assets exist in impl/public/ — dominant cause of inflated AE on
+    # image-heavy sections.
+    attr_map = {
+        "src": "src", "href": "href", "alt": "alt", "poster": "poster",
+        "srcset": "srcSet", "sizes": "sizes", "type": "type",
+        "target": "target", "rel": "rel",
+        "aria-label": "aria-label", "title": "title", "role": "role",
+        "data-src": "data-src", "data-poster": "data-poster",
+    }
+    extra_attrs = ""
+    for src_key, jsx_key in attr_map.items():
+        v = node.get(src_key)
+        if not isinstance(v, str) or not v:
+            continue
+        # For <img src> rewrite the CDN URL to the locally-downloaded path
+        # under /images/ or /videos/ so Next.js serves from impl/public.
+        if src_key in ("src", "poster"):
+            import os as _os, re as _re
+            base = _os.path.basename(v.split("?")[0])
+            m = _re.search(r'/cdn-cgi/image/[^/]+/(.+)', v)
+            if m:
+                base = _os.path.basename(m.group(1))
+            ext = _os.path.splitext(base)[1].lower()
+            if ext in (".mp4", ".webm", ".mov"):
+                v = f"/videos/{base}"
+            elif ext in (".webp", ".png", ".jpg", ".jpeg", ".svg", ".gif", ".avif"):
+                v = f"/images/{base}"
+            # else leave URL as-is (rare)
+        v_safe = v.replace("\\", "\\\\").replace('"', '\\"')
+        extra_attrs += f' {jsx_key}="{v_safe}"'
+    cls_attr += extra_attrs
+
     # Void element — self-close, no children/text.
     if tag in VOID_TAGS:
         return f'{pad}<{tag}{cls_attr}{style_attr} />'
