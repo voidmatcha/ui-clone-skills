@@ -142,6 +142,68 @@ def test_section_compare_with_failing_rows_routes_to_visual_judge(tmp_path: Path
     assert "priority_fix" in card or "selector_hint" in card
 
 
+def test_visual_judge_routing_fires_on_post_implement_too(tmp_path: Path) -> None:
+    """The post-implement gate transitively fails when section-compare has
+    FAIL rows, but `current_gate` stays at 'post-implement' and never advances
+    to 'section-compare'. The 3-round benchmark (Round 1 / A / B) observed
+    `gate_fail_counts[post-implement]` climbing past 400 while the section-
+    compare branch of the visual-judge override never fired. The override now
+    fires on post-implement as well, breaking the runaway-retry loop.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "realfood"
+    _write_state(ref_dir, "section-compare")
+    # Overwrite the state we just wrote: we want current_gate=='post-implement'
+    # (the failing gate that ACTUALLY traps real benchmark runs), with the
+    # section-compare evidence on disk that triggers the visual-judge override.
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": ref_dir.name,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": [
+                    "reference",
+                    "extraction",
+                    "bundle",
+                    "paid-features",
+                    "spec",
+                    "pre-generate",
+                ],
+                "current_gate": "post-implement",
+                "last_updated": "2026-01-01T01:00:00Z",
+                "gate_fail_counts": {"post-implement": 41},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sections_dir = ref_dir / "sections"
+    ref_pngs = sections_dir / "ref"
+    impl_pngs = sections_dir / "impl"
+    ref_pngs.mkdir(parents=True)
+    impl_pngs.mkdir(parents=True)
+    for name in ("section-1", "section-9"):
+        (ref_pngs / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (impl_pngs / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    (sections_dir / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| section-1 | 1227100 | 946836 | critical | ❌ |\n"
+        "| section-9 | 1256000 | 969136 | critical | ❌ |\n",
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+    # Override fired even though current_gate is post-implement, not
+    # section-compare — the routing now reads result.txt for FAIL rows
+    # regardless of which of the two gates the pipeline is stuck on.
+    assert "visual-judge.sh" in card
+    assert "section-1" in card
+    assert "section-9" in card
+
+
 def test_visual_judge_routing_skips_when_no_result(tmp_path: Path) -> None:
     """If sections/result.txt is absent (section-compare hasn't run yet), the
     next-action falls back to the generic section-compare invocation. The

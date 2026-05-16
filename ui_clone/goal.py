@@ -244,11 +244,19 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     next_action = step.next_action.replace("<ref-dir>", command_ref)
     evidence = step.required_evidence.replace("<ref-dir>", command_ref)
 
-    # Visual-judge routing: when section-compare has already produced a
-    # result.txt with FAIL rows, AE alone is a dead gradient signal. Override
-    # the generic section-compare next-action with a concrete multimodal-LLM
-    # diff invocation targeting the worst-AE sections.
-    if gate == "section-compare":
+    # Visual-judge routing: when sections/result.txt has FAIL rows, AE alone
+    # is a dead gradient signal. Override the generic next-action with a
+    # concrete multimodal-LLM diff invocation targeting the worst-AE sections.
+    #
+    # Fires on BOTH "section-compare" and "post-implement" gates. The latter
+    # matters because post-implement's check transitively includes
+    # section-compare evidence — when section-compare fails, post-implement
+    # also fails, but current_gate stays at "post-implement" and never advances
+    # to "section-compare". The 3-round benchmark (Round 1 / A / B) observed
+    # this: gate_fail_counts[post-implement] climbed past 400 while the
+    # routing override never fired. Broadening the trigger to post-implement
+    # cuts the runaway loop.
+    if gate in ("section-compare", "post-implement"):
         vj_action = _visual_judge_next_action(ref_dir)
         if vj_action is not None:
             next_action = vj_action

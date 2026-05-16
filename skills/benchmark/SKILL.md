@@ -76,13 +76,24 @@ SHA=$(git rev-parse --short HEAD)
 WORK_DIR="benchmark/work/${SHA}"
 REF_DIR="${WORK_DIR}/ref"
 IMPL_DIR="${WORK_DIR}/impl"
+EXPECTED_LINK="$(pwd)/$REF_DIR"
 # Wipe any prior run at the same SHA for a clean baseline.
 rm -rf "$WORK_DIR"
 mkdir -p "$REF_DIR" "$IMPL_DIR" tmp/ref
-# Symlink so /ui-capture (hard-coded to tmp/ref/<component>) lands in our work dir.
-ln -sfn "$(pwd)/$REF_DIR" tmp/ref/realfood
+# Symlink so /ui-capture (hard-coded to tmp/ref/<component>) lands in our work
+# dir. MUST be unconditional — a prior run on a different SHA leaves the
+# symlink pointing at the old work dir, which the agent then silently inherits
+# (observed Round 1 / A / B in benchmark/history.csv: B bench reused A's
+# 73ecf10/ work dir because tmp/ref/realfood still pointed there). Force-relink
+# every Step 1 and verify.
+ln -sfn "$EXPECTED_LINK" tmp/ref/realfood
+ACTUAL_LINK="$(readlink tmp/ref/realfood)"
+if [ "$ACTUAL_LINK" != "$EXPECTED_LINK" ]; then
+    echo "ERROR: tmp/ref/realfood points at $ACTUAL_LINK, expected $EXPECTED_LINK" >&2
+    exit 2
+fi
 date +%s > "$REF_DIR/.benchmark-start"
-echo "Work dir: $WORK_DIR"
+echo "Work dir: $WORK_DIR (symlink verified)"
 ```
 
 ### Step 2 — Drive the ui-reverse-engineering pipeline
