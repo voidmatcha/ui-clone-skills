@@ -301,6 +301,29 @@ def test_section_spec_script_present_and_callable() -> None:
         assert key in prompt_text, f"section-spec.md prompt missing schema key {key}"
 
 
+def test_fix12_synthesis_drops_zero_height_wrappers() -> None:
+    """Fix 12 — section-compare.sh synthesis must skip section-map entries
+    with height < 50 (layout-only wrappers from pre-reveal capture). V8
+    (d4b369d) measured ae_avg 509k partly because 5 zero-height wrappers
+    were pixel-compared as catastrophic critical sections. The filter
+    removes those from the synthesized ref-sections so AE reflects only
+    real content rows.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "_MIN_VISIBLE_HEIGHT" in text, (
+        "section-compare.sh must define _MIN_VISIBLE_HEIGHT for Fix 12 filter"
+    )
+    assert "if h_raw < _MIN_VISIBLE_HEIGHT" in text or "h_raw < _MIN_VISIBLE_HEIGHT" in text, (
+        "section-compare.sh must filter h_raw < _MIN_VISIBLE_HEIGHT entries"
+    )
+    # Safety: empty-output fallback (don't override with thin synthesis).
+    assert "if len(out) < 3" in text, (
+        "section-compare.sh must fall back to runtime enumeration when "
+        "the filter removes too many sections"
+    )
+
+
 def test_section_compare_synthesis_uses_correct_section_map_keys() -> None:
     """Regression: section-compare.sh synthesizes ref-sections from
     section-map.json when ENUMERATE_SECTIONS comes back too lean. The

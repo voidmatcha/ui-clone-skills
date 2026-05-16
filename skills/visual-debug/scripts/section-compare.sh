@@ -828,13 +828,25 @@ if not isinstance(sections, list) or len(sections) < 3:
 # read `y`, producing a "phantom ref" with collapsed coords that triggered
 # uniform AE/Mpx ~950k across every section and 632 wasted retry iterations.
 out = []
+# Fix 12 — drop layout-only zero-height wrappers from synthesis.
+# V8 (d4b369d) section-map had 15 sections but all carried `height: 0` for
+# the same reason scroll-reveal animations leave them collapsed at capture
+# time. Including them in ref-sections produced 5 catastrophic-AE rows
+# (~900k) that dragged ae_avg from a real ~250k up to 509k. Skip entries
+# below the minimum-visible threshold so synthesis matches only real
+# content sections.
+_MIN_VISIBLE_HEIGHT = 50
 sections_sorted = sorted(sections, key=lambda s: s.get("top") or s.get("y") or 0)
 for i, s in enumerate(sections_sorted):
+    h_raw = int(s.get("height") or 0)
+    if h_raw < _MIN_VISIBLE_HEIGHT:
+        # Layout-only wrapper, not a content section — skip.
+        continue
     cls = (s.get("cls") or s.get("class") or "").strip()
     sid = s.get("id")
     tag = s.get("tag") or "section"
     y = int(s.get("top") or s.get("y") or 0)
-    h = int(s.get("height") or 0)
+    h = h_raw
     w = int(s.get("width") or s.get("w") or 1440)
     fp_seed = sid or cls or f"sec-{i}"
     # fingerprint: lowercase alphanumeric, take first 100 chars of the
@@ -856,6 +868,12 @@ for i, s in enumerate(sections_sorted):
         "gridCols": None,
         "childCount": 0,
     })
+# Fix 12 safety — if the h>=50 filter removed too many sections, the
+# resulting synthesis is degenerate. Fall back to the runtime enumeration
+# (don't write a thin override) so section-compare can still pair real
+# content sections after they scroll-reveal.
+if len(out) < 3:
+    sys.exit(0)
 with open(out_path, "w") as fh:
     json.dump(out, fh)
 PY

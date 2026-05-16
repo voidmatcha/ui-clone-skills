@@ -106,6 +106,38 @@ Follow the normal ui-reverse-engineering pipeline:
   ```
   Populates sections + scroll video + regions.json into `<ref>` via the symlink.
 
+  **Fix 12 — scroll-reveal trigger before enumeration**. realfood.gov uses
+  GSAP ScrollTrigger + Intersection Observer reveal animations: sections
+  outside the initial viewport stay `height: 0` until the user scrolls to
+  them. If `section-map.json` ends up with most entries at `height: 0`
+  (observed V8 / d4b369d: 15/15 sections at h=0), the capture happened
+  before reveal — re-run after scrolling the page to the bottom and back:
+  ```bash
+  agent-browser --session realfood-bench eval "
+  (() => {
+    return new Promise(resolve => {
+      let y = 0; const step = window.innerHeight * 0.8;
+      const tick = () => {
+        window.scrollTo(0, y);
+        y += step;
+        if (y < document.documentElement.scrollHeight) {
+          setTimeout(tick, 250);
+        } else {
+          window.scrollTo(0, 0);
+          setTimeout(() => resolve('done'), 500);
+        }
+      };
+      tick();
+    });
+  })()
+  "
+  ```
+  After this completes, re-run the section enumeration to capture
+  post-reveal heights. Without this, ref-sections has zero-height wrappers
+  that section-compare's synthesis (Fix 12 filter) drops, leaving fewer
+  comparable rows and inflating per-section AE for the wrappers that DID
+  reveal.
+
 - **Phase 2 — extraction** (DOM, CSS, bundles, fonts, paid features).
 
 - **Phase 2.5 — asset transfer (MANDATORY, not just cataloging)**:
