@@ -72,8 +72,9 @@ if [[ -n "$VIEWPORT" ]]; then
   # Resize before extracting. Failure here is fatal — extracting at the
   # wrong viewport silently produces desktop styles which is worse than
   # erroring.
-  if ! agent-browser --session "$SESSION" resize --width "$W" --height "$H" >/dev/null 2>&1; then
-    echo "extract-dom: agent-browser resize to ${W}x${H} failed" >&2
+  # agent-browser CLI uses `set viewport <w> <h>`, not `resize --width`.
+  if ! agent-browser --session "$SESSION" set viewport "$W" "$H" >/dev/null 2>&1; then
+    echo "extract-dom: agent-browser set viewport ${W}x${H} failed" >&2
     exit 6
   fi
 fi
