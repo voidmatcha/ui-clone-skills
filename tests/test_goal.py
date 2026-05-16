@@ -204,6 +204,85 @@ def test_visual_judge_routing_fires_on_post_implement_too(tmp_path: Path) -> Non
     assert "section-9" in card
 
 
+def test_max_gate_fails_triggers_hard_abort(tmp_path: Path) -> None:
+    """When `gate_fail_counts[<active_gate>] >= _MAX_GATE_FAILS`, the card
+    surfaces an abort_banner and `--check-done` exits 2. This is the hard cap
+    that prevents the runaway loop observed in B bench (gate_fail_counts
+    climbed to 445 while the stuck advisory was ignored).
+    """
+    import subprocess
+
+    from ui_clone.goal import build_goal_card_data
+
+    ref_dir = tmp_path / "tmp" / "ref" / "realfood"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": ref_dir.name,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": [
+                    "reference",
+                    "extraction",
+                    "bundle",
+                    "paid-features",
+                    "spec",
+                    "pre-generate",
+                ],
+                "current_gate": "post-implement",
+                "last_updated": "2026-01-01T01:00:00Z",
+                "gate_fail_counts": {"post-implement": 50},  # well past cap
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    card = build_goal_card_data(ref_dir)
+    assert card.abort_banner is not None
+    assert "ABORT" in card.abort_banner
+    assert "hard cap" in card.abort_banner
+    assert "post-implement" in card.abort_banner
+    assert "50" in card.abort_banner
+
+    # --check-done returns exit 2 so external loop drivers (Python harness,
+    # LLM-driven) can machine-stop on this.
+    result = subprocess.run(
+        [sys.executable, "-m", "ui_clone.goal", str(ref_dir), "--check-done"],
+        capture_output=True,
+    )
+    assert result.returncode == 2
+
+
+def test_max_gate_fails_only_fires_above_threshold(tmp_path: Path) -> None:
+    """fail_count below _MAX_GATE_FAILS gives stuck_banner (advisory) but NOT
+    abort_banner. The two thresholds are layered: 3 = stuck (banner), 10 =
+    abort (terminal).
+    """
+    from ui_clone.goal import build_goal_card_data
+
+    ref_dir = tmp_path / "tmp" / "ref" / "realfood"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": ref_dir.name,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": ["reference"],
+                "current_gate": "extraction",
+                "last_updated": "2026-01-01T01:00:00Z",
+                "gate_fail_counts": {"extraction": 5},  # above 3, below 10
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    card = build_goal_card_data(ref_dir)
+    assert card.stuck_banner is not None
+    assert "STUCK" in card.stuck_banner
+    # Critical: 5 is between stuck (3) and abort (10) — no abort yet.
+    assert card.abort_banner is None
+
+
 def test_visual_judge_routing_skips_when_no_result(tmp_path: Path) -> None:
     """If sections/result.txt is absent (section-compare hasn't run yet), the
     next-action falls back to the generic section-compare invocation. The

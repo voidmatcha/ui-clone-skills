@@ -64,6 +64,14 @@ _NO_INFINITE_LOOP = (
 # is the empirical "you are grinding, not progressing" boundary — fewer is
 # noise (one retry after a transient browser glitch), more wastes iterations.
 _STUCK_THRESHOLD = 3
+# Hard ABORT threshold. The stuck banner is advisory — the agent reads it and
+# sometimes keeps retrying anyway (observed in the 3-round benchmark: B bench
+# climbed to `gate_fail_counts[post-implement] == 445` while the stuck banner
+# was being emitted on every cycle). Beyond this count, the goal card flips
+# to abort_banner mode which is terminal: `--check-done` exits 2 and external
+# loop drivers stop iterating. 10 leaves the agent ~7 cycles after the stuck
+# advisory to actually change approach before the loop is forced shut.
+_MAX_GATE_FAILS = 10
 
 
 _GOAL_BY_GATE: dict[str, GoalStep] = {
@@ -277,7 +285,9 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
 
     # Abort banner: hard-blocker reasons recorded by gates/scripts when they
     # detect a condition the pipeline cannot resolve (paid font with no
-    # substitution, DRM canvas, auth-gated content, etc.).
+    # substitution, DRM canvas, auth-gated content, etc.) OR — added in Fix 4
+    # after the 3-round benchmark observed B bench retrying post-implement
+    # 445 times — when any gate has failed more than _MAX_GATE_FAILS times.
     abort_banner: str | None = None
     if state.unclonable_reasons:
         summary = "; ".join(
@@ -288,6 +298,17 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
             f"ABORT: this site cannot be cloned as-is. Reasons: {summary}. "
             "External loops should stop iterating. Resolve the underlying "
             "constraint (license, auth, content gating) or report unclonable."
+        )
+    elif fail_count >= _MAX_GATE_FAILS:
+        abort_banner = (
+            f"ABORT: gate '{gate}' failed {fail_count} times "
+            f"(hard cap {_MAX_GATE_FAILS}). The pipeline is not converging — "
+            "retrying the same gate burns iterations without progress. Halt "
+            "the loop, harvest as INCOMPLETE, and report the root cause "
+            "(unmapped section enumeration, splash overlay blocking capture, "
+            "etc.) instead of continuing. External drivers (Python harness, "
+            "LLM-driven session) MUST stop on this banner — `--check-done` "
+            "returns exit 2 to make the stop machine-checkable."
         )
 
     return GoalCard(

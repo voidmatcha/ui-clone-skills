@@ -50,6 +50,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ui_clone.goal import _MAX_GATE_FAILS
 from ui_clone.state import PipelineState
 
 # ── Stop-condition probes ────────────────────────────────────────────────
@@ -383,6 +384,26 @@ def run_loop(args: argparse.Namespace) -> str:
         if state.unclonable_reasons:
             outcome = "ABORTED"
             _log({"event": "abort", "reasons": list(state.unclonable_reasons)})
+            break
+        # Hard cap: any gate that crossed _MAX_GATE_FAILS is in a runaway
+        # retry loop (observed in B bench at 445× post-implement). goal.py's
+        # abort_banner triggers on this; the harness mirrors that check so it
+        # stops burning iterations / tokens / wallclock on the same failure.
+        max_fail_gate = None
+        max_fail_count = 0
+        for g, n in state.gate_fail_counts.items():
+            if n > max_fail_count:
+                max_fail_count = n
+                max_fail_gate = g
+        if max_fail_count >= _MAX_GATE_FAILS:
+            outcome = "ABORTED"
+            _log({
+                "event": "abort",
+                "reason": "max_gate_fails_exceeded",
+                "gate": max_fail_gate,
+                "fail_count": max_fail_count,
+                "cap": _MAX_GATE_FAILS,
+            })
             break
 
         # Build prompt + invoke
