@@ -44,6 +44,31 @@ The scaffold contains:
    - If both pass and the component file is still <400 bytes, scaffold subtree was probably misread — re-inspect.
 
 4. **Group subtrees into Section components** using `sections[]` metadata (`top`, `height`, `class`). Each section becomes one component under `impl/src/components/<Name>.tsx`. Component count MUST match `sections.length`.
+
+   **Semantic root rule (Fix 11, post-V7).** Every section-component's
+   top-level JSX element MUST be a semantic block element — `<section>`,
+   `<header>`, `<footer>`, `<nav>`, `<main>`, `<article>`, `<aside>`. Wrapping
+   the section in `<div>` causes section-compare's runtime `ENUMERATE_SECTIONS`
+   walker to merge it into the parent `<main>` (observed V7 / bb9bf84:
+   section-compare returned `0 sections matched — fingerprint extraction
+   failed` because 13 generated components all rendered as `<div>` inside one
+   `<main>`, so the runtime saw 2 sections vs ref's 17 and could not match).
+
+   For each component:
+   ```tsx
+   // ✓ Good — semantic root
+   export default function Hero() {
+     return <section className="...">…</section>;
+   }
+   // ✗ Bad — div root invisible to ENUMERATE_SECTIONS
+   export default function Hero() {
+     return <div className="...">…</div>;
+   }
+   ```
+
+   Inherit the tag from the scaffold subtree's top node (which carries the
+   actual ref tag like `section` / `header` / `footer`). Do NOT override with
+   `<div>` "for layout flexibility" — that's the V7 regression.
 5. **Tree shape preserved.** `dom-mirror-check.sh` compares your generated JSX tree shape (tag sequence + nesting depth) against the scaffold subtree. Divergence > 30% in tag-sequence Levenshtein distance fails the gate.
 6. **Cross-check with section-spec when available.** `sections/spec/*.json` (Phase 2.6 LLM section-spec output, when present) lists the exact text + hex colors + typography measurements the LLM extracted from the section's ref clip. Use it to disambiguate when the scaffold's `styles` block is ambiguous (e.g., scaffold says `color: rgb(245,234,210)`, section-spec says `fg: "#f5ead2"` — same value, the spec confirms). If section-spec disagrees with the scaffold, the scaffold wins (it's deterministic from ref DOM), but investigate the disagreement before continuing — it usually means one of the inputs is stale.
 
