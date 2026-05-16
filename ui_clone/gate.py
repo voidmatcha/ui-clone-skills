@@ -1000,6 +1000,13 @@ class Gate:
             ("animation-init-styles.json", "animation-init-styles.json (Step 2.6)", False),
             ("section-map.json", "section-map.json (semantic section enumeration)", False),
             ("svg-text-elements.json", "svg-text-elements.json (SVG-as-text detection)", True),
+            # Fix 9 — dom-scaffold.json (Phase 2.7) is the Fix 8 source-of-truth
+            # for Phase-4 generation. V5 showed agents skipping Phase 2.7 when
+            # it lived as SKILL.md guidance only; making it a pre-generate gate
+            # artifact enforces it before any component is written. The
+            # scaffold's anti-fabrication value is lost if Phase 4 starts
+            # without it.
+            ("dom-scaffold.json", "dom-scaffold.json (Phase 2.7 — Fix 8 generation source-of-truth)", False),
         ]:
             results.append(
                 self.check_file(self.ref_dir / filename, label, allow_empty_array=allow_empty)

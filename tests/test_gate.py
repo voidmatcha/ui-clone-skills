@@ -346,6 +346,8 @@ def _write_pre_generate_baseline(ref: Path) -> None:
     (ref / "animation-init-styles.json").write_text(json.dumps({"elements": []}))
     (ref / "section-map.json").write_text(json.dumps({"sections": [], "totalCount": 0, "hasFooter": False}))
     (ref / "svg-text-elements.json").write_text(json.dumps([]))
+    # Fix 9 — dom-scaffold.json now a pre-generate prereq.
+    (ref / "dom-scaffold.json").write_text(json.dumps({"sections": [], "tree": {"tag": "body"}}))
     responsive = ref / "responsive"
     responsive.mkdir()
     (responsive / "sizing-expressions.json").write_text(json.dumps({"expressions": []}))

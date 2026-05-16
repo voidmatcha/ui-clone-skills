@@ -86,6 +86,8 @@ def _populate_pre_generate_artifacts(ref_dir: Path) -> None:
         json.dumps({"interactions": [], "hasPreloader": False})
     )
     (ref_dir / "hover-css-rules.json").write_text(json.dumps({"rules": []}))
+    # Fix 9 — dom-scaffold.json now a pre-generate prereq.
+    (ref_dir / "dom-scaffold.json").write_text(json.dumps({"sections": [], "tree": {"tag": "body"}}))
     (ref_dir / "transition-spec.json").write_text(json.dumps({"transitions": []}))
     (ref_dir / "bundle-map.json").write_text(json.dumps({"chunks": []}))
     (ref_dir / "animation-init-styles.json").write_text(json.dumps({"elements": []}))
