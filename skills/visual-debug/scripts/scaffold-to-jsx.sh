@@ -167,16 +167,27 @@ def section_component_name(section, index):
     return pascal
 
 
-def find_subtree_for_section(root, section):
+def find_subtree_for_section(root, section, consumed):
     """Locate the structure.json subtree corresponding to a section-map entry.
-    Match by tag + class (or id). Returns the first match or None."""
+    Match by tag + class (or id). Returns the first match not yet consumed.
+
+    Fix 16b — V13 (11672af) regressed to ae_avg 881k because this function
+    used to return the *first* DOM match per section, regardless of whether
+    that subtree had already been assigned to an earlier section. When
+    section-map.json contained multiple entries sharing a class prefix
+    (CSS-Module suffixes like dga_section__k3uwv-2, -3, ...), 8 of 15
+    sections collapsed to the same subtree and rendered identical JSX —
+    section-compare scored every duplicate at ~1.2M AE (the max possible).
+    The `consumed` set tracks Python id() of already-assigned subtrees so
+    each section gets a unique slice of the DOM.
+    """
     sid = section.get("id")
     cls = section.get("cls") or section.get("className") or ""
     target_tag = (section.get("tag") or "section").lower()
     target_cls = cls.split()[0] if cls else ""
 
     def walk(node):
-        if not isinstance(node, dict):
+        if not isinstance(node, dict) or id(node) in consumed:
             return None
         if (node.get("tag", "").lower() == target_tag
                 and (
@@ -190,7 +201,10 @@ def find_subtree_for_section(root, section):
                 return m
         return None
 
-    return walk(root)
+    found = walk(root)
+    if found is not None:
+        consumed.add(id(found))
+    return found
 
 
 structure = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -217,6 +231,7 @@ if not sections:
 written = []
 exports = []
 seen_names = {}  # Fix 15 — dedup component names so page.tsx imports are unique.
+consumed = set()  # Fix 16b — id(node) of subtrees already assigned to a section.
 for i, sec in enumerate(sections):
     base = section_component_name(sec, i)
     # If name already used, suffix with the section index to make it unique.
@@ -226,7 +241,7 @@ for i, sec in enumerate(sections):
     else:
         seen_names[base] = 1
         name = base
-    subtree = find_subtree_for_section(structure, sec)
+    subtree = find_subtree_for_section(structure, sec, consumed)
     if subtree is None:
         # Couldn't locate the subtree — emit a stub that imports the section
         # placeholder. Phase-5b visual-judge will surface this gap.

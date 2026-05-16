@@ -319,6 +319,30 @@ def test_fix13_dom_extraction_captures_per_node_styles() -> None:
     )
 
 
+def test_fix16b_scaffold_to_jsx_consumes_subtrees() -> None:
+    """Fix 16b — scaffold-to-jsx.sh must not assign the same DOM subtree to
+    multiple sections. V13 (11672af) regressed to ae_avg 881k because
+    find_subtree_for_section returned the first match per section, so
+    multiple sections sharing a CSS-Module class prefix all collapsed onto
+    one subtree and rendered identical JSX. The `consumed` set tracks
+    id(node) of already-assigned subtrees.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
+    body = script.read_text(encoding="utf-8")
+    assert "consumed = set()" in body, (
+        "scaffold-to-jsx.sh must initialize a consumed set before the section loop (Fix 16b)"
+    )
+    assert "id(node) in consumed" in body, (
+        "find_subtree_for_section must skip subtrees already assigned (Fix 16b)"
+    )
+    assert "consumed.add(id(found))" in body, (
+        "find_subtree_for_section must mark the assigned subtree consumed (Fix 16b)"
+    )
+    assert "find_subtree_for_section(structure, sec, consumed)" in body, (
+        "section loop must pass consumed into find_subtree_for_section (Fix 16b)"
+    )
+
+
 def test_fix16_extract_dom_captures_transitions_and_animations() -> None:
     """Fix 16 — extract-dom.sh's LAYOUT_PROPS must include transition + animation
     properties so the impl renders the same hover/focus/active/keyframe motion
