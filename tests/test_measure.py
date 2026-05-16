@@ -186,6 +186,57 @@ def test_locked_defaults_exposed_for_audit() -> None:
     assert measure.LOCKED_DEFAULTS["SECTION_THRESHOLD"] == "2000"
 
 
+def test_dom_extraction_captures_direct_text() -> None:
+    """Regression (Fix 6 v1): the DOM extraction eval in dom-extraction.md
+    MUST capture each element's direct text (own text nodes, not descendants').
+    Without `text` in the extracted schema, Phase 4 has no verbatim text to
+    paste — agent fabricates from class names / URLs / asset filenames. The
+    3-round benchmark showed Hero generated with "Eat Real Food" while the
+    real ref hero said "Real Food Wins".
+    """
+    doc = _project_root() / "skills" / "ui-reverse-engineering" / "dom-extraction.md"
+    text = doc.read_text(encoding="utf-8")
+
+    # The direct-text helper that captures own-text without recursing into
+    # descendants — keeps structure.json from exploding with duplicated text.
+    assert "directText" in text, "dom-extraction.md must define directText helper"
+    assert "nodeType === 3" in text, (
+        "directText must filter to text nodes (nodeType === 3) to avoid "
+        "capturing nested element duplicates"
+    )
+    # The extract function must populate `text` from the helper.
+    assert "out.text = text" in text or "text: directText" in text, (
+        "dom-extraction.md extract() must populate a `text` field on each node"
+    )
+
+
+def test_section_spec_script_present_and_callable() -> None:
+    """Regression (Fix 6 v2): section-spec.sh must exist with the required
+    flags (--label, --out, --metadata, --text) so Phase 2.6 grounding can run
+    on each section. Without this step Phase 4 has no LLM-verified spec and
+    falls back to inferring from extracted JSON.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-spec.sh"
+    assert script.is_file(), "section-spec.sh must exist for Phase 2.6"
+    body = script.read_text(encoding="utf-8")
+    # Required flags
+    assert "--label" in body, "section-spec.sh must accept --label"
+    assert "--out" in body, "section-spec.sh must accept --out"
+    assert "--metadata" in body, "section-spec.sh must accept --metadata"
+    assert "--text" in body, "section-spec.sh must accept --text"
+    # Calls claude --print (LLM-driven, not script-only)
+    assert "claude --print" in body, (
+        "section-spec.sh must call claude --print — Fix 6 v2 is LLM-driven"
+    )
+    # Prompt template exists
+    prompt = _project_root() / "skills" / "visual-debug" / "prompts" / "section-spec.md"
+    assert prompt.is_file(), "section-spec.md prompt template must exist"
+    prompt_text = prompt.read_text(encoding="utf-8")
+    # Schema keys required for grounded generation
+    for key in ('"label"', '"text"', '"colors"', '"typography"', '"layout"', '"key_elements"'):
+        assert key in prompt_text, f"section-spec.md prompt missing schema key {key}"
+
+
 def test_section_compare_synthesis_uses_correct_section_map_keys() -> None:
     """Regression: section-compare.sh synthesizes ref-sections from
     section-map.json when ENUMERATE_SECTIONS comes back too lean. The

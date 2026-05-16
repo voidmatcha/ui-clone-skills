@@ -123,6 +123,30 @@ Follow the normal ui-reverse-engineering pipeline:
   explodes to 1M+ on every section. Also parse `<ref>/visible-images.json`
   and reference any non-CDN URLs in your generated code.
 
+- **Phase 2.6 — LLM-driven section spec (MANDATORY, anti-fabrication grounding)**:
+  Before Phase 3 / Phase 4, run section-spec.sh on each section's ref clip to
+  generate a verbatim, evidence-anchored spec (text content, hex colors,
+  typographic scale, layout pattern, key elements, asset paths). Without this
+  step Phase 4 fabricates plausible-but-wrong text (e.g., guessing "Eat Real
+  Food" from URL when ref actually shows "Real Food Wins") and arbitrary
+  styling from class names. The spec is the **primary input** to Phase 4 —
+  the agent paste-translates the spec into TSX instead of inferring from
+  lossy JSON dumps.
+
+  For each section in section-map.json:
+  ```bash
+  bash skills/visual-debug/scripts/section-spec.sh \
+    "$REF_DIR/sections/ref/section-N.png" \
+    --label section-N \
+    --metadata "$(jq -c '.sections[N]' $REF_DIR/section-map.json)" \
+    --out "$REF_DIR/sections/spec/section-N.json"
+  ```
+
+  Each spec captures: verbatim text (h1/subhead/body/cta_label/captions), hex
+  colors (bg/fg/accent), typographic scale (size+weight+family observed),
+  layout vocabulary term, enumerated key elements, asset paths. Phase 4 then
+  reads `sections/spec/*.json` and follows it deterministically.
+
 - **Phase 3 — spec** (transition-spec, verification-plan).
 
 - **Phase 4 — pre-generate + scaffold**: if `<impl>` is empty, scaffold a

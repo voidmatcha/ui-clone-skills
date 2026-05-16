@@ -115,17 +115,35 @@ agent-browser --session <project-name> eval "
 (() => {
   const target = document.querySelector('.target-selector');
   if (!target) return JSON.stringify({ error: 'selector not found' });
+  // Direct-text helper: capture ONLY this element's own text nodes, NOT
+  // descendants' text. Without this, every wrapper div would carry duplicate
+  // text from its children, exploding structure.json by 10–100x. With it,
+  // text lives exactly where it's authored ('h1' has the headline text,
+  // 'section' typically has empty text and gets text via its children).
+  // This is the deterministic anchor agents use in Phase 4 — without it
+  // they fabricate plausible text from class names / URLs / asset filenames
+  // and the convergence loop can't reach a basin of attraction.
+  const directText = (el) => {
+    let t = '';
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3) t += n.textContent;
+    }
+    return t.trim().replace(/\\s+/g, ' ').slice(0, 300);
+  };
   // depth limit: reduce to 4 for simple pages, increase to 8 for deep component trees (shadcn, MUI, etc.)
   const extract = (el, depth = 0) => {
     if (depth > 6) return null;
     const s = getComputedStyle(el);
-    return {
+    const text = directText(el);
+    const out = {
       tag: el.tagName.toLowerCase(),
       class: (typeof el.className === 'string' ? el.className : el.className?.baseVal || '').slice(0, 80),
       display: s.display,
       position: s.position,
       children: Array.from(el.children).map(c => extract(c, depth + 1)).filter(Boolean),
     };
+    if (text) out.text = text;  // omit empty-text wrappers to keep schema lean
+    return out;
   };
   return JSON.stringify(extract(target), null, 2);
 })()
