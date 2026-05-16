@@ -319,6 +319,23 @@ def test_fix13_dom_extraction_captures_per_node_styles() -> None:
     )
 
 
+def test_fix15_scaffold_to_jsx_emits_page_tsx() -> None:
+    """Fix 15 — scaffold-to-jsx.sh must also emit impl/src/app/page.tsx that
+    composes the generated section components. V11 (220c969) showed 3 sections
+    (hero/lineInTheSand/stats) stuck at ~900k AE because agent-written
+    page.tsx wrapped components incorrectly; transpiler-generated page.tsx
+    eliminates that wiring drift by mirroring the ref structure root.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
+    body = script.read_text(encoding="utf-8")
+    assert 'page.tsx' in body, "scaffold-to-jsx.sh must write page.tsx (Fix 15)"
+    # Mirrors structure.json root tag (not hardcoded to <main>).
+    assert 'root_tag' in body, "page.tsx must use structure.json root tag dynamically"
+    # Dedup component names — collisions across sections common when
+    # ref has repeated class names (e.g., 4× dga_section).
+    assert "seen_names" in body, "must dedup component names for unique imports"
+
+
 def test_fix13_scaffold_to_jsx_script_present() -> None:
     """Fix 13 — scaffold-to-jsx.sh is the deterministic transpiler that
     replaces the LLM-interpretation step in Phase 4. Locks the script + its
