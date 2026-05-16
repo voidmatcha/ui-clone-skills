@@ -30,9 +30,22 @@ The scaffold contains:
    - `lh: "0.95"` → `leading-[0.95]`
    - `padding: "102.4px 144px 95px"` → `pt-[102.4px] px-[144px] pb-[95px]`
    - `ff: "Die Grotesk A, …"` → matching `font-*` token or import the font and use `font-[family]`
-3. **No fabrication.** If a node has `text: ""` and no children, render NOTHING. Do NOT invent placeholder text from class names, URLs, or guesses. `text-fidelity-check.sh` will fail the gate on any JSX text-position string that isn't in the scaffold.
+3. **No fabrication, but no stubs either (Fix 10 prompt refinement, post-V6).** Two equally bad failure modes the prompt has to bridge:
+   - **Fabrication**: inventing text not in the scaffold ("Eat Real Food" when scaffold says "Real Food Wins").
+   - **Stub regression** (observed in V6 / 9be7b18 / ae_avg jumped 463k → 819k): generating 200-byte empty wrapper components when the scaffold subtree is rich. Tree shape was mirrored but content wasn't rendered.
+
+   The rule: **every component must render every leaf-text and every asset reference present in its scaffold subtree.** If the scaffold for a section has 12 `text` fields across its tree, the generated component MUST contain 12 corresponding JSX text positions with those exact strings. If the scaffold subtree references images from `impl/public/`, the component MUST emit corresponding `<img>` / `<video>` / `<Image>` tags with those paths.
+
+   Empty placeholder is valid ONLY when the scaffold subtree itself is empty (no text, no children with text, no asset references). A component file under ~400 bytes (sans imports) with a non-empty scaffold subtree is almost always a stub regression — re-generate.
+
+   Self-check after writing each component:
+   - For every `text` in this section's scaffold subtree, does the component contain that string verbatim in a JSX text position?
+   - For every asset path in `visible-images.json` whose `top` falls within this section's bbox, does the component reference that path?
+   - If both pass and the component file is still <400 bytes, scaffold subtree was probably misread — re-inspect.
+
 4. **Group subtrees into Section components** using `sections[]` metadata (`top`, `height`, `class`). Each section becomes one component under `impl/src/components/<Name>.tsx`. Component count MUST match `sections.length`.
 5. **Tree shape preserved.** `dom-mirror-check.sh` compares your generated JSX tree shape (tag sequence + nesting depth) against the scaffold subtree. Divergence > 30% in tag-sequence Levenshtein distance fails the gate.
+6. **Cross-check with section-spec when available.** `sections/spec/*.json` (Phase 2.6 LLM section-spec output, when present) lists the exact text + hex colors + typography measurements the LLM extracted from the section's ref clip. Use it to disambiguate when the scaffold's `styles` block is ambiguous (e.g., scaffold says `color: rgb(245,234,210)`, section-spec says `fg: "#f5ead2"` — same value, the spec confirms). If section-spec disagrees with the scaffold, the scaffold wins (it's deterministic from ref DOM), but investigate the disagreement before continuing — it usually means one of the inputs is stale.
 
 Cross-validate with the per-section LLM `section-spec.sh` outputs in `sections/spec/*.json` (Phase 2.6) — they should AGREE with the scaffold. If they disagree, scaffold wins (it's deterministic).
 
