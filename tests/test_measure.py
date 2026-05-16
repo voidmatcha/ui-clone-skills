@@ -319,6 +319,29 @@ def test_fix13_dom_extraction_captures_per_node_styles() -> None:
     )
 
 
+def test_fix16_extract_dom_captures_transitions_and_animations() -> None:
+    """Fix 16 — extract-dom.sh's LAYOUT_PROPS must include transition + animation
+    properties so the impl renders the same hover/focus/active/keyframe motion
+    as the ref. Without these the transpiler emits static JSX and the page
+    looks dead. NOISE must also drop the user-agent defaults for these props
+    ('all 0s ease 0s' etc.) so every node doesn't carry meaningless data.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "extract-dom.sh"
+    text = script.read_text(encoding="utf-8")
+    for prop in (
+        'transition', 'transition-property', 'transition-duration',
+        'animation', 'animation-name', 'animation-duration',
+        'cursor',
+    ):
+        assert f"'{prop}'" in text, (
+            f"extract-dom.sh LAYOUT_PROPS must include {prop} (Fix 16)"
+        )
+    # The default transition computed value Chromium emits — must be filtered.
+    assert "'all 0s ease 0s'" in text, (
+        "NOISE must drop the user-agent default transition value 'all 0s ease 0s'"
+    )
+
+
 def test_fix15_scaffold_to_jsx_emits_page_tsx() -> None:
     """Fix 15 — scaffold-to-jsx.sh must also emit impl/src/app/page.tsx that
     composes the generated section components. V11 (220c969) showed 3 sections

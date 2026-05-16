@@ -78,8 +78,25 @@ EXTRACT_JS=$(cat <<'JSEOF'
     'flex','flex-direction','justify-content','align-items','gap',
     'grid-template-columns','grid-template-rows',
     'z-index','box-shadow',
+    // Fix 16 — transition + animation. The transpiler emits each captured
+    // value as a property inside style={{ ... }} so the impl renders the
+    // same hover/focus/active transitions as the ref. NOISE filters out
+    // the user-agent defaults ('none', 'all 0s ease 0s', etc.) so only
+    // ref-authored transitions reach the JSX.
+    'transition','transition-property','transition-duration',
+    'transition-timing-function','transition-delay',
+    'animation','animation-name','animation-duration',
+    'animation-timing-function','animation-delay',
+    'animation-iteration-count','animation-direction',
+    'animation-fill-mode','animation-play-state',
+    'cursor','pointer-events',
   ];
-  const NOISE = new Set(['', 'normal', 'none', 'auto', '0px', 'rgba(0, 0, 0, 0)', 'visible', 'start']);
+  const NOISE = new Set([
+    '', 'normal', 'none', 'auto', '0px', 'rgba(0, 0, 0, 0)', 'visible', 'start',
+    // Fix 16 — user-agent defaults for transition/animation. Without these
+    // every node would carry a noisy 'all 0s ease 0s' transition value.
+    'all 0s ease 0s', 'all', '0s', 'ease', '1', 'running', 'forwards', 'backwards',
+  ]);
   const extract = (el, depth = 0) => {
     if (depth > 6) return null;
     const s = getComputedStyle(el);
