@@ -69,32 +69,26 @@ you know what's left.
 
 ## Procedure
 
-### Step 1 — Setup (inline bash, run once at start)
+### Step 1 — Setup (MANDATORY, single command)
 
 ```bash
-SHA=$(git rev-parse --short HEAD)
-WORK_DIR="benchmark/work/${SHA}"
-REF_DIR="${WORK_DIR}/ref"
-IMPL_DIR="${WORK_DIR}/impl"
-EXPECTED_LINK="$(pwd)/$REF_DIR"
-# Wipe any prior run at the same SHA for a clean baseline.
-rm -rf "$WORK_DIR"
-mkdir -p "$REF_DIR" "$IMPL_DIR" tmp/ref
-# Symlink so /ui-capture (hard-coded to tmp/ref/<component>) lands in our work
-# dir. MUST be unconditional — a prior run on a different SHA leaves the
-# symlink pointing at the old work dir, which the agent then silently inherits
-# (observed Round 1 / A / B in benchmark/history.csv: B bench reused A's
-# 73ecf10/ work dir because tmp/ref/realfood still pointed there). Force-relink
-# every Step 1 and verify.
-ln -sfn "$EXPECTED_LINK" tmp/ref/realfood
-ACTUAL_LINK="$(readlink tmp/ref/realfood)"
-if [ "$ACTUAL_LINK" != "$EXPECTED_LINK" ]; then
-    echo "ERROR: tmp/ref/realfood points at $ACTUAL_LINK, expected $EXPECTED_LINK" >&2
-    exit 2
-fi
-date +%s > "$REF_DIR/.benchmark-start"
-echo "Work dir: $WORK_DIR (symlink verified)"
+bash skills/benchmark/scripts/setup.sh
 ```
+
+This is the **only entry point**. The script wipes any stale work dir at the
+current SHA, creates `benchmark/work/<sha>/{ref,impl}`, force-relinks
+`tmp/ref/realfood → benchmark/work/<sha>/ref`, and fails fast on symlink
+mismatch. It is idempotent — safe to re-run if you suspect setup is stale.
+
+The `ui_clone.hooks.pre_bash` hook will **block** any benchmark-related Bash
+command (`section-compare.sh`, `extract-assets.sh`, `benchmark-harvest.sh`,
+`visual-judge.sh`, `section-spec.sh`, any path under `benchmark/work/`, or
+any use of `tmp/ref/realfood`) when `tmp/ref/realfood` points at a different
+SHA's work dir than the current HEAD. Rounds A / B / V3 silently inherited
+the prior run's symlink and produced misleading benchmarks; the hook + this
+script close that loophole.
+
+Bypass for emergencies only: `UI_RE_SKIP_BASH_GATE=1 <command>`.
 
 ### Step 2 — Drive the ui-reverse-engineering pipeline
 

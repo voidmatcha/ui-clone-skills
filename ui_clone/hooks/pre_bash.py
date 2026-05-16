@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import cast
@@ -55,6 +56,31 @@ _BLOCK_PATTERNS = re.compile(
     r"|git\s+push\b"
     r"|gh\s+pr\s+(?:create|merge|close)\b"
     r")"
+)
+
+# Benchmark-related commands that depend on tmp/ref/realfood pointing at the
+# current HEAD's work dir. When the symlink is stale (points at a prior SHA's
+# dir), these commands silently iterate on the wrong artifacts and produce
+# misleading metrics. Block them until `bash skills/benchmark/scripts/setup.sh`
+# has re-linked. Pattern matches anywhere in the command — agents commonly
+# chain a `cd` or env-setup prefix before the actual call.
+_BENCHMARK_COMMAND_PATTERNS = re.compile(
+    r"benchmark/work/"
+    r"|skills/visual-debug/scripts/(?:section-compare|asset-transfer-check|"
+    r"asset-utilization-check|visual-judge|section-spec|image-fidelity-check|"
+    r"font-parity-check)"
+    r"|scripts/extract/extract-assets"
+    r"|skills/benchmark/scripts/benchmark-harvest"
+    r"|tmp/ref/realfood",
+    re.IGNORECASE,
+)
+# Within benchmark commands, setup.sh itself MUST be allowed even when the
+# symlink is stale — running it is the recovery action. Same for `rm`/`ln`
+# style cleanup the agent might issue when shown the block reason.
+_BENCHMARK_SETUP_ESCAPES = re.compile(
+    r"skills/benchmark/scripts/setup\.sh"
+    r"|ln\s+-s",
+    re.IGNORECASE,
 )
 
 # Bash redirects/streams that write to a file. Each pattern captures the target
@@ -122,6 +148,66 @@ def _find_active_ref(search_root: Path) -> Path | None:
     return None
 
 
+def _check_benchmark_setup_alignment(project_root: Path) -> str | None:
+    """Return a block reason if `tmp/ref/realfood` points at a benchmark/work/
+    dir whose SHA doesn't match `git rev-parse --short HEAD`; else None.
+
+    The check applies only when the symlink target matches the canonical
+    `benchmark/work/<sha>/ref` layout — a different layout (e.g. user
+    pointing at `tmp/ref/realfood -> tmp/ref/someothercomponent` for an
+    unrelated clone) is left alone.
+
+    Rationale: rounds A / B / V3 each launched a new SHA but agents skipped
+    Step 1 setup, so the symlink stayed pinned to the previous round's work
+    dir. Section-compare ran on stale capture data, AE metrics were
+    artifacts, and the benchmark history was misleading. This check makes
+    that failure mode loud — the agent is blocked at the first benchmark
+    command and pointed at the recovery script.
+    """
+    sym = project_root / "tmp" / "ref" / "realfood"
+    if not sym.is_symlink():
+        return None
+    try:
+        target = os.readlink(sym)
+    except OSError:
+        return None
+
+    m = re.search(r"benchmark/work/([0-9a-f]{7,40})/ref/?$", target)
+    if not m:
+        # Symlink doesn't point at a benchmark work dir — out of scope.
+        return None
+    link_sha = m.group(1)
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    head = (result.stdout or "").strip()
+    if not head:
+        return None
+
+    if link_sha.startswith(head) or head.startswith(link_sha):
+        return None  # match (one is shorter prefix of the other)
+
+    return (
+        f"⛔ UI-RE benchmark setup mismatch: tmp/ref/realfood points at "
+        f"benchmark/work/{link_sha}/ref but HEAD is {head}. The agent is "
+        f"about to iterate on a stale work dir (the inheritance bug observed "
+        f"in rounds A / B / V3).\n"
+        f"Run setup before any other benchmark command:\n"
+        f"  bash skills/benchmark/scripts/setup.sh\n"
+        f"That script wipes the current-SHA work dir, re-links "
+        f"tmp/ref/realfood, and exits 2 on any further mismatch.\n"
+        f"Bypass (emergency only): UI_RE_SKIP_BASH_GATE=1 <command>"
+    )
+
+
 def main() -> None:
     if os.environ.get("UI_RE_SKIP_BASH_GATE") == "1":
         sys.exit(0)
@@ -141,12 +227,22 @@ def main() -> None:
     if not isinstance(cmd, str):
         sys.exit(0)
 
+    project_root = find_project_root()
+
+    # Benchmark setup-alignment check. Fires BEFORE the declaration-of-done
+    # logic so the agent is blocked on the first stale-symlink command, not
+    # only when it tries to commit/push. The escape lets setup.sh / `ln -s`
+    # through so the recovery action isn't itself blocked.
+    if _BENCHMARK_COMMAND_PATTERNS.search(cmd) and not _BENCHMARK_SETUP_ESCAPES.search(cmd):
+        bench_reason = _check_benchmark_setup_alignment(project_root)
+        if bench_reason is not None:
+            _emit_block(bench_reason)
+            sys.exit(0)
+
     is_decl = _is_declaration_command(cmd)
     bash_write = _bash_write_target(cmd)
     if not is_decl and bash_write is None:
         sys.exit(0)
-
-    project_root = find_project_root()
 
     # Bash-write to a component file: same gate as pre_generate (extraction must
     # be complete before component code is written). This closes the bypass where

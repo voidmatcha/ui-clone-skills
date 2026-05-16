@@ -1915,3 +1915,169 @@ class TestPreGeneratePostDoneInvalidation:
         assert reloaded.current_gate == "section-compare"
         # No demotion message
         assert "demoted" not in result.stderr.lower()
+
+
+class TestPreBashBenchmarkSetupAlignment:
+    """PreToolUse Bash hook blocks benchmark-related commands when the
+    `tmp/ref/realfood` symlink points at a different SHA's work dir than
+    the current HEAD. This closes the 'agent skips Step 1 setup, inherits
+    prior round's symlink' bug observed 3× across rounds A / B / V3.
+
+    Recovery action: `bash skills/benchmark/scripts/setup.sh` (idempotent
+    wipe + re-link). The escape regex lets that command through even when
+    the symlink is stale.
+    """
+
+    MODULE = "ui_clone.hooks.pre_bash"
+
+    def _init_git_repo(self, tmp_path: Path, commit_message: str = "init") -> str:
+        """Init a tmp git repo and return its short HEAD SHA."""
+        subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.email", "t@t.invalid"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.name", "t"], check=True
+        )
+        (tmp_path / "README").write_text("test", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "README"], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-q", "-m", commit_message],
+            check=True,
+        )
+        sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return sha
+
+    def _make_stale_symlink(self, tmp_path: Path, stale_sha: str) -> Path:
+        """Create tmp/ref/realfood → benchmark/work/<stale_sha>/ref."""
+        work = tmp_path / "benchmark" / "work" / stale_sha / "ref"
+        work.mkdir(parents=True)
+        sym_parent = tmp_path / "tmp" / "ref"
+        sym_parent.mkdir(parents=True)
+        sym = sym_parent / "realfood"
+        sym.symlink_to(work)
+        return sym
+
+    def test_stale_symlink_blocks_section_compare(self, tmp_path: Path) -> None:
+        """Bench command with symlink pointing at a different SHA → block."""
+        head_sha = self._init_git_repo(tmp_path)
+        stale_sha = "deadbee"  # arbitrary other SHA
+        assert stale_sha != head_sha
+        self._make_stale_symlink(tmp_path, stale_sha)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "bash skills/visual-debug/scripts/section-compare.sh "
+                "https://x.test http://localhost:3000 sess tmp/ref/realfood"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "benchmark setup mismatch" in reason
+        assert stale_sha in reason
+        assert head_sha in reason
+        assert "skills/benchmark/scripts/setup.sh" in reason
+
+    def test_aligned_symlink_allows_section_compare(self, tmp_path: Path) -> None:
+        """Symlink SHA matches HEAD → no block (other checks may still fire)."""
+        head_sha = self._init_git_repo(tmp_path)
+        self._make_stale_symlink(tmp_path, head_sha)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                f"bash skills/visual-debug/scripts/section-compare.sh "
+                f"https://x.test http://localhost:3000 sess "
+                f"benchmark/work/{head_sha}/ref"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        # No active WIP marker, no declaration command → no block expected.
+        # (Downstream existing logic may emit if other conditions hold; for
+        # this test we care that the alignment check doesn't fire.)
+        out = result.stdout.strip()
+        if out:
+            data = json.loads(out)
+            reason = data.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            assert "benchmark setup mismatch" not in reason, (
+                "alignment check should not fire when SHAs match"
+            )
+
+    def test_setup_sh_escape_allowed_even_when_stale(self, tmp_path: Path) -> None:
+        """`bash skills/benchmark/scripts/setup.sh` is the recovery action.
+        It must be allowed through even when the symlink is stale — otherwise
+        the agent cannot recover."""
+        head_sha = self._init_git_repo(tmp_path)
+        stale_sha = "deadbee"
+        assert stale_sha != head_sha
+        self._make_stale_symlink(tmp_path, stale_sha)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input("bash skills/benchmark/scripts/setup.sh"),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        # setup.sh escape — alignment check must not fire on this command.
+        if out:
+            data = json.loads(out)
+            reason = data.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            assert "benchmark setup mismatch" not in reason, (
+                "setup.sh is the recovery path; alignment check must allow it"
+            )
+
+    def test_non_benchmark_command_unaffected(self, tmp_path: Path) -> None:
+        """Generic commands (ls, git status, npm test) must not trigger the
+        alignment check at all, even with a stale symlink present."""
+        self._init_git_repo(tmp_path)
+        stale_sha = "deadbee"
+        self._make_stale_symlink(tmp_path, stale_sha)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input("ls -la"),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        if out:
+            data = json.loads(out)
+            reason = data.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            assert "benchmark setup mismatch" not in reason
+
+    def test_bypass_env_var_disables_check(self, tmp_path: Path) -> None:
+        """UI_RE_SKIP_BASH_GATE=1 short-circuits ALL hook logic, including
+        the alignment check — the existing escape hatch must keep working."""
+        self._init_git_repo(tmp_path)
+        stale_sha = "deadbee"
+        self._make_stale_symlink(tmp_path, stale_sha)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "bash skills/visual-debug/scripts/section-compare.sh "
+                "https://x.test http://localhost:3000 sess tmp/ref/realfood"
+            ),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_RE_SKIP_BASH_GATE": "1",
+            },
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", (
+            "UI_RE_SKIP_BASH_GATE=1 must short-circuit even the alignment check"
+        )
