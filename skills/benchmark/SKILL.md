@@ -140,6 +140,18 @@ Follow the normal ui-reverse-engineering pipeline:
 
 - **Phase 2 — extraction** (DOM, CSS, bundles, fonts, paid features).
 
+  **DOM extraction MUST go through `extract-dom.sh`** (Fix 14). Across V5–V10,
+  agents wrote their own variants of the DOM extraction eval, losing the
+  Fix 6 v1 `text` field and the Fix 13 `styles` field. Prose-level guidance
+  in dom-extraction.md was ignored. The script is now the only canonical
+  entry:
+  ```bash
+  bash skills/visual-debug/scripts/extract-dom.sh "$REF_DIR" realfood-bench '.target-selector'
+  ```
+  Writes `<ref-dir>/structure.json` with the Fix 13 schema (per-node text +
+  styles). Validation is built into the script — it fails fast if the
+  resulting JSON lacks `tag` / `children` keys (schema drift detection).
+
 - **Phase 2.5 — asset transfer (MANDATORY, not just cataloging)**:
   ```bash
   bash scripts/extract/extract-assets.sh realfood-bench "$REF_DIR" "$IMPL_DIR/public"
