@@ -1440,7 +1440,9 @@ def test_verification_plan_quick_tier_filters_to_static_checks(tmp_path: Path) -
     """tier=quick must emit only the static / JSON-comparison checks.
 
     Static-only set (with all signals firing): hydration-check,
-    tailwind-transform-conflict, transition-spec-coverage, runtime-spec-coverage.
+    tailwind-transform-conflict, transition-spec-coverage, runtime-spec-coverage,
+    plus the Fix 8 anti-fabrication gates (text-fidelity-check, dom-mirror-check)
+    which are pure static AST/tree comparison — no browser, no LLM, no IO.
     Everything else (one-shot browser + 60fps video) must be filtered out.
     """
     ref = tmp_path / "ref"
@@ -1454,6 +1456,8 @@ def test_verification_plan_quick_tier_filters_to_static_checks(tmp_path: Path) -
         "tailwind-transform-conflict",
         "transition-spec-coverage",
         "runtime-spec-coverage",
+        "text-fidelity-check",
+        "dom-mirror-check",
     }, f"quick tier emitted unexpected ids: {ids}"
     # Every emitted check must be tagged tier=quick.
     tiers = {c["tier"] for c in plan["requiredChecks"]}

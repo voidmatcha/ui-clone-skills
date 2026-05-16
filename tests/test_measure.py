@@ -210,6 +210,70 @@ def test_dom_extraction_captures_direct_text() -> None:
     )
 
 
+def test_fix8_dom_scaffold_script_present() -> None:
+    """Fix 8 — dom-scaffold.sh produces the source-of-truth scaffold for
+    Phase 4 generation. Locks the script + its key responsibilities so a
+    future refactor can't silently remove the determinism layer that
+    closed the V4 (avg ~463k AE) → expected-V5 fidelity gap.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "dom-scaffold.sh"
+    assert script.is_file(), "dom-scaffold.sh missing — Fix 8 incomplete"
+    body = script.read_text(encoding="utf-8")
+    # Reads the three Phase-2 artifacts.
+    for input_name in ("structure.json", "styles.json", "section-map.json"):
+        assert input_name in body, f"dom-scaffold.sh must read {input_name}"
+    # Writes the canonical output path.
+    assert "dom-scaffold.json" in body, "dom-scaffold.sh must write dom-scaffold.json"
+    # Style keys carried through to the scaffold tree.
+    for key in ("bg", "color", "ff", "fs", "fw", "lh"):
+        assert f'"{key}"' in body, f"dom-scaffold.sh must carry styles.{key}"
+
+
+def test_fix8_text_fidelity_check_script_present() -> None:
+    """Fix 8 — text-fidelity-check.sh is the post-Phase-4 gate that blocks
+    JSX text-position strings not present in the scaffold allowlist. Locks
+    the script + the canonical fabrication-detection regex patterns.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "text-fidelity-check.sh"
+    assert script.is_file(), "text-fidelity-check.sh missing — Fix 8 incomplete"
+    body = script.read_text(encoding="utf-8")
+    # Reads dom-scaffold as the allowlist source.
+    assert "dom-scaffold.json" in body
+    # Emits the canonical output artifact.
+    assert "text-fidelity-check" in body  # appears in OUT name + identity
+    # Has the fabrication-detection logic ("status": "fail" branch).
+    assert "fabrications" in body, "must enumerate fabrications"
+
+
+def test_fix8_dom_mirror_check_script_present() -> None:
+    """Fix 8 — dom-mirror-check.sh compares impl JSX tag-multiset to the
+    scaffold's tag-multiset. Locks the divergence-threshold default + that
+    the script writes its verdict to dom-mirror-check.json.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "dom-mirror-check.sh"
+    assert script.is_file(), "dom-mirror-check.sh missing — Fix 8 incomplete"
+    body = script.read_text(encoding="utf-8")
+    assert "dom-scaffold.json" in body
+    assert "divergence" in body, "must report divergence percentage"
+    # 30% default threshold (any change to default should be intentional).
+    assert "THRESHOLD=30" in body, "default divergence threshold should be 30%"
+
+
+def test_fix8_verification_plan_dispatches_new_gates() -> None:
+    """Fix 8 — verification-plan.sh must dispatch text-fidelity-check and
+    dom-mirror-check at tier=quick (static analysis, cheap) with severity=block.
+    Without this dispatch the gates exist as scripts but never run as gates.
+    """
+    plan = _project_root() / "skills" / "visual-debug" / "scripts" / "verification-plan.sh"
+    body = plan.read_text(encoding="utf-8")
+    assert 'add_check "text-fidelity-check"' in body, (
+        "verification-plan.sh must dispatch text-fidelity-check"
+    )
+    assert 'add_check "dom-mirror-check"' in body, (
+        "verification-plan.sh must dispatch dom-mirror-check"
+    )
+
+
 def test_section_spec_script_present_and_callable() -> None:
     """Regression (Fix 6 v2): section-spec.sh must exist with the required
     flags (--label, --out, --metadata, --text) so Phase 2.6 grounding can run

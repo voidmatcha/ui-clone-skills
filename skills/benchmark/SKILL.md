@@ -117,6 +117,19 @@ Follow the normal ui-reverse-engineering pipeline:
   explodes to 1M+ on every section. Also parse `<ref>/visible-images.json`
   and reference any non-CDN URLs in your generated code.
 
+- **Phase 2.7 — DOM scaffold (MANDATORY, deterministic, Fix 8)**:
+  Merge `structure.json` + `styles.json` + `section-map.json` into a single
+  scaffold that the Phase-4 generator MUST follow verbatim:
+  ```bash
+  bash skills/visual-debug/scripts/dom-scaffold.sh "$REF_DIR"
+  ```
+  Produces `<ref-dir>/dom-scaffold.json` with: full DOM tree + Fix 6 v1 text
+  per node + measured CSS (`bg`, `color`, `ff`, `fs`, `fw`, `lh`, ...) +
+  per-section bbox metadata. This is the *source of truth* for Phase 4 — no
+  LLM cost (pure Python merge of existing Phase 2 artifacts). It eliminates
+  the "agent fabricates because lossy JSON input" failure mode at the
+  cheapest layer.
+
 - **Phase 2.6 — LLM-driven section spec (MANDATORY, anti-fabrication grounding)**:
   Before Phase 3 / Phase 4, run section-spec.sh on each section's ref clip to
   generate a verbatim, evidence-anchored spec (text content, hex colors,

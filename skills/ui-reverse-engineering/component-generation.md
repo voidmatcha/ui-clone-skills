@@ -6,10 +6,41 @@
 >
 > 2. **One component per section — DO NOT write a 300-line monolith `page.tsx`.** Read `component-map.json`; each entry in `sections[]` becomes its own file under `src/projects/<name>/components/sections/<SectionName>.tsx`. The top-level `page.tsx` should be ~40-60 lines of imports + an `<main>` with section components composed in order (plus shared scroll/intro wrappers from `bundle-map.json`). Inlining everything into `page.tsx` is the single largest quality regression observed on the realfood.gov benchmark — the prior successful clone of the same site has 14 component files; the failing one has 0.
 
+## DOM-scaffold rule (HARD BLOCK — Fix 8)
+
+**The single source of truth for Phase 4 generation is `<ref-dir>/dom-scaffold.json`**, produced by `skills/visual-debug/scripts/dom-scaffold.sh` from `structure.json` (Fix 6 v1 text fields) + `styles.json` (measured CSS) + `section-map.json`. Read it first; if it doesn't exist, run:
+
+```bash
+bash skills/visual-debug/scripts/dom-scaffold.sh <ref-dir>
+```
+
+The scaffold contains:
+- `tree`: the entire ref DOM as a nested object — `tag`, `text` (verbatim), `class`, `styles` (measured CSS), `children[]`.
+- `sections[]`: per-section bbox + class + styles, for grouping subtrees into components.
+- `_rule`: the generation contract (also restated below).
+
+**Generation contract**:
+
+1. **Translate the scaffold tree 1:1 to JSX.** Same tag hierarchy. Same nesting depth. Same `text` content **verbatim**. You do NOT decide what to render — the scaffold decides.
+2. **Measure-then-lookup, not feel.** For each `styles` block, pick the closest *exact* Tailwind utility for each property:
+   - `bg: "rgb(26,14,8)"` → `bg-[#1a0e08]`
+   - `color: "rgb(245,234,210)"` → `text-[#f5ead2]`
+   - `fs: "140px"` → `text-[140px]` (or `text-9xl` if Tailwind has an exact match)
+   - `fw: "700"` → `font-bold`
+   - `lh: "0.95"` → `leading-[0.95]`
+   - `padding: "102.4px 144px 95px"` → `pt-[102.4px] px-[144px] pb-[95px]`
+   - `ff: "Die Grotesk A, …"` → matching `font-*` token or import the font and use `font-[family]`
+3. **No fabrication.** If a node has `text: ""` and no children, render NOTHING. Do NOT invent placeholder text from class names, URLs, or guesses. `text-fidelity-check.sh` will fail the gate on any JSX text-position string that isn't in the scaffold.
+4. **Group subtrees into Section components** using `sections[]` metadata (`top`, `height`, `class`). Each section becomes one component under `impl/src/components/<Name>.tsx`. Component count MUST match `sections.length`.
+5. **Tree shape preserved.** `dom-mirror-check.sh` compares your generated JSX tree shape (tag sequence + nesting depth) against the scaffold subtree. Divergence > 30% in tag-sequence Levenshtein distance fails the gate.
+
+Cross-validate with the per-section LLM `section-spec.sh` outputs in `sections/spec/*.json` (Phase 2.6) — they should AGREE with the scaffold. If they disagree, scaffold wins (it's deterministic).
+
 ## Input checklist (BLOCKING)
 
 **Do not generate code if ANY of these are missing.** Go back to the step that produces the missing artifact.
 
+From **Fix 8 / Phase 2.7**: `dom-scaffold.json` (produced by `dom-scaffold.sh`)
 From **Step 2**: `structure.json`, `portal-candidates.json`, `sticky-elements.json`
 From **Step 2.5**: `head.json`, `assets.json`, `inline-svgs.json`, `fonts.json`
 From **Step 3**: `styles.json`, `advanced-styles.json`, `body-state.json`, `design-bundles.json`, `decorative-svgs.json`

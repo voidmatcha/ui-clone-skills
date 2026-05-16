@@ -286,6 +286,25 @@ add_check "tailwind-transform-conflict" \
           "block" \
           "quick"
 
+# Universal — Fix 8 anti-fabrication gates. Both are pure static analysis
+# (no LLM, no browser) so they're tier=quick. They compare the generated
+# Phase-4 components against <ref-dir>/dom-scaffold.json:
+#   text-fidelity-check  — block JSX text-position strings not in scaffold
+#   dom-mirror-check     — block JSX tag-multiset diverging >30% from scaffold
+add_check "text-fidelity-check" \
+          "skills/visual-debug/scripts/text-fidelity-check.sh" \
+          "text-fidelity-check.json" \
+          "Universal — JSX text-position strings must be verbatim from ref (dom-scaffold.json allowlist)" \
+          "block" \
+          "quick"
+
+add_check "dom-mirror-check" \
+          "skills/visual-debug/scripts/dom-mirror-check.sh" \
+          "dom-mirror-check.json" \
+          "Universal — JSX tag-multiset must mirror ref tree shape within 30% divergence" \
+          "block" \
+          "quick"
+
 # Conditional.
 # Tier=standard: scroll-end-completion opens ref + impl in agent-browser,
 # scrolls to maxScroll once per viewport, and reads computed styles. One-shot
