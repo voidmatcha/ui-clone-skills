@@ -186,6 +186,19 @@ Follow the normal ui-reverse-engineering pipeline:
   layout vocabulary term, enumerated key elements, asset paths. Phase 4 then
   reads `sections/spec/*.json` and follows it deterministically.
 
+- **Phase 2.8 — Deterministic transpile (MANDATORY, Fix 13)**:
+  Run the JSON-to-JSX transpiler to produce skeleton component files from
+  the per-node styles captured in Phase 2 (Fix 13 extension):
+  ```bash
+  bash skills/visual-debug/scripts/scaffold-to-jsx.sh "$REF_DIR" "$IMPL_DIR"
+  ```
+  Output: one `.tsx` per ref section under `impl/src/components/`, with
+  verbatim text, verbatim inline styles, original tag hierarchy. This
+  replaces the LLM-interpretation step of Phase 4 with a deterministic AST
+  transform — no fabrication, no Tailwind class guessing, no stub
+  regression. The LLM still has Phase 4 for things the transpiler can't
+  deduce (event handlers, state, scroll-trigger animation).
+
 - **Phase 3 — spec** (transition-spec, verification-plan).
 
 - **Phase 4 — pre-generate + scaffold**: if `<impl>` is empty, scaffold a

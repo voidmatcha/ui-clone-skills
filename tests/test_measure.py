@@ -301,6 +301,57 @@ def test_section_spec_script_present_and_callable() -> None:
         assert key in prompt_text, f"section-spec.md prompt missing schema key {key}"
 
 
+def test_fix13_dom_extraction_captures_per_node_styles() -> None:
+    """Fix 13 — dom-extraction.md JS eval must capture per-node computed
+    styles (LAYOUT_PROPS subset). Without this the scaffold-to-jsx transpiler
+    has no styling info per node, defeating the whole determinism strategy.
+    """
+    doc = _project_root() / "skills" / "ui-reverse-engineering" / "dom-extraction.md"
+    text = doc.read_text(encoding="utf-8")
+    assert "LAYOUT_PROPS" in text, (
+        "dom-extraction.md must define LAYOUT_PROPS for per-node style capture"
+    )
+    # Critical style props that must be in the capture list.
+    for prop in ('font-family', 'background-color', 'padding', 'color', 'font-size'):
+        assert f"'{prop}'" in text, f"LAYOUT_PROPS must include {prop}"
+    assert "out.styles = styles" in text, (
+        "extract() must populate out.styles when at least one prop diverges from default"
+    )
+
+
+def test_fix13_scaffold_to_jsx_script_present() -> None:
+    """Fix 13 — scaffold-to-jsx.sh is the deterministic transpiler that
+    replaces the LLM-interpretation step in Phase 4. Locks the script + its
+    invocation contract.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
+    assert script.is_file(), "scaffold-to-jsx.sh missing — Fix 13 incomplete"
+    body = script.read_text(encoding="utf-8")
+    # Reads structure.json + section-map.json.
+    assert "structure.json" in body
+    assert "section-map.json" in body
+    # Writes .tsx files.
+    assert ".tsx" in body
+    # JSX semantics: void tags, class→className, for→htmlFor.
+    assert "VOID_TAGS" in body, "must handle void elements"
+    assert "ATTR_RENAMES" in body or '"class": "className"' in body, "must rename class→className"
+    # Inline style emission.
+    assert "style_to_jsx" in body, "must emit JSX-format style objects"
+    # Per-section component file.
+    assert "section_component_name" in body, "must derive component name per section"
+
+
+def test_fix13_skill_md_phase_2_8() -> None:
+    """Fix 13 — SKILL.md must reference Phase 2.8 deterministic transpile
+    so the agent knows to invoke scaffold-to-jsx.sh between Phase 2.7
+    (dom-scaffold) and Phase 3 (spec).
+    """
+    skill = _project_root() / "skills" / "benchmark" / "SKILL.md"
+    text = skill.read_text(encoding="utf-8")
+    assert "Phase 2.8" in text, "benchmark/SKILL.md must document Phase 2.8 (Fix 13)"
+    assert "scaffold-to-jsx" in text, "benchmark/SKILL.md must reference the transpiler"
+
+
 def test_fix12_synthesis_drops_zero_height_wrappers() -> None:
     """Fix 12 — section-compare.sh synthesis must skip section-map entries
     with height < 50 (layout-only wrappers from pre-reveal capture). V8

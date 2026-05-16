@@ -130,11 +130,39 @@ agent-browser --session <project-name> eval "
     }
     return t.trim().replace(/\\s+/g, ' ').slice(0, 300);
   };
+  // Layout properties captured per node (Fix 13 — per-node verbatim styles).
+  // Carrying computed style on each AST node eliminates the cascade/inheritance
+  // resolution step downstream — the browser already resolved everything.
+  // Phase 4's scaffold-to-jsx transpiler emits these as inline style props,
+  // producing pixel-accurate output without an LLM 'interpret CSS → Tailwind'
+  // step. Subset chosen: ~25 props that materially affect rendered layout.
+  // Full computed style would balloon structure.json to 5–10MB; this subset
+  // keeps it under 500KB for typical pages while preserving fidelity.
+  const LAYOUT_PROPS = [
+    'display','position','top','left','right','bottom',
+    'width','height','min-width','max-width','min-height','max-height',
+    'padding','margin','border-radius','border',
+    'background-color','background-image','background-size','background-position',
+    'color','font-family','font-size','font-weight','line-height','letter-spacing',
+    'text-align','text-decoration','text-transform','white-space',
+    'transform','opacity','overflow',
+    'flex','flex-direction','justify-content','align-items','gap',
+    'grid-template-columns','grid-template-rows',
+    'z-index','box-shadow',
+  ];
+  // Skip default-y values to keep payload lean — only carry computed values
+  // that diverge from the user-agent default.
+  const NOISE = new Set(['', 'normal', 'none', 'auto', '0px', 'rgba(0, 0, 0, 0)', 'visible', 'start']);
   // depth limit: reduce to 4 for simple pages, increase to 8 for deep component trees (shadcn, MUI, etc.)
   const extract = (el, depth = 0) => {
     if (depth > 6) return null;
     const s = getComputedStyle(el);
     const text = directText(el);
+    const styles = {};
+    for (const p of LAYOUT_PROPS) {
+      const v = s.getPropertyValue(p);
+      if (v && !NOISE.has(v)) styles[p] = v.slice(0, 200);
+    }
     const out = {
       tag: el.tagName.toLowerCase(),
       class: (typeof el.className === 'string' ? el.className : el.className?.baseVal || '').slice(0, 80),
@@ -143,6 +171,7 @@ agent-browser --session <project-name> eval "
       children: Array.from(el.children).map(c => extract(c, depth + 1)).filter(Boolean),
     };
     if (text) out.text = text;  // omit empty-text wrappers to keep schema lean
+    if (Object.keys(styles).length) out.styles = styles;  // Fix 13 per-node styles
     return out;
   };
   return JSON.stringify(extract(target), null, 2);
