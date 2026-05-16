@@ -307,7 +307,7 @@ fi
 section "README accuracy"
 
 # Sub-doc count
-ACTUAL_SUBDOCS=$(find skills -name "*.md" ! -name "SKILL.md" | wc -l | tr -d ' ')
+ACTUAL_SUBDOCS=$(find skills -name "*.md" ! -name "SKILL.md" ! -path '*/prompts/*' | wc -l | tr -d ' ')
 README_COUNT=$(grep -oE '[0-9]+ focused sub-docs' README.md | grep -oE '[0-9]+')
 if [ "$ACTUAL_SUBDOCS" = "$README_COUNT" ]; then
   ok "sub-doc count matches README ($ACTUAL_SUBDOCS)"
