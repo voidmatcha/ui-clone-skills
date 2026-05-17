@@ -319,6 +319,46 @@ def test_fix13_dom_extraction_captures_per_node_styles() -> None:
     )
 
 
+def test_fix18_extract_dom_captures_pseudo_elements() -> None:
+    """Fix 18 — extract-dom.sh must capture ::before / ::after computed
+    styles + content per node so the transpiler can synthesize the
+    pseudo-element layer that drives realfood.gov's glow rings, divider
+    decorations, gradient overlays, etc. Without this the impl misses an
+    entire visual layer — dominant cause of the "전체 레이아웃 못 잡는다"
+    feedback after V15.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "extract-dom.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "capturePseudo" in text, (
+        "extract-dom.sh must define a capturePseudo helper for ::before/::after (Fix 18)"
+    )
+    assert "'::before'" in text and "'::after'" in text, (
+        "capturePseudo must read both ::before and ::after computed styles"
+    )
+    assert "out.before_styles" in text and "out.after_styles" in text, (
+        "extract() must attach before_styles/after_styles to each node when present"
+    )
+
+
+def test_fix18_scaffold_to_jsx_emits_pseudo_spans() -> None:
+    """Fix 18 — scaffold-to-jsx.sh must turn before_styles/after_styles into
+    visible JSX. The transpiler synthesizes <span data-pseudo="before"|"after">
+    children with the pseudo's content + styles so the impl reproduces the
+    decoration layer the ref draws via CSS pseudo-elements.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
+    text = script.read_text(encoding="utf-8")
+    assert 'data-pseudo="' in text, (
+        "scaffold-to-jsx.sh must emit <span data-pseudo=...> for captured pseudos (Fix 18)"
+    )
+    assert "before_styles" in text and "after_styles" in text, (
+        "transpiler must read both before_styles and after_styles fields"
+    )
+    assert "_render_pseudo" in text, (
+        "scaffold-to-jsx.sh must define _render_pseudo helper"
+    )
+
+
 def test_fix17_extract_dom_accepts_viewport_flag() -> None:
     """Fix 17 — extract-dom.sh accepts --viewport WIDTHxHEIGHT so the bench
     can sweep mobile + desktop in a single pipeline. Mobile capture (e.g.
@@ -333,8 +373,8 @@ def test_fix17_extract_dom_accepts_viewport_flag() -> None:
     assert "structure_${VIEWPORT}.json" in text, (
         "viewport-scoped output path must use the WxH suffix (Fix 17)"
     )
-    assert "agent-browser --session \"$SESSION\" resize" in text, (
-        "extract-dom.sh must resize the agent-browser session before extracting (Fix 17)"
+    assert "agent-browser --session \"$SESSION\" set viewport" in text, (
+        "extract-dom.sh must resize the agent-browser session via `set viewport W H` before extracting (Fix 17)"
     )
     # Schema-guard the WxH form so a typo can't silently produce desktop styles.
     assert "^[0-9]+x[0-9]+$" in text, (

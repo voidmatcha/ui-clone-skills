@@ -120,6 +120,24 @@ EXTRACT_JS=$(cat <<'JSEOF'
     // every node would carry a noisy 'all 0s ease 0s' transition value.
     'all 0s ease 0s', 'all', '0s', 'ease', '1', 'running', 'forwards', 'backwards',
   ]);
+  // Fix 18 — pseudo-element capture. Helper extracts a non-empty subset of
+  // LAYOUT_PROPS from a pseudo computed style, plus its `content` so the
+  // transpiler can emit a <span data-pseudo="before" /> with matching styles
+  // when the ref draws decorations via ::before / ::after (glow rings, icon
+  // dots, gradient overlays, divider lines etc.). Without this the impl is
+  // missing the entire pseudo-element layer — a dominant cause of the
+  // "전체 레이아웃 못 잡는다" feel reported after V15.
+  const capturePseudo = (el, which) => {
+    const ps = getComputedStyle(el, which);
+    const content = ps.getPropertyValue('content');
+    if (!content || content === 'none' || content === 'normal') return null;
+    const out = { content };
+    for (const p of LAYOUT_PROPS) {
+      const v = ps.getPropertyValue(p);
+      if (v && !NOISE.has(v)) out[p] = v.slice(0, 200);
+    }
+    return out;
+  };
   const extract = (el, depth = 0) => {
     if (depth > 10) return null;
     const s = getComputedStyle(el);
@@ -138,6 +156,12 @@ EXTRACT_JS=$(cat <<'JSEOF'
     };
     if (text) out.text = text;
     if (Object.keys(styles).length) out.styles = styles;
+    // Fix 18 — pseudo styles attached to the node so the transpiler can
+    // synthesize <span data-pseudo> children with matching CSS.
+    const before = capturePseudo(el, '::before');
+    if (before) out.before_styles = before;
+    const after = capturePseudo(el, '::after');
+    if (after) out.after_styles = after;
     // Capture asset/link attrs so the transpiler can emit <img src>, <a href>,
     // <video poster>, etc. Without these the scaffold renders empty
     // placeholder boxes for every media element, which inflates section-compare

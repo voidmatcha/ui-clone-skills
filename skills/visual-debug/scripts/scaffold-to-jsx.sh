@@ -166,21 +166,65 @@ def render(node, indent=2):
         extra_attrs += f' {jsx_key}="{v_safe}"'
     cls_attr += extra_attrs
 
+    # Fix 18 — pseudo-element synthesis. When extract-dom captured a non-
+    # empty before_styles/after_styles on this node, emit a <span> child
+    # carrying those styles plus the original `content` value as visible
+    # text (since CSS `content: "★"` can't be expressed via inline style
+    # alone in React). The data-pseudo attribute lets later CSS overrides
+    # target these synthetic siblings if needed. Position: absolute on the
+    # ref pseudo is preserved via the inline style copy.
+    pseudo_jsx = ""
+
+    def _render_pseudo(which, ps_dict, child_indent):
+        if not isinstance(ps_dict, dict) or not ps_dict:
+            return ""
+        # Strip CSS-quoted content: "foo" → foo. Empty string content (").
+        raw_content = ps_dict.get("content", "")
+        text_content = ""
+        if isinstance(raw_content, str):
+            stripped = raw_content.strip()
+            if stripped.startswith('"') and stripped.endswith('"'):
+                text_content = stripped[1:-1]
+            elif stripped not in ("none", "normal", "''", '""'):
+                text_content = stripped
+        ps_styles = {k: v for k, v in ps_dict.items() if k != "content"}
+        if not ps_styles and not text_content:
+            return ""
+        ps_pad = "  " * child_indent
+        ps_style_attr = f" style={style_to_jsx(ps_styles)}" if ps_styles else ""
+        body = escape_jsx_text(text_content) if text_content else ""
+        return f'{ps_pad}<span data-pseudo="{which}"{ps_style_attr}>{body}</span>'
+
+    before_ps = node.get("before_styles")
+    after_ps = node.get("after_styles")
+    if before_ps:
+        pseudo_jsx += "\n" + _render_pseudo("before", before_ps, indent + 1)
+    if after_ps:
+        pseudo_jsx += ("\n" if not pseudo_jsx else "") + \
+                      _render_pseudo("after", after_ps, indent + 1)
+
     # Void element — self-close, no children/text.
     if tag in VOID_TAGS:
         return f'{pad}<{tag}{cls_attr}{style_attr} />'
 
     # Render children first.
     child_str = ""
-    if children:
+    if children or pseudo_jsx:
         rendered = [render(c, indent + 1) for c in children]
-        child_str = "\n" + "\n".join(r for r in rendered if r) + "\n" + pad
+        rendered_chunks = [r for r in rendered if r]
+        if pseudo_jsx:
+            # ::before precedes the real children, ::after follows them.
+            if before_ps:
+                rendered_chunks.insert(0, _render_pseudo("before", before_ps, indent + 1))
+            if after_ps:
+                rendered_chunks.append(_render_pseudo("after", after_ps, indent + 1))
+        child_str = "\n" + "\n".join(rendered_chunks) + "\n" + pad
 
     # Text content (verbatim, escaped).
-    if text and not children:
+    if text and not children and not pseudo_jsx:
         return f'{pad}<{tag}{cls_attr}{style_attr}>{escape_jsx_text(text)}</{tag}>'
-    if text and children:
-        # Mixed: text + children. Place text at top, then children.
+    if text and (children or pseudo_jsx):
+        # Mixed: text + children. Place text at top, then children/pseudos.
         return f'{pad}<{tag}{cls_attr}{style_attr}>\n{"  " * (indent + 1)}{escape_jsx_text(text)}{child_str}</{tag}>'
     return f'{pad}<{tag}{cls_attr}{style_attr}>{child_str}</{tag}>'
 
