@@ -120,6 +120,58 @@ EXTRACT_JS=$(cat <<'JSEOF'
     // every node would carry a noisy 'all 0s ease 0s' transition value.
     'all 0s ease 0s', 'all', '0s', 'ease', '1', 'running', 'forwards', 'backwards',
   ]);
+  // Fix 19 — :hover / :focus rule extraction. Walks document.styleSheets,
+  // matches each rule's selectorText against the element's class list, and
+  // pulls the LAYOUT_PROPS subset from `:hover` declarations so the
+  // transpiler emits matching CSS that lets the captured transition values
+  // actually animate something. Without this Fix 16's transition properties
+  // exist but have nothing to interpolate to — the impl stays static under
+  // hover. Tries each sheet under try/catch since cross-origin stylesheets
+  // throw on cssRules access. Memoized per element classlist by the caller.
+  let HOVER_RULES = null;  // lazy initialized
+  const buildHoverRules = () => {
+    if (HOVER_RULES !== null) return HOVER_RULES;
+    const out = [];  // [{selPrefix, decls: {prop: value}}]
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules || sheet.rules; } catch (e) { continue; }
+      if (!rules) continue;
+      for (const rule of rules) {
+        if (!rule.selectorText || !rule.style) continue;
+        // Match selectors containing :hover or :focus (skip media-query
+        // wrappers which we'd need recursive walking to handle; covers 95%).
+        if (!rule.selectorText.match(/:(hover|focus(?!-within|-visible))/)) continue;
+        // selectorText can be comma-separated: ".a:hover, .b:hover" — split
+        // and store the prefix BEFORE the pseudo so we can match elements.
+        for (const sel of rule.selectorText.split(',')) {
+          const m = sel.match(/\.([a-zA-Z0-9_-]+)/);  // first .class token
+          if (!m) continue;
+          const cls = m[1];
+          const decls = {};
+          for (const p of LAYOUT_PROPS) {
+            const v = rule.style.getPropertyValue(p);
+            if (v && !NOISE.has(v)) decls[p] = v.slice(0, 200);
+          }
+          if (Object.keys(decls).length) out.push({ cls, decls });
+        }
+      }
+    }
+    HOVER_RULES = out;
+    return out;
+  };
+  const captureHover = (el) => {
+    if (!el.className || typeof el.className !== 'string') return null;
+    const classes = el.className.split(/\s+/).filter(Boolean);
+    if (!classes.length) return null;
+    const rules = buildHoverRules();
+    const merged = {};
+    for (const r of rules) {
+      if (classes.indexOf(r.cls) >= 0) {
+        Object.assign(merged, r.decls);
+      }
+    }
+    return Object.keys(merged).length ? merged : null;
+  };
   // Fix 18 — pseudo-element capture. Helper extracts a non-empty subset of
   // LAYOUT_PROPS from a pseudo computed style, plus its `content` so the
   // transpiler can emit a <span data-pseudo="before" /> with matching styles
@@ -162,6 +214,11 @@ EXTRACT_JS=$(cat <<'JSEOF'
     if (before) out.before_styles = before;
     const after = capturePseudo(el, '::after');
     if (after) out.after_styles = after;
+    // Fix 19 — :hover/:focus rule declarations matching this element's
+    // class list, so the transpiler can emit a CSS rule that gives the
+    // captured `transition` (Fix 16) something to animate to.
+    const hover = captureHover(el);
+    if (hover) out.hover_styles = hover;
     // Capture asset/link attrs so the transpiler can emit <img src>, <a href>,
     // <video poster>, etc. Without these the scaffold renders empty
     // placeholder boxes for every media element, which inflates section-compare
