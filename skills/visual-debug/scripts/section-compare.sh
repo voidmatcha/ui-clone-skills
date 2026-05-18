@@ -838,12 +838,17 @@ out = []
 _MIN_VISIBLE_HEIGHT = 50
 sections_sorted = sorted(sections, key=lambda s: s.get("top") or s.get("y") or 0)
 for i, s in enumerate(sections_sorted):
-    h_raw = int(s.get("height") or 0)
+    # section-map.json may use either `height` (runtime enumeration shape) or
+    # `h` (extraction-time short shape). Read both. Without this fallback,
+    # every section reads as h=0 and gets filtered, collapsing the override
+    # to zero rows and re-using the runtime 1-giant-section enumeration.
+    h_raw = int(s.get("height") or s.get("h") or 0)
     if h_raw < _MIN_VISIBLE_HEIGHT:
         # Layout-only wrapper, not a content section — skip.
         continue
     cls = (s.get("cls") or s.get("class") or "").strip()
-    sid = s.get("id")
+    # Same fallback for id: extraction-time section-map uses `name`.
+    sid = s.get("id") or s.get("name")
     tag = s.get("tag") or "section"
     y = int(s.get("top") or s.get("y") or 0)
     h = h_raw
