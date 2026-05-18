@@ -183,22 +183,55 @@ _FRESH_FOLDER_DENY_PATTERNS = re.compile(
 )
 
 
-def _is_fresh_state(project_root: Path) -> bool:
-    """True when `tmp/ref/` has no usable component dir yet.
+def _has_no_populated_component(ref_root: Path) -> bool:
+    """True when no immediate child dir under ref_root has Phase-1 evidence.
 
-    A component dir is "usable" once it contains either `regions.json`
-    (Phase 1 minimal evidence) or `pipeline-state.json`. An empty `tmp/`
-    or absent `tmp/ref/` both count as fresh.
+    Resolves symlinks (so a stale benchmark symlink doesn't pollute the
+    decision) and skips entries that fail to resolve at all.
     """
-    ref_root = project_root / "tmp" / "ref"
     if not ref_root.is_dir():
         return True
     for d in ref_root.iterdir():
         if not d.is_dir():
             continue
-        if (d / "regions.json").is_file() or (d / "pipeline-state.json").is_file():
+        try:
+            real = d.resolve(strict=True)
+        except (OSError, RuntimeError):
+            # Broken symlink or unresolvable — treat as not populated.
+            continue
+        if (real / "regions.json").is_file() or (real / "pipeline-state.json").is_file():
             return False
     return True
+
+
+def _is_fresh_state(project_root: Path, cwd: Path | None = None) -> bool:
+    """True when the relevant ref dir has no usable component dir yet.
+
+    A component dir is "usable" once its resolved target contains either
+    `regions.json` (Phase 1 minimal evidence) or `pipeline-state.json`.
+
+    Resolution order (v1.2 — cwd-aware to handle scratch subdirs):
+      1. Walk up from `cwd` looking for the nearest `tmp/ref/`. If found,
+         use that one and DO NOT also check the project root — a fresh
+         scratch subdir inside a populated repo still counts as fresh.
+      2. Fall back to `project_root / "tmp" / "ref"`.
+      3. If neither exists, the project is fresh.
+
+    The v1.1 version checked only project_root, which falsely reported
+    "not fresh" when the repo root had stale benchmark symlinks (e.g.
+    `tmp/ref/realfood-main -> benchmark/work/<sha>/ref/`) even though
+    the agent was working from a clean scratch/ subdirectory.
+    """
+    if cwd is not None:
+        cur = cwd
+        while cur != cur.parent:
+            candidate = cur / "tmp" / "ref"
+            if candidate.is_dir():
+                # Found the nearest tmp/ref to cwd — that's the scope of
+                # this session's freshness. Don't widen to project root.
+                return _has_no_populated_component(candidate)
+            cur = cur.parent
+    return _has_no_populated_component(project_root / "tmp" / "ref")
 
 
 def _fresh_state_violation(cmd: str) -> bool:
@@ -359,6 +392,18 @@ def main() -> None:
     if not isinstance(cmd, str):
         sys.exit(0)
 
+    # PreToolUse payload includes `cwd` — the working directory the agent's
+    # Bash tool will run in. Use it as the primary scope for fresh-state
+    # checks so a scratch subdir inside a populated repo still counts as
+    # fresh. Falls back to project_root when absent (rare; some host
+    # variants omit the field).
+    payload_cwd_raw = data.get("cwd", "")
+    payload_cwd: Path | None = None
+    if isinstance(payload_cwd_raw, str) and payload_cwd_raw:
+        candidate = Path(payload_cwd_raw)
+        if candidate.is_dir():
+            payload_cwd = candidate.resolve()
+
     project_root = find_project_root()
 
     # Benchmark setup-alignment check. Fires BEFORE the declaration-of-done
@@ -417,7 +462,9 @@ def main() -> None:
     # agent to call `pipeline run` first; this hook makes that mandatory
     # instead of just guidance — the v1.0 nested test confirmed instruction
     # alone is ignored. Same UI_RE_SKIP_BASH_GATE escape as the ad-hoc deny.
-    if not os.environ.get("UI_RE_SKIP_BASH_GATE") and _is_fresh_state(project_root):
+    if not os.environ.get("UI_RE_SKIP_BASH_GATE") and _is_fresh_state(
+        project_root, cwd=payload_cwd
+    ):
         if _fresh_state_violation(cmd):
             example_component = "site"
             example_session = "ref-capture"
