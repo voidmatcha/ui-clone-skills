@@ -211,16 +211,26 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     state = PipelineState.load(ref_dir)
     current_gate = state.current_gate
 
+    # Verify-stamp short-circuit (loop-9 post-mortem). When impl/ exists,
+    # the Stop hook trusts the verify-stamp + the canonical
+    # pipeline.execute_verify entry point as the SOLE release decision and
+    # does NOT re-run section-compare itself. Re-running the gate inline
+    # caused a fire-storm in loop-9 — 440 Stop-hook injections in 1.5 h —
+    # because section-compare permanently reports the same critical FAILs
+    # on textually-correct clones with substituted fonts / approximated
+    # videos / canvas reveals. The gate is still enforced (pipeline verify
+    # runs it on every invocation), but it runs ONCE per agent-initiated
+    # cycle, not once per Stop event.
+    impl_dir = ref_dir.parent.parent.parent / "impl"
+    if impl_dir.is_dir():
+        return _enforce_verify_stamp(ref_dir)
+
     if current_gate in {"section-compare", "done"}:
         gate_result = _run_gate(ref_dir, "section-compare")
         if not gate_result.get("passed", True):
             return _section_compare_block_reason(ref_dir, gate_result)
-        # Section-compare PASS at current_gate "done" → the goal-card stop
-        # condition is satisfied. The Python benchmark harness owns the
-        # iter loop and checks STRICT v2 itself; this hook just confirms
-        # the gate is genuinely clean for interactive sessions.
-        # Even on PASS, demand a fresh verify stamp (closes the loop-5
-        # "agent ran scripts directly, skipped canonical entry" bypass).
+        # Section-compare PASS but no stamp yet — point the agent at the
+        # canonical entry instead of releasing silently.
         return _enforce_verify_stamp(ref_dir)
 
     if current_gate not in GATE_ORDER:
