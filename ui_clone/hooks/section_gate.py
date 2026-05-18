@@ -112,6 +112,68 @@ def _unknown_gate_block_reason(current_gate: str, ref_dir: Path) -> str:
     )
 
 
+_VERIFY_STAMP_MAX_AGE_S = 1800  # 30 min — generous so the agent has time to
+# finish the response after running verify, but short enough that stale
+# stamps from a previous run don't satisfy the gate.
+
+
+def _enforce_verify_stamp(ref_dir: Path) -> str | None:
+    """Block Stop unless pipeline.execute_verify wrote a fresh stamp.
+
+    Codex Q1 (loop-5 post-mortem): the SKILL.md mandate to run
+    `pipeline ... verify` was bypassed because the agent invoked
+    individual verification scripts directly. This check closes the
+    bypass — Stop blocks unless `verify-stamp.json` exists AND is
+    newer than _VERIFY_STAMP_MAX_AGE_S.
+
+    Only fires when impl/ exists (post-generation). Pre-generation
+    loops are governed by the regular current_gate enforcement.
+    """
+    # impl/ is resolved relative to cwd because that's what
+    # pipeline.execute_verify uses; for the Stop-hook caller cwd
+    # may differ from ref_dir's parent (especially in scratch/loop-N
+    # validation runs), so we walk up from ref_dir to find it.
+    impl_dir = ref_dir.parent.parent.parent / "impl"  # tmp/ref/<c>/.. = tmp/ref/.. = tmp/.. = loop-N/
+    if not impl_dir.is_dir():
+        return None  # pre-generation — no stamp required yet
+
+    stamp_path = ref_dir / "verify-stamp.json"
+    if not stamp_path.is_file():
+        return (
+            f"⛔ UI-RE Verify-stamp gate: BLOCKED for {ref_dir}\n\n"
+            f"impl/ exists at {impl_dir} but no verify-stamp.json. The Stop hook\n"
+            f"requires `python -m ui_clone.pipeline ... verify` to have run and\n"
+            f"passed before the response can end.\n\n"
+            f"Fix:\n"
+            f"  python -m ui_clone.pipeline <url> <component> <session> verify\n\n"
+            f"Verify drives the post-impl gates in GATE_ORDER (post-implement,\n"
+            f"boundary, font-parity, section-compare) and stamps {stamp_path.name}\n"
+            f"on success.\n"
+        )
+
+    try:
+        stamp = json.loads(stamp_path.read_text())
+        import datetime
+        stamped_at = datetime.datetime.strptime(
+            stamp["verifiedAt"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.UTC)
+        age_s = (datetime.datetime.now(datetime.UTC) - stamped_at).total_seconds()
+    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        return (
+            f"⛔ UI-RE Verify-stamp gate: malformed stamp {stamp_path}\n\n"
+            f"{exc}\n\n"
+            f"Re-run `python -m ui_clone.pipeline ... verify` to regenerate.\n"
+        )
+    if age_s > _VERIFY_STAMP_MAX_AGE_S:
+        return (
+            f"⛔ UI-RE Verify-stamp gate: STALE stamp for {ref_dir}\n\n"
+            f"verify-stamp.json is {int(age_s)}s old (max {_VERIFY_STAMP_MAX_AGE_S}s).\n"
+            f"impl/ was likely modified after the last verify. Re-run:\n\n"
+            f"  python -m ui_clone.pipeline <url> <component> <session> verify\n"
+        )
+    return None
+
+
 def _enforce_ref_dir(ref_dir: Path) -> str | None:
     # Load current gate from pipeline-state.json.
     # If absent, treat as fresh start at "reference" gate (not legacy section-compare fallback).
@@ -126,7 +188,9 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
         # condition is satisfied. The Python benchmark harness owns the
         # iter loop and checks STRICT v2 itself; this hook just confirms
         # the gate is genuinely clean for interactive sessions.
-        return None
+        # Even on PASS, demand a fresh verify stamp (closes the loop-5
+        # "agent ran scripts directly, skipped canonical entry" bypass).
+        return _enforce_verify_stamp(ref_dir)
 
     if current_gate not in GATE_ORDER:
         return _unknown_gate_block_reason(current_gate, ref_dir)
@@ -134,7 +198,9 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     gate_result = _run_gate(ref_dir, current_gate)
     if not gate_result.get("passed", True):
         return _block_reason_for_gate(current_gate, ref_dir, gate_result)
-    return None
+    # Per-gate PASS does NOT release the Stop hook on its own — verify
+    # stamp is the canonical "agent finished cleanly" signal.
+    return _enforce_verify_stamp(ref_dir)
 
 
 def main() -> None:

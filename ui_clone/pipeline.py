@@ -748,7 +748,24 @@ class Pipeline:
                 f"{', '.join(failures)}{_NC}"
             )
             return 1
+        # Stop-hook stamp (Codex Q1 critical-path fix). On success, write a
+        # current-run-fresh marker that the Stop hook checks before allowing
+        # the agent to claim "완료". Without this stamp, the Stop hook will
+        # block — closing the bypass loop-5 exposed (agent ran individual
+        # verification scripts directly, never reached the canonical entry).
+        import datetime
+        stamp = {
+            "verifiedAt": datetime.datetime.now(datetime.UTC)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "gatesPassed": list(gates_post_impl),
+            "stampedBy": "pipeline.execute_verify",
+            "implDir": str(impl_dir),
+            "refDir": str(self.ref_dir),
+        }
+        stamp_path = self.ref_dir / "verify-stamp.json"
+        stamp_path.write_text(json.dumps(stamp, indent=2) + "\n")
         print(f"\n{_GREEN}{_BOLD}verify: all post-impl gates passed{_NC}")
+        print(f"  stamp: {stamp_path}")
         return 0
 
 

@@ -137,7 +137,11 @@ if ts_path:
     o1_gate_invocations = len(re.findall(r"python -m ui_clone\.gate\s+\S+\s+\S+", text))
 ae_d_val = int(ae_d.split("=")[1]) if "=" in ae_d else None
 ae_m_val = int(ae_m.split("=")[1]) if "=" in ae_m else None
-dist_exists = (pathlib.Path(loopdir) / "impl" / "dist").is_dir()
+# O3 build artifact — vite produces impl/dist/, Next.js produces impl/.next/.
+# Either signals a successful production build; the agent's framework choice
+# is allowed to vary (vite vs Next.js).
+impl_root = pathlib.Path(loopdir) / "impl"
+dist_exists = (impl_root / "dist").is_dir() or (impl_root / ".next").is_dir()
 
 def verdict(ok):
     return "PASS" if ok else "FAIL"
