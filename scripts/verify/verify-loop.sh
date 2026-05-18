@@ -93,7 +93,10 @@ echo "[4/5] transition coverage"
 SPEC="$(find "$LOOPDIR" -name "transition-spec.json" 2>/dev/null | head -1)"
 if [ -n "$SPEC" ]; then
   COV_SCRIPT="$REPO_ROOT/skills/visual-debug/scripts/transition-spec-coverage.sh"
-  ts_cov="$(bash "$COV_SCRIPT" "$SPEC" "$LOOPDIR/impl/src" 2>&1 | tail -1)"
+  # transition-spec-coverage.sh wants <component-dir>, not the json file —
+  # it appends `/transition-spec.json` internally. Pass the parent.
+  SPEC_DIR="$(dirname "$SPEC")"
+  ts_cov="$(bash "$COV_SCRIPT" "$SPEC_DIR" "$LOOPDIR/impl/src" 2>&1 | tail -1 || true)"
   echo "  $ts_cov"
 else
   ts_cov="NO_SPEC"
