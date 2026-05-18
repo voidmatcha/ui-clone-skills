@@ -326,6 +326,12 @@ def is_ad_hoc_ref_artifact(file_path: str) -> tuple[bool, str]:
         ("faq", "structure.json"),
         ("stat", "extracted.json"),
         ("key", "structure.json"),
+        ("page", "structure.json"),
+        ("overview", "structure.json"),
+        ("header", "structure.json"),
+        ("nav", "structure.json"),
+        ("footer", "structure.json"),
+        ("hero", "structure.json"),
     )
     lower = basename.lower()
     suggestion = ""

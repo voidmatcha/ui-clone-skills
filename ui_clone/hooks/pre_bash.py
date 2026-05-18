@@ -47,7 +47,13 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from ui_clone.hooks._common import find_project_root, find_ref_dir, is_component_file, run_gate
+from ui_clone.hooks._common import (
+    find_project_root,
+    find_ref_dir,
+    is_ad_hoc_ref_artifact,
+    is_component_file,
+    run_gate,
+)
 from ui_clone.state import PipelineState
 
 _BLOCK_PATTERNS = re.compile(
@@ -125,6 +131,30 @@ def _bash_write_target(cmd: str) -> str | None:
                 continue
             if is_component_file(target):
                 return target
+    return None
+
+
+def _bash_adhoc_ref_target(cmd: str) -> tuple[str, str] | None:
+    """Return (target_path, suggested_canonical) for the first Bash redirect
+    that writes to an ad-hoc *.json under any `tmp/ref/<c>/`, else None.
+
+    Closes the v0.6 bypass observed during natural-prompt fresh runs: the
+    pre_generate Write/Edit hook denies invented artifact names, but nested
+    agents fall back to `bash -c '... > sections-map.json'`. This catches
+    `cat > file.json`, `echo > file.json`, `tee file.json`, `agent-browser
+    eval ... > file.json`, etc. — the same redirect set already parsed for
+    component-file enforcement.
+    """
+    if not cmd:
+        return None
+    for pat in _BASH_WRITE_PATTERNS:
+        for m in pat.finditer(cmd):
+            target = m.group(1).strip("\"'")
+            if not target or target.startswith("&") or target == "/dev/null":
+                continue
+            is_adhoc, suggested = is_ad_hoc_ref_artifact(target)
+            if is_adhoc:
+                return target, suggested
     return None
 
 
@@ -237,6 +267,38 @@ def main() -> None:
         bench_reason = _check_benchmark_setup_alignment(project_root)
         if bench_reason is not None:
             _emit_block(bench_reason)
+            sys.exit(0)
+
+    # Ad-hoc ref-artifact redirect denial — closes the Bash bypass route of the
+    # pre_generate Write/Edit hook. Observed during natural-prompt fresh runs:
+    # nested agents dump JSON into `tmp/ref/<c>/sections-map.json` via Bash
+    # redirect instead of running the canonical script. Catch the redirect
+    # before the command runs and point at the canonical name + the script
+    # that produces it. UI_RE_SKIP_BASH_GATE escape passes through.
+    if not os.environ.get("UI_RE_SKIP_BASH_GATE"):
+        adhoc = _bash_adhoc_ref_target(cmd)
+        if adhoc is not None:
+            target, suggested = adhoc
+            basename = Path(target).name
+            if suggested:
+                reason = (
+                    f"⛔ UI-RE: Bash redirect to ad-hoc ref artifact "
+                    f"'{basename}' blocked. Use canonical '{suggested}' "
+                    f"produced by the matching pipeline script "
+                    f"(e.g. `bash $PLUGIN_ROOT/skills/visual-debug/scripts/"
+                    f"dom-scaffold.sh <ref-dir>` for section-map.json). "
+                    f"Do NOT dump JSON into tmp/ref/<c>/ via cat/echo/tee/"
+                    f"agent-browser eval redirects. See SKILL.md Pipeline section."
+                )
+            else:
+                reason = (
+                    f"⛔ UI-RE: Bash redirect to ad-hoc ref artifact "
+                    f"'{basename}' blocked. Run a canonical extraction "
+                    f"script (skills/visual-debug/scripts/*.sh) instead of "
+                    f"hand-dumping JSON into tmp/ref/<c>/. See SKILL.md "
+                    f"Pipeline section for the step → artifact mapping."
+                )
+            _emit_block(reason)
             sys.exit(0)
 
     is_decl = _is_declaration_command(cmd)

@@ -102,6 +102,27 @@ This intentionally mirrors how real users invoke the `ui-reverse-engineering`
 skill — single session, agent-driven, verification gates surface failures so
 you know what's left.
 
+### Measurement coverage (multi-path)
+
+Benchmark MUST exercise both invocation paths so single-path coverage doesn't
+silently hide fragility (the v0.5.0 → v0.6 lesson: the wrapped-command path
+passed every loop, while fresh-prompt path quietly regressed because nested
+agents invented ad-hoc artifact names that no script consumed).
+
+When the runner records a row in `benchmark/history.csv`, set the `path`
+column to one of:
+
+- `wrapped` — the benchmark wrapper invoked the canonical script chain
+  (`dom-scaffold.sh`, `extract-dom.sh`, `section-compare.sh`) by name.
+  Always required.
+- `natural` — a separate run started from a fresh top-level folder with a
+  free-form prompt (e.g. `"<URL> 사이트 React + Tailwind로 클론해줘"`) and no
+  script-name hints. Required for any SKILL.md prompt-surface change, any
+  artifact-name rename, any new pre_*/post_* hook, and any change to
+  `ui_clone/hooks/_common.py:CANONICAL_REF_ARTIFACTS`. The two rows
+  should land within one factor of two of each other; a wider gap means
+  the fresh path is degraded — find which step diverged before merging.
+
 ## Procedure
 
 ### Step 1 — Setup (MANDATORY, single command)
