@@ -1,10 +1,12 @@
 # Component Generation — Step 7
 
-> 🚨 **Two hard requirements before you write a single line of JSX:**
+> 🚨 **Three hard requirements before you write a single line of JSX:**
 >
 > 1. **Asset transfer is NOT optional.** Run `bash scripts/extract/extract-assets.sh <session> <ref-dir> <impl>/public` to download ref images / fonts / videos into the impl's `public/` directory. Then `bash skills/visual-debug/scripts/asset-transfer-check.sh <ref-dir> <impl>/public` should PASS. Skipping this step produces a clone where every `<img>` is a 404 placeholder and section-compare AE explodes to 1M+. The pipeline now blocks at `post-implement` until `asset-transfer.json` and `image-fidelity.json` both pass.
 >
 > 2. **One component per section — DO NOT write a 300-line monolith `page.tsx`.** Read `component-map.json`; each entry in `sections[]` becomes its own file under `src/projects/<name>/components/sections/<SectionName>.tsx`. The top-level `page.tsx` should be ~40-60 lines of imports + an `<main>` with section components composed in order (plus shared scroll/intro wrappers from `bundle-map.json`). Inlining everything into `page.tsx` is the single largest quality regression observed on the realfood.gov benchmark — the prior successful clone of the same site has 14 component files; the failing one has 0.
+>
+> 3. **NEVER substitute emoji / unicode characters / text labels for missing image assets.** If `asset-transfer-check.sh` reports a missing image, FIX the extraction: re-run `extract-assets.sh`, point `<img src=>` at the original CDN URL if the host is public and CORS-permissive, or declare the gap in `asset-substitution.json` with a justification. Falling back to `<span>🍔</span>` / `<div>[image]</div>` is a silent failure mode — the emoji glyph passes the structural diff while looking nothing like the reference, so section-compare can't catch it. Lifelong rule: every `<img>` in the ref scaffold MUST stay an `<img>` in the impl. No exceptions.
 
 ## DOM-scaffold rule (HARD BLOCK — Fix 8)
 

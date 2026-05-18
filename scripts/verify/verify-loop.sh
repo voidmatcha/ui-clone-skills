@@ -2,9 +2,11 @@
 # verify-loop.sh — Per-loop fidelity verification under the new SUCCESS criteria.
 #
 # Usage:
-#   verify-loop.sh <N> <impl_url> [ref_url]
+#   verify-loop.sh <N> <impl_url> <ref_url>
 #
-# Defaults: ref_url=https://realfood.gov
+# Both impl_url and ref_url are required — no built-in defaults, since the
+# script is target-agnostic (the original validation target is canonicalised
+# in skills/benchmark/, not here).
 #
 # Runs the full post-loop checklist:
 #   - probe splash state of ref via scripts/extract/splash-bypass.sh
@@ -18,9 +20,9 @@
 
 set -euo pipefail
 
-N="${1:?Usage: $0 <N> <impl_url> [ref_url]}"
+N="${1:?Usage: $0 <N> <impl_url> <ref_url>}"
 IMPL_URL="${2:?impl_url required (e.g. http://localhost:5174)}"
-REF_URL="${3:-https://realfood.gov}"
+REF_URL="${3:?ref_url required (the original site being cloned)}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LOOPDIR="$REPO_ROOT/scratch/loop-${N}"
