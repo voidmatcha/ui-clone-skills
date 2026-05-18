@@ -21,6 +21,7 @@ from typing import cast
 
 from ui_clone.hooks._common import find_project_root as _find_project_root
 from ui_clone.hooks._common import find_ref_dir as _find_ref_dir
+from ui_clone.hooks._common import is_ad_hoc_ref_artifact as _is_ad_hoc_ref_artifact
 from ui_clone.hooks._common import is_component_file as _is_component_file
 from ui_clone.hooks._common import run_gate as _run_gate_common
 from ui_clone.state import PipelineState
@@ -58,6 +59,37 @@ def main() -> None:
             file_path = data.get("tool_input", {}).get("file_path", "") or data.get("file_path", "")
         except json.JSONDecodeError:
             pass
+
+    # ── Ad-hoc ref-artifact denial ──
+    # Block Write/Edit to non-canonical top-level *.json names under
+    # `<any>/tmp/ref/<component>/`. This is the v0.5.0+1 fix: nested agents
+    # given a natural-language prompt tend to invent artifact names like
+    # `sections.json`, `content-detail.json`, `key-sections.json`,
+    # `styles-core.json` instead of running the canonical scripts that
+    # produce `section-map.json`, `structure.json`, `styles.json`. Deny the
+    # Write and point at the right script so the canonical pipeline runs.
+    is_adhoc, suggested = _is_ad_hoc_ref_artifact(file_path)
+    if is_adhoc:
+        basename = Path(file_path).name
+        if suggested:
+            reason = (
+                f"UI Reverse Engineering: '{basename}' is not a canonical "
+                f"ref-dir artifact name. Use '{suggested}' produced by the "
+                f"matching pipeline script (e.g. `bash $PLUGIN_ROOT/skills/"
+                f"visual-debug/scripts/dom-scaffold.sh <ref-dir>` for "
+                f"section-map.json, or `python -m ui_clone.pipeline` for "
+                f"the full sequence). Do NOT hand-write artifacts."
+            )
+        else:
+            reason = (
+                f"UI Reverse Engineering: '{basename}' is not a canonical "
+                f"ref-dir artifact. Run the canonical extraction scripts "
+                f"under skills/visual-debug/scripts/ instead of hand-writing "
+                f"ref artifacts. See SKILL.md Pipeline section for the "
+                f"step → artifact mapping."
+            )
+        _emit_block(reason)
+        sys.exit(0)
 
     # Only enforce on component/page files
     if not _is_component_file(file_path):

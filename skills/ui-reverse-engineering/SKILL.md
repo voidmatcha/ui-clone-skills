@@ -187,6 +187,14 @@ brew install imagemagick dssim ffmpeg
 
 **Read each sub-doc before executing its step.**
 
+⛔ **Canonical artifact names — Hook enforced.** The `pre_generate` hook denies
+`Write`/`Edit` to non-canonical *.json names at the top of any `tmp/ref/<c>/`.
+Do not invent ad-hoc names like `sections.json`, `content-detail.json`,
+`key-sections.json`, `styles-core.json` — the Write will be blocked with a
+pointer to the canonical name and the script that produces it. Run the
+named extraction script (`dom-scaffold.sh`, `extract-dom.sh`, etc.) instead
+of dumping JSON yourself.
+
 | Phase | Step | Do |
 |---|---|---|
 | **0A** | — | Canvas/WebGL detection — `python -m ui_clone.pipeline` runs this automatically. If `hasCanvas=True` in `canvas-webgl-detection.json`, read `canvas-webgl-extraction.md` BEFORE Phase 2. **Advisory only — no gate.** This is a routing signal, not a blocker; the agent reads the canvas extraction sub-doc when the flag is set, but no validation gate enforces it. |
