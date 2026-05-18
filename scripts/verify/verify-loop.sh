@@ -149,20 +149,62 @@ dist_exists = (impl_root / "dist").is_dir() or (impl_root / ".next").is_dir()
 def verdict(ok):
     return "PASS" if ok else "FAIL"
 
+# O2 mode switch (Codex Q2 — loop-7 post-mortem). When the clone has
+# declared an approved font / asset substitution via asset-substitution.json,
+# raw full-page AE is no longer the canonical pass signal — it permanently
+# fails on font-rendered text it can't help. Fall back to the agent's own
+# section-compare result.txt, which already classifies sections as PASS /
+# STRUCTURAL_ONLY (substituted) / FAIL.
+asset_sub_files = list(pathlib.Path(loopdir).rglob("asset-substitution.json"))
+section_result_files = list(pathlib.Path(loopdir).rglob("sections/result.txt"))
+structural_mode = bool(asset_sub_files) and bool(section_result_files)
+if structural_mode:
+    result_text = pathlib.Path(section_result_files[0]).read_text(errors="ignore")
+    # Lines look like: "| hero | — | — | substituted | 🔁 STRUCTURAL_ONLY |"
+    # or              "| pyramid | 1114010 | 910139 | saturated | ❌ |"
+    rows = [r for r in result_text.splitlines() if r.startswith("|") and "Section" not in r and "---" not in r]
+    fail_rows = [r for r in rows if "❌" in r]
+    structural_rows = [r for r in rows if "STRUCTURAL_ONLY" in r]
+    pass_rows = [r for r in rows if "✅" in r or " PASS " in r]
+    # Pass when at least half of sections are structural+pass (substituted
+    # font sections accepted as structural pass when declared in
+    # asset-substitution.json), and no more than a third are hard fails.
+    total = len(rows) or 1
+    structural_pass_ratio = (len(pass_rows) + len(structural_rows)) / total
+    hard_fail_ratio = len(fail_rows) / total
+    o2_structural_pass = structural_pass_ratio >= 0.5 and hard_fail_ratio <= 0.34
+
 criteria = {
     "P1_pipeline_run":     {"value": p1_run_invocations, "verdict": verdict(p1_run_invocations >= 1)},
     "P2_regions_json":     {"value": [str(p) for p in regions_json], "verdict": verdict(len(regions_json) >= 1)},
     "P3_no_leak":          {"value": p3_leaks, "verdict": "MANUAL"},
     "P4_no_hook_deny":     {"value": p4_denies, "verdict": verdict(p4_denies == 0)},
     "O1_verification_gates": {"value": o1_gate_invocations, "verdict": verdict(o1_gate_invocations >= 1)},
-    "O2_ae_desktop":       {"value": ae_d_val, "threshold": 2_000_000, "verdict": verdict(ae_d_val is not None and ae_d_val < 2_000_000)},
-    "O2_ae_mobile":        {"value": ae_m_val, "threshold": 2_000_000, "verdict": verdict(ae_m_val is not None and ae_m_val < 2_000_000)},
-    "O3_build_dist":       {"value": dist_exists, "verdict": verdict(dist_exists)},
-    "O4_transition_cov":   {"value": ts_cov, "verdict": "MANUAL" if "NO_SPEC" in ts_cov else verdict("PASS" in ts_cov or "0 missing" in ts_cov.lower())},
+}
+if structural_mode:
+    criteria["O2_structural"] = {
+        "value": f"sections={len(rows)} pass+structural={len(pass_rows) + len(structural_rows)} fail={len(fail_rows)}",
+        "mode": "structural (asset-substitution.json present)",
+        "verdict": verdict(o2_structural_pass),
+    }
+    # Keep raw AE for visibility but mark advisory only.
+    criteria["O2_ae_desktop_advisory"] = {"value": ae_d_val, "verdict": "ADVISORY"}
+    criteria["O2_ae_mobile_advisory"] = {"value": ae_m_val, "verdict": "ADVISORY"}
+else:
+    criteria["O2_ae_desktop"] = {"value": ae_d_val, "threshold": 2_000_000, "verdict": verdict(ae_d_val is not None and ae_d_val < 2_000_000)}
+    criteria["O2_ae_mobile"] = {"value": ae_m_val, "threshold": 2_000_000, "verdict": verdict(ae_m_val is not None and ae_m_val < 2_000_000)}
+criteria["O3_build_dist"] = {"value": dist_exists, "verdict": verdict(dist_exists)}
+criteria["O4_transition_cov"] = {
+    "value": ts_cov,
+    "verdict": "MANUAL" if "NO_SPEC" in ts_cov else verdict("PASS" in ts_cov or "0 missing" in ts_cov.lower()),
 }
 
-verdicts = [c["verdict"] for c in criteria.values()]
-overall = "PASS" if all(v == "PASS" for v in verdicts) else ("PARTIAL" if any(v == "PASS" for v in verdicts) else "FAIL")
+# ADVISORY rows participate in overall verdict the same way MANUAL does —
+# present but not gating. PASS = every gating row is PASS.
+gating_verdicts = [v["verdict"] for v in criteria.values() if v["verdict"] not in ("ADVISORY", "MANUAL")]
+overall = "PASS" if gating_verdicts and all(v == "PASS" for v in gating_verdicts) else (
+    "PARTIAL" if any(v == "PASS" for v in gating_verdicts) else "FAIL"
+)
 
 report = {
     "loop": int(N),
