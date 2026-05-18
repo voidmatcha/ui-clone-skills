@@ -698,6 +698,60 @@ class Pipeline:
         return 0
 
 
+    # ── verify action: drive post-generation gates ─────────────────────────
+    #
+    # Codex structural review (loop-3/4 convergence trigger): the run driver
+    # stops after Phase 2 and Phase 3+ verification gates are advisory only,
+    # which lets nested agents claim "완료" while the impl/ silently fails
+    # boundary / font-parity / section-compare. `verify` closes the loop:
+    # one canonical entry that drives every post-impl gate in GATE_ORDER and
+    # returns non-zero on the first failure so the nested agent (and the
+    # autonomous outer loop) can react.
+    #
+    # The gates themselves live in ui_clone.gate; we shell out so the gate
+    # module's argparse + exit codes stay the source of truth.
+    def execute_verify(self) -> int:
+        import subprocess
+        # GATES_POST_IMPL is the suffix of state.GATE_ORDER that requires
+        # the impl/ directory to exist. Kept inline (not lifted into
+        # state.py) until a second caller appears.
+        gates_post_impl = (
+            "post-implement",
+            "boundary",
+            "font-parity",
+            "section-compare",
+        )
+        impl_dir = Path.cwd() / "impl"
+        if not impl_dir.is_dir():
+            print(
+                f"{_RED}verify: impl/ not found at {impl_dir}. "
+                f"Generate components first, then re-run verify.{_NC}"
+            )
+            return 1
+
+        failures: list[str] = []
+        for gate_name in gates_post_impl:
+            print(f"\n{_BOLD}== verify: gate {gate_name}{_NC}")
+            result = subprocess.run(
+                [sys.executable, "-m", "ui_clone.gate", str(self.ref_dir), gate_name],
+                capture_output=False,  # stream gate output to operator
+            )
+            if result.returncode != 0:
+                failures.append(gate_name)
+                print(
+                    f"  {_RED}✗{_NC} {gate_name} exit {result.returncode} "
+                    f"— continuing to surface every failure rather than short-circuit"
+                )
+        if failures:
+            print(
+                f"\n{_RED}{_BOLD}verify: {len(failures)} gate(s) failed: "
+                f"{', '.join(failures)}{_NC}"
+            )
+            return 1
+        print(f"\n{_GREEN}{_BOLD}verify: all post-impl gates passed{_NC}")
+        return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Pipeline driver for ui-clone-skills",
@@ -708,8 +762,12 @@ def main() -> None:
     parser.add_argument("session", help="Browser session name")
     parser.add_argument(
         "action",
-        choices=["status", "run"],
-        help="status = inspect + next-step report; run = deterministic execution",
+        choices=["status", "run", "verify"],
+        help=(
+            "status = inspect + next-step report; "
+            "run = deterministic execution of pre-generation phases; "
+            "verify = run the post-impl gates after impl/ has been generated"
+        ),
     )
     parser.add_argument(
         "--json",
@@ -727,6 +785,8 @@ def main() -> None:
     pipeline = Pipeline(args.url, args.component, args.session)
     if args.action == "status":
         sys.exit(pipeline.run(json_output=args.json_output))
+    if args.action == "verify":
+        sys.exit(pipeline.execute_verify())
     # action == run
     requested = tuple(p.strip() for p in args.phases.split(",") if p.strip())
     sys.exit(pipeline.execute_phases(requested))

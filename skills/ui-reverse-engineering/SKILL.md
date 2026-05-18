@@ -315,6 +315,25 @@ This bites hardest right after `<system-reminder>` summaries reactivate a long-r
 
 ## Completion criteria
 
+**⛔ Mandatory single entry — before claiming completion run:**
+
+```bash
+# 1. Dev server on 0.0.0.0 so external observers (verify outer loop,
+#    Tailscale peers, mobile devices on the LAN) can reach impl.
+#    `--host 0.0.0.0` is NOT optional — section-compare / font-parity /
+#    breakpoint-collision-check all hit the impl URL, and a 127.0.0.1
+#    binding makes those scripts fail from outside the loopback.
+cd impl && npm run dev -- --host 0.0.0.0 &
+
+# 2. One canonical verify entry — runs every post-impl gate in
+#    GATE_ORDER (post-implement → boundary → font-parity →
+#    section-compare). On any failure, the gate output prints the
+#    exact script to run next. Iterate until exit 0.
+cd .. && python -m ui_clone.pipeline <url> <component> <session> verify
+```
+
+`pipeline ... verify` is the single replacement for the "did I remember to run every gate" mental checklist. It surfaces every missing artifact at once instead of failing one gate, fixing it, then discovering the next one.
+
 ```
 □ C1 static ✅  □ C2 scroll ✅  □ C3 transitions ✅
 □ D1 Visual Gate pass  □ D2 Numerical mismatches = 0
@@ -326,7 +345,7 @@ This bites hardest right after `<system-reminder>` summaries reactivate a long-r
 □ Screenshots taken at 375 / 768 / 1280 and compared against ref — NOT self-reported
 ```
 
-**"Done" = ref comparison ran and passed. NOT "I wrote the code and it looks right to me."**
+**"Done" = `pipeline ... verify` exits 0. NOT "I wrote the code and it looks right to me."**
 
 ## Operational rules
 
