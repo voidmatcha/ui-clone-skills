@@ -249,7 +249,21 @@ def test_gate_pre_generate_blocks_when_footer_missing_from_component_map(tmp_pat
 
     # Minimal artifacts required by gate_pre_generate
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
+    # Codex L10-L12 review: empty transitions list is now a hard fail
+    # in gate_spec (silently accepting it was the L12 bypass). Tests that
+    # used to seed `transitions: []` must declare at least one entry with
+    # all required keys so gate_spec sees a structurally valid spec.
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "fixture-reveal-on-scroll",
+            "trigger": "intersection",
+            "source_chunk": "fixture.js",
+            "bundle_branch": "main",
+            "target": ".fixture",
+            "animation": "opacity-translateY",
+            "reference_frames": ["frame_00.png"],
+        }]
+    }))
     (ref / "animation-init-styles.json").write_text(json.dumps({}))
     (ref / "svg-text-elements.json").write_text(json.dumps([]))
     responsive = ref / "responsive"
@@ -301,7 +315,21 @@ def test_gate_pre_generate_fails_when_hover_timing_unknown(tmp_path: Path) -> No
     ref.mkdir()
 
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
+    # Codex L10-L12 review: empty transitions list is now a hard fail
+    # in gate_spec (silently accepting it was the L12 bypass). Tests that
+    # used to seed `transitions: []` must declare at least one entry with
+    # all required keys so gate_spec sees a structurally valid spec.
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "fixture-reveal-on-scroll",
+            "trigger": "intersection",
+            "source_chunk": "fixture.js",
+            "bundle_branch": "main",
+            "target": ".fixture",
+            "animation": "opacity-translateY",
+            "reference_frames": ["frame_00.png"],
+        }]
+    }))
     (ref / "animation-init-styles.json").write_text(json.dumps({}))
     (ref / "svg-text-elements.json").write_text(json.dumps([]))
     responsive = ref / "responsive"
@@ -342,7 +370,21 @@ def test_gate_pre_generate_fails_when_hover_timing_unknown(tmp_path: Path) -> No
 def _write_pre_generate_baseline(ref: Path) -> None:
     """Write enough artifacts for pre-generate so provenance is the only blocker."""
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
+    # Codex L10-L12 review: empty transitions list is now a hard fail
+    # in gate_spec (silently accepting it was the L12 bypass). Tests that
+    # used to seed `transitions: []` must declare at least one entry with
+    # all required keys so gate_spec sees a structurally valid spec.
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "fixture-reveal-on-scroll",
+            "trigger": "intersection",
+            "source_chunk": "fixture.js",
+            "bundle_branch": "main",
+            "target": ".fixture",
+            "animation": "opacity-translateY",
+            "reference_frames": ["frame_00.png"],
+        }]
+    }))
     (ref / "animation-init-styles.json").write_text(json.dumps({"elements": []}))
     (ref / "section-map.json").write_text(json.dumps({"sections": [], "totalCount": 0, "hasFooter": False}))
     (ref / "svg-text-elements.json").write_text(json.dumps([]))
@@ -551,7 +593,21 @@ def test_gate_spec_fails_when_bundle_map_missing(tmp_path: Path) -> None:
     """gate_spec must fail when bundle-map.json is absent."""
     ref = tmp_path / "ref"
     ref.mkdir()
-    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
+    # Codex L10-L12 review: empty transitions list is now a hard fail
+    # in gate_spec (silently accepting it was the L12 bypass). Tests that
+    # used to seed `transitions: []` must declare at least one entry with
+    # all required keys so gate_spec sees a structurally valid spec.
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "fixture-reveal-on-scroll",
+            "trigger": "intersection",
+            "source_chunk": "fixture.js",
+            "bundle_branch": "main",
+            "target": ".fixture",
+            "animation": "opacity-translateY",
+            "reference_frames": ["frame_00.png"],
+        }]
+    }))
     # bundle-map.json intentionally absent
 
     gate = Gate(ref)
@@ -567,7 +623,21 @@ def test_gate_spec_passes_with_required_files(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
-    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
+    # Codex L10-L12 review: empty transitions list is now a hard fail
+    # in gate_spec (silently accepting it was the L12 bypass). Tests that
+    # used to seed `transitions: []` must declare at least one entry with
+    # all required keys so gate_spec sees a structurally valid spec.
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "fixture-reveal-on-scroll",
+            "trigger": "intersection",
+            "source_chunk": "fixture.js",
+            "bundle_branch": "main",
+            "target": ".fixture",
+            "animation": "opacity-translateY",
+            "reference_frames": ["frame_00.png"],
+        }]
+    }))
     (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
     (ref / "verification-plan.json").write_text(json.dumps({
         "schemaVersion": 1, "requiredChecks": []
@@ -589,7 +659,21 @@ def test_gate_spec_fails_when_verification_plan_missing(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
-    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
+    # Codex L10-L12 review: empty transitions list is now a hard fail
+    # in gate_spec (silently accepting it was the L12 bypass). Tests that
+    # used to seed `transitions: []` must declare at least one entry with
+    # all required keys so gate_spec sees a structurally valid spec.
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "fixture-reveal-on-scroll",
+            "trigger": "intersection",
+            "source_chunk": "fixture.js",
+            "bundle_branch": "main",
+            "target": ".fixture",
+            "animation": "opacity-translateY",
+            "reference_frames": ["frame_00.png"],
+        }]
+    }))
     (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
     verify = ref / "verify"
     verify.mkdir()
@@ -671,7 +755,21 @@ def test_gate_post_implement_passes_with_required_files(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
+    # Codex L10-L12 review: empty transitions list is now a hard fail
+    # in gate_spec (silently accepting it was the L12 bypass). Tests that
+    # used to seed `transitions: []` must declare at least one entry with
+    # all required keys so gate_spec sees a structurally valid spec.
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "fixture-reveal-on-scroll",
+            "trigger": "intersection",
+            "source_chunk": "fixture.js",
+            "bundle_branch": "main",
+            "target": ".fixture",
+            "animation": "opacity-translateY",
+            "reference_frames": ["frame_00.png"],
+        }]
+    }))
     screenshots = ref / "static" / "ref"
     screenshots.mkdir(parents=True)
     for i in range(5):
@@ -686,7 +784,21 @@ def test_gate_post_implement_passes_with_required_files(tmp_path: Path) -> None:
 def _post_implement_baseline(ref: Path) -> None:
     """Write minimal artifacts so gate_post_implement passes the legacy checks."""
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
+    # Codex L10-L12 review: empty transitions list is now a hard fail
+    # in gate_spec (silently accepting it was the L12 bypass). Tests that
+    # used to seed `transitions: []` must declare at least one entry with
+    # all required keys so gate_spec sees a structurally valid spec.
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "fixture-reveal-on-scroll",
+            "trigger": "intersection",
+            "source_chunk": "fixture.js",
+            "bundle_branch": "main",
+            "target": ".fixture",
+            "animation": "opacity-translateY",
+            "reference_frames": ["frame_00.png"],
+        }]
+    }))
     screenshots = ref / "static" / "ref"
     screenshots.mkdir(parents=True, exist_ok=True)
     for i in range(5):
@@ -987,6 +1099,12 @@ def test_verification_plan_transition_compare_empty_artifact_passes_when_no_spec
     ref = tmp_path / "ref"
     ref.mkdir()
     _post_implement_baseline(ref)
+    # This test specifically exercises the "spec declares no transitions"
+    # path, so override the baseline's populated spec with an empty one.
+    # gate_spec rejects empty transitions at the spec gate, but the
+    # post-implement counterpart accepts an empty result.txt when the spec
+    # is also empty — different gate, different responsibility.
+    (ref / "transition-spec.json").write_text(json.dumps({"transitions": []}))
     (ref / "verification-plan.json").write_text(json.dumps({
         "schemaVersion": 1,
         "requiredChecks": [

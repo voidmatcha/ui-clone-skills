@@ -751,7 +751,38 @@ class Gate:
         # Validate transition-spec structure
         spec = self._load_json("transition-spec.json")
         if spec is not None:
-            transitions = spec.get("transitions", [])
+            transitions = spec.get("transitions")
+            # Codex L10-L12 review: gate_spec used to silently pass when
+            # `transitions` was missing, non-list, or `[]`. The L12 agent
+            # exploited this by writing `"transitions": []` with a note
+            # like "FAQ accordion handled by React state, not in spec scope"
+            # — the spec gate passed structurally, downstream transition-
+            # spec-coverage failed with "spec has no entries", and the AE
+            # envelope regressed from L11's 8.5M to L12's 17M. Reject the
+            # bypass at the source.
+            if not isinstance(transitions, list):
+                results.append(
+                    CheckResult(
+                        "transitions list",
+                        "fail",
+                        "transition-spec.json: `transitions` must be a list (got "
+                        f"{type(transitions).__name__}). Re-run Step 5d so the "
+                        f"spec captures the observed interactions.",
+                    )
+                )
+                transitions = []
+            elif len(transitions) == 0:
+                results.append(
+                    CheckResult(
+                        "transitions non-empty",
+                        "fail",
+                        "transition-spec.json: `transitions` is empty. Every site "
+                        "the cloner targets has at least page-load / hover / scroll "
+                        "/ click handlers — re-run Step 5/6 (animation-detection.md "
+                        "Phase A-C) and Step 5d to record them. Empty spec = the "
+                        "downstream coverage check has nothing to enforce.",
+                    )
+                )
             required_transition_keys = (
                 "id",
                 "trigger",
