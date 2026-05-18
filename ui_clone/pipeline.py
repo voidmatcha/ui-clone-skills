@@ -628,10 +628,11 @@ class Pipeline:
                 # Phase 0A is a pure detection that the status checker
                 # already runs lazily; no driver work required here. Just
                 # validate.
-                phase_result = self.check_phase_0a()
-                # The runtime detection JSON is produced by check_phase_0a
-                # itself on first call; if it's still missing we surface
-                # that as a phase-0A failure.
+                # check_phase_0a is invoked for its side effect — it
+                # writes canvas-webgl-detection.json on first call. The
+                # return value is unused here; we validate by checking
+                # the artefact below.
+                self.check_phase_0a()
                 if not (self.ref_dir / "canvas-webgl-detection.json").is_file():
                     print(
                         f"\n{_RED}Phase 0A failed: canvas-webgl-detection.json absent.{_NC}"

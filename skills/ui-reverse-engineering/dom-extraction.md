@@ -13,78 +13,20 @@ Sites with splash animations block interaction for 5-10 seconds on every page lo
 4. **Pre-splash extraction (Step 2.6-pre) is the exception** — it intentionally captures before splash completes, using a separate session.
 
 ```bash
-# Open once, reuse everywhere
-agent-browser open <url> --session <project-name>
+# Canonical entry point — opens the session, waits for splash to
+# clear, and writes tmp/ref/<component>/splash-state.json. All
+# downstream steps reuse --session <project-name>.
+bash $PLUGIN_ROOT/scripts/extract/splash-bypass.sh \
+  <url> <project-name> tmp/ref/<component>
 
-# Auto-detect splash completion (replaces hardcoded wait 8000)
-agent-browser eval --session <project-name> "
-(() => {
-  return new Promise(resolve => {
-    let checks = 0;
-    const maxChecks = 40; // 40 × 500ms = 20s max wait
-    const check = () => {
-      checks++;
-      const html = document.documentElement;
-      const body = document.body;
-
-      // Signal 1: Full-viewport overlay gone
-      // Splash screens are typically position:fixed elements covering the viewport.
-      // When they finish, they get display:none, opacity:0, or removed from DOM.
-      const overlays = [...document.querySelectorAll('*')].filter(el => {
-        const s = getComputedStyle(el);
-        return s.position === 'fixed' && s.zIndex !== 'auto' && parseInt(s.zIndex) > 10 &&
-               el.offsetWidth >= window.innerWidth * 0.9 &&
-               el.offsetHeight >= window.innerHeight * 0.9 &&
-               s.opacity !== '0' && s.display !== 'none' && s.visibility !== 'hidden';
-      });
-      const hasFullScreenOverlay = overlays.length > 0;
-
-      // Signal 2: Interactive elements reachable
-      // During splash, buttons/links are blocked by the overlay (pointer-events: none or covered).
-      // After splash, at least one link/button should be clickable.
-      const firstLink = document.querySelector('a[href], button');
-      const linkRect = firstLink?.getBoundingClientRect();
-      const linkReachable = linkRect && linkRect.width > 0 &&
-        document.elementFromPoint(linkRect.x + 5, linkRect.y + 5) === firstLink;
-
-      // Signal 3: Page scrollable
-      // Splash often locks scroll. After completion, scroll should work.
-      const scrollHeight = document.documentElement.scrollHeight;
-      const isScrollable = scrollHeight > window.innerHeight * 1.5;
-
-      // Signal 4: DOM stable (no rapid changes)
-      // During splash, elements animate rapidly. After, DOM stabilizes.
-      // We track this across checks — if body innerHTML length is stable for 2 consecutive checks, splash is done.
-      const currentLen = document.body.innerHTML.length;
-      window.__splashCheckLen = window.__splashCheckLen || 0;
-      window.__splashStableCount = window.__splashStableCount || 0;
-      if (Math.abs(currentLen - window.__splashCheckLen) < 500) {
-        window.__splashStableCount++;
-      } else {
-        window.__splashStableCount = 0;
-      }
-      window.__splashCheckLen = currentLen;
-      const domStable = window.__splashStableCount >= 2;
-
-      const splashDone = !hasFullScreenOverlay && isScrollable && domStable;
-
-      if (splashDone || checks >= maxChecks) {
-        resolve(JSON.stringify({
-          splashDone,
-          checks,
-          timeMs: checks * 500,
-          signals: { hasFullScreenOverlay, linkReachable, isScrollable, domStable }
-        }));
-      } else {
-        setTimeout(check, 500);
-      }
-    };
-    check();
-  });
-})()
-"
-# All subsequent steps use --session <project-name>
+# Inspect what happened (optional — for debugging):
+cat tmp/ref/<component>/splash-state.json
+# → {"hasSplash": ..., "splashDone": ..., "durationMs": ..., "signals": {...}}
 ```
+
+`splash-bypass.sh` replaces the inline auto-detect IIFE that used to live in this file. The detection algorithm (4 signals: full-screen overlay, link reachability, scrollability, DOM stability) is unchanged; it just now lives in one canonical place so animation-detection.md and element-capture.md can route through the same primitive. See the script header for the full output schema.
+
+**Never call `agent-browser eval` with an inline splash check anymore** — route through this script so every loop, every site, every nested session gets the same detection logic and a JSON artefact you can compare across runs.
 
 ## Step 1: Open & Snapshot
 

@@ -116,7 +116,7 @@ column to one of:
   (`dom-scaffold.sh`, `extract-dom.sh`, `section-compare.sh`) by name.
   Always required.
 - `natural` — a separate run started from a fresh top-level folder with a
-  free-form prompt (e.g. `"<URL> 사이트 React + Tailwind로 클론해줘"`) and no
+  free-form prompt (e.g. `"clone <URL> as a React + Tailwind app"`) and no
   script-name hints. Required for any SKILL.md prompt-surface change, any
   artifact-name rename, any new pre_*/post_* hook, and any change to
   `ui_clone/hooks/_common.py:CANONICAL_REF_ARTIFACTS`. The two rows
