@@ -340,9 +340,17 @@ section "Shell syntax"
 SH_BAD=""
 SH_FILES=$(find scripts skills hooks -name '*.sh' -type f 2>/dev/null)
 [ -f install.sh ] && SH_FILES="$SH_FILES"$'\n'"install.sh"
+# Use bash 4+; macOS /bin/bash (3.2) mis-lexes quoted heredocs with apostrophes.
+SH_BIN=$(command -v bash)
+SH_MAJOR=$("$SH_BIN" -c 'echo ${BASH_VERSION%%.*}')
+if [ "${SH_MAJOR:-0}" -lt 4 ]; then
+  for cand in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [ -x "$cand" ]; then SH_BIN="$cand"; break; fi
+  done
+fi
 while IFS= read -r f; do
   [ -z "$f" ] && continue
-  bash -n "$f" 2>/dev/null || SH_BAD="$SH_BAD $f"
+  "$SH_BIN" -n "$f" 2>/dev/null || SH_BAD="$SH_BAD $f"
 done <<< "$SH_FILES"
 if [ -z "$SH_BAD" ]; then
   SH_COUNT=$(printf "%s\n" "$SH_FILES" | grep -c '\.sh$' || true)

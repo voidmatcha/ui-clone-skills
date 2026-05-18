@@ -19,3 +19,6 @@ __pycache__/
 benchmark/history/
 benchmark/history.csv
 benchmark/work/
+
+# benchmark loop-iteration screenshots saved to repo root during sessions
+loop*.png

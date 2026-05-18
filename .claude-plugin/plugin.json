@@ -1,6 +1,6 @@
 {
   "name": "ui-clone-skills",
-  "version": "0.4.10",
+  "version": "0.5.0",
   "description": "Clone any live website into React + Tailwind code with extraction-first verification — no vision tokens, real CSS/JS bundle analysis instead of screenshots. Three skills: ui-reverse-engineering (URL → React + Tailwind, supports GSAP / Framer Motion / Lenis / Webflow IX2 / Next.js / Tailwind v4), ui-capture (reference screenshots, scroll evidence, transitions), visual-debug (AE/SSIM diff + computed-style mismatch diagnosis). Shared hooks and gates enforce extraction and verification before code generation.",
   "license": "Apache-2.0",
   "author": {

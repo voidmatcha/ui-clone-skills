@@ -32,10 +32,24 @@ Your job: emit a structured JSON report of **concrete, actionable** differences 
       "description": "<concrete actionable diff, ≤200 chars>"
     }
   ],
-  "priority_fix": "<selector_hint of highest-impact finding, or null if findings is empty>",
+  "priority_fix": {
+    "selector": "<selector_hint of highest-impact finding>",
+    "action": "<imperative ≤140-char instruction>",
+    "tailwind_add": "<space-separated Tailwind classes to ADD to the element, or empty string>",
+    "tailwind_remove": "<space-separated Tailwind classes to REMOVE, or empty string>",
+    "inline_style": "<CSS declarations to apply as inline style for values that don't fit Tailwind's scale (e.g. 'gap: 22.5px; line-height: 1.07'), or empty string>",
+    "text_replace": "<exact REF text content to replace IMPL text with, or empty string if not a text fix>"
+  },
   "confidence": "high|medium|low"
 }
 ```
+
+`priority_fix` MUST be an object (or `null` when findings is empty). The five fields are what an auto-fix iterator pipes directly into codegen — each is a concrete patch instruction, not an English description. Fill every field that applies; leave the rest as `""`. Earlier versions emitted only a selector or only an English `action`, which left the iterator with no "what to change" half and the AE never moved. Reasoning belongs in `findings[i].description`; `priority_fix` is the patch itself.
+
+Rules for the concrete fields:
+- `tailwind_add` / `tailwind_remove` — only valid Tailwind v3/v4 class names. No prose, no commas, no `className="..."` wrapper. If the change can be expressed in Tailwind, prefer Tailwind over `inline_style`.
+- `inline_style` — only CSS declarations with measured values you read off the ref (px / hex / rem); never the literal text "the same as ref". Use when the ref value doesn't snap to a Tailwind scale step.
+- `text_replace` — verbatim, character-for-character ref text. Use when IMPL has fabricated copy (typical Phase 4 failure mode: agent guessed "Eat Real Food" when ref says "Real Food Wins"). Leave empty for non-text fixes.
 
 ## Good-output example
 
@@ -63,7 +77,14 @@ Your job: emit a structured JSON report of **concrete, actionable** differences 
       "description": "REF unit text (`%`, `in 5`) uses #cc4422 accent; IMPL is uniform black. Add `text-[#cc4422]`."
     }
   ],
-  "priority_fix": ".stats-grid",
+  "priority_fix": {
+    "selector": ".stats-grid",
+    "action": "Convert the container to a 3-column grid with vertical dividers so the three stats render side-by-side.",
+    "tailwind_add": "md:grid-cols-3 gap-12 divide-x divide-neutral-800",
+    "tailwind_remove": "flex flex-col",
+    "inline_style": "",
+    "text_replace": ""
+  },
   "confidence": "high"
 }
 ```

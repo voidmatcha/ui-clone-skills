@@ -1271,7 +1271,12 @@ for REF_IMG in "${REF_IMGS[@]}"; do
 
   # Thresholds operate on AE/Mpx (defect density). Default 2000 still works for
   # static content; use SECTION_THRESHOLD=50000 for image/animation-rich pages.
+  # Saturation band (AE/Mpx >= 800k) means the per-pixel diff is so dense that
+  # AE has lost its gradient — visual-judge can't reduce it with macro tweaks
+  # and the agent must return to Phase 4 LLM refinement (typography, asset
+  # references, scroll-trigger wiring) before more iteration is useful.
   THRESHOLD="${SECTION_THRESHOLD:-2000}"
+  SATURATION="${AE_SATURATION:-800000}"
   if [ "$AE_PER_MPX" -le 500 ]; then
     STATUS="✅"
     SEV="ok"
@@ -1284,9 +1289,13 @@ for REF_IMG in "${REF_IMGS[@]}"; do
     STATUS="❌"
     SEV="major"
     FAIL_COUNT=$((FAIL_COUNT + 1))
-  else
+  elif [ "$AE_PER_MPX" -lt "$SATURATION" ]; then
     STATUS="❌"
     SEV="critical"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  else
+    STATUS="🌑"
+    SEV="saturated"
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 
@@ -1300,6 +1309,20 @@ echo -e "$RESULTS"
 echo ""
 echo "**Result: ${PASS_COUNT} PASS, ${FAIL_COUNT} FAIL, ${SKIP_COUNT} SKIP, ${SUBSTITUTED_COUNT} STRUCTURAL_ONLY**"
 echo "(Severity is based on AE/Mpx — defect density per megapixel — not raw AE.)"
+
+# Count saturated rows for the agent's stop-decision routing.
+SATURATED_COUNT=$(echo -e "$RESULTS" | grep -c "| saturated | 🌑 |" || true)
+if [ "$SATURATED_COUNT" -gt 0 ]; then
+  echo ""
+  echo "⚠ Saturation: ${SATURATED_COUNT} section(s) at AE/Mpx ≥ ${SATURATION} (gradient dead)."
+  echo "  Visual-judge cannot reduce these with class/wrapper tweaks alone — the"
+  echo "  underlying components are missing typography / fonts / images / scroll-"
+  echo "  trigger wiring that Phase 4 LLM refinement should have supplied."
+  echo "  Before another visual-judge pass: revisit each saturated section's"
+  echo "  impl/src/components/<Name>.tsx and apply the Phase 4 refinement"
+  echo "  checklist (Tailwind class swap, asset reference, font variable,"
+  echo "  state/handlers, scroll-trigger animation). Then re-run section-compare."
+fi
 
 # ── Auto-save result for Stop gate hook ──
 mkdir -p "$DIR/sections"

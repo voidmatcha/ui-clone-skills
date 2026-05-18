@@ -336,6 +336,28 @@ for i, sec in enumerate(sections):
         name = base
     subtree = find_subtree_for_section(structure, sec, consumed)
     hover_rules = []  # Fix 19 — collected during render(); emitted as <style>.
+    # Fix 20 (Loop 16) — inject per-section dominant background color EARLY.
+    # Phase 2 captures `background-color` on whatever node *literally* carries
+    # it; on realfood.gov the colored backdrop lives on a wrapping
+    # `<div class="dga_dark__...">` outside the section, so the section root's
+    # styles report `background-color: rgba(0,0,0,0)`. The impl then renders
+    # the section on white, mismatching every dark/sand/off-white region by
+    # ~38% AE per Loop 15 measurement. When section-map.json carries a
+    # `dominantBg` (computed from the ref clip), promote it onto the section
+    # subtree's `background-color` BEFORE render() runs so the deterministic
+    # scaffold already paints the correct backdrop without waiting for LLM
+    # refinement to discover it.
+    dominant_bg = sec.get("dominantBg") if isinstance(sec, dict) else None
+    if subtree is not None and dominant_bg:
+        sub_styles = subtree.get("styles") or {}
+        existing = sub_styles.get("background-color", "")
+        # Promote only when nothing meaningful is set. We treat transparent
+        # rgba, empty, and the literal "none" as "missing" so we don't
+        # clobber a hex/named color the page actually authored.
+        TRANSPARENT = {"", "none", "rgba(0, 0, 0, 0)", "transparent"}
+        if existing in TRANSPARENT:
+            sub_styles["background-color"] = dominant_bg
+            subtree["styles"] = sub_styles
     if subtree is None:
         # Couldn't locate the subtree — emit a stub that imports the section
         # placeholder. Phase-5b visual-judge will surface this gap.

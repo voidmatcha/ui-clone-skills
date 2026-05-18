@@ -26,19 +26,54 @@ metadata:
 
 ## ⚡ Activation sentinel (READ FIRST)
 
-When this skill is loaded into the session and you act on its trigger ("run
-benchmark" or equivalent), the FIRST LINE of your response MUST be exactly
-the following token, with no decoration:
+The FIRST RESPONSE you generate after reading this file in reaction to a
+"run benchmark" / "regression benchmark" / "benchmark clone" trigger MUST
+begin with the exact line below — no decoration, no preamble, no header
+above it:
 
 ```
 [BENCHMARK-SKILL-ACTIVE v1 / skills/benchmark/SKILL.md]
 ```
 
-This sentinel exists purely so the maintainer can verify with one round-trip
-whether `--plugin-dir` discovery picked up this internal skill from the dev
-clone. If you ever respond to a benchmark trigger WITHOUT this token, the
-maintainer cannot tell whether the skill is loaded — emit it every time, even
-if the rest of your response is a clarifying question.
+Concretely: the response that comes right after the tool-result of your
+`Read(skills/benchmark/SKILL.md)`. Reading this file IS the start of
+execution; do not defer the sentinel to a later "more real" response, do
+not announce the rule in prose instead of emitting the token, do not
+prepend a step heading. The first line of that response is the token
+itself, and only the token. Anything else (Step 1 announcement,
+`bash skills/benchmark/scripts/setup.sh` call, status notes) goes
+below it on subsequent lines.
+
+Only that one response needs the sentinel — later responses in the same
+session do not need to repeat it. Empirically, LLMs drop a per-message
+prepend after a few turns even when the rule says "every response," so a
+single emission anchored to the post-read response is the reliable signal
+the maintainer checks.
+
+Edge case — tool-only first turn. If the response immediately after the
+SKILL.md Read would otherwise contain only a tool call with no text (e.g.
+you decide to dispatch `bash skills/benchmark/scripts/setup.sh` without
+saying anything), prefix that turn with the sentinel as a one-line text
+message before the tool call. The text-only line is the sentinel; the
+tool dispatch follows on the next line. Do not skip the sentinel just
+because the turn would have been silent.
+
+Maintainer-shell note. In some maintainer environments `ls` is aliased
+to `eza`, where `ls -t` fails with `-t needs a value (modified|...)`.
+Inside benchmark commands prefer the portable forms `\ls -1t`,
+`/bin/ls -t`, or `find ... -printf '%T@ %p\n' | sort -rn` instead of
+bare `ls -t` so the pipeline doesn't break on the maintainer's shell.
+
+Why this is the activation signal. This skill is intentionally NOT registered
+in `.claude-plugin/plugin.json` `skills` (see "Internal-only skills" in
+AGENTS.md), so Claude Code's `--plugin-dir` discovery will never auto-load
+it. The supported activation path is the AGENTS.md fallback: AGENTS.md is
+imported into the system prompt via `CLAUDE.md → @AGENTS.md`, lists the
+trigger phrases, and on trigger the agent must read this SKILL.md and act on
+it. The sentinel therefore CANNOT appear in the *very first* response (the
+one that decides to read SKILL.md), and the maintainer must not interpret
+its absence there as a failure. It MUST appear in the next response — the
+one right after the SKILL.md Read tool-result.
 
 ## Trigger
 
@@ -161,6 +196,21 @@ Follow the normal ui-reverse-engineering pipeline:
   explodes to 1M+ on every section. Also parse `<ref>/visible-images.json`
   and reference any non-CDN URLs in your generated code.
 
+  **Completeness check (mandatory before Phase 4)**. extract-assets.sh
+  silently partial-fails on origin redirects, signed URLs, or CDN
+  cookies — observed in benchmark runs where AE stayed saturated because
+  3 of 86 visible images were missing. After the script runs:
+  ```bash
+  EXPECTED=$(jq '[.[] | select(.type=="image") | .url] | unique | length' "$REF_DIR/visible-images.json")
+  ACTUAL=$(find "$IMPL_DIR/public/images" -type f 2>/dev/null | wc -l | tr -d ' ')
+  echo "images: expected=${EXPECTED} actual=${ACTUAL}"
+  test "$ACTUAL" -ge "$((EXPECTED * 9 / 10))" || { echo "FAIL: more than 10% of images missing — re-run extract-assets.sh or fall back to inlining the missing URLs in <img src> rather than placeholders"; exit 1; }
+  ```
+  If under 90% transfer, the gate fails immediately rather than letting
+  Phase 4 generate against broken assets — the AE regression that
+  causes is invisible to visual-judge (it just sees a uniform mismatch
+  with no actionable selector).
+
 - **Phase 2.7 — DOM scaffold (MANDATORY, deterministic, Fix 8)**:
   Merge `structure.json` + `styles.json` + `section-map.json` into a single
   scaffold that the Phase-4 generator MUST follow verbatim:
@@ -213,8 +263,8 @@ Follow the normal ui-reverse-engineering pipeline:
 
 - **Phase 3 — spec** (transition-spec, verification-plan).
 
-- **Phase 4 — pre-generate + scaffold**: if `<impl>` is empty, scaffold a
-  Next.js project:
+- **Phase 4 — pre-generate + scaffold + LLM refinement**: if `<impl>` is
+  empty, scaffold a Next.js project:
   ```
   npx create-next-app@latest "$IMPL_DIR" --typescript --tailwind --app \
       --src-dir --no-eslint --use-npm --no-import-alias --yes
@@ -223,6 +273,79 @@ Follow the normal ui-reverse-engineering pipeline:
   in `public/` (not placeholder rectangles). Split into per-section components
   under `src/components/` — `componentization` gate fails when `page.tsx` >
   200 LOC AND components/ < 3.
+
+  **MANDATORY LLM refinement step (do NOT skip).** After `scaffold-to-jsx.sh`
+  emits the deterministic TSX skeleton, you (the LLM) MUST iterate over each
+  `impl/src/components/<Name>.tsx` and refine it. The deterministic transpile
+  only captures verbatim text + inline styles + tag hierarchy — it does
+  *not* produce production fidelity. Refine each component for:
+
+  1. **Tailwind class replacement of inline styles** where the inline value
+     maps cleanly (`style={{display:"flex",gap:"24px"}}` → `className="flex
+     gap-6"`). Keep inline only for measured values that don't fit Tailwind's
+     scale (e.g. `gap: 22.5px`). **Always strip `transform: matrix(...)` and
+     `transform: matrix3d(...)` from inline style** — Phase 2's getComputedStyle
+     snapshots these as the *final animation state*, so leaving them in
+     locks every element at "post-animation" coordinates (commonly seen as
+     "the impl renders shifted ~785px to the left" in Loop 7). Either map
+     the transform to a Framer Motion `initial`/`animate` pair, a GSAP
+     timeline, or just delete it and let the layout sit at its natural
+     position.
+  2. **Image references**: every `<img>`/`<source>` MUST point at
+     `public/images/...` paths produced by Phase 2.5, not external CDNs and
+     not `placeholder` rectangles. Check `visible-images.json` + `<impl>/public/`.
+  3. **Font stacks**: components MUST use the project's font CSS variable
+     (Geist / Die Grotesk / whatever Phase 2 detected) — not browser default.
+  4. **Event handlers + state**: when `interactions-detected.json` flags an
+     element (accordion, tab, modal, video play, scroll-driven reveal),
+     wire React `useState` / event handlers / IntersectionObserver. The
+     transpiler emits a static snapshot; behavior is your job.
+  5. **Scroll-trigger animation**: when `transition-spec.json` declares
+     scroll-driven entries (`progress`, `pinning`, etc.), wire them via
+     Framer Motion / GSAP / Lenis-aware refs to match the ref's motion. If
+     you do nothing here, AE on scroll sections inflates to ~1M permanently
+     and visual-judge has no leverage to reduce it (it can only suggest
+     Tailwind tweaks, not author behavior).
+  6. **Responsive variants**: the benchmark target is also rendered on
+     mobile (375 / 414), tablet (768 / 834) and desktop (1280 / 1440)
+     viewports. The deterministic transpiler captures the 1440 snapshot
+     only; you must inspect `responsive/<viewport>/section-*.png` if it
+     exists, otherwise re-capture at each viewport via
+     `agent-browser --session realfood-bench set viewport <w> <h>` +
+     screenshot, and add Tailwind responsive variants (`sm:`, `md:`,
+     `lg:`, `xl:`) so the layout collapses correctly. Common patterns:
+     `flex-col md:flex-row`, `text-2xl md:text-5xl lg:text-7xl`,
+     `gap-4 md:gap-12`, `px-4 md:px-12 lg:px-20`. Without this step the
+     impl renders broken on the very viewports `verification-plan.json`
+     expects to verify, and any "responsive" sub-check in the gate fails
+     deterministically.
+  7. **Section-matcher: flat `<section>` children at top of `<main>`**.
+     `section-compare.sh`'s fingerprint algorithm pairs ref↔impl by
+     `<section>` className token intersection at depth 1 — it does NOT
+     traverse into wrapper `<div>`s. If you wrap sections in color-zone
+     wrappers (`<div className="dga_dark">...</div>`), every section
+     inside becomes invisible to the matcher and AE explodes (observed
+     Loop 19 → 12 ref ↔ 12 impl only after wrapper removal). The correct
+     pattern: apply each color-zone as a `style={{ background: ... }}`
+     on the `<section>` itself, and keep `<main>`'s direct children as
+     a flat list of `<section>` elements that mirror ref's CSS-module
+     class names verbatim (`dga_hero__AjMaf`, `dga_stats__Wj1Kx`, etc.).
+  8. **No other-SHA impl bootstrap**. Do NOT copy
+     `benchmark/work/<other-sha>/impl/` as a warm-start base for the
+     current SHA — that contaminates the measurement (you're benchmarking
+     the prior maintainer's work plus your refinement, not the current
+     SHA's pipeline). Each run must start from `npx create-next-app`
+     scaffold + the SHA's own Phase 1-3 artifacts. Bootstrapping is
+     allowed for the *ref* side (the live site is identical across SHAs,
+     so `cp benchmark/work/<other-sha>/ref/*` saves capture time without
+     contaminating measurement) but never for `impl`.
+
+  Skipping the refinement step is the #1 cause of the "Phase 5 visual-judge
+  loop runs forever but AE never drops" failure mode observed in
+  benchmark/history.csv. The deterministic skeleton + macro wrapper fixes
+  cannot move AE below ~400k on any non-trivial section; only refined
+  components reach the < 100k range where the gate's critical threshold
+  (and the gradient signal visual-judge needs) actually live.
 
 - **Phase 5 — verification**: run `npm run dev` (background, capture port),
   then run section-compare, tree-diff, transition-compare against the local
@@ -242,6 +365,65 @@ Follow the normal ui-reverse-engineering pipeline:
   `python -m ui_clone.goal`. Repeat until result.txt has 0 FAIL rows or
   the per-section AE/Mpx drops below the section-compare critical threshold.
 
+  **Mandatory: dev-server restart between iterations.** Next.js 16 + Turbopack
+  HMR has been observed (benchmark/history Loop 3 12:05) to serve stale HTML
+  for several sections mid-iteration even after the source file is updated
+  via Edit — `dga_section__k3uwv` and `real_food_wins` rows stayed unchanged
+  across 3 visual-judge iters until the dev server was restarted, despite
+  source diffs being correctly applied. Before each `section-compare` re-run
+  inside the Phase 5b loop:
+  ```bash
+  pkill -f "next.*dev"; sleep 2
+  PORT=<port> npm run dev > /tmp/dev.log 2>&1 &
+  until grep -q "Ready" /tmp/dev.log; do sleep 1; done
+  ```
+  This trades ~3s per iter for measurement validity. Without it, refinements
+  silently don't land and AE plateaus look like "fix didn't work" when the
+  actual fix is fine — the dev server just hadn't re-rendered.
+
+  **Graded stop allowed.** STRICT v2 demands all 10 post-implement
+  sub-checks PASS, but in practice `video-motion-compare` and
+  `scroll-end-completion` need frame-perfect GSAP/Lenis parity that
+  Phase 4 LLM refinement can approximate only loosely; insisting on
+  perfect PASS there sends the loop forever. The pipeline is allowed
+  to emit `INCOMPLETE-CONVERGED` instead of `DONE` when ALL of the
+  conditions below hold simultaneously — that is a successful run for
+  the benchmark even though it does not pass STRICT v2's `done` gate:
+
+  - `result.txt` has zero `saturated` rows (no AE/Mpx ≥ 800k).
+  - `ae_avg` improved by ≥ 30% versus the prior recorded run in
+    `benchmark/history.csv` for the same SHA.
+  - All static-content sub-checks PASS:
+    `hydration-check`, `tailwind-transform-conflict`, `asset-transfer`,
+    `transition-spec-coverage`, `spec-implementation-coverage`.
+  - At most two of the dynamic-content sub-checks remain incomplete:
+    `video-motion-compare`, `scroll-end-completion`, `text-fidelity-check`,
+    `dom-mirror-check`, `image-fidelity`.
+
+  Record outcome `INCOMPLETE-CONVERGED` via `benchmark-harvest.sh` when
+  these hold. Treat it as a clean stop, not a forced quit — the data
+  point is valid and the agent should not keep iterating against
+  dynamic-content gates that can't converge inside one session.
+
+  **Multi-section fairness when comparing history.csv rows.** An `ae_avg`
+  computed over 1 section is not the same metric as `ae_avg` over 15
+  sections — a single-section measurement reflects only that section's
+  match quality. When the maintainer asks "did we beat baseline X," the
+  honest comparison is between rows with similar `sections_captured`
+  counts. A 1-section 156k run is not a better result than a 15-section
+  187k run; it's a different measurement. Phase 5 must capture *all*
+  sections present in section-map.json (skipping zero-height entries
+  per Fix 12), and harvest's `sections_captured` field is what the
+  fairness comparison reads.
+
+  **`.benchmark-start` timestamp must be reset every setup.** When
+  `setup.sh` runs in an existing work dir, the prior `.benchmark-start`
+  marker file can survive and inflate `wallclock_s` in the next harvest
+  (observed Loop 10 → wallclock_s=69688 ≈ 19h, real elapsed ~30min). The
+  setup script always writes a fresh `date +%s` into `.benchmark-start`
+  after the wipe, but verify the file's mtime before trusting
+  harvest's elapsed time — if it predates the run, the row is bogus.
+
 After every chunk of work, route the next action via:
 
 ```bash
@@ -253,6 +435,17 @@ The goal card emits one bounded "Next action" string based on
 next action, then re-route.
 
 ### Step 3 — STRICT v2 stop conditions
+
+**Do NOT self-impose a stop.** The visual-judge convergence loop in Phase 5b
+IS the procedure, not the measurement subject. A first-pass result with FAIL
+rows is not a valid stopping point on the grounds that "iterating would
+invalidate the data point." The data point this skill records — wallclock,
+iteration count, AE/Mpx, gate-fail counts — is exactly what `benchmark-harvest.sh`
+computes *after* you converge or genuinely hit a blocker. Treat this run the
+same as a real user invoking `ui-reverse-engineering`: iterate until 100%
+visual match, exactly as that skill's own SKILL.md directs. The whole point
+of this benchmark is to *mirror* real usage; deviating "to keep the data
+clean" defeats the entire measurement.
 
 You may emit "DONE" and stop ONLY when EVERY condition below is true:
 

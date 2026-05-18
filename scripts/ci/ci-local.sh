@@ -51,11 +51,26 @@ else
 fi
 
 # 4. Shell syntax check
+# Use bash 4+ explicitly. macOS ships bash 3.2 as /bin/bash, which mis-lexes
+# quoted heredocs containing apostrophes (a known 3.2 bug). All target hosts
+# (GitHub Actions Ubuntu, Linux installs, macOS users with `brew install bash`)
+# run bash 4+, so we enforce that minimum here.
 step "Shell syntax check"
+BASH_BIN=$(command -v bash)
+BASH_MAJOR=$("$BASH_BIN" -c 'echo ${BASH_VERSION%%.*}')
+if [ "${BASH_MAJOR:-0}" -lt 4 ]; then
+  for cand in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [ -x "$cand" ]; then BASH_BIN="$cand"; break; fi
+  done
+  BASH_MAJOR=$("$BASH_BIN" -c 'echo ${BASH_VERSION%%.*}')
+fi
+if [ "${BASH_MAJOR:-0}" -lt 4 ]; then
+  fail "shell syntax: bash 4+ required (found $($BASH_BIN --version | head -1)). On macOS: brew install bash"
+fi
 for f in scripts/ci/*.sh scripts/hooks/*.sh scripts/extract/*.sh scripts/verify/*.sh hooks/*.sh skills/visual-debug/scripts/*.sh; do
-  bash -n "$f" || fail "shell syntax: $f"
+  "$BASH_BIN" -n "$f" || fail "shell syntax: $f"
 done
-[ "$QUIET" = "1" ] || echo "  ✓ all shell scripts parse"
+[ "$QUIET" = "1" ] || echo "  ✓ all shell scripts parse (bash $BASH_MAJOR.x at $BASH_BIN)"
 
 # 5. Review checks
 step "Review checks"

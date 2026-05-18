@@ -235,9 +235,11 @@ EXTRACT_JS=$(cat <<'JSEOF'
 JSEOF
 )
 
-# Inject the selector — must be a JS string literal. Escape single-quotes.
+# Inject the selector — must be a JS string literal. Escape single-quotes,
+# then substitute via sed (avoiding bashs parameter-expansion replacement,
+# which mis-lexes single quotes inside REPL on bash 3.2).
 SELECTOR_LITERAL=$(printf '%s' "$TARGET" | sed "s/'/\\\\'/g")
-EVAL_JS="${EXTRACT_JS/SELECTOR_PLACEHOLDER/'$SELECTOR_LITERAL'}"
+EVAL_JS=$(printf '%s' "$EXTRACT_JS" | sed "s|SELECTOR_PLACEHOLDER|'${SELECTOR_LITERAL}'|")
 
 # Run via agent-browser and capture.
 TMP_OUT=$(mktemp)

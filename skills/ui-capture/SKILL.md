@@ -34,6 +34,26 @@ agent-browser --session <s> eval "<script>" > tmp/ref/<name>.json
 ```
 Never let large JSON print to stdout — it wastes tokens.
 
+## `eval` JSON unwrap rule
+
+`agent-browser eval` returns the script's return value JSON-encoded, so a
+script that returns `JSON.stringify(obj)` writes a *double-quoted JSON
+string* to disk (e.g. `"{\"sections\":[...]}"`), not the object itself.
+Passing that file straight to `jq '.sections'` fails with `jq: Cannot
+index string with string "sections"`.
+
+Unwrap once before further `jq` work:
+```bash
+agent-browser --session <s> eval "(() => JSON.stringify({...}))()" > raw.json
+jq -r 'fromjson' raw.json > data.json   # now a real object; pipe to jq freely
+```
+Or skip the inner `JSON.stringify` entirely — `agent-browser eval` already
+serializes the return value, so returning the plain object works too and
+avoids the unwrap step:
+```bash
+agent-browser --session <s> eval "(() => ({sections: [...]}))()" > data.json
+```
+
 ## When to use
 
 - **Standalone**: `/ui-capture <reference-url> [local-url] [component]`
