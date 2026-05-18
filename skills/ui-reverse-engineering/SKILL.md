@@ -315,24 +315,14 @@ This bites hardest right after `<system-reminder>` summaries reactivate a long-r
 
 ## Completion criteria
 
-**⛔ Mandatory single entry — before claiming completion run:**
+**⛔ Mandatory before claiming "done":**
 
 ```bash
-# 1. Dev server on 0.0.0.0 so external observers (verify outer loop,
-#    Tailscale peers, mobile devices on the LAN) can reach impl.
-#    `--host 0.0.0.0` is NOT optional — section-compare / font-parity /
-#    breakpoint-collision-check all hit the impl URL, and a 127.0.0.1
-#    binding makes those scripts fail from outside the loopback.
-cd impl && npm run dev -- --host 0.0.0.0 &
-
-# 2. One canonical verify entry — runs every post-impl gate in
-#    GATE_ORDER (post-implement → boundary → font-parity →
-#    section-compare). On any failure, the gate output prints the
-#    exact script to run next. Iterate until exit 0.
-cd .. && python -m ui_clone.pipeline <url> <component> <session> verify
+cd impl && npm run dev -- --host 0.0.0.0 &        # external-reachable
+python -m ui_clone.pipeline <url> <component> <session> verify
 ```
 
-`pipeline ... verify` is the single replacement for the "did I remember to run every gate" mental checklist. It surfaces every missing artifact at once instead of failing one gate, fixing it, then discovering the next one.
+`verify` runs the post-impl GATE_ORDER (post-implement → boundary → font-parity → section-compare) and stamps `verify-stamp.json` on PASS. Iterate until exit 0; the gate output names the exact script to run for each missing artefact.
 
 ```
 □ C1 static ✅  □ C2 scroll ✅  □ C3 transitions ✅
