@@ -129,6 +129,92 @@ def _is_declaration_command(cmd: str) -> bool:
     return bool(_BLOCK_PATTERNS.search(cmd))
 
 
+# ── Fresh-folder first-action enforcement ──
+#
+# v1.0 SKILL.md added "First action — Fresh-folder fast path" telling the
+# agent to run `python -m ui_clone.pipeline ... run --phases 0A,1,2` before
+# any other tool. The v1.0 nested test ignored that instruction completely
+# (0 invocations) and started capturing screenshots / inspecting scripts
+# directly. SKILL.md is guidance, not enforcement — so the hook has to do
+# the enforcement.
+#
+# When the project's `tmp/ref/` is empty (or absent), this hook denies any
+# Bash that touches the canonical extraction surface (agent-browser CLI,
+# visual-debug/scripts/*.sh wrappers, scripts/extract/*.sh wrappers) except
+# the pipeline driver itself and read-only inspection. The deny reason
+# names the exact command the agent should run instead.
+#
+# Allowlisted in fresh state:
+#   - python -m ui_clone.pipeline ...    (status / run actions)
+#   - which / command -v / type / ls / cat / head / tail / grep / find / pwd
+#   - mkdir -p (so the agent can prepare scratch dirs without hitting deny)
+#   - git status / git diff / git log
+#   - the preflight Bash literally documented in SKILL.md's First action
+#     section (uses `command -v` + `for c in agent-browser ...; do` shape)
+#   - the pipeline run's own internal invocations (we identify them by
+#     PLUGIN_ROOT/scripts/extract/capture.sh and the visual-debug script
+#     paths — they only appear when execute_phases() called them)
+
+_FRESH_FOLDER_ALLOW_PATTERNS = re.compile(
+    r"^\s*("
+    r"python(?:3)?\s+-m\s+ui_clone\."
+    r"|which\b|command\s+-v\b|type\s+-[ap]\b|type\s+[A-Za-z_]"
+    r"|ls\b|cat\b|head\b|tail\b|grep\b|find\b|pwd\b|stat\b"
+    r"|mkdir\s+-p\b|mkdir\b"
+    r"|git\s+(?:status|diff|log|rev-parse|show)\b"
+    r"|for\s+c\s+in\s+agent-browser"  # SKILL.md preflight shape
+    r"|miss=\"\""                       # SKILL.md preflight starts here too
+    r"|echo\b|printf\b|true\b"
+    r"|test\b|\[\s+"
+    r")"
+)
+
+_FRESH_FOLDER_DENY_PATTERNS = re.compile(
+    r"\bagent-browser\b"
+    r"|/skills/visual-debug/scripts/(?:extract-dom|dom-scaffold|section-compare|"
+    r"asset-transfer-check|asset-utilization-check|paid-features-detect|"
+    r"bundle-impl-coverage-check|hover-state-compare|click-state-compare|"
+    r"video-transition-compare|hydration-check|reveal-trigger-check|"
+    r"transition-compare|font-parity-check|image-fidelity-check|"
+    r"scroll-end-completion-check)\.sh\b"
+    r"|/scripts/extract/(?:extract-assets|extract-section-html|"
+    r"extract-animation-runtime|extract-dynamic-styles|section-clips|"
+    r"download-chunks|gsap-to-css)\.sh\b"
+)
+
+
+def _is_fresh_state(project_root: Path) -> bool:
+    """True when `tmp/ref/` has no usable component dir yet.
+
+    A component dir is "usable" once it contains either `regions.json`
+    (Phase 1 minimal evidence) or `pipeline-state.json`. An empty `tmp/`
+    or absent `tmp/ref/` both count as fresh.
+    """
+    ref_root = project_root / "tmp" / "ref"
+    if not ref_root.is_dir():
+        return True
+    for d in ref_root.iterdir():
+        if not d.is_dir():
+            continue
+        if (d / "regions.json").is_file() or (d / "pipeline-state.json").is_file():
+            return False
+    return True
+
+
+def _fresh_state_violation(cmd: str) -> bool:
+    """True when the command is on the deny list AND not on the allow list.
+
+    Both lists are checked because some commands match both (e.g. a script
+    invocation in a `command -v` check). Allow wins — better to let an
+    inspection through than to falsely block.
+    """
+    if not cmd:
+        return False
+    if _FRESH_FOLDER_ALLOW_PATTERNS.match(cmd):
+        return False
+    return bool(_FRESH_FOLDER_DENY_PATTERNS.search(cmd))
+
+
 def _bash_write_target(cmd: str) -> str | None:
     """Return the first component-file target this Bash command writes to, else None.
 
@@ -322,6 +408,32 @@ def main() -> None:
                     f"hand-dumping JSON into tmp/ref/<c>/. See SKILL.md "
                     f"Pipeline section for the step → artifact mapping."
                 )
+            _emit_block(reason)
+            sys.exit(0)
+
+    # Fresh-folder first-action enforcement (v1.1). When the project has no
+    # populated ref dir yet, deny any Bash that touches the canonical
+    # extraction surface except via the pipeline driver. SKILL.md tells the
+    # agent to call `pipeline run` first; this hook makes that mandatory
+    # instead of just guidance — the v1.0 nested test confirmed instruction
+    # alone is ignored. Same UI_RE_SKIP_BASH_GATE escape as the ad-hoc deny.
+    if not os.environ.get("UI_RE_SKIP_BASH_GATE") and _is_fresh_state(project_root):
+        if _fresh_state_violation(cmd):
+            example_component = "site"
+            example_session = "ref-capture"
+            reason = (
+                f"⛔ UI-RE fresh-folder enforcement: tmp/ref/ has no Phase 1 "
+                f"evidence yet, so direct extraction commands are blocked.\n"
+                f"Run the pipeline driver FIRST:\n"
+                f"  python -m ui_clone.pipeline <URL> {example_component} "
+                f"{example_session} run --phases 0A,1,2\n"
+                f"It invokes capture.sh + extract-dom.sh + dom-scaffold.sh "
+                f"in the right order and produces canonical artifacts.\n"
+                f"Inspection commands (which / command -v / ls / cat / "
+                f"`python -m ui_clone.pipeline ... status`) still pass.\n"
+                f"Bypass (emergency only, voids measurement signal): "
+                f"UI_RE_SKIP_BASH_GATE=1 <command>"
+            )
             _emit_block(reason)
             sys.exit(0)
 
