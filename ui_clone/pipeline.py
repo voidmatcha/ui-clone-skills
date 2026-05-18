@@ -131,7 +131,18 @@ class Pipeline:
         self.url = url
         self.component = component
         self.session = session
-        self.project_root = find_project_root()
+        # v1.3: prefer cwd as the project root scope so iterations launched
+        # from `scratch/loop-N/` or similar isolated subdirs land their
+        # artifacts inside that subdir, not in the plugin repo's top-level
+        # tmp/ref. find_project_root() walks up to the git root, which is
+        # right for cross-process hook resolution but wrong for per-loop
+        # output isolation. Fall back to find_project_root() only when the
+        # cwd is clearly not a working dir (system root, /tmp, /var/tmp).
+        cwd = Path.cwd()
+        if str(cwd) in ("/", "/tmp", "/var/tmp", "/usr", "/etc"):
+            self.project_root = find_project_root()
+        else:
+            self.project_root = cwd
         self.ref_dir = self.project_root / "tmp" / "ref" / component
         self.next_phase: str = ""
         self.next_step: str = ""
