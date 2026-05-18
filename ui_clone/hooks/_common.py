@@ -235,6 +235,13 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "summary.json",
         "known-artifacts.json",
         "tailwind-conflict.json",
+        # Codex review v0.8: gate.py + verification-plan.sh references that
+        # were missing from the initial allowlist — would otherwise
+        # false-positive deny on a standard pipeline run.
+        "regions.json",
+        "dom-state-diff.json",
+        "dom-mirror-check.json",
+        "tree-diff-status.json",
         # Photo of the gate result (visual-debug scripts deposit some at top)
         "hydration-check.json",
         "boundary-collisions.json",
@@ -311,32 +318,36 @@ def is_ad_hoc_ref_artifact(file_path: str) -> tuple[bool, str]:
     basename = tail[1]
     if basename in CANONICAL_REF_ARTIFACTS:
         return False, ""
-    # Heuristic suggestion based on substring keywords.
-    keyword_to_canonical = (
-        ("section", "section-map.json"),
-        ("content", "structure.json"),
+    # Heuristic suggestion — only return a suggestion when we're confident.
+    # Codex review v0.8: substring matches on short keywords (`key`, `page`,
+    # `stat`) over-fire on legitimate diagnostic names like
+    # `section-counts.json` → suggests `section-map.json` confidently and
+    # misleads the agent. Restrict to prefix matches on the file stem.
+    # Ambiguous short tokens are intentionally dropped from the table
+    # rather than rephrased — better to deny with no suggestion than to
+    # point at the wrong canonical.
+    prefix_to_canonical = (
+        # Listed longest-prefix-first so `sections-map` (length 8) matches
+        # before the more general `section-` (length 8 — tie, longer key wins
+        # via iteration order).
+        ("sections-map", "section-map.json"),
+        ("sections", "section-map.json"),
+        ("section-", "section-map.json"),
+        ("structure", "structure.json"),
         ("style", "styles.json"),
-        ("anim", "animations-detected.json"),
-        ("transit", "transition-spec.json"),
-        ("bundle", "bundle-map.json"),
+        ("animations-", "animations-detected.json"),
+        ("transition-", "transition-spec.json"),
+        ("bundle-", "bundle-map.json"),
         ("font", "fonts.json"),
-        ("hover", "hover-css-rules.json"),
-        ("interaction", "interactions-detected.json"),
-        ("paid", "paid-features.json"),
-        ("faq", "structure.json"),
-        ("stat", "extracted.json"),
-        ("key", "structure.json"),
-        ("page", "structure.json"),
-        ("overview", "structure.json"),
-        ("header", "structure.json"),
-        ("nav", "structure.json"),
-        ("footer", "structure.json"),
-        ("hero", "structure.json"),
+        ("hover-", "hover-css-rules.json"),
+        ("interactions-", "interactions-detected.json"),
+        ("paid-", "paid-features.json"),
+        ("scroll-engine", "scroll-engine.json"),
     )
-    lower = basename.lower()
+    stem = basename.lower()
     suggestion = ""
-    for kw, name in keyword_to_canonical:
-        if kw in lower:
+    for prefix, name in prefix_to_canonical:
+        if stem.startswith(prefix) and stem != name:
             suggestion = name
             break
     return True, suggestion

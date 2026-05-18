@@ -91,7 +91,12 @@ _BENCHMARK_SETUP_ESCAPES = re.compile(
 
 # Bash redirects/streams that write to a file. Each pattern captures the target
 # path. Designed to catch the common ways an agent could bypass the PreToolUse
-# Edit/Write hook (pre_generate.py): `cat > file`, `tee file`, `sed -i ... file`.
+# Edit/Write hook (pre_generate.py): `cat > file`, `tee file`, `sed -i ... file`,
+# and Codex-flagged v0.8 additions: `python3 -c "open(...).write(...)"`,
+# `cp source target`, `mv source target`. Bash redirect was the original
+# bypass; v0.6 → v0.7 closed `>`/`tee`/`sed`; v0.8 closes the file-API
+# bypass after a natural-prompt nested agent invented `initial-survey.json`
+# / `style-survey.json` via `python3 -c` to skirt the redirect deny.
 _BASH_WRITE_PATTERNS = [
     # `cmd > file` or `cmd >> file` — any redirect to a path. Excludes process
     # substitutions (>(...)), fd duplications (>&N), and /dev/* sinks.
@@ -104,6 +109,17 @@ _BASH_WRITE_PATTERNS = [
     re.compile(
         r"\bsed\b[^|;&]*?\s-i(?:\.\S+)?\s[^|;&]*?\s([^\s|;&<>()]+\.(?:tsx|jsx|ts|js|css|scss|svelte|vue))\b"
     ),
+    # `python -c "open('path','w').write(...)"` / `python3 -c "..."` /
+    # `python -c "with open('path', 'w') as f: ..."`. Matches both quoted
+    # styles. Captures only paths ending in .json (the only artifact class
+    # we care about under tmp/ref/<c>/) to avoid false-positives on
+    # legitimate Python that writes .txt logs etc.
+    re.compile(r"open\s*\(\s*['\"]([^'\"]+\.json)['\"]\s*,\s*['\"]w(?:b|t)?['\"]"),
+    # `cp source target.json` / `cp -r source target.json` — final positional
+    # arg is the destination. Conservative: target must end in .json.
+    re.compile(r"\bcp\b\s+(?:-[a-zA-Z]+\s+)*\S+\s+([^\s|;&<>()]+\.json)\b"),
+    # `mv source target.json` — same shape.
+    re.compile(r"\bmv\b\s+(?:-[a-zA-Z]+\s+)*\S+\s+([^\s|;&<>()]+\.json)\b"),
 ]
 
 
@@ -274,7 +290,15 @@ def main() -> None:
     # nested agents dump JSON into `tmp/ref/<c>/sections-map.json` via Bash
     # redirect instead of running the canonical script. Catch the redirect
     # before the command runs and point at the canonical name + the script
-    # that produces it. UI_RE_SKIP_BASH_GATE escape passes through.
+    # that produces it.
+    #
+    # UI_RE_SKIP_BASH_GATE — emergency escape hatch. Setting this env var
+    # DEFEATS the core ad-hoc-artifact enforcement on natural-path runs,
+    # meaning a fresh-prompt session can revert to dumping invented JSON
+    # names with no measurement signal. Reserved for cases where the agent
+    # legitimately needs to write a one-off scratch file under tmp/ref/ and
+    # the operator has accepted that the run will not produce a verifiable
+    # ae_avg. Do NOT export this globally.
     if not os.environ.get("UI_RE_SKIP_BASH_GATE"):
         adhoc = _bash_adhoc_ref_target(cmd)
         if adhoc is not None:
