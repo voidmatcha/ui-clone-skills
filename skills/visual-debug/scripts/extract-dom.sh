@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # extract-dom.sh — invoke the Fix 13 DOM extraction eval as a real callable.
 #
+# Bash 4+ self-relaunch: this script uses heredoc shapes / array syntax that
+# macOS's bundled bash 3.2 mis-parses (loop-6 nested agent hit this — line
+# 289 EOF error). When `/usr/bin/env bash` resolves to bash 3.2 we re-exec
+# under a bash 4+ binary if one exists in the usual Homebrew locations,
+# falling back to a clear error message instead of a cryptic syntax error.
+if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  for _bashcand in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [ -x "$_bashcand" ] && exec "$_bashcand" "$0" "$@"
+  done
+  echo "extract-dom.sh: bash 4+ required (current ${BASH_VERSION:-unknown}); install via 'brew install bash'" >&2
+  exit 1
+fi
+#
 # Replaces the dom-extraction.md prose guide as the canonical entry point.
 # Across V5–V10 the prose guide was repeatedly ignored — agents wrote their
 # own variant of the eval that lost the per-node `text` field (Fix 6 v1)
