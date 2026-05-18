@@ -198,7 +198,15 @@ else:
 criteria["O3_build_dist"] = {"value": dist_exists, "verdict": verdict(dist_exists)}
 criteria["O4_transition_cov"] = {
     "value": ts_cov,
-    "verdict": "MANUAL" if "NO_SPEC" in ts_cov else verdict("PASS" in ts_cov or "0 missing" in ts_cov.lower()),
+    # transition-spec-coverage.sh exit-0 lines we accept as PASS:
+    #   "✅ Every spec entry has at least one matching impl artifact."
+    #   "PASS" / "0 missing"
+    "verdict": "MANUAL" if "NO_SPEC" in ts_cov else verdict(
+        "✅" in ts_cov
+        or "matching impl artifact" in ts_cov
+        or "PASS" in ts_cov
+        or "0 missing" in ts_cov.lower()
+    ),
 }
 
 # ADVISORY rows participate in overall verdict the same way MANUAL does —
