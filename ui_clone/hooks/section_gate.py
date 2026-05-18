@@ -37,18 +37,49 @@ def _get_stale_seconds() -> float:
 
 
 def _find_active_markers(search_root: Path) -> list[Path]:
-    """Return list of ref dirs that have a .ui-re-active marker."""
+    """Return ref dirs that should engage the Stop hook.
+
+    Two activation paths:
+    1. Explicit `.ui-re-active` marker — written by pre_generate.py on the
+       first passing pre-generate gate. This is the canonical "I am in a
+       ui-re flow" signal.
+    2. impl/ alongside tmp/ref/<c>/ even without the explicit marker —
+       loop-6 post-mortem: nested agents that skip Phase 5/6 (spec) never
+       pass pre-generate, the marker never gets written, and the Stop hook
+       used to release silently. Treat the bare presence of impl/ as a
+       sufficient signal that an agent is mid-clone, so the verify-stamp
+       gate gets a chance to enforce.
+    """
     if not search_root.is_dir():
         return []
-    return [
-        d for d in sorted(search_root.iterdir()) if d.is_dir() and (d / ".ui-re-active").is_file()
-    ]
+    dirs: list[Path] = []
+    # project_root is the parent of tmp/, which is the parent of search_root.
+    project_root = search_root.parent.parent
+    impl_dir = project_root / "impl"
+    impl_present = impl_dir.is_dir()
+    for d in sorted(search_root.iterdir()):
+        if not d.is_dir():
+            continue
+        if (d / ".ui-re-active").is_file():
+            dirs.append(d)
+        elif impl_present and any(d.iterdir()):
+            # impl/ exists but the canonical marker is missing — implicit
+            # activation. Skip empty ref dirs to avoid false positives on
+            # totally cold fresh starts.
+            dirs.append(d)
+    return dirs
 
 
 def _fresh_active_dirs(active_dirs: list[Path]) -> list[Path]:
     fresh_dirs = []
     for ref_dir in active_dirs:
         marker = ref_dir / ".ui-re-active"
+        if not marker.is_file():
+            # Implicit activation (impl/ present, no marker) — never goes
+            # stale because there's nothing to age. The verify-stamp check
+            # owns its own freshness window.
+            fresh_dirs.append(ref_dir)
+            continue
         try:
             age = time.time() - marker.stat().st_mtime
         except OSError:
