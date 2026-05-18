@@ -88,6 +88,18 @@ Do NOT proceed to the pipeline or any extraction until `<url>` is provided.
 
 Start here for every run. If `<url>` or `<component-name>` is missing and cannot be determined from the request or current artifacts, stop at the Inputs section. Otherwise perform the before-starting state inspection/routing step before running any phase: inspect `tmp/ref/<component>/`, `pipeline-state.json`, `current_gate`, `status` output, and usable artifacts. Ask only when the URL/component cannot be determined or the state is corrupt beyond recovery.
 
+### Fresh-folder fast path (natural-language prompt, no prior artifacts)
+
+When the request is a free-form ask like *"<URL> 사이트를 React + Tailwind로 클론해줘"* and `tmp/ref/<component>/` does not yet exist, run **exactly one** command before any other tool call. The driver invokes the canonical Phase 0A → 1 → 2 scripts under a single deterministic entry point, so you do not need to choose which sub-doc to read or which extraction script to call:
+
+```bash
+python -m ui_clone.pipeline <URL> <component-name> <session> run --phases 0A,1,2
+```
+
+After it exits 0, run `status` to confirm `current_gate ∈ {bundle, paid-features, spec}` and continue from there — Phase 3+ stays under the regular per-step flow described in the Pipeline table below until the `run` driver covers them too.
+
+Do NOT hand-write any `tmp/ref/<component>/*.json` artifact or invoke `dom-scaffold.sh` / `extract-dom.sh` directly on this fast path; the driver does it and the hook will deny ad-hoc artifact names with a pointer to the canonical script anyway. The fast path is the LLM-free-choice reduction: the agent picks the URL/component, the driver picks the steps.
+
 **0. Preflight (run once before the first pipeline action in a session — `npx skills add` install path skips system deps).** If anything is missing, halt and surface the bootstrap one-liner to the user; do **not** auto-execute `curl | bash` on their behalf — let the user run it themselves.
 
 ```bash

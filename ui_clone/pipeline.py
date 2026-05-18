@@ -550,25 +550,174 @@ class Pipeline:
         print(json.dumps(output, ensure_ascii=False, indent=2))
 
 
+    # ── run action: deterministic Phase 0A-2 executor ──
+    #
+    # Codex review v0.8 → v1.0: hook policy closed the negative space
+    # (ad-hoc artifact writes denied), but the natural-prompt nested agent
+    # got stuck in Phase 1 because hooks can't force forward progress.
+    # This driver does the forward push: each phase invokes the canonical
+    # script, then runs the existing check_phase_* validators to confirm
+    # the artifacts appeared. On any failure, abort with a clear message
+    # — no silent fallback to ad-hoc dumping.
+    #
+    # Initial coverage is Phase 0A → 1 → 2 (Codex's 4-hour scope).
+    # Phase 3+ stays under check-only / SKILL.md guidance for now;
+    # extending coverage is `--phases 3-5` follow-up work.
+
+    def execute_phases(self, phases: tuple[str, ...] = ("0A", "1", "2")) -> int:
+        """Run the canonical scripts for each named phase, validate, repeat.
+
+        Returns 0 on success (all requested phases pass their check_phase_*
+        validator), non-zero on the first phase that fails. Each phase
+        invocation prints a header so the operator (or the wrapping nested
+        agent) can see exactly which step blocked.
+        """
+        import subprocess
+
+        # Resolve $PLUGIN_ROOT for the wrapper scripts. Mirrors the cascade
+        # used by hooks/shim.sh so the run command works both inside the
+        # plugin checkout and from a fresh top-level folder where the
+        # plugin is installed elsewhere.
+        plugin_root = os.environ.get("PLUGIN_ROOT") or os.environ.get(
+            "CLAUDE_PLUGIN_ROOT"
+        ) or os.environ.get("CODEX_PLUGIN_ROOT")
+        if not plugin_root or not (Path(plugin_root) / "scripts" / "extract").is_dir():
+            # Fallback: pipeline.py lives in ui_clone/, plugin root is two up.
+            plugin_root = str(Path(__file__).resolve().parent.parent)
+        scripts = Path(plugin_root) / "scripts" / "extract"
+        visual_scripts = Path(plugin_root) / "skills" / "visual-debug" / "scripts"
+
+        # Ensure ref dir exists for downstream artifact targets.
+        self.ref_dir.mkdir(parents=True, exist_ok=True)
+
+        def _run(cmd: list[str], label: str) -> bool:
+            print(f"\n{_BOLD}== execute: {label}{_NC}")
+            print(f"  $ {' '.join(cmd)}")
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                print(f"  {_RED}✗{_NC} {label} failed: {exc}")
+                return False
+            if result.returncode != 0:
+                print(f"  {_RED}✗{_NC} {label} exit {result.returncode}")
+                if result.stderr.strip():
+                    print(f"  stderr:\n{result.stderr.rstrip()}")
+                return False
+            if result.stdout.strip():
+                print(result.stdout.rstrip())
+            return True
+
+        for phase in phases:
+            if phase == "0A":
+                # Phase 0A is a pure detection that the status checker
+                # already runs lazily; no driver work required here. Just
+                # validate.
+                phase_result = self.check_phase_0a()
+                # The runtime detection JSON is produced by check_phase_0a
+                # itself on first call; if it's still missing we surface
+                # that as a phase-0A failure.
+                if not (self.ref_dir / "canvas-webgl-detection.json").is_file():
+                    print(
+                        f"\n{_RED}Phase 0A failed: canvas-webgl-detection.json absent.{_NC}"
+                    )
+                    return 1
+                continue
+
+            if phase == "1":
+                capture = scripts / "capture.sh"
+                if not capture.is_file():
+                    print(f"\n{_RED}Phase 1 failed: capture.sh not found at {capture}{_NC}")
+                    return 1
+                if not _run(
+                    ["bash", str(capture), self.url, self.session, str(self.ref_dir)],
+                    "Phase 1 — reference capture",
+                ):
+                    return 1
+                has_ref = (self.ref_dir / "regions.json").is_file()
+                self.check_phase_1()
+                if not has_ref:
+                    print(
+                        f"\n{_RED}Phase 1 failed: regions.json missing after capture.{_NC}"
+                    )
+                    return 1
+                continue
+
+            if phase == "2":
+                # Phase 2 covers DOM extraction (extract-dom.sh + scaffold)
+                # and asset/style extraction. The two known invocations
+                # come from skills/visual-debug/scripts/.
+                extract_dom = visual_scripts / "extract-dom.sh"
+                scaffold = visual_scripts / "dom-scaffold.sh"
+                # extract-dom.sh and dom-scaffold.sh are agent-browser
+                # invocations; both target the ref dir. They are run
+                # sequentially; the second consumes the first's outputs.
+                if extract_dom.is_file() and not _run(
+                    ["bash", str(extract_dom), self.session, str(self.ref_dir)],
+                    "Phase 2 — DOM extraction",
+                ):
+                    return 1
+                if scaffold.is_file() and not _run(
+                    ["bash", str(scaffold), str(self.ref_dir)],
+                    "Phase 2 — DOM scaffold",
+                ):
+                    return 1
+                # Validate the artifact gate.
+                has_ref = (self.ref_dir / "regions.json").is_file()
+                self.check_phase_2(has_ref)
+                if not (self.ref_dir / "section-map.json").is_file():
+                    print(
+                        f"\n{_RED}Phase 2 failed: section-map.json missing.{_NC}"
+                    )
+                    return 1
+                continue
+
+            print(
+                f"\n{_YELLOW}Phase {phase} not yet supported by the run driver. "
+                f"Use status to see the next step.{_NC}"
+            )
+            return 1
+
+        print(f"\n{_GREEN}{_BOLD}run: requested phases complete: {','.join(phases)}{_NC}")
+        return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Pipeline status checker for ui-clone-skills",
-        usage="python -m ui_clone.pipeline <url> <component> <session> status [--json]",
+        description="Pipeline driver for ui-clone-skills",
+        usage="python -m ui_clone.pipeline <url> <component> <session> {status|run} [--json] [--phases LIST]",
     )
     parser.add_argument("url", help="Target URL")
     parser.add_argument("component", help="Component name")
     parser.add_argument("session", help="Browser session name")
-    parser.add_argument("action", choices=["status"], help="Action to perform")
+    parser.add_argument(
+        "action",
+        choices=["status", "run"],
+        help="status = inspect + next-step report; run = deterministic execution",
+    )
     parser.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
-        help="Also output structured JSON summary",
+        help="Also output structured JSON summary (status only)",
+    )
+    parser.add_argument(
+        "--phases",
+        default="0A,1,2",
+        help="Comma-separated phases to execute when action=run (default 0A,1,2)",
     )
     args = parser.parse_args()
 
     pipeline = Pipeline(args.url, args.component, args.session)
-    sys.exit(pipeline.run(json_output=args.json_output))
+    if args.action == "status":
+        sys.exit(pipeline.run(json_output=args.json_output))
+    # action == run
+    requested = tuple(p.strip() for p in args.phases.split(",") if p.strip())
+    sys.exit(pipeline.execute_phases(requested))
 
 
 if __name__ == "__main__":
