@@ -99,16 +99,26 @@ _DISALLOWED_PROVENANCE_SOURCES = {
 
 
 def _parse_failed_sections(lines: list[str]) -> list[tuple[str, int]]:
-    """Extract (section_name, ae) pairs from sections/result.txt ❌ lines.
+    """Extract (section_name, ae) pairs from sections/result.txt FAIL lines.
 
     result.txt is a markdown table:
-        | <name> | <ae> | <ae/mpx> | <severity> | ❌ |
-    Returns the failed sections only. Names missing or AE unparseable
-    are still returned (with AE=0) so we don't silently drop failures.
+        | <name> | <ae> | <ae/mpx> | <severity> | ❌ |   (critical fail)
+        | <name> | <ae> | <ae/mpx> | saturated | 🌑 |   (gradient-dead fail)
+    Codex L13 review Q1: `🌑 saturated` rows are FAIL_COUNT increments
+    in section-compare.sh (AE/Mpx ≥ 800k, "gradient dead, not comparable")
+    but `_parse_failed_sections` was only catching `❌`. That let
+    known-artifacts.json downgrade saturated rows to a structural pass
+    even though section-compare itself treated them as failures —
+    a silent bypass that contributed to L11-L13's persistent AE envelope.
+    Counting `🌑` lines as fail aligns the gate's accounting with the
+    producer's. Names missing or AE unparseable are still returned
+    (with AE=0) so we don't silently drop failures.
     """
     out: list[tuple[str, int]] = []
     for ln in lines:
-        if "❌" not in ln or not ln.startswith("|"):
+        if not ln.startswith("|"):
+            continue
+        if "❌" not in ln and "🌑" not in ln:
             continue
         cells = [c.strip() for c in ln.strip("|").split("|")]
         if len(cells) < 2:

@@ -165,7 +165,15 @@ if structural_mode:
     # Lines look like: "| hero | — | — | substituted | 🔁 STRUCTURAL_ONLY |"
     # or              "| pyramid | 1114010 | 910139 | saturated | ❌ |"
     rows = [r for r in result_text.splitlines() if r.startswith("|") and "Section" not in r and "---" not in r]
-    fail_rows = [r for r in rows if "❌" in r]
+    # Codex L13 review Q1: `🌑 saturated` rows are counted as FAIL by
+    # section-compare.sh itself (FAIL_COUNT increments at AE/Mpx >= 800k,
+    # described as "gradient dead, not comparable"). The outer parser
+    # previously missed them entirely — they weren't pass, structural,
+    # or fail — so a clone with 5 saturated + 6 structural + 3 critical
+    # tallied 6 PASS+structural / 14 total and just missed the 50% bar.
+    # Counting saturated as FAIL gives the parser the same accounting
+    # as the producer.
+    fail_rows = [r for r in rows if "❌" in r or "🌑" in r]
     structural_rows = [r for r in rows if "STRUCTURAL_ONLY" in r]
     pass_rows = [r for r in rows if "✅" in r or " PASS " in r]
     # Pass when at least half of sections are structural+pass (substituted
