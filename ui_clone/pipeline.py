@@ -712,10 +712,18 @@ class Pipeline:
     # module's argparse + exit codes stay the source of truth.
     def execute_verify(self) -> int:
         import subprocess
-        # GATES_POST_IMPL is the suffix of state.GATE_ORDER that requires
-        # the impl/ directory to exist. Kept inline (not lifted into
-        # state.py) until a second caller appears.
+        # Gate suite run by verify. Codex L14 review: `spec` was originally
+        # left out because conceptually it's pre-impl (transition-spec.json
+        # is produced at Step 5d, before generation). But loop-14 exposed
+        # the bypass: the agent wrote `{"transitions": [], "notes": "FAQ
+        # accordion is React state, not in spec scope"}`, passed the four
+        # post-impl gates, and shipped verify-stamp.json — while the spec
+        # was empty (identical to the loop-12 regression that
+        # commit-with-empty-spec-rejection was supposed to close). Adding
+        # `spec` here makes the new gate.py validation actually fire during
+        # verify, so empty/malformed specs block the stamp.
         gates_post_impl = (
+            "spec",
             "post-implement",
             "boundary",
             "font-parity",
