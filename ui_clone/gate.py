@@ -991,16 +991,82 @@ class Gate:
         return results
 
     def _check_audit_artifacts(self) -> list[CheckResult]:
-        """Check that all 6c audit JSON artifacts are present."""
+        """Check that all 6c audit JSON artifacts are present AND that
+        their content cross-references the section-map (Codex L15 review:
+        agent had been satisfying gates by writing canonical filenames
+        with low-content or fabricated bodies — e.g. interactions-detected
+        with 0 entries while the ref clearly has FAQ accordions + hover
+        + scroll reveals; component-map sectionIds invented to satisfy
+        filename presence). Cross-validation refuses both fabrication
+        modes.
+        """
         results = []
-        if (self.ref_dir / "section-map.json").exists():
-            for filename, label in [
-                ("element-roles.json", "element-roles.json"),
-                ("element-groups.json", "element-groups.json"),
-                ("layout-decisions.json", "layout-decisions.json"),
-                ("component-map.json", "component-map.json"),
-            ]:
-                results.append(self.check_file(self.ref_dir / filename, label))
+        if not (self.ref_dir / "section-map.json").exists():
+            return results
+        for filename, label in [
+            ("element-roles.json", "element-roles.json"),
+            ("element-groups.json", "element-groups.json"),
+            ("layout-decisions.json", "layout-decisions.json"),
+            ("component-map.json", "component-map.json"),
+        ]:
+            results.append(self.check_file(self.ref_dir / filename, label))
+
+        # Cross-reference checks: sectionIds in audit artifacts must
+        # appear in section-map; component count must roughly match
+        # section count.
+        section_map = self._load_json("section-map.json")
+        if not section_map:
+            return results
+        sec_ids = {s.get("id") for s in section_map.get("sections", []) if s.get("id")}
+        if not sec_ids:
+            return results
+
+        def _cross_check(filename: str, list_key: str, id_field: str = "sectionId") -> None:
+            data = self._load_json(filename)
+            if not data:
+                return
+            entries = data.get(list_key, [])
+            if not isinstance(entries, list):
+                return
+            fabricated = [
+                str(e.get(id_field, ""))
+                for e in entries
+                if isinstance(e, dict)
+                and e.get(id_field)
+                and str(e.get(id_field)) not in sec_ids
+            ]
+            if fabricated:
+                results.append(
+                    CheckResult(
+                        f"{filename} sectionId cross-ref",
+                        "fail",
+                        f"{filename} references sectionIds not in section-map.json: "
+                        f"{sorted(set(fabricated))[:5]}. Either fix the IDs or extend "
+                        f"section-map.json so the audit and the map agree.",
+                    )
+                )
+
+        _cross_check("component-map.json", "components")
+        _cross_check("layout-decisions.json", "decisions")
+
+        # Component-count parity: |components| must be within ±2 of
+        # |sections|. Catches the "1 monolith component for 13 sections"
+        # regression that historically passed gates trivially.
+        component_map = self._load_json("component-map.json")
+        if component_map:
+            n_components = len(component_map.get("components", []))
+            n_sections = len(sec_ids)
+            if n_components and n_sections and abs(n_components - n_sections) > 2:
+                results.append(
+                    CheckResult(
+                        "component-count parity",
+                        "fail",
+                        f"component-map has {n_components} components vs section-map's "
+                        f"{n_sections} sections — gap of {abs(n_components - n_sections)} "
+                        f"exceeds tolerance ±2. Likely a monolith page.tsx (under-count) "
+                        f"or fabricated components (over-count).",
+                    )
+                )
         return results
 
     # ── gate_pre_generate ──
