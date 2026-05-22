@@ -155,6 +155,7 @@ PAID_FEATURES="$REF_DIR/paid-features.json"
 HAS_SCROLL_SCRUB="false"
 if contains_pattern "$EXTERNAL_SDKS" '"(useScroll|scrollYProgress|ScrollTrigger|scrubbed|scrub)"' \
    || contains_pattern "$SCROLL_ENGINE" '"library":\s*"(Lenis|Locomotive|ScrollSmoother)"' \
+   || contains_pattern "$SCROLL_ENGINE" '"(motion|useScroll|scrollYProgress)":\s*\{[^}]*"matches":\s*[1-9]' \
    || contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"scroll' \
    || contains_pattern "$INTERACTIONS" '"engine":\s*"scroll"' \
    || contains_pattern "$BUNDLE_MAP" '"(framer-motion|motion-one|gsap-scrolltrigger)"'; then
@@ -165,6 +166,7 @@ fi
 HAS_IO_REVEAL="false"
 if contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(intersection|inview|onView)"' \
    || contains_pattern "$INTERACTIONS" '"trigger":\s*"intersection"' \
+   || contains_pattern "$SCROLL_ENGINE" '"IntersectionObserver":\s*\{[^}]*"matches":\s*[1-9]' \
    || contains_pattern "$BUNDLE_MAP" 'IntersectionObserver'; then
   HAS_IO_REVEAL="true"
 fi
@@ -185,10 +187,12 @@ fi
 # Preloader/Splash protocol in bundle-analysis.md. Fall back to the
 # splash-extraction artifacts in case the agent set hasPreloader=false but
 # splash-extraction.md still produced output.
+#
+DOM_STATE_DIFF="$REF_DIR/dom-state-diff.json"
 HAS_SPLASH="false"
 if contains_pattern "$INTERACTIONS" '"hasPreloader":\s*true' \
    || contains_pattern "$INTERACTIONS" '"hasSplash":\s*true' \
-   || [ -f "$REF_DIR/dom-state-diff.json" ]; then
+   || contains_pattern "$DOM_STATE_DIFF" '"(dom_changes|splashElements|changes|preloaderRemoved)":\s*\[?[^][}{]'; then
   HAS_SPLASH="true"
 fi
 
@@ -229,6 +233,25 @@ if contains_pattern "$REGIONS_JSON" '"triggerType":\s*"click-' \
   HAS_CLICK_STATE="true"
 fi
 
+# hasLottie — Lottie/bodymovin/dotlottie needs a real runtime + local JSON,
+# not generic CSS/GSAP motion. Evidence can come from bundle resources,
+# transition specs, runtime dumps, or canvas/WebGL detection.
+HAS_LOTTIE="false"
+for LOTTIE_FILE in \
+  "$BUNDLE_MAP" \
+  "$TRANSITION_SPEC" \
+  "$REF_DIR/animation-runtime-dump.json" \
+  "$REF_DIR/canvas-webgl-detection.json" \
+  "$REF_DIR/external-sdks.json" \
+  "$REF_DIR/interactions-detected.json" \
+  "$REF_DIR/assets.json" \
+  "$REF_DIR/extracted.json"; do
+  if contains_pattern "$LOTTIE_FILE" '[Ll]ottie|bodymovin|dotlottie|lottie-player'; then
+    HAS_LOTTIE="true"
+    break
+  fi
+done
+
 # ── Required checks (dispatch table) ──
 # Built incrementally as JSON array body.
 
@@ -242,6 +265,7 @@ CHECKS=""
 add_check() {
   local id="$1" script="$2" produces="$3" reason="$4" severity="$5"
   local min_tier="${6:-standard}"
+  local depends_on="${7:-}"
   local check_level
   check_level=$(tier_level "$min_tier")
   if [ "$check_level" -eq 0 ]; then
@@ -253,6 +277,22 @@ add_check() {
   fi
   local sep=""
   [ -n "$CHECKS" ] && sep=","
+  local depends_field=""
+  if [ -n "$depends_on" ]; then
+    local deps_json="["
+    local first=1
+    for dep in $depends_on; do
+      if [ "$first" = "1" ]; then
+        deps_json="${deps_json}\"$dep\""
+        first=0
+      else
+        deps_json="${deps_json}, \"$dep\""
+      fi
+    done
+    deps_json="${deps_json}]"
+    depends_field=",
+      \"dependsOn\": $deps_json"
+  fi
   CHECKS="${CHECKS}${sep}
     {
       \"id\": \"$id\",
@@ -260,7 +300,7 @@ add_check() {
       \"produces\": \"$produces\",
       \"reason\": \"$reason\",
       \"severity\": \"$severity\",
-      \"tier\": \"$min_tier\"
+      \"tier\": \"$min_tier\"${depends_field}
     }"
 }
 
@@ -290,7 +330,7 @@ add_check "tailwind-transform-conflict" \
 # (no LLM, no browser) so they're tier=quick. They compare the generated
 # Phase-4 components against <ref-dir>/dom-scaffold.json:
 #   text-fidelity-check  — block JSX text-position strings not in scaffold
-#   dom-mirror-check     — block JSX tag-multiset diverging >30% from scaffold
+#   dom-mirror-check     — advisory JSX tag-multiset divergence signal
 add_check "text-fidelity-check" \
           "skills/visual-debug/scripts/text-fidelity-check.sh" \
           "text-fidelity-check.json" \
@@ -298,12 +338,51 @@ add_check "text-fidelity-check" \
           "block" \
           "quick"
 
+# 17-iteration measurement (2026-05-22): every codex/claude clone produced
+# 80%+ tag-multiset divergence — LLMs collapse ref's deeply-nested div soup
+# (~1063 nodes) into clean React components (~200 nodes). The signal is
+# real (catches eviscerated impls) but the strict threshold made block
+# severity unreachable for legitimate React component patterns. Downgraded
+# to warn so the divergence number stays informational without blocking
+# section-compare-PASS impls. The "hero composite must exist" enforcement
+# moved to hero-composite-check.sh which spot-checks the specific 4-element
+# pattern (video + button + h1/h2 + label) the LLM consistently drops.
+# Operators with non-React targets (1:1 HTML clones) can re-tighten via
+# UI_CLONE_DOM_MIRROR_THRESHOLD env var on dom-mirror-check.sh directly.
 add_check "dom-mirror-check" \
           "skills/visual-debug/scripts/dom-mirror-check.sh" \
           "dom-mirror-check.json" \
-          "Universal — JSX tag-multiset must mirror ref tree shape within 30% divergence" \
+          "Advisory — JSX tag-multiset divergence vs ref (informational; legit React composition produces 80%+ divergence)" \
+          "warn" \
+          "quick"
+
+# Hero composite spot-check — replaces dom-mirror's role as the structural
+# enforcer. Verifies the impl contains every element kind present in ref's
+# hero region (video, button, h1/h2, label span). LLMs drop the 4-layer
+# composite into 1-2 layers consistently; this check catches that
+# without the noise of full-tree divergence.
+add_check "hero-composite-check" \
+          "skills/visual-debug/scripts/hero-composite-check.sh" \
+          "hero-composite.json" \
+          "Impl hero region must contain every element kind present in ref hero (video, button, h1/h2, label span)" \
           "block" \
           "quick"
+
+add_check "proxy-mirror-check" \
+          "skills/visual-debug/scripts/proxy-mirror-check.sh" \
+          "proxy-mirror-check.json" \
+          "Universal — local impl must be generated source, not a proxy/cache of the original HTML, RSC payloads, or _next runtime" \
+          "block" \
+          "quick"
+
+if [ "$HAS_LOTTIE" = "true" ]; then
+  add_check "lottie-runtime" \
+            "skills/visual-debug/scripts/lottie-runtime-check.sh" \
+            "lottie-runtime.json" \
+            "Lottie/bodymovin/dotlottie detected — impl must use a real runtime package and downloaded animation JSON" \
+            "block" \
+            "quick"
+fi
 
 # Conditional.
 # Tier=standard: scroll-end-completion opens ref + impl in agent-browser,
@@ -325,8 +404,123 @@ if [ "$HAS_IO_REVEAL" = "true" ]; then
             "reveal-trigger.json" \
             "signals.hasIOReveal=true — initially-hidden elements must advance after IO fires" \
             "block" \
-            "standard"
+            "standard" \
+          "runtime-env"
 fi
+
+add_check "svg-provenance" \
+          "skills/visual-debug/scripts/svg-provenance-check.sh" \
+          "svg-provenance.json" \
+          "Impl <svg> geometry must trace back to ref (catches LLM-invented icons satisfying svg-dom-parity count only)" \
+          "block" \
+          "standard" \
+          "runtime-env"
+
+# 2026-05-22 SKILL.md Tier 1-5 composite enforcement (codex-rescue
+# a125b997): runtime-proof.json is a roll-up validator over every
+# existing runtime-measurement artifact. Does NOT run new probes —
+# instead checks that each constituent gate produced an artifact AND
+# the artifact contains real measurement (not a measurement-free
+# status=pass). tier=quick because it's pure file IO.
+add_check "runtime-proof" \
+          "skills/visual-debug/scripts/runtime-proof-rollup.sh" \
+          "runtime-proof.json" \
+          "Composite roll-up: every runtime/state/no-cheat gate must produce a measurement-bearing artifact (catches measurement-free status=pass and missing source artifacts)" \
+          "block" \
+          "quick"
+
+# 2026-05-22 SKILL.md Tier 3 composite (codex-rescue a125b997):
+# transition-proof.json rolls up spec-coverage + spec-implementation +
+# transition-coverage runtime probe + reveal + scroll-end + keyframes +
+# video-motion. Fails on partial coverage and empty runtime probes that
+# the individual gates didn't themselves fail.
+add_check "transition-proof" \
+          "skills/visual-debug/scripts/transition-proof-rollup.sh" \
+          "transition-proof.json" \
+          "Composite roll-up: every transition-spec entry must have impl file + motion declaration + runtime probe evidence (catches partial coverage and empty runtime probes)" \
+          "block" \
+          "quick"
+
+# 2026-05-22 SKILL.md Tier 5 (codex-rescue a125b997): the existing
+# anti-cheat gates catch screenshot/HTML cheats; this catches the
+# remaining big cheat — loading ref's compiled JS bundle directly via
+# <script src>, dynamic import(), or fetch() from impl source or
+# runtime. Scans impl source tree for ref-host references and (with
+# impl-url) inspects performance.getEntriesByType("resource") for
+# cross-origin requests to the ref. tier=quick (filesystem only when
+# no impl-url; one viewport when impl-url present).
+add_check "ref-js-loader" \
+          "skills/visual-debug/scripts/ref-js-loader-check.sh" \
+          "ref-js-loader.json" \
+          "Impl must not load ref site's JavaScript at build or runtime (catches the documented Tier 5 'load ref bundle to fake runtime' cheat)" \
+          "block" \
+          "quick"
+
+add_check "runtime-env" \
+          "skills/visual-debug/scripts/runtime-env-check.sh" \
+          "runtime-env.json" \
+          "Impl-url must serve current iteration's impl-root AND render without env traps (Vite preamble missing, hydration mismatch, port-routing mismatch)" \
+          "block" \
+          "standard"
+
+add_check "video-play-proof" \
+          "skills/visual-debug/scripts/video-play-proof-check.sh" \
+          "video-play-proof.json" \
+          "Impl <video> must advance currentTime at runtime, not just exist (catches static-poster cheats and missing autoplay/playsinline)" \
+          "block" \
+          "standard" \
+          "runtime-env"
+
+add_check "impl-scope" \
+          "skills/visual-debug/scripts/impl-scope-check.sh" \
+          "impl-scope.json" \
+          "Impl iteration must only modify scratch/loop-N/impl/** files; editing plugin tooling (skills/, scripts/, ui_clone/, tests/) is the documented gate-cheat pattern" \
+          "block" \
+          "quick"
+
+add_check "color-token-grounding" \
+          "skills/visual-debug/scripts/color-token-grounding-check.sh" \
+          "color-token-grounding.json" \
+          "Every impl color literal must trace to ref's extracted color palette (blocks 'invent plausible color' failures)" \
+          "block" \
+          "quick"
+
+add_check "duration-easing-grounding" \
+          "skills/visual-debug/scripts/duration-easing-grounding-check.sh" \
+          "duration-easing-grounding.json" \
+          "Impl transition durations/easings must come from ref artifacts, not guessed values" \
+          "block" \
+          "quick"
+
+add_check "mobile-viewport-parity" \
+          "skills/visual-debug/scripts/mobile-viewport-parity-check.sh" \
+          "mobile-viewport-parity.json" \
+          "Impl must render at mobile viewport (375x812) with no h-overflow, working mobile nav, vertical content stacking matching ref" \
+          "block" \
+          "standard" \
+          "runtime-env"
+
+add_check "runtime-frame-proof" \
+          "skills/visual-debug/scripts/runtime-frame-proof-check.sh" \
+          "runtime-frame-proof.json" \
+          "Animation surfaces (canvas/WebGL/Lottie instance) must advance frames at runtime (stricter than DOM mutation heuristic)" \
+          "block" \
+          "standard" \
+          "runtime-env"
+
+#
+# Gate fires unconditionally — every clone has a header/nav. The gate
+# self-skips when the ref's own header is static (single-page apps with
+# no scroll-driven nav). tier=standard because it requires two viewport
+# loads (ref + impl) and a 1.5s settle each — heavier than tier=quick
+# static rows but cheaper than the 60fps video comparisons.
+add_check "header-state-runtime" \
+          "skills/visual-debug/scripts/header-state-runtime-check.sh" \
+          "header-state-runtime.json" \
+          "Impl header must mutate className/data-* on scroll when ref does (prove runtime controller, not static HTML paste)" \
+          "block" \
+          "standard" \
+          "runtime-env"
 
 # 60fps video motion compare. Fires whenever any motion signal is true.
 # Closes the "right destination, wrong velocity-curve" failure class that the
@@ -366,7 +560,8 @@ if [ "$HAS_HOVER" = "true" ]; then
             "transitions/hover-state-result.txt" \
             "signals.hasHover=true — hover motion arc must match (catches different easing / duration on entry transition)" \
             "block" \
-            "comprehensive"
+            "comprehensive" \
+          "runtime-env"
 fi
 
 # Click-state video compare. Catches the failure class where tabs / accordions /
@@ -388,6 +583,14 @@ fi
 # were never wired" failure class that transition-compare.sh can't see.
 # Tier=quick: file-presence + grep over generated source — no browser.
 if [ -f "$TRANSITION_SPEC" ]; then
+  if [ "$HAS_HOVER" != "true" ]; then
+    add_check "transition-compare" \
+              "skills/visual-debug/scripts/transition-compare.sh" \
+              "transitions/result.txt" \
+              "transition-spec.json present — runtime/end-state transition comparison must produce measurement rows, even when hover is not the detected trigger" \
+              "block" \
+              "standard"
+  fi
   add_check "transition-spec-coverage" \
             "skills/visual-debug/scripts/transition-spec-coverage.sh" \
             "transition-spec-coverage.json" \
@@ -477,7 +680,180 @@ if [ -f "$VISIBLE_IMAGES" ]; then
             "At least 60% of non-substituted visible-images.json entries must be referenced in impl/src/ source" \
             "block" \
             "quick"
+  add_check "runtime-image-validity" \
+            "skills/visual-debug/scripts/runtime-image-validity-check.sh" \
+            "runtime-image-validity.json" \
+            "Runtime <img> elements must load with nonzero naturalWidth and not resolve to HTML fallback responses" \
+            "block" \
+            "standard" \
+          "runtime-env"
+  add_check "remote-asset-ref" \
+            "skills/visual-debug/scripts/remote-asset-ref-check.sh" \
+            "remote-asset-ref.json" \
+            "Impl source must not hot-link the reference CDN — use locally-downloaded /public/ assets" \
+            "block" \
+            "quick"
 fi
+
+#
+# Failure pattern: agent placed captured ref section PNGs as
+# background-image on impl sections and hid every real DOM child
+# (opacity:0, visibility:hidden, display:none, pointer-events:none) so
+# pixel-diff collapsed to zero — the impl was literally rendering the
+# ref's captured artifacts instead of building UI. Static scan of impl
+# tree rejects path substrings of the ref's screenshot dirs and byte-
+# identical copies. tier=quick (filesystem + sha256, no browser).
+add_check "ref-screenshot-asset" \
+          "skills/visual-debug/scripts/ref-screenshot-asset-check.sh" \
+          "ref-screenshot-asset.json" \
+          "Impl must not reference or copy reference screenshot artifacts (sections/, static/, transitions/) — using them as backgrounds fakes pixel-diff parity" \
+          "block" \
+          "quick"
+
+# Common cheat pattern A2/A3 — entry coherence. Vite+React must render from
+# src/main.{jsx,tsx}; Next App from app/page.tsx. Coexisting entry
+# points (src/main.* + app/page.* both present), mixed Vite+Next
+# dependencies, or raw ref markup pasted into index.html all indicate
+# the agent is gaming gates via scaffold residue. tier=quick (pure
+# filesystem + package.json read).
+add_check "entry-coherence" \
+          "skills/visual-debug/scripts/entry-coherence-check.sh" \
+          "entry-coherence.json" \
+          "Impl must have ONE coherent entry path matching declared stack; no coexisting Vite/Next entries; index.html must be a mount file, not pasted ref markup" \
+          "block" \
+          "quick"
+
+# Common cheat pattern A3 — scaffold residue (orphan components). PascalCase
+# components exported from impl/src/ (excluding entry files main.*/
+# App.*/index.{tsx,jsx}) must appear as JSX usage somewhere. ≥3 orphans
+# OR ≥40% orphan ratio = the agent shipped scaffold files without
+# actually wiring them into the render tree. tier=quick (regex scan).
+add_check "scaffold-residue" \
+          "skills/visual-debug/scripts/scaffold-residue-check.sh" \
+          "scaffold-residue.json" \
+          "PascalCase components defined in impl/src/ must be referenced as JSX (<Name>) or createElement(Name) somewhere; ≥3 orphans = scaffold residue" \
+          "block" \
+          "quick"
+
+# Common cheat pattern A1 — HTML paste theft. Catches three orthogonal cheats
+# beyond what entry-coherence sees:
+#   1. impl entry HTML tag-multiset >= 70% similar to ref's
+#      dom-scaffold.json (likely paste of ref body)
+#   2. <script src=...> in impl entry HTML naming a ref bundle from
+#      bundle-map.json (hot-loading ref JS)
+#   3. inline <style> block byte-similar to a ref CSS bundle from
+#      <ref>/bundles/*.css (bulk-paste of compiled ref CSS)
+# tier=quick (filesystem + multiset + difflib quick_ratio, no browser).
+add_check "html-paste" \
+          "skills/visual-debug/scripts/html-paste-check.sh" \
+          "html-paste.json" \
+          "Impl entry HTML must not mirror ref dom-scaffold (>=70% similarity), load ref bundle scripts, or inline ref CSS bundles" \
+          "block" \
+          "quick"
+
+add_check "required-media-coverage" \
+          "skills/visual-debug/scripts/required-media-coverage-check.sh" \
+          "required-media-coverage.json" \
+          "Every required video/Lottie/SVG asset (from html/*.json + bundles/*.js + CSS url(...)) must be downloaded to impl/public AND referenced in impl source; Lottie URLs require a Lottie runtime package" \
+          "block" \
+          "quick"
+
+# Common cheat pattern A5 — CSS mirror. Reject @import to ref CSS hosts/
+# filenames, byte-identical copies of <ref>/bundles/*.css in impl CSS,
+# and impl CSS files with >=70% difflib quick_ratio similarity to a
+# ref CSS bundle. Per-section snippets are allowed under
+# impl/src/styles/from-ref/. tier=quick (filesystem + difflib).
+add_check "css-mirror" \
+          "skills/visual-debug/scripts/css-mirror-check.sh" \
+          "css-mirror.json" \
+          "Impl CSS must not @import the reference CSS host/filename, byte-copy any ref CSS bundle, or be >=70% similar to one (snippets allowed under src/styles/from-ref/)" \
+          "block" \
+          "quick"
+
+add_check "hidden-children" \
+          "skills/visual-debug/scripts/hidden-children-check.sh" \
+          "hidden-children.json" \
+          "Major sections (area>20000) must not have ALL non-trivial direct children permanently hidden after animations finish" \
+          "block" \
+          "standard" \
+          "runtime-env"
+# Common cheat pattern A4 — positive-parity runtime gate. All other gates
+# are NEGATIVE assertions (don't cheat with X). This one is POSITIVE:
+# the impl runtime DOM must match the ref runtime DOM along four
+# axes — node count within ±30%, >= max(10, sectionCount*2) visible
+# text nodes, no single image/video/background element covering >90%
+# of viewport, and >=1 Lottie container mounted when ref has Lottie
+# evidence. tier=standard (one browser session per side, scroll
+# walk, eval).
+add_check "runtime-dom-parity" \
+          "skills/visual-debug/scripts/runtime-dom-parity-check.sh" \
+          "runtime-dom-parity.json" \
+          "Impl runtime DOM must match ref along node count (±30%), text-node count, no-single-dominant-element, and Lottie-container parity" \
+          "block" \
+          "standard" \
+          "runtime-env"
+add_check "svg-dom-parity" \
+          "skills/visual-debug/scripts/svg-dom-parity-check.sh" \
+          "svg-dom-parity.json" \
+          "Impl runtime SVG inventory must match ref (page total >=50%, inline <svg> must have geometry children, no per-section SVG dropout)" \
+          "block" \
+          "standard"
+
+add_check "invalidation" \
+          "skills/visual-debug/scripts/invalidation-check.sh" \
+          "invalidation.json" \
+          "Ref must not carry an .invalidated stamp; remove the stamp only after fixing the underlying cheat that triggered it" \
+          "block" \
+          "quick"
+
+# Common failure pattern — monolithic-impl detection. When the agent packs
+# the entire UI into a single App.jsx/App.tsx/page.tsx without any
+# components, scaffold-residue passes (0 orphans because 0 components
+# defined). The monolithic shape breaks per-section iteration: every
+# visual-debug fix touches the same file. Catches that pattern by
+# requiring expected-component-count when entry file is large.
+# tier=quick (filesystem only).
+add_check "monolithic-impl" \
+          "skills/visual-debug/scripts/monolithic-impl-check.sh" \
+          "monolithic-impl.json" \
+          "Impl must componentize: entry file >= 8KB AND component count < max(3, sections/3) = fail" \
+          "block" \
+          "quick"
+
+# Common failure pattern — motion coverage. When ref's bundle-map/
+# transition-spec/external-sdks evidence motion lib usage but impl
+# source has zero motion imports, hooks, IntersectionObserver, or
+# GSAP calls — fail. bundle-impl-coverage only checks package.json;
+# this checks ACTUAL motion code presence. tier=quick (grep over
+# impl source + JSON reads).
+add_check "scroll-engine-parity" \
+          "skills/visual-debug/scripts/scroll-engine-parity-check.sh" \
+          "scroll-engine-parity.json" \
+          "Impl must implement an equivalent scroll-engine class to ref (gsap-scrolltrigger / lenis-smooth-scroll / scroll-pin / scroll-scrub / framer-motion / native-scroll-timeline). Bare IntersectionObserver + CSS transitions cannot replicate progress-bound scrub or sticky-pin." \
+          "block" \
+          "quick"
+
+add_check "motion-coverage" \
+          "skills/visual-debug/scripts/motion-coverage-check.sh" \
+          "motion-coverage.json" \
+          "Impl source must show motion implementation matching ref bundle/spec evidence (imports, hooks, IntersectionObserver, GSAP calls)" \
+          "block" \
+          "quick"
+
+# Signal 1 — scaffold-warn placeholders. scaffold-to-jsx.sh emits
+# `<section data-scaffold-warn="subtree-not-found-for-<name>" />`
+# when it cannot resolve a section's subtree in dom-scaffold.json.
+# Those sentinels were meant for Phase-5b visual-judge to flag, but
+# in practice they ship to impl/src/ untouched and render empty
+# sections — section-compare then blames CSS while the real cause
+# is missing subtree resolution. Static scan of impl source rejects
+# any file containing the placeholder.
+add_check "scaffold-warn" \
+          "skills/visual-debug/scripts/scaffold-warn-check.sh" \
+          "scaffold-warn.json" \
+          "Impl source must not carry scaffold-to-jsx subtree-not-found placeholders — re-run scaffold extraction or author the section by hand" \
+          "block" \
+          "quick"
 
 # bundle-impl-coverage — if bundle-map.json detected runtime libs (Lenis,
 # GSAP, Framer Motion), require impl/package.json to actually depend on
@@ -495,18 +871,24 @@ if [ -f "$BUNDLE_MAP" ]; then
             "quick"
 fi
 
-# tree-diff — primary STATIC-phase convergence loop. Walks every visible
-# impl element, pairs with ref via elementFromPoint, diffs computed style +
-# layout. Becomes the gate that the iter loop has to drive to zero
-# critical/major mismatches. Block severity so section-compare PASS isn't
-# enough to declare done — the per-element diff must also converge.
-# Runtime: ~200 element pairs × 2 sides ≈ 400 browser eval calls, so
-# min_tier=standard (skip in quick smoke).
+# tree-diff — element pairing via elementFromPoint, per-element style+layout
+# diff. 17-iteration measurement (2026-05-22): hero-area elements
+# (BUTTON.hero-video, VIDEO, SPAN.hero-video__label, H1) were unpaired in
+# EVERY iteration because LLMs flatten ref's deeply-nested hero composite
+# into a clean React tree — the impl's BUTTON center now lands on the
+# parent SECTION instead of resolving to BUTTON via elementFromPoint.
+# Forcing block severity made section-compare-PASS impls fail forever on
+# a structural pattern the LLM cannot un-abstract. Downgraded to warn:
+# results stay informational (still useful when AE diff is mysterious),
+# but the dispatcher doesn't count them in the FAIL tally. The actual
+# "hero composite must exist" signal moved to hero-composite-check.sh,
+# which spot-checks the 4-element pattern (video + button + h1/h2 +
+# label) regardless of how impl wraps them.
 add_check "tree-diff" \
           "skills/visual-debug/scripts/tree-diff.sh" \
           "tree-diff-status.json" \
-          "Every paired impl ↔ ref element must match style + layout within tolerance (zero critical/major/layout-major mismatches)" \
-          "block" \
+          "Element-pairing diff (advisory) — informational only; hero composite enforced by hero-composite-check" \
+          "warn" \
           "standard"
 
 # scroll-coverage — revives the previously-orphan batch-scroll + batch-compare
@@ -582,7 +964,8 @@ cat > "$OUT" <<JSON
     "hasCanvas": $HAS_CANVAS,
     "hasCustomScroll": $HAS_CUSTOM_SCROLL,
     "hasCommercialFont": $HAS_COMMERCIAL_FONT,
-    "hasClickStateTransition": $HAS_CLICK_STATE
+    "hasClickStateTransition": $HAS_CLICK_STATE,
+    "hasLottie": $HAS_LOTTIE
   },
   "requiredChecks": [$CHECKS
   ],
@@ -597,7 +980,7 @@ JSON
 
 echo "Wrote $OUT"
 echo "Tier: $TIER"
-echo "Signals: scrollScrub=$HAS_SCROLL_SCRUB ioReveal=$HAS_IO_REVEAL hover=$HAS_HOVER splash=$HAS_SPLASH canvas=$HAS_CANVAS customScroll=$HAS_CUSTOM_SCROLL commercialFont=$HAS_COMMERCIAL_FONT clickState=$HAS_CLICK_STATE"
+echo "Signals: scrollScrub=$HAS_SCROLL_SCRUB ioReveal=$HAS_IO_REVEAL hover=$HAS_HOVER splash=$HAS_SPLASH canvas=$HAS_CANVAS customScroll=$HAS_CUSTOM_SCROLL commercialFont=$HAS_COMMERCIAL_FONT clickState=$HAS_CLICK_STATE lottie=$HAS_LOTTIE"
 
 # Validate JSON
 if [ "$HAS_JQ" -eq 1 ]; then

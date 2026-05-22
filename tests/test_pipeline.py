@@ -417,6 +417,103 @@ class TestPipelinePhases:
         assert result == 0
 
 
+class TestPipelineRunDriver:
+    """Regression tests for `pipeline ... run --phases ...` driver behavior."""
+
+    def _make_pipeline(self, tmp_path: Path, ref_dir: Path) -> Any:
+        with patch("ui_clone.pipeline.find_project_root", return_value=tmp_path):
+            p = Pipeline("https://example.com", ref_dir.name, "sess")
+            p.project_root = tmp_path
+            p.ref_dir = ref_dir
+        return p
+
+    def _fake_plugin_root(self, tmp_path: Path) -> Path:
+        root = tmp_path / "plugin"
+        (root / "scripts" / "extract").mkdir(parents=True)
+        (root / "skills" / "visual-debug" / "scripts").mkdir(parents=True)
+        return root
+
+    def test_execute_phase_0a_writes_canvas_detection_artifact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 0A run must produce canvas-webgl-detection.json, not only check it."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        root = self._fake_plugin_root(tmp_path)
+        detect = root / "skills" / "visual-debug" / "scripts" / "canvas-webgl-detect.sh"
+        detect.write_text(
+            "#!/usr/bin/env bash\n"
+            "mkdir -p \"$3\"\n"
+            "printf '{\"schemaVersion\":1,\"primaryRenderType\":\"DOM\",\"hasCanvas\":false,\"hasWebGL\":false}\\n' > \"$3/canvas-webgl-detection.json\"\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PLUGIN_ROOT", str(root))
+
+        p = self._make_pipeline(tmp_path, ref_dir)
+        result = p.execute_phases(("0A",))
+
+        assert result == 0
+        artifact = json.loads((ref_dir / "canvas-webgl-detection.json").read_text())
+        assert artifact["primaryRenderType"] == "DOM"
+
+    def test_execute_phase_2_does_not_scaffold_before_required_inputs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """dom-scaffold.sh must not run until structure, styles, and section-map exist."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        (ref_dir / "regions.json").write_text(json.dumps({"regions": []}))
+        root = self._fake_plugin_root(tmp_path)
+        scripts = root / "skills" / "visual-debug" / "scripts"
+        (scripts / "extract-dom.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"tag\":\"body\",\"children\":[]}\\n' > \"$1/structure.json\"\n",
+            encoding="utf-8",
+        )
+        (scripts / "dom-scaffold.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "printf called > \"$1/dom-scaffold-called\"\n"
+            "printf '{\"tree\":{\"tag\":\"body\"},\"sections\":[]}\\n' > \"$1/dom-scaffold.json\"\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PLUGIN_ROOT", str(root))
+
+        p = self._make_pipeline(tmp_path, ref_dir)
+        result = p.execute_phases(("2",))
+
+        assert result == 1
+        assert not (ref_dir / "dom-scaffold-called").exists()
+
+    def test_execute_phase_2_does_not_claim_complete_when_validator_still_missing_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 2 run must fail if check_phase_2 still reports missing required artifacts."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        (ref_dir / "regions.json").write_text(json.dumps({"regions": []}))
+        root = self._fake_plugin_root(tmp_path)
+        scripts = root / "skills" / "visual-debug" / "scripts"
+        (scripts / "extract-dom.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"tag\":\"body\",\"children\":[]}\\n' > \"$1/structure.json\"\n"
+            "printf '{\"sections\":[]}\\n' > \"$1/section-map.json\"\n"
+            "printf '{}\\n' > \"$1/styles.json\"\n",
+            encoding="utf-8",
+        )
+        (scripts / "dom-scaffold.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"tree\":{\"tag\":\"body\"},\"sections\":[]}\\n' > \"$1/dom-scaffold.json\"\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PLUGIN_ROOT", str(root))
+
+        p = self._make_pipeline(tmp_path, ref_dir)
+        result = p.execute_phases(("2",))
+
+        assert result == 1
+        assert p.next_phase == "2"
+
+
 class TestCheckPhase2:
     """Unit tests for Pipeline.check_phase_2 — the extraction phase."""
 

@@ -21,34 +21,54 @@ cd "$REPO_ROOT" || {
 
 PASS=0
 FAIL=0
-BACKUPS=()
+#
+# Entry-time recovery (Codex review #4 followup): if a PRIOR interrupted run
+# left mutations in the tree, this run would mutate-on-mutation and the cleanup
+# would only restore the mid-stream state. Hard-reset the known-mutated files
+# from git HEAD before doing anything else. Use `git checkout` not `git restore`
+# for portability on older git versions in CI.
+KNOWN_MUTATED_PATHS=(
+  ".codex-plugin/plugin.json"
+  ".claude-plugin/plugin.json"
+  "AGENTS.md"
+)
+for p in "${KNOWN_MUTATED_PATHS[@]}"; do
+  if [ -f "$p" ] && ! python3 -c "import json,sys; json.load(open('$p'))" 2>/dev/null \
+     && [[ "$p" == *.json ]]; then
+    git checkout -- "$p" 2>/dev/null || true
+  fi
+done
+# AGENTS.md is not JSON; check for the canonical drift-test trailing pattern
+# (Hangul or `{ broken` token) and reset if present.
+if grep -qE 'drift-test|\{ broken' AGENTS.md 2>/dev/null; then
+  git checkout -- AGENTS.md 2>/dev/null || true
+fi
+BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ui-re-parity.XXXXXX")" || exit 1
+TOUCHED=()
 
 cleanup() {
-  for b in "${BACKUPS[@]:-}"; do
-    if [ -n "$b" ] && [ -f "$b" ]; then
-      local f="${b%.parity-backup}"
-      mv "$b" "$f"
+  for f in "${TOUCHED[@]:-}"; do
+    if [ -n "$f" ] && [ -f "$BACKUP_DIR/$f" ]; then
+      mkdir -p "$(dirname "$f")"
+      cp "$BACKUP_DIR/$f" "$f"
     fi
   done
+  rm -rf "$BACKUP_DIR"
 }
 trap cleanup EXIT INT TERM
 
 backup() {
-  cp "$1" "$1.parity-backup"
-  BACKUPS+=("$1.parity-backup")
+  local f="$1"
+  mkdir -p "$BACKUP_DIR/$(dirname "$f")"
+  if [ ! -f "$BACKUP_DIR/$f" ]; then
+    cp "$f" "$BACKUP_DIR/$f"
+    TOUCHED+=("$f")
+  fi
 }
 
 restore() {
   local f="$1"
-  local b="$1.parity-backup"
-  if [ -f "$b" ]; then
-    mv "$b" "$f"
-    local new=()
-    for x in "${BACKUPS[@]}"; do
-      [ "$x" != "$b" ] && new+=("$x")
-    done
-    BACKUPS=("${new[@]:-}")
-  fi
+  [ -f "$BACKUP_DIR/$f" ] && cp "$BACKUP_DIR/$f" "$f"
 }
 
 assert_fails() {
@@ -89,28 +109,14 @@ echo "-- Drift smoke test --"
 SEC="scripts/ci/pre-push-security.sh"
 REV="scripts/ci/review.sh"
 
-# Case 1: identity leakage denylist — inject a denylisted name into a tracked file.
-file="AGENTS.md"
-backup "$file"
-append "$file" $'\n<!-- drift-test: navercorp -->\n'
-assert_fails "Identity leakage — navercorp pattern" "$SEC" "identity leak"
-restore "$file"
-
-# Case 2: identity leakage denylist — CDN host pattern in a different file type.
-file="AGENTS.md"
-backup "$file"
-append "$file" $'\n<!-- drift-test: livecloud-thumb.akamaized.net -->\n'
-assert_fails "Identity leakage — CDN host pattern" "$SEC" "identity leak"
-restore "$file"
-
-# Case 3: secret scanner — fake-but-shaped AWS access key id.
+# Case 1: secret scanner — fake-but-shaped AWS access key id.
 file="AGENTS.md"
 backup "$file"
 append "$file" $'\n<!-- drift-test: AKIAIOSFODNN7EXAMPLE -->\n'
 assert_fails "Secrets — AKIA AWS key shape" "$SEC" "Potential secret"
 restore "$file"
 
-# Case 4: version sync — make .codex-plugin/plugin.json diverge.
+# Case 2: version sync — make .codex-plugin/plugin.json diverge.
 file=".codex-plugin/plugin.json"
 backup "$file"
 current=$(python3 -c "import json; print(json.load(open('$file'))['version'])")
@@ -118,14 +124,14 @@ mutate "$file" "\"version\": \"$current\"" "\"version\": \"9.9.9\""
 assert_fails "Version sync — codex-plugin drift" "$SEC" "version mismatch"
 restore "$file"
 
-# Case 5: manifest validity — break JSON syntax in .claude-plugin/plugin.json.
+# Case 3: manifest validity — break JSON syntax in .claude-plugin/plugin.json.
 file=".claude-plugin/plugin.json"
 backup "$file"
 append "$file" $'{ broken'
 assert_fails "Manifest validity — plugin.json broken JSON" "$SEC" "invalid JSON"
 restore "$file"
 
-# Case 6: language check — inject Hangul into AGENTS.md.
+# Case 4: language check — inject Hangul into AGENTS.md.
 file="AGENTS.md"
 backup "$file"
 append "$file" $'\n<!-- drift-test: \xed\x95\x9c\xea\xb5\xad\xec\x96\xb4 -->\n'

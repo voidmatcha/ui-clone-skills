@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+# header-state-runtime-check.sh — prove that the impl header is a runtime
+# state machine, not a static HTML paste.
+#
+# Usage:
+#   header-state-runtime-check.sh <session> <ref-url> <impl-url> <ref-dir> [w] [h]
+#
+#
+# What this gate does:
+#   1. Probes the ref header at scroll=0 and scroll=600. If the nav root
+#      (first `header` or `nav` element) does NOT mutate its className /
+#      data-* attributes between the two states, the site has no stateful
+#      header — gate writes status=skip and exits 0.
+#   2. Probes the impl header the same way.
+#   3. If ref mutated but impl did NOT, fails: the impl shipped static HTML
+#      where the ref has a controller.
+#   4. If both mutated, computes a fingerprint (set of toggled class names)
+#      on each side and warns when ref toggles a class the impl never does
+#      — typical signs: ref toggles is-hide / thema-* / track-animation /
+#      js-scroll-animation but impl only toggles a single is-scrolled flag.
+#
+# Symmetric "no-controller" failure modes also caught:
+#   - impl serializes the ref's settled-state HTML at scroll=200 verbatim,
+#     so the impl rendering looks correct at scroll=200 but never changes
+#     when the user scrolls. Test catches it because impl scroll=0 and
+#     scroll=600 nav classNames are identical.
+#   - impl loads the ref's raw runtime JS via <script src="...">. This is
+#     a documented anti-pattern ("don't load ref-js to fake runtime"). The
+#     gate doesn't ban it, but if the loaded JS doesn't actually attach
+#     listeners (CORS / scope issues) the impl still fails the mutation
+#     assertion.
+#
+# Writes:
+#   <ref-dir>/header-state-runtime.json
+#
+# Exit 0 on pass/skip, 1 on missing mutation, 2 on setup error.
+
+set -uo pipefail
+
+SESSION="${1:?Usage: header-state-runtime-check.sh <session> <ref-url> <impl-url> <ref-dir> [w] [h]}"
+REF_URL="${2:?ref-url required}"
+IMPL_URL="${3:?impl-url required}"
+REF_DIR="${4:?ref-dir required}"
+WIDTH="${5:-1440}"
+HEIGHT="${6:-900}"
+
+if ! command -v agent-browser >/dev/null 2>&1; then
+  echo "header-state-runtime: agent-browser CLI missing" >&2
+  exit 2
+fi
+if [ ! -d "$REF_DIR" ]; then
+  echo "header-state-runtime: ref-dir not found: $REF_DIR" >&2
+  exit 2
+fi
+
+OUT="$REF_DIR/header-state-runtime.json"
+REF_SESSION="${SESSION}-hdr-ref"
+IMPL_SESSION="${SESSION}-hdr-impl"
+PROBE_REF=$(mktemp -t hdr-ref.XXXX.json)
+PROBE_IMPL=$(mktemp -t hdr-impl.XXXX.json)
+trap 'rm -f "$PROBE_REF" "$PROBE_IMPL"; agent-browser --session "$REF_SESSION" close >/dev/null 2>&1 || true; agent-browser --session "$IMPL_SESSION" close >/dev/null 2>&1 || true' EXIT
+
+# Probe script: collect className + data-* fingerprint at scroll=0 and
+# scroll=600 from the first header/nav root encountered. Returns JSON
+# with both fingerprints so the comparison happens in Python (avoids
+# embedding string-diff logic in JS that has to survive shell quoting).
+PROBE_JS='
+(async () => {
+  const findRoots = () => {
+    const list = [];
+    const header = document.querySelector("header") ||
+                   document.querySelector("[role=banner]") ||
+                   document.querySelector("nav");
+    if (header) list.push({ name: "header", el: header });
+    list.push({ name: "body", el: document.body });
+    list.push({ name: "html", el: document.documentElement });
+    const fwRootSelectors = ["#root", "#__next", "#__nuxt", "#app",
+                             ".app-wrapper", ".layout-root", "[data-theme]"];
+    for (const sel of fwRootSelectors) {
+      const el = document.querySelector(sel);
+      if (el && !list.find(x => x.el === el)) {
+        list.push({ name: "fw-root:" + sel, el });
+      }
+    }
+    return list;
+  };
+  const snap = (el) => {
+    if (!el) return null;
+    const dataAttrs = {};
+    for (const a of el.attributes) {
+      if (a.name === "class" || a.name.startsWith("data-")) {
+        dataAttrs[a.name] = a.value;
+      }
+    }
+    return {
+      tag: el.tagName.toLowerCase(),
+      cls: el.className || "",
+      attrs: dataAttrs,
+      childTagClasses: Array.from(el.querySelectorAll("*"))
+        .slice(0, 40)
+        .map(c => c.tagName.toLowerCase() + ":" + (c.className || "")),
+    };
+  };
+  const snapAll = (roots) => roots.map(r => ({ name: r.name, snap: snap(r.el) }));
+  const findRoot = () => {
+    const roots = findRoots();
+    return roots.length ? roots[0].el : null;
+  };
+  const root = findRoot();
+  if (!root) return JSON.stringify({ found: false });
+  window.scrollTo({ top: 0, behavior: "instant" });
+  await new Promise(r => setTimeout(r, 400));
+  const at0 = snap(findRoot());
+  const allRoots0 = snapAll(findRoots());
+  const sh = document.documentElement.scrollHeight || document.body.scrollHeight || 600;
+  // Probes: 200px (early state change), proportional 25% (most sites),
+  // 1200px (late-change parallax), and 50% of page height.
+  const probes = [
+    200,
+    Math.min(600, Math.max(200, Math.floor(sh / 4))),
+    Math.min(1200, sh - 100),
+    Math.floor(sh / 2),
+  ].filter((v, i, a) => v > 0 && a.indexOf(v) === i).sort((a, b) => a - b);
+  const samples = [];
+  let at600 = at0;
+  for (const top of probes) {
+    window.scrollTo({ top, behavior: "instant" });
+    await new Promise(r => setTimeout(r, 350));
+    const snapshot = snap(findRoot());
+    samples.push({ top, snapshot });
+    at600 = snapshot;  // last probe stays as the "deep" reference
+  }
+  const allRootsDeep = snapAll(findRoots());
+  return JSON.stringify({
+    found: true,
+    at0, at600, samples,
+    allRoots0,
+    allRootsDeep,
+    scrollHeight: sh,
+  });
+})()
+'
+
+probe_url() {
+  local session="$1" url="$2" out_file="$3"
+  agent-browser --session "$session" open "$url" --viewport "${WIDTH}x${HEIGHT}" --wait 1500 >/dev/null 2>&1 || true
+  agent-browser --session "$session" eval "$PROBE_JS" > "$out_file" 2>/dev/null || true
+}
+
+probe_url "$REF_SESSION" "$REF_URL" "$PROBE_REF"
+probe_url "$IMPL_SESSION" "$IMPL_URL" "$PROBE_IMPL"
+
+python3 - "$OUT" "$PROBE_REF" "$PROBE_IMPL" "$REF_URL" "$IMPL_URL" <<'PY'
+# Python 3.9 compat: union syntax via future-import.
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+out_path, ref_path, impl_path, ref_url, impl_url = sys.argv[1:6]
+
+def read_probe(path: str) -> dict:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return {"found": False, "error": "probe-missing"}
+    # agent-browser eval emits the value as the last JSON-shaped line.
+    # Scan from the end for the first line that parses as JSON.
+    for line in reversed(text.strip().splitlines()):
+        stripped = line.strip()
+        if not stripped or not (stripped.startswith("{") or stripped.startswith("[") or stripped.startswith('"')):
+            continue
+        try:
+            value = json.loads(stripped)
+        except Exception:
+            continue
+        # eval prints the raw string return; loadAnimation/etc print
+        # the JSON twice (once as JS string, once as the response).
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                continue
+        if isinstance(value, dict):
+            return value
+    return {"found": False, "error": "probe-parse-failed"}
+
+def signature(snap: dict | None) -> tuple[str, str, frozenset]:
+    """Reduce a snap to (className, data-attrs-tuple, child-class-set)
+    for set-comparison. Order-independent on attributes to avoid
+    false positives from attribute reorder.
+    """
+    if not snap:
+        return ("", "", frozenset())
+    cls = snap.get("cls", "") or ""
+    attrs = snap.get("attrs") or {}
+    attrs_repr = "|".join(f"{k}={v}" for k, v in sorted(attrs.items()) if k != "class")
+    child_set = frozenset(snap.get("childTagClasses") or [])
+    return (cls, attrs_repr, child_set)
+
+def mutates(at0: dict | None, at600: dict | None) -> bool:
+    s0 = signature(at0)
+    s6 = signature(at600)
+    if s0 == s6:
+        return False
+    # Treat class-set delta as "real" mutation; pure inline-style change
+    # without class toggle is allowed but doesn't count as a state
+    # machine — the user's checklist names class toggles specifically.
+    cls0 = set(re.split(r"\s+", s0[0]))
+    cls6 = set(re.split(r"\s+", s6[0]))
+    if cls0 ^ cls6:
+        return True
+    if s0[1] != s6[1]:
+        return True
+    if s0[2] != s6[2]:
+        return True
+    return False
+
+ref_probe = read_probe(ref_path)
+impl_probe = read_probe(impl_path)
+
+reasons: list[str] = []
+ref_mutates = False
+impl_mutates = False
+ref_classes_toggled: set[str] = set()
+impl_classes_toggled: set[str] = set()
+
+def any_sample_mutates(probe: dict) -> tuple[bool, set]:
+    """2026-05-22 universality audit: check mutation against ALL sample
+    snapshots, not just the deepest one. Some sites flip class state
+    earlier than our deepest probe; some flip later. Reporting
+    mutation if ANY scroll point differs from scroll=0 catches both.
+    Returns (mutated, classes_toggled_union).
+    """
+    at0 = probe.get("at0") or {}
+    if not isinstance(at0, dict):
+        return False, set()
+    cls0 = set(re.split(r"\s+", at0.get("cls", "") or ""))
+    samples = probe.get("samples") or []
+    if not samples:
+        # Fallback to legacy at600 comparison
+        return mutates(at0, probe.get("at600")), set()
+    union: set = set()
+    for s in samples:
+        snap = s.get("snapshot") or {}
+        if not isinstance(snap, dict):
+            continue
+        if mutates(at0, snap):
+            cls_n = set(re.split(r"\s+", snap.get("cls", "") or ""))
+            union |= (cls0 ^ cls_n) - {""}
+    return bool(union) or any(mutates(at0, s.get("snapshot")) for s in samples), union
+
+def body_or_root_mutates(probe: dict) -> tuple[bool, list]:
+    """2026-05-22 user request: state machine extends beyond <header>.
+    Some sites toggle classes on document.body or document.documentElement
+    (`<html>`) as scroll/theme state changes. Compare allRoots0 vs
+    allRootsDeep; report mutation if body or html class delta is non-empty.
+    Returns (mutated, list-of-root-names-with-mutation).
+    """
+    root0 = {r.get("name"): (r.get("snap") or {}) for r in (probe.get("allRoots0") or [])}
+    root_deep = {r.get("name"): (r.get("snap") or {}) for r in (probe.get("allRootsDeep") or [])}
+    mutated_roots: list[str] = []
+    all_names = set()
+    for r in (probe.get("allRoots0") or []) + (probe.get("allRootsDeep") or []):
+        n = r.get("name")
+        if n and n != "header":
+            all_names.add(n)
+    for name in sorted(all_names):
+        s0 = root0.get(name) or {}
+        sd = root_deep.get(name) or {}
+        if not s0 or not sd:
+            continue
+        c0 = set(re.split(r"\s+", s0.get("cls", "") or ""))
+        cd = set(re.split(r"\s+", sd.get("cls", "") or ""))
+        if (c0 ^ cd) - {""}:
+            mutated_roots.append(name)
+    return bool(mutated_roots), mutated_roots
+
+if not ref_probe.get("found"):
+    status = "skip"
+    reasons.append(f"ref probe: no header/nav root found ({ref_probe.get('error','no-root')})")
+else:
+    ref_mutates, ref_classes_toggled = any_sample_mutates(ref_probe)
+    ref_body_mutates, ref_body_roots = body_or_root_mutates(ref_probe)
+    if ref_body_mutates and not ref_mutates:
+        ref_mutates = True
+        ref_classes_toggled = set()  # body/html names not header classes
+    if ref_mutates and not ref_classes_toggled:
+        # mutation present via attrs/childTagClasses, no class-only delta
+        c0 = set(re.split(r"\s+", (ref_probe.get("at0") or {}).get("cls", "")))
+        c6 = set(re.split(r"\s+", (ref_probe.get("at600") or {}).get("cls", "")))
+        ref_classes_toggled = (c0 ^ c6) - {""}
+
+if not ref_mutates:
+    status = "skip" if ref_probe.get("found") else "skip"
+    if ref_probe.get("found") and not reasons:
+        reasons.append("ref header does not mutate on scroll — no state machine to verify")
+else:
+    if not impl_probe.get("found"):
+        status = "fail"
+        reasons.append("ref has a stateful header but impl has no header/nav root")
+    else:
+        impl_mutates, impl_classes_toggled = any_sample_mutates(impl_probe)
+        impl_body_mutates, impl_body_roots = body_or_root_mutates(impl_probe)
+        if impl_body_mutates and not impl_mutates:
+            impl_mutates = True
+            impl_classes_toggled = set()
+        if impl_mutates and not impl_classes_toggled:
+            c0 = set(re.split(r"\s+", (impl_probe.get("at0") or {}).get("cls", "")))
+            c6 = set(re.split(r"\s+", (impl_probe.get("at600") or {}).get("cls", "")))
+            impl_classes_toggled = (c0 ^ c6) - {""}
+
+        if not impl_mutates:
+            status = "fail"
+            reasons.append(
+                "ref header mutates className/data-* on scroll but impl header is static — "
+                "impl is missing the runtime controller (likely shipped captured HTML)."
+            )
+        else:
+            # Both mutate. Warn (still pass) if ref toggles a class family
+            # the impl never toggles — typical asymmetry: ref does
+            # is-hide+thema-* while impl only does a single -scrolled.
+            ref_only = ref_classes_toggled - impl_classes_toggled
+            if ref_only:
+                status = "pass"
+                reasons.append(
+                    "informational: ref toggles classes not seen in impl: "
+                    + ", ".join(sorted(ref_only))
+                )
+            else:
+                status = "pass"
+
+payload = {
+    "schemaVersion": 1,
+    "status": status,
+    "ref": {
+        "url": ref_url,
+        "found": ref_probe.get("found", False),
+        "mutates": ref_mutates,
+        "classesToggled": sorted(ref_classes_toggled),
+    },
+    "impl": {
+        "url": impl_url,
+        "found": impl_probe.get("found", False),
+        "mutates": impl_mutates,
+        "classesToggled": sorted(impl_classes_toggled),
+    },
+    "reasons": reasons,
+    "nextAction": (
+        "Implement a scroll-listener (or IntersectionObserver) that toggles "
+        "header className (is-hide, thema-*, scroll classes, etc.) based on "
+        "scroll position. The ref header is a state machine; impl serializing "
+        "one snapshot of the HTML is a documented Tier 5 cheat. See the ref's "
+        "compiled JS bundle for the exact class names and toggle conditions."
+        if (status == "fail") else "header state machine parity verified"
+    ),
+    "rule": (
+        "If the ref header mutates className or data-* attributes between scroll=0 "
+        "and scroll=600 (state machine present), the impl header must mutate too. "
+        "Missing mutation proves the impl shipped a captured-HTML paste of one scroll "
+        "state with no runtime controller (is-hide, thema-*, scroll classes, etc.). "
+        "When the ref header is static, the gate skips."
+    ),
+}
+
+Path(out_path).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+print(json.dumps({"status": status, "reasons": reasons, "out": out_path}, ensure_ascii=False))
+sys.exit({"pass": 0, "skip": 0, "fail": 1}.get(status, 2))
+PY

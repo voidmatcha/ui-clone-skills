@@ -48,9 +48,10 @@ Default stays `comprehensive` so existing callers and CI keep their current safe
 - Code comments: English only
 - Commit messages: English only
 
-### Identity / example placeholders
-- Never embed real company, employer, service, or third-party site names in code, comments, docs, or fixtures. Use generic placeholders: `project-a` / `project-b` / `example`, `example.com` / `target-site.com`, `<cdn-domain-1>` / `<streaming-cdn-host>` / `<image-cdn-host>`, "a partner site" for prose. The plugin is a public-facing marketplace surface; leakage of real names is unprofessional and embeds NDA-adjacent info. Enforced by `scripts/ci/pre-push-security.sh` "Identity leakage" section — add new patterns to its `leak_patterns=()` array.
-- **One explicit exception: `realfood.gov` is the canonical benchmark target for the internal `skills/benchmark/` skill.** It is a public US-government site, not NDA-adjacent, and the maintainer regression suite must hit a real production site to measure prompt / sub-doc / external-dep drift (the entire point of `skills/benchmark/SKILL.md` is end-to-end fidelity against an unmocked target). Permitted in: `skills/benchmark/**`, `benchmark/work/**` artifacts, and the prompt strings the agent emits when it acts on the "run benchmark" trigger. Still forbidden elsewhere — do NOT add `realfood.gov` to user-facing examples, public skill docs (`skills/ui-reverse-engineering/**`, `skills/ui-capture/**`, `skills/visual-debug/**`), README, or marketplace metadata.
+### Source fidelity
+- This repo does not enforce identity/name redaction. Preserve observed site names, service names, brand text, asset URLs, image/video/Lottie references, alt/title/aria labels, and other user-visible identity strings when they are part of the reference, clone output, benchmark, test fixture, or explanatory evidence.
+- Generic examples may use placeholders when they are clearer, but placeholders are a style choice, not a compliance rule. Do not rewrite source copy to `Example`, generic brands, sanitized labels, emoji, gradients, or placeholder text for policy reasons.
+- Do not treat HTTP 200, page title, section ids, build success, source string presence, or a proxy/cache of the original site runtime as fidelity evidence. Clone quality requires actual rendered text, visible assets, DOM/section structure, and motion runtime behavior to match the reference from generated implementation source.
 
 ### Naming
 - Python package: `ui_clone`

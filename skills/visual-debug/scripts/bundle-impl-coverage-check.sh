@@ -53,6 +53,16 @@ if [ -z "$IMPL_PKG" ]; then
   done
 fi
 
+if [ -z "$IMPL_PKG" ] || [ ! -f "$IMPL_PKG" ]; then
+  RESOLVER="${PLUGIN_ROOT:-$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")}/scripts/extract/find-impl-root.sh"
+  if [ -x "$RESOLVER" ]; then
+    RESOLVED=$(bash "$RESOLVER" "$REF_DIR" 2>/dev/null | sed -n '3p')
+    if [ -n "$RESOLVED" ] && [ -f "$RESOLVED" ]; then
+      IMPL_PKG="$RESOLVED"
+    fi
+  fi
+fi
+
 write_status() {
   local status="$1" reason="$2"
   python3 - "$OUT" "$status" "$reason" "$BUNDLE_MAP" "${IMPL_PKG:-}" <<'PY'
@@ -191,8 +201,15 @@ with open('$OUT') as fh:
 print(len(d.get('detectedLibs', [])))
 ")
   if [ "$DETECTED_COUNT" -eq 0 ]; then
-    write_status skip "no library signatures detected in bundle-map.json"
-    echo "▸ bundle-impl-coverage: SKIP (no library signatures detected)"
+    # No library signatures in bundle-map.json means there's nothing to verify
+    # against — a static-site clone has no bundle libs that need matching
+    # package.json deps. Emit pass (not skip): the gate counts `status:"skip"`
+    # as failure, but "no libs detected" is unambiguously a success condition
+    # (Common cheat pattern). The two upstream skip cases (bundle-map.json absent /
+    # impl package.json not found) are real prerequisite failures and remain
+    # `skip` so the operator notices them.
+    write_status pass "no library signatures detected in bundle-map.json (static build, nothing to verify)"
+    echo "✓ bundle-impl-coverage: PASS (no library signatures detected)"
   else
     write_status pass "all $DETECTED_COUNT detected library signature(s) have matching install"
     echo "✓ bundle-impl-coverage: PASS"

@@ -212,7 +212,7 @@ Download the favicon from `head.json` and each image from `visible-images.json` 
 - **HTTPS only** — skip `http://` and `data:` URIs
 - **10 MB limit** per file, 30s timeout
 - **No credential forwarding** — no cookies or auth tokens
-- If a download fails (404, CORS, timeout), record `"local": null` with an error note in `assets.json` — component generation will use a descriptive placeholder instead
+- If a download fails (404, CORS, timeout), record `"local": null` with an error note in `assets.json` and add a justified entry to `asset-substitution.json` if the asset cannot be used from its original URL. Do not silently replace successful public assets with placeholder blocks or generic labels.
 
 ```bash
 mkdir -p tmp/ref/<component>/assets
@@ -235,6 +235,15 @@ mkdir -p tmp/ref/<component>/assets
 **Generation rules for downloaded assets:**
 1. **Favicon:** Copy to the project's public/static directory and reference it in the HTML head (`<link rel="icon" href="/favicon.ico" />`). Without this, the browser tab shows a generic icon.
 2. **Images:** Copy to the public directory (e.g., `public/images/`). Reference them with absolute paths (`/images/hero.webp`).
+
+### Download Lottie/bodymovin JSON
+
+If resource logs, bundle grep, DOM attributes, or transition specs mention
+`lottie`, `bodymovin`, `dotlottie`, `<lottie-player>`, or animation `.json`
+files, download the animation JSON into the impl public directory and record it
+in `assets.json`. Component generation must render it with `lottie-web`,
+`lottie-react`, or an equivalent runtime. Generic CSS/GSAP motion is not a
+substitute for the original animation data.
 
 ### Download fonts
 

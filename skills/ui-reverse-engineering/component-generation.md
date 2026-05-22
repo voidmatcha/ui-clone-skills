@@ -1,12 +1,30 @@
 # Component Generation — Step 7
 
-> 🚨 **Three hard requirements before you write a single line of JSX:**
+> 🚨 **Hard requirements before you write a single line of JSX:**
 >
-> 1. **Asset transfer is NOT optional.** Run `bash scripts/extract/extract-assets.sh <session> <ref-dir> <impl>/public` to download ref images / fonts / videos into the impl's `public/` directory. Then `bash skills/visual-debug/scripts/asset-transfer-check.sh <ref-dir> <impl>/public` should PASS. Skipping this step produces a clone where every `<img>` is a 404 placeholder and section-compare AE explodes to 1M+. The pipeline now blocks at `post-implement` until `asset-transfer.json` and `image-fidelity.json` both pass.
+> 1. **Asset transfer is NOT optional.** Run `bash scripts/extract/asset-download.sh <ref-dir> <impl>/public` for `visible-images.json` images and `bash scripts/extract/extract-assets.sh <session> <ref-dir> <impl>/public` for videos, posters, fonts, and other captured assets. Then `bash skills/visual-debug/scripts/asset-transfer-check.sh <ref-dir> <impl>/public` and `bash skills/visual-debug/scripts/asset-utilization-check.sh <ref-dir> <impl>/src` should PASS. Skipping this step produces a clone where `<img>` tags are broken or replaced with colored blocks while section ids/build still pass.
 >
-> 2. **One component per section — DO NOT write a 300-line monolith `page.tsx`.** Read `component-map.json`; each entry in `sections[]` becomes its own file under `src/projects/<name>/components/sections/<SectionName>.tsx`. The top-level `page.tsx` should be ~40-60 lines of imports + an `<main>` with section components composed in order (plus shared scroll/intro wrappers from `bundle-map.json`). Inlining everything into `page.tsx` is the single largest quality regression observed on the realfood.gov benchmark — the prior successful clone of the same site has 14 component files; the failing one has 0.
+> 2. **Visible text fidelity is NOT optional.** `dom-scaffold.json` text fields are source evidence. Scratch clone outputs must preserve the user-provided site's visible text, brand/service/site names, alt/title/aria labels, and other user-visible identity strings verbatim. Do not replace them with generic brand names, sanitized copy, or placeholder labels. `text-fidelity-check.sh` fails both fabricated text and omitted scaffold text.
 >
-> 3. **NEVER substitute emoji / unicode characters / text labels for missing image assets.** If `asset-transfer-check.sh` reports a missing image, FIX the extraction: re-run `extract-assets.sh`, point `<img src=>` at the original CDN URL if the host is public and CORS-permissive, or declare the gap in `asset-substitution.json` with a justification. Falling back to `<span>🍔</span>` / `<div>[image]</div>` is a silent failure mode — the emoji glyph passes the structural diff while looking nothing like the reference, so section-compare can't catch it. Lifelong rule: every `<img>` in the ref scaffold MUST stay an `<img>` in the impl. No exceptions.
+> 3. **Lottie/bodymovin must stay Lottie/bodymovin.** If ref artifacts mention `lottie`, `bodymovin`, `dotlottie`, `<lottie-player>`, or an animation JSON URL, download the JSON and use `lottie-web`, `lottie-react`, or an equivalent Lottie runtime in the impl. Do not approximate it with GSAP/CSS marker motion. `lottie-runtime-check.sh` fails when the runtime package, source usage, or local animation JSON is missing.
+>
+> 4. **One component per section — DO NOT write a 300-line monolith `page.tsx`.** Read `component-map.json`; each entry in `sections[]` becomes its own file under `src/projects/<name>/components/sections/<SectionName>.tsx`. The top-level `page.tsx` should be ~40-60 lines of imports + an `<main>` with section components composed in order (plus shared scroll/intro wrappers from `bundle-map.json`). Inlining everything into `page.tsx` is the single largest quality regression observed on the benchmark runs — successful clones split sections into focused component files; failing ones tend to have none.
+>
+> 5. **NEVER substitute emoji / unicode characters / text labels for missing image assets.** If `asset-transfer-check.sh` reports a missing image, FIX the extraction: re-run `asset-download.sh` / `extract-assets.sh`, point `<img src=>` at the original CDN URL if the host is public and CORS-permissive, or declare the gap in `asset-substitution.json` with a justification. Falling back to `<span>...</span>` / `<div>[image]</div>` is a silent failure mode — text can pass structural diff while looking nothing like the reference. Every `<img>` in the ref scaffold MUST stay an `<img>` in the impl. No exceptions.
+>
+> 6. **Never preserve local `/cdn-cgi/image/...` optimizer URLs in generated JSX.** Those paths belong to the reference site's CDN edge, not the local Next/Vite dev server. Rewrite `src`, `poster`, and every `srcset` candidate to the transferred public asset path such as `/images/foo.webp` or `/videos/foo.mp4`. A basename-only static check can pass while the browser still requests `/cdn-cgi/image/width=.../foo.webp` locally and renders a broken image.
+>
+> 7. **Transition coverage means runtime behavior, not marker strings.** If `transition-spec.json` declares an entry, implement the matching trigger in code/CSS: load reveals need mount/load animation wiring, smooth-scroll entries need the real detected smooth-scroll library or native smooth-scroll behavior, hover entries need actual hover CSS/handlers, and click/accordion entries need state + event handlers. Do not add hidden spans, `data-transition-hooks`, `data-scroll-hook`, `data-hover-hook`, or generic words like `useScroll` just so static coverage can grep them. Those are verifier markers, not an implementation.
+>
+> 8. **HTTP 200 / title / build success is not completion evidence.** Treat those as boot checks only. Completion evidence is the actual gate artifact set: text fidelity, asset transfer/utilization, Lottie/runtime when detected, motion/runtime checks, and visual comparison.
+>
+> 9. **Never ship a whole-document static/proxy mirror.** Do not save `document.documentElement.outerHTML`, `document.body.innerHTML`, `live.html`, or `original.html` as `impl/index.html`, and do not make `server.js` proxy/cache the original upstream HTML, RSC payloads, or `_next` chunks. A mirrored runtime can look perfect while proving nothing about source implementation. If raw HTML is warranted, extract and render per-section HTML inside components, preserve the runtime data/libraries, and still run `pipeline ... verify`.
+>
+> 10. **Downloaded assets must be rendered by components.** `asset-transfer: PASS` only proves files exist. If `asset-utilization.json` is missing or reports a low referenced/downloaded ratio, fix the JSX/CSS to use the transferred images, posters, videos, and Lottie JSON. Do not count a populated `public/` folder as visual fidelity.
+>
+> 11. **Hidden manifests are not rendered usage.** Do not add a hidden `reference-manifest`, `asset-manifest`, offscreen span bank, or JSON blob just to make source-string checks see image URLs, text, or motion selectors. The visible component tree must render those assets/text/motion; the gates now ignore/fail manifest-only usage.
+>
+> 12. **Motion checks must prove behavior, not strings.** `transition-spec-coverage: PASS` can only prove selectors/keywords are present. `spec-implementation-coverage.json`, `transition-compare` rows, `scroll-end-completion`, `reveal-trigger`, and Lottie runtime checks are the evidence that triggers, easing, scroll pinning, and playback actually run. Missing artifacts mean the implementation is still incomplete.
 
 ## DOM-scaffold rule (HARD BLOCK — Fix 8)
 
@@ -155,7 +173,7 @@ agent-browser --session cake-impl screenshot tmp/ref/<c>/verify-impl-scroll200.p
    - `breakpoint-jump` → use Tailwind responsive prefixes (e.g., `w-full md:w-[704px] lg:w-[1376px]`)
    - When in doubt, download the original CSS stylesheet and grep for the selector to find the raw expression (see `js-animation-extraction.md` Step 5)
 6. **Never recreate SVGs from visual appearance.** Use `outerHTML` from `inline-svgs.json` verbatim; convert HTML attributes to JSX (`stroke-width` → `strokeWidth`, `class` → `className`, `fill-rule` → `fillRule`).
-7. **Transitions are part of generation, not a later pass.** A component without its transitions is incomplete. Read `transition-spec.json` entries for the component + implement inline. See `transition-implementation.md`.
+7. **Transitions are part of generation, not a later pass.** A component without its transitions is incomplete. Read `transition-spec.json` entries for the component + implement inline as real runtime behavior. See `transition-implementation.md`.
 8. **Never guess UI layout.** See SKILL.md rule 12 — capture idle + active screenshots before implementing.
 9. **Never skip features because you don't want an extra dependency.** Use the project animation library or an OSS alternative (see `transition-implementation.md` "GSAP Plugin Alternatives"). Never simplify per-char stagger to whole-block fade.
 10. **Auto-timers must respect splash phase.** See SKILL.md rule 13b — delay auto-rotate by `splashDuration + 1s`.
@@ -183,7 +201,7 @@ agent-browser --session cake-impl screenshot tmp/ref/<c>/verify-impl-scroll200.p
     ```
     This works with ANY scroll implementation because `getBoundingClientRect()` always reflects the visual position.
 
-**Post-generation transition coverage gate:** Every entry in `transition-spec.json` must have a corresponding implementation. Missing any = incomplete, don't proceed to verification.
+**Post-generation transition coverage gate:** Every entry in `transition-spec.json` must have a corresponding runtime implementation. Missing any, or satisfying coverage with hidden marker/data attributes instead of load/scroll/hover/click wiring, is incomplete. Do not proceed to verification until both transition coverage and implementation coverage pass.
 
 ## CSS variable consistency (HARD RULE)
 
@@ -245,6 +263,11 @@ diff /tmp/ref-children.txt /tmp/impl-children.txt   # must be identical
 3. Confirm `bundle_branch` matches current page state (first visit vs returning, desktop vs mobile)
 4. View 2-3 `reference_frames` to confirm spec matches visual behavior
 5. If spec seems wrong, update spec FIRST, then implement
+6. Map each trigger to an observable mechanism before coding:
+   - `load` / reveal: `@keyframes`, CSS `animation`, Framer `initial`/`animate`, GSAP `from`, or a mount `useEffect` that toggles visible state.
+   - `scroll` / smooth-scroll: detected library setup (`new Lenis`, `ReactLenis`, GSAP `ScrollTrigger`, Framer `useScroll` where applicable) or native `scroll-behavior: smooth`.
+   - `hover`: `:hover`, `group-hover`, `whileHover`, `onMouseEnter`, or `onPointerEnter` on the actual selector.
+   - `click` / accordion: `onClick` or click listener plus `useState` / `aria-expanded` / `open` state.
 
 ## Font size accuracy (extract + verify)
 

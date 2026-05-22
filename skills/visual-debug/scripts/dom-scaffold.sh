@@ -67,6 +67,56 @@ STYLE_KEYS = (
     "padding", "margin", "width", "height",
 )
 
+# Per-node style shortener — mirrors extract-styles.sh's shorten_styles. The
+# input is the raw computed-CSS dict extract-dom.sh writes onto each node
+# (full property names like 'background-color', 'font-family'); the output
+# is the shorthand keyspace dom-scaffold consumers expect. Codex review
+# 2026-05-22 (Q1): per-node styles must win over the class-level aggregate
+# so exceptional instances (a `.card` inside a hero) don't inherit the
+# dominant class's structural layout (320px catalog width stamped over an
+# 800px hero card).
+_PER_NODE_SHORTHAND = (
+    ("display", "display"),
+    ("position", "position"),
+    ("color", "color"),
+    ("font-family", "ff"),
+    ("font-size", "fs"),
+    ("font-weight", "fw"),
+    ("line-height", "lh"),
+    ("letter-spacing", "ls"),
+    ("padding", "padding"),
+    ("margin", "margin"),
+    ("width", "width"),
+    ("height", "height"),
+)
+_PER_NODE_NOISE = {"", "normal", "none", "auto", "0px", "rgba(0, 0, 0, 0)"}
+
+
+def shorten_node_styles(raw):
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    bg_image = raw.get("background-image")
+    bg_color = raw.get("background-color")
+    bg = None
+    if isinstance(bg_image, str):
+        v = bg_image.strip()
+        if v and v not in _PER_NODE_NOISE:
+            bg = v
+    if bg is None and isinstance(bg_color, str):
+        v = bg_color.strip()
+        if v and v not in _PER_NODE_NOISE:
+            bg = v
+    if bg:
+        out["bg"] = bg
+    for css_name, short in _PER_NODE_SHORTHAND:
+        v = raw.get(css_name)
+        if isinstance(v, str):
+            vv = v.strip()
+            if vv and vv not in _PER_NODE_NOISE:
+                out[short] = vv
+    return out
+
 
 def resolve_styles(tag, class_str, styles_map):
     """Look up styles.json entries for this node by tag first then by each
@@ -105,7 +155,13 @@ def walk(node, styles_map, depth=0, max_depth=8):
     tag = node.get("tag", "")
     text = node.get("text", "") or ""
     cls = (node.get("class") or "")[:80]
-    styles = resolve_styles(tag, cls, styles_map)
+    # Per-node styles win over the class/tag aggregate: the aggregate is a
+    # fallback for nodes that did not capture a computed value, but the raw
+    # per-node styles already reflect the exceptional-instance layout
+    # extract-dom.sh measured for *this* node. See Codex review 2026-05-22.
+    per_node = shorten_node_styles(node.get("styles") or {})
+    aggregate = resolve_styles(tag, cls, styles_map)
+    styles = {**aggregate, **per_node}
     children = []
     for c in node.get("children", []) or []:
         sub = walk(c, styles_map, depth + 1, max_depth)

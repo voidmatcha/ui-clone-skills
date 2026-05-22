@@ -1,0 +1,125 @@
+# Generation plan enrichment
+
+**Audience**: anyone (host-agnostic) performing Phase 6-pre enrichment of `generation-plan.json`.
+
+- **Claude Code path**: invoked via the `generation-planner` sub-agent (`.claude-plugin/agents/generation-planner.md`). The sub-agent reads this file as its operational contract.
+- **Codex path**: read this file inline at Step 7-pre per `.codex-plugin/plugin.json defaultPrompt`. Perform the same work in the main context.
+
+## Pre-condition
+
+`scripts/extract/generation-plan.sh` has already produced `tmp/ref/<component>/generation-plan.json` at `schemaVersion: 1`. The plan covers component list, library deps, sticky strategy, hidden state, mobile-swap, architecture booleans, smooth-scroll wrapper, intro animation. Your job is to enrich it to `schemaVersion: 2`.
+
+## Inputs (already exist)
+
+- `tmp/ref/<component>/generation-plan.json` — deterministic base
+- `tmp/ref/<component>/structure.json` — full DOM tree
+- `tmp/ref/<component>/styles.json` + `tmp/ref/<component>/css/variables.txt` — design tokens
+- `tmp/ref/<component>/animations-detected.json` — animation candidates
+- `tmp/ref/<component>/transition-spec.json` — transitions
+- `tmp/ref/<component>/element-roles.json`, `element-groups.json`, `layout-decisions.json`, `component-map.json` — Step 6c audit
+- `tmp/ref/<component>/asset-substitution.json` + `font-parity.json` — substitution declarations
+- `tmp/ref/<component>/bundle-extraction.json` — bundle analyzer output (from Phase 5d, if libraries detected); read this for sticky-mechanism decisions
+
+## Work — fill these gaps in the plan
+
+### 1. Component grouping refinement
+
+The deterministic plan lists each section as a separate component. Decide which sections share enough structure to belong inside an ds-components primitive (cards, accordions, list rows, badge groups, motion wrappers). Update `componentList` with a `dsComponent: "<name>"` field on entries that should consume a shared primitive, and add a top-level `dsComponentsRequired` array listing those primitives.
+
+### 2. Token names (anti-hallucination contract)
+
+Inspect `css/variables.txt` and `styles.json`. Extract semantic names for repeated color / spacing / radius / shadow / typography values. Output a top-level `tokens` object:
+
+```json
+"tokens": {
+  "colors": {"ink": "#110000", "cream": "#fdfbee", ...},
+  "spacing": {"section": "144px", "block": "48px", ...},
+  "radius": {"card": "24px"},
+  "shadows": {...},
+  "typography": {"display": "Die Grotesk D 700 / 88px / 0.95", ...}
+}
+```
+
+**Anti-hallucination contract**: every emitted value MUST literally appear in `css/variables.txt` or `styles.json`. Names are your judgment, values are not. Skip tokens with only one occurrence — they're not shared design system values.
+
+### 3. Library wiring per-component
+
+For each `componentList` entry, add `wires: []` with concrete library hooks the impl should use. Examples:
+
+- Hero with scroll-driven parallax → `["useScroll", "useTransform"]` (Framer Motion) or `["gsap.timeline + ScrollTrigger"]`
+- Footer with rotating cards → `["useEffect with setInterval"]` (vanilla React, no library)
+- IntroAnimation coordinator → `["AnimatePresence", "motion.div initial/animate"]`
+
+Only attach wires the detected library supports — never invent a hook from a library that wasn't installed.
+
+### 4. Signature effects
+
+Read `animations-detected.json` carefully. If you see per-character / staggered / scramble / dissolve / disintegrate / glyph-split patterns, name the effect explicitly in `signatureEffects[]`:
+
+```json
+"signatureEffects": [
+  {"selector": ".hero_title__abc", "name": "DisintegratingText", "component": "components/ui/DisintegratingText.tsx", "library": "framer-motion"}
+]
+```
+
+Common signatures:
+
+- Per-letter stagger fade → `DisintegratingText` / `SplitText`
+- Random-character cycling before reveal → `ScrambleText`
+- Word-by-word reveal → `WordRevealText`
+- Image dissolve via mask + blur → `MaskedDissolve`
+
+### 5. Pin / scroll-snap mapping (uses bundle-extraction.json)
+
+For each entry in `stickyStrategy`, decide:
+
+- True CSS sticky → `mechanism: "css-sticky"` (mirror position+top+zIndex)
+- GSAP ScrollTrigger.pin → `mechanism: "gsap-pin"` with start/end values copied from `bundle-extraction.json` (NOT just `bundle-map.json` which only reports detection, not parameter extraction)
+- Scroll-snap parent → `mechanism: "scroll-snap"` (CSS `scroll-snap-type` on parent)
+
+The deterministic plan defaults to `mirror-as-is`. Upgrade to `gsap-pin` only when `bundle-extraction.json` shows ScrollTrigger with concrete `pin: true` + `start`/`end` values.
+
+## Output
+
+Write the enriched plan back to the SAME path (`tmp/ref/<component>/generation-plan.json`). Preserve all fields from the deterministic base; only add or refine. Set `schemaVersion: 2` to indicate enrichment.
+
+End with a one-line summary printed to stdout:
+
+```
+✓ enrichment: <N> components | <M> ds-components | <K> tokens | <S> signature effects | mechanisms: [<sticky-types>]
+```
+
+## Don'ts
+
+- Don't run the pipeline / generate impl code yourself. Your output is JSON only.
+- Don't invent fields not grounded in the detection artifacts. If the artifact is empty/missing, the corresponding plan section stays empty.
+- Don't trim the deterministic base — refine, don't replace.
+- Don't emit a `tokens.colors.<name>: <value>` where `<value>` cannot be found in `css/variables.txt` or `styles.json`. The `pre-generate` gate validates this.
+
+## Anti-optimization rule (HARD)
+
+Never omit, downgrade, or coarsen a detected feature in the plan to avoid a downstream verification step. Specifically forbidden:
+- Removing a sticky / scroll-driven element from the plan because trajectory-compare would otherwise run.
+- Re-labeling a `scroll-scrub` or `sticky-pin` mechanism as `css-sticky` to skip motion verification.
+- Marking a transition `dynamic: true` (which suppresses AE diff) on entries that DO have a deterministic end frame, just to dodge section-compare.
+- Pruning items from `componentList` to shrink the diff surface.
+
+Detection artifacts (`stickyElements`, `scrollEngine`, `interactionsDetected`, `paid_features_detected`) define the verification surface. Omitting from spec/plan is treated as a gate failure equivalent to having no plan at all. If a detected feature genuinely doesn't need a verification (e.g. the sticky element is a footer copyright bar with no inner motion), document the reason in `notes[]` on the plan entry — do NOT silently drop it.
+
+## Asset substitution validation (loop-37 fix)
+
+When the enrichment encounters an existing `asset-substitution.json` with `images[]` entries, validate them:
+
+- Reject `replacement: "emoji-or-gradient"` (or any of `emoji` / `gradient` / `placeholder` / `stub`) — these are banned.
+- For each image substitution, the enrichment must check `download-log.json` (if exists) or `asset-transfer.json` to confirm an actual download attempt occurred. If not, mark the entry as `pending-download` in the plan and let the main agent retry download.
+- Public-domain sources (`.gov`, `wikimedia.org`, `wikipedia.org`, `commons.wikimedia.org`) must NEVER be substituted on copyright grounds. Agent self-assessed "looks USDA-licensed" is not evidence — `.gov` is by-default public domain.
+
+## Post-condition verification
+
+After writing back, the main agent (or Codex inline) MUST verify:
+
+1. `jq '.schemaVersion == 2' tmp/ref/<component>/generation-plan.json` returns true
+2. Every `tokens.colors`/`spacing`/etc. value is grep-able in `css/variables.txt` or `styles.json`
+3. Every `signatureEffects[].component` path is a valid impl target (e.g. `components/ui/<Name>.tsx`)
+
+If any verification fails, re-run enrichment with the failure as feedback.

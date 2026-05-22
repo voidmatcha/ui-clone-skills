@@ -243,6 +243,34 @@ except Exception:
   fi
 fi
 
+# Template-mode escape valve restriction (Common cheat pattern): wildcard "*"
+# only honored when paid-features.json has at least one finding (paid font /
+# paid SDK / paid asset). Otherwise the wildcard is downgraded to "no
+# substitution at all" — agent must declare per-section or download the
+# real asset. This blocks the "declare wholesale substitution to skip
+if [ "$SUBSTITUTION_ALL" = "1" ]; then
+  PAID_FEATURES_FILE="$DIR/paid-features.json"
+  has_paid=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(open('$PAID_FEATURES_FILE').read())
+    fonts = d.get('paidFonts', []) or []
+    sdks = d.get('paidSdks', []) or []
+    assets = d.get('paidAssets', []) or []
+    print(1 if (fonts or sdks or assets) else 0)
+except Exception:
+    print(0)
+" 2>/dev/null)
+  if [ "$has_paid" != "1" ]; then
+    echo "  ⛔ Wildcard substitution [\"*\"] REJECTED — paid-features.json shows no paid font / SDK / asset."
+    echo "    Wholesale substitution requires evidence (a paid foundry or commercial CDN). Without it,"
+    echo "    agent must either (a) download the asset for real, or (b) declare per-section substitution"
+    echo "    with concrete substitution targets (not 'emoji-or-gradient')."
+    SUBSTITUTION_ALL=0
+    SUBSTITUTION_PATTERNS=""
+  fi
+fi
+
 echo "═══ Section-Level Comparison ═══"
 echo "Original: $ORIG_URL"
 echo "Implementation: $IMPL_URL"
@@ -710,7 +738,16 @@ ENUMERATE_SECTIONS='(() => {
           const t = c.tagName.toLowerCase();
           return t === "section" || t === "main";
         });
-        if (hasStructuralChild) {
+        const structuralDescendantCount = Array.from(el.querySelectorAll("section, main"))
+          .filter(c => c !== el).length;
+        const hasWrappedStructuralDescendants = tag === "main"
+          && structuralDescendantCount >= 2
+          && h > window.innerHeight * 1.5;
+        // Webflow / single-main pages collapse 17+ visible sub-sections into one giant
+        const isJumboMain = tag === "main"
+          && el.children.length > 3
+          && h > window.innerHeight * 1.5;
+        if (hasStructuralChild || isJumboMain || hasWrappedStructuralDescendants) {
           collect(el, depth + 1);
         } else {
           containers.push({ el, tag, rect });
@@ -846,12 +883,13 @@ for i, s in enumerate(sections_sorted):
     if h_raw < _MIN_VISIBLE_HEIGHT:
         # Layout-only wrapper, not a content section — skip.
         continue
-    cls = (s.get("cls") or s.get("class") or "").strip()
+    cls = (s.get("cls") or s.get("className") or s.get("class") or "").strip()
     # Same fallback for id: extraction-time section-map uses `name`.
     sid = s.get("id") or s.get("name")
     tag = s.get("tag") or "section"
     y = int(s.get("top") or s.get("y") or 0)
     h = h_raw
+    x = int(s.get("left") or s.get("x") or 0)
     w = int(s.get("width") or s.get("w") or 1440)
     fp_seed = sid or cls or f"sec-{i}"
     # fingerprint: lowercase alphanumeric, take first 100 chars of the
@@ -868,10 +906,10 @@ for i, s in enumerate(sections_sorted):
         "className": cls[:80],
         "fingerprint": fp,
         "hasSvgText": False,
-        "rect": {"top": y, "left": 0, "width": w, "height": h},
-        "display": "block",
-        "gridCols": None,
-        "childCount": 0,
+        "rect": {"top": y, "left": x, "width": w, "height": h},
+        "display": s.get("display") or "block",
+        "gridCols": s.get("gridCols") or None,
+        "childCount": int(s.get("childCount") or 0),
     })
 # Fix 12 safety — if the h>=50 filter removed too many sections, the
 # resulting synthesis is degenerate. Fall back to the runtime enumeration
@@ -964,6 +1002,36 @@ def dedup_name(base, used):
     used.add(n)
     return n
 
+_GENERIC_TAG_TOKENS = {'section', 'header', 'footer', 'article', 'aside', 'main', 'nav', 'figure'}
+
+def norm_key(s):
+    raw = ' '.join(str(s.get(k) or '') for k in ('id', 'tag', 'className'))
+    tokens = [t for t in ''.join(c if c.isalnum() else ' ' for c in raw.lower()).split() if len(t) >= 4]
+    # validation run finding: generic HTML5 sectioning tags (section, footer,
+    # main, header, ...) appear in BOTH the tag string and many className
+    # strings (Tailwind utilities, BEM, CSS-Modules). When they are treated as
+    # identity tokens, every section element overlaps with every section element
+    # and the index-distance tie-breaker pairs ref/footer (index 1) with
+    # whatever section sits at impl index 0 -- usually hero. Strip them so
+    # identity overlap requires a real id or class match.
+    return [t for t in tokens if t not in _GENERIC_TAG_TOKENS]
+
+def has_identity_overlap(a, b):
+    a_tokens = set(norm_key(a))
+    b_tokens = set(norm_key(b))
+    return bool(a_tokens & b_tokens)
+
+semantic_key_paired = set()
+for r in ref:
+    candidates = [im for im in impl
+                  if im['index'] not in used_impl
+                  and has_identity_overlap(r, im)]
+    if candidates:
+        chosen = min(candidates, key=lambda im: abs(r['index'] - im['index']))
+        preferred_impl[r['index']] = chosen['index']
+        used_impl.add(chosen['index'])
+        semantic_key_paired.add(r['index'])
+
 # ── PRE-PASS: className exact match ──
 # Greedy fingerprint pairing breaks down when the ref has sections with no
 # impl counterpart (cookie banners, third-party overlays) — they steal the
@@ -975,6 +1043,8 @@ def class_tokens(s):
     return [t for t in (s or '').split() if t and len(t) >= 4]
 
 for r in ref:
+    if r['index'] in preferred_impl:
+        continue  # already paired by semantic-key pre-pre-pass
     r_tokens = set(class_tokens(r.get('className')))
     if not r_tokens:
         continue
@@ -992,12 +1062,15 @@ for r in ref:
         anchored = next((x for x in impl if x['index'] == preferred_impl[r['index']]), None)
         if anchored:
             name = dedup_name(make_name(r, 'section'), used_names)
+            pairing_kind = ('semantic-key'
+                            if r['index'] in semantic_key_paired
+                            else 'className-exact')
             entry = {
                 'name': name,
-                'score': 1.0,  # className-anchored pair
+                'score': 1.0,  # identity-anchored pair
                 'ref': r,
                 'impl': anchored,
-                'pairing': 'className-exact',
+                'pairing': pairing_kind,
             }
             matches.append(entry)
             continue
@@ -1187,6 +1260,11 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 SUBSTITUTED_COUNT=0
+# NON_STRUCTURAL_PASS_COUNT tracks ONLY real pixel-level passes (ok/minor AE).
+# STRUCTURAL_ONLY (substituted) rows DO NOT increment this — they pass the
+# layout sniff test but skip pixel diff, so they're not visual evidence on
+# their own. Final pass condition (line 1503) requires non-structural evidence
+NON_STRUCTURAL_PASS_COUNT=0
 
 # Build a lookup of wrapper-only sections so the AE loop can skip them.
 # These have no ref content of their own (sticky-image holders, spacer wrappers).
@@ -1282,14 +1360,32 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   # references, scroll-trigger wiring) before more iteration is useful.
   THRESHOLD="${SECTION_THRESHOLD:-2000}"
   SATURATION="${AE_SATURATION:-800000}"
+  DSSIM_FALLBACK="${SECTION_DSSIM_FALLBACK:-1}"
+  DSSIM_PASS_MAX="${SECTION_DSSIM_PASS_MAX:-0.015}"
+  DSSIM_SCORE=""
+  if [ "$DSSIM_FALLBACK" = "1" ] \
+     && [ "$AE_PER_MPX" -gt "$THRESHOLD" ] \
+     && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
+     && command -v dssim >/dev/null 2>&1; then
+    DSSIM_SCORE=$(dssim "$REF_IMG" "$IMPL_IMG" 2>/dev/null | awk '{print $1}')
+  fi
   if [ "$AE_PER_MPX" -le 500 ]; then
     STATUS="✅"
     SEV="ok"
     PASS_COUNT=$((PASS_COUNT + 1))
+    NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
   elif [ "$AE_PER_MPX" -le "$THRESHOLD" ]; then
     STATUS="✅"
     SEV="minor"
     PASS_COUNT=$((PASS_COUNT + 1))
+    NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+  elif [ -n "$DSSIM_SCORE" ] \
+       && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
+       && awk -v d="$DSSIM_SCORE" -v max="$DSSIM_PASS_MAX" 'BEGIN{exit !(d+0 <= max+0)}'; then
+    STATUS="✅"
+    SEV="pass-by-dssim"
+    PASS_COUNT=$((PASS_COUNT + 1))
+    NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
   elif [ "$AE_PER_MPX" -le $((THRESHOLD * 10)) ]; then
     STATUS="❌"
     SEV="major"
@@ -1492,8 +1588,62 @@ fi
 # after calling mark_passed("section-compare") and recording "done" in pipeline-state.json.
 # section-compare.sh intentionally does NOT remove the marker here, so the Stop hook
 # can still fire once more to record the completed state.
-if [ "$FAIL_COUNT" -eq 0 ] && [ "$SKIP_COUNT" -eq 0 ]; then
-  echo "  ✓ Section-compare passed — Stop hook will record completion on next write."
-elif [ "$SKIP_COUNT" -gt 0 ]; then
-  echo "  ⚠  $SKIP_COUNT section(s) missing from impl — implement them and re-run section-compare.sh."
+TOTAL_ROWS=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
+# Template-mode escape valve (Common cheat pattern): when asset-substitution.json
+# declares wholesale wildcard substitution ("*"), the agent has explicitly
+# committed to a design-template clone where copy/imagery are intentionally
+# different. The 50% NON_STRUCTURAL_PASS rule has no pass path in that mode
+# (every row is STRUCTURAL_ONLY by construction) — so bypass it. The
+# substitution declaration itself IS the up-front contract; gaming protection
+# only matters when substitution is partial (per-section, not wildcard).
+if [ "$SUBSTITUTION_ALL" = "1" ]; then
+  # Coverage safeguard (Sonnet-Opus comparison finding): even with template
+  # mode (wildcard substitution + paid-features evidence), require minimum
+  # section-map coverage. Block the "agent gets a 2-section ref capture by
+  # luck, declares wildcard substitution, gate passes" path. Threshold:
+  # TOTAL_ROWS must be ≥ ceil(N/2) where N = section-map.json section count.
+  SECTION_MAP="$DIR/section-map.json"
+  EXPECTED_SECTIONS=$(python3 -c "
+import json
+try:
+    d = json.loads(open('$SECTION_MAP').read())
+    if isinstance(d, dict):
+        sections = d.get('sections', [])
+    elif isinstance(d, list):
+        sections = d
+    else:
+        sections = []
+    print(len(sections))
+except Exception:
+    print(0)
+" 2>/dev/null)
+  REQUIRED_COVERAGE=$(( (EXPECTED_SECTIONS + 1) / 2 ))
+  TOTAL_TEMPLATE=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
+  if [ "$EXPECTED_SECTIONS" -ge 4 ] && [ "$TOTAL_TEMPLATE" -lt "$REQUIRED_COVERAGE" ]; then
+    echo "  ⛔ Template mode REJECTED — only ${TOTAL_TEMPLATE} sections compared but section-map.json has ${EXPECTED_SECTIONS} (need ≥${REQUIRED_COVERAGE})."
+    echo "    Wholesale substitution does not excuse low ref-capture coverage. Re-capture ref or fix the matcher."
+    exit 1
+  fi
+  if [ "$FAIL_COUNT" -eq 0 ] && [ "$SKIP_COUNT" -eq 0 ]; then
+    echo "  ✓ Section-compare passed (template mode — wildcard substitution, coverage ${TOTAL_TEMPLATE}/${EXPECTED_SECTIONS}) — Stop hook will record completion on next write."
+  elif [ "$SKIP_COUNT" -gt 0 ]; then
+    echo "  ⚠  $SKIP_COUNT section(s) missing from impl — implement them and re-run section-compare.sh."
+  fi
+else
+  # Require non-structural pixel evidence on at least ceil(TOTAL_ROWS / 2) rows.
+  # This prevents an agent from satisfying section-compare with mostly
+  # STRUCTURAL_ONLY (substituted) rows when only a couple of sections actually
+  # render real pixel-matching content. STRUCTURAL_ONLY is a deferral, not
+  # evidence of visual fidelity.
+  REQUIRED_NS_PASS=$(( (TOTAL_ROWS + 1) / 2 ))
+  if [ "$FAIL_COUNT" -eq 0 ] && [ "$SKIP_COUNT" -eq 0 ] && [ "$NON_STRUCTURAL_PASS_COUNT" -ge "$REQUIRED_NS_PASS" ]; then
+    echo "  ✓ Section-compare passed — Stop hook will record completion on next write."
+  elif [ "$FAIL_COUNT" -eq 0 ] && [ "$SKIP_COUNT" -eq 0 ]; then
+    echo "  ⚠  Section-compare INCOMPLETE: only ${NON_STRUCTURAL_PASS_COUNT}/${TOTAL_ROWS} rows have non-structural pixel passes (need ≥${REQUIRED_NS_PASS})."
+    echo "    STRUCTURAL_ONLY rows skip pixel diff — they are not visual evidence."
+    echo "    Implement remaining sections with real content (matching ref fonts/assets) or remove the substitution patterns."
+    exit 1
+  elif [ "$SKIP_COUNT" -gt 0 ]; then
+    echo "  ⚠  $SKIP_COUNT section(s) missing from impl — implement them and re-run section-compare.sh."
+  fi
 fi

@@ -119,6 +119,36 @@ def test_check_strict_done_tree_diff_fail_blocks(tmp_path: Path) -> None:
     assert any("tree-diff status='fail'" in u for u in unmet)
 
 
+def test_check_strict_done_tree_diff_unpaired_majority_blocks(tmp_path: Path) -> None:
+    """status=pass with most rows unpaired is not a valid tree-diff pass."""
+    ref, impl = _make_ref_dir(tmp_path)
+    _write_state(ref, "done")
+    (impl / "src" / "app").mkdir(parents=True)
+    (impl / "src" / "app" / "page.tsx").write_text(
+        "\n".join(f"// line {i}" for i in range(100)) + "\n",
+        encoding="utf-8",
+    )
+    comps = impl / "src" / "components"
+    comps.mkdir()
+    for n in ("Hero", "Nav", "Footer", "Stats", "Cta"):
+        (comps / f"{n}.tsx").write_text(f"export default function {n}() {{ return null; }}\n")
+    (ref / "sections").mkdir()
+    (ref / "sections" / "result.txt").write_text(
+        "| hero | 100 | 50 | ok | ✅ |\n"
+        "| footer | 200 | 100 | minor | ✅ |\n"
+        "**Result: 2 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    (ref / "tree-diff-status.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "elements_walked": 90,
+        "counts": {"critical": 0, "major": 0, "layout-major": 0, "minor": 0, "layout-minor": 0, "ok": 10, "unpaired": 80},
+        "errorCount": 0, "reason": "all paired elements within tolerance",
+    }))
+    done, unmet = benchmark_harness.check_strict_done(ref, impl)
+    assert not done
+    assert any("tree-diff unpaired=80 ok=10" in u for u in unmet)
+
+
 # ── Prompt building ──────────────────────────────────────────────────────
 
 

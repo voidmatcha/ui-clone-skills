@@ -27,6 +27,15 @@ GATE_ORDER: list[str] = [
 ]
 
 
+def prerequisite_gates(gate: str) -> list[str]:
+    """Return gates that must be completed before `gate` can pass."""
+    if gate == "done":
+        return list(GATE_ORDER)
+    if gate not in GATE_ORDER:
+        return []
+    return GATE_ORDER[:GATE_ORDER.index(gate)]
+
+
 @dataclass
 class PipelineState:
     component: str = ""
@@ -46,6 +55,11 @@ class PipelineState:
     # loops stop iterating on an unwinnable target instead of grinding to
     # max-iterations.
     unclonable_reasons: list[dict] = field(default_factory=list)
+    # Absolute path to the impl tree this pipeline run targets. Set
+    # by pipeline.execute_extract once at Phase 1 start; consumed by
+    # find-impl-root.sh as a universal layout-independent resolver.
+    # Empty string when not yet established (pre-extraction).
+    impl_root: str = ""
 
     @classmethod
     def load(cls, ref_dir: Path) -> PipelineState:
@@ -63,12 +77,58 @@ class PipelineState:
                 last_updated=data.get("last_updated", ""),
                 gate_fail_counts=data.get("gate_fail_counts", {}) or {},
                 unclonable_reasons=data.get("unclonable_reasons", []) or [],
+                # Accept implRoot OR impl_root from on-disk JSON for
+                # forward-compat with the camelCase field find-impl-
+                # root.sh reads.
+                impl_root=(
+                    data.get("implRoot")
+                    or data.get("impl_root")
+                    or ""
+                ),
             )
         except json.JSONDecodeError:
             return cls(component=ref_dir.name)
         except OSError as exc:
             print(f"ui-clone-skills: Cannot read {path}: {exc}", file=sys.stderr)
             return cls(component=ref_dir.name)
+
+    def save(self, ref_dir: Path) -> None:
+        """Write the current in-memory state to pipeline-state.json atomically.
+
+        Used by callers that mutate fields outside of `mark_passed` /
+        `mark_failed` / `record_unclonable` (e.g. `impl_root` write at
+        Phase 1 start in `pipeline.execute_phases`).
+        """
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if not self.started_at:
+            self.started_at = now
+        self.last_updated = now
+
+        path = ref_dir / "pipeline-state.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "component": self.component,
+                    "started_at": self.started_at,
+                    "completed_steps": self.completed_steps,
+                    "current_gate": self.current_gate,
+                    "last_updated": self.last_updated,
+                    "gate_fail_counts": self.gate_fail_counts,
+                    "unclonable_reasons": self.unclonable_reasons,
+                    # Emit both keys so find-impl-root.sh (camelCase
+                    # `implRoot`) and any internal reader (snake_case
+                    # `impl_root`) both work. Omit when empty to keep
+                    # legacy state files compact.
+                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
+                       if self.impl_root else {}),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
 
     def demote_to(self, gate: str, ref_dir: Path) -> None:
         """Reset current_gate back to `gate` and remove it (and later gates) from completed.
@@ -114,6 +174,12 @@ class PipelineState:
                     "last_updated": self.last_updated,
                     "gate_fail_counts": self.gate_fail_counts,
                     "unclonable_reasons": self.unclonable_reasons,
+                    # Emit both keys so find-impl-root.sh (camelCase
+                    # `implRoot`) and any internal reader (snake_case
+                    # `impl_root`) both work. Omit when empty to keep
+                    # legacy state files compact.
+                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
+                       if self.impl_root else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -122,15 +188,33 @@ class PipelineState:
         )
         tmp.replace(path)
 
+    def missing_prerequisites(self, gate: str) -> list[str]:
+        """Return prerequisite gates absent from completed_steps."""
+        completed = set(self.completed_steps)
+        return [g for g in prerequisite_gates(gate) if g not in completed]
+
+    def _normalize_completed_steps(self) -> None:
+        """Keep known gates in canonical order and preserve unknown extras last."""
+        seen = set(self.completed_steps)
+        ordered = [g for g in GATE_ORDER if g in seen]
+        extras = [g for g in self.completed_steps if g not in GATE_ORDER]
+        self.completed_steps = ordered + extras
+
     def mark_passed(self, gate: str, ref_dir: Path) -> None:
         """Record gate as passed and advance current_gate. Writes file atomically.
 
         Skips the write when the gate was already recorded and current_gate
         would not advance — avoids unnecessary filesystem churn on re-runs.
         """
+        if gate not in GATE_ORDER:
+            return
+        if self.missing_prerequisites(gate):
+            return
+
         already_recorded = gate in self.completed_steps
         if not already_recorded:
             self.completed_steps.append(gate)
+            self._normalize_completed_steps()
 
         # Reset the consecutive-fail counter for this gate now that it passed.
         fail_reset = self.gate_fail_counts.pop(gate, 0) > 0
@@ -178,6 +262,12 @@ class PipelineState:
                     "last_updated": self.last_updated,
                     "gate_fail_counts": self.gate_fail_counts,
                     "unclonable_reasons": self.unclonable_reasons,
+                    # Emit both keys so find-impl-root.sh (camelCase
+                    # `implRoot`) and any internal reader (snake_case
+                    # `impl_root`) both work. Omit when empty to keep
+                    # legacy state files compact.
+                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
+                       if self.impl_root else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -216,6 +306,12 @@ class PipelineState:
                     "last_updated": self.last_updated,
                     "gate_fail_counts": self.gate_fail_counts,
                     "unclonable_reasons": self.unclonable_reasons,
+                    # Emit both keys so find-impl-root.sh (camelCase
+                    # `implRoot`) and any internal reader (snake_case
+                    # `impl_root`) both work. Omit when empty to keep
+                    # legacy state files compact.
+                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
+                       if self.impl_root else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -263,6 +359,12 @@ class PipelineState:
                     "last_updated": self.last_updated,
                     "gate_fail_counts": self.gate_fail_counts,
                     "unclonable_reasons": self.unclonable_reasons,
+                    # Emit both keys so find-impl-root.sh (camelCase
+                    # `implRoot`) and any internal reader (snake_case
+                    # `impl_root`) both work. Omit when empty to keep
+                    # legacy state files compact.
+                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
+                       if self.impl_root else {}),
                 },
                 ensure_ascii=False,
                 indent=2,

@@ -534,3 +534,58 @@ done
 ```
 
 A spike of `sw > w` at exactly `<bp>` (with `<bp>-1` and `<bp>+1` clean) is the unambiguous signature.
+
+---
+
+## Sub-agent / inline-diagnosis contract (Phase 4 gate failures)
+
+This file is the catalog. Both Claude Code (via `mismatch-diagnoser` sub-agent at `.claude-plugin/agents/mismatch-diagnoser.md`) and Codex (inline at any Phase 4 gate-failure point per `.codex-plugin/plugin.json defaultPrompt`) classify failures using the catalog above and emit a structured diagnosis JSON.
+
+### Additional root-cause classes (beyond A-J)
+
+The A-J classes cover visual / layout mismatches surfaced by AE, computed-diff, and viewport probes. The classes below cover gate-sidecar failure modes detected by `post-implement` checks:
+
+| Class | Symptom | Typical fix |
+|---|---|---|
+| **K. Stub function** | `generation-completeness` reports empty body | Fill the component body with real JSX |
+| **L. Missing image asset** | `asset-transfer-check` reports 404 | Copy from `tmp/ref/<component>/static/` to `impl/public/` |
+| **M. Missing library install** | `bundle-impl-coverage` reports library detected but not in package.json deps | Install package |
+| **N. Wrong library wiring** | library installed but not used (e.g. `framer-motion` in deps but no `motion.*` calls) | Wire per `generation-plan.json` `componentList[].wires` |
+| **O. Missing component** | impl has 0 of a section that ref has 1 | Generate missing component, add to `App.tsx` |
+| **P. Wrong text content** | text differs (typo / placeholder / truncation) | Replace from `structure.json` / `extracted.json` |
+| **Q. Wrong sticky rendering** | Same nav rendered N times (one per section that shows it in screenshots) | Move sticky element to App level, render once |
+| **R. Wrong animation initial state** | section appears already-revealed; `animation-init-styles.json` shows entry transform | Set initial state via library `initial` / GSAP `from` / style |
+
+### Diagnostic workflow
+
+1. **Read the check sidecar**: e.g. `dom-mirror-check.json`, `text-fidelity-check.json`, `bundle-impl-coverage.json`, `image-fidelity-check.json`, `transition-spec-coverage.json`. Identify the specific delta.
+2. **Find the matching impl source location**: grep `impl/src/` for the affected text/tag/library.
+3. **Find the matching ref artifact**: where does the ref declare this element? `structure.json`, `extracted.json`, `bundle-map.json`, `interactions-detected.json`, etc.
+4. **Classify**: pick ONE root-cause class from the A-J or K-R catalog. Don't return multiple primary causes.
+
+### Output (Claude Code sub-agent path AND Codex inline path)
+
+```json
+{
+  "schemaVersion": 1,
+  "failingGate": "<gate>",
+  "failingCheck": "<check>",
+  "rootCauseClass": "<A | B | ... | R>",
+  "hypothesis": "<one sentence>",
+  "evidence": {
+    "refArtifact": "<path:JSONPointer | path:line>",
+    "implFile": "<path:line>",
+    "deltaSummary": "<specific value differs>"
+  },
+  "suggestedFix": "<concise instruction the main agent can act on>",
+  "confidence": "<high | medium | low>"
+}
+```
+
+### Don'ts
+
+- Don't apply fixes (Claude path); the main agent applies. Codex inline: diagnose first, then apply — never apply before classifying.
+- Don't return multiple primary causes. If 2+ classes contribute, pick the highest-severity one and note alternates in `alternates: []`.
+- Don't speculate when evidence is missing. Return `confidence: "low"` with a `needMore: [...]` array of artifacts you'd need to read.
+- Don't return `rootCauseClass: "no-failure"` unless the sidecar's `status` field is actually `"pass"` — re-read carefully.
+- **Don't recommend a fix that removes a detected feature from spec/plan to dodge the failing check.** If `transition-spec-coverage` fails because a sticky / scroll-scrub entry has no impl artifact, the fix is "wire the entry" (Class N — wrong library wiring), never "delete the spec entry." Treat any suggestion that shrinks the verification surface as a gate-game and refuse to emit it.

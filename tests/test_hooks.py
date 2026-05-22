@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +119,12 @@ def _populate_pre_generate_artifacts(ref_dir: Path) -> None:
         json.dumps({"sections": [], "url": "https://example.com"})
     )
     os.utime(ref_dir / "extracted.json", (extracted_time, extracted_time))
+
+    # generation-plan.json — required by gate_pre_generate (research1 fix)
+    (ref_dir / "generation-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "componentList": [], "guidance": {}})
+    )
+    os.utime(ref_dir / "generation-plan.json", (extracted_time, extracted_time))
 
     provenance_artifacts = [
         "extracted.json",
@@ -349,9 +356,12 @@ class TestSectionGate:
                         "reference",
                         "extraction",
                         "bundle",
+                        "paid-features",
                         "spec",
                         "pre-generate",
                         "post-implement",
+                        "boundary",
+                        "font-parity",
                     ],
                     "current_gate": "section-compare",
                     "last_updated": "2026-01-01T01:00:00Z",
@@ -391,9 +401,12 @@ class TestSectionGate:
                         "reference",
                         "extraction",
                         "bundle",
+                        "paid-features",
                         "spec",
                         "pre-generate",
                         "post-implement",
+                        "boundary",
+                        "font-parity",
                     ],
                     "current_gate": "section-compare",
                     "last_updated": "2026-01-01T01:00:00Z",
@@ -437,9 +450,12 @@ class TestSectionGate:
                         "reference",
                         "extraction",
                         "bundle",
+                        "paid-features",
                         "spec",
                         "pre-generate",
                         "post-implement",
+                        "boundary",
+                        "font-parity",
                     ],
                     "current_gate": "section-compare",
                     "last_updated": "2026-01-01T01:00:00Z",
@@ -709,9 +725,12 @@ class TestSectionGateFullEnforcement:
                         "reference",
                         "extraction",
                         "bundle",
+                        "paid-features",
                         "spec",
                         "pre-generate",
                         "post-implement",
+                        "boundary",
+                        "font-parity",
                     ],
                     "current_gate": "section-compare",
                     "last_updated": "2026-01-01T01:00:00Z",
@@ -740,6 +759,35 @@ class TestSectionGateFullEnforcement:
             "post-done-edit drift hole; stale-marker guard cleans up after 3 days)"
         )
 
+    def test_unclonable_reasons_releases_stop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Loop-41 finding: pipeline-state.json unclonable_reasons must release
+        Stop, symmetric to `python -m ui_clone.goal --check-done` exit 2.
+        Without this short-circuit, Stop fires every turn while the goal harness
+        signals ABORT — external loops cannot terminate cleanly.
+        """
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        (ref_dir / ".ui-re-active").touch()
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps(
+                {
+                    "component": "comp",
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "completed_steps": ["reference", "extraction"],
+                    "current_gate": "section-compare",
+                    "last_updated": "2026-01-01T01:00:00Z",
+                    "gate_fail_counts": {"section-compare": 10},
+                    "unclonable_reasons": [
+                        {"gate": "section-compare", "reason": "hard-cap reached"}
+                    ],
+                }
+            )
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        assert exit_code == 0
+        assert "block" not in output.lower()
+
     def test_section_compare_blocks_when_result_txt_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """current_gate=section-compare with no result.txt → block, even if diff PNGs exist."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
@@ -754,9 +802,12 @@ class TestSectionGateFullEnforcement:
                         "reference",
                         "extraction",
                         "bundle",
+                        "paid-features",
                         "spec",
                         "pre-generate",
                         "post-implement",
+                        "boundary",
+                        "font-parity",
                     ],
                     "current_gate": "section-compare",
                     "last_updated": "2026-01-01T01:00:00Z",
@@ -854,6 +905,119 @@ class TestSectionGateFullEnforcement:
         assert exit_code == 0
         assert "block" not in output.lower()
 
+    def test_impl_done_state_blocks_without_verify_stamp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """impl/ exists → clean sections alone is not enough; pipeline verify must stamp."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_done_state(ref_dir)
+        sections = ref_dir / "sections"
+        sections.mkdir()
+        (sections / "result.txt").write_text("| hero | ✅ PASS | ... |\n", encoding="utf-8")
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text("export default function App(){return <main />}", encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "no verify-stamp.json" in reason
+        assert "Build success" in reason
+        assert "spot checks" in reason
+
+    def test_verify_stamp_blocks_when_impl_changed_after_verify(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Loop feedback: a fresh stamp must not release Stop after later JSX/CSS/asset edits."""
+        import datetime
+        import time
+
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_done_state(ref_dir)
+        sections = ref_dir / "sections"
+        sections.mkdir()
+        (sections / "result.txt").write_text("| hero | ✅ PASS | ... |\n", encoding="utf-8")
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        app = src / "App.tsx"
+        app.write_text("export default function App(){return <main />}", encoding="utf-8")
+
+        stamp = ref_dir / "verify-stamp.json"
+        stamp.write_text(
+            json.dumps(
+                {
+                    "verifiedAt": datetime.datetime.now(datetime.UTC).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    "gatesPassed": [
+                        "spec",
+                        "post-implement",
+                        "boundary",
+                        "font-parity",
+                        "section-compare",
+                    ],
+                    "stampedBy": "pipeline.execute_verify",
+                }
+            ),
+            encoding="utf-8",
+        )
+        now = time.time()
+        os.utime(stamp, (now - 10, now - 10))
+        os.utime(app, (now, now))
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "impl changed after verify" in reason
+        assert "App.tsx" in reason
+
+    def test_verify_stamp_blocks_when_not_canonical_pipeline_stamp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hand-written/fake stamp must not release Stop."""
+        import datetime
+        import time
+
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_done_state(ref_dir)
+        sections = ref_dir / "sections"
+        sections.mkdir()
+        (sections / "result.txt").write_text("| hero | ✅ PASS | ... |\n", encoding="utf-8")
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        app = src / "App.tsx"
+        app.write_text("export default function App(){return <main />}", encoding="utf-8")
+
+        stamp = ref_dir / "verify-stamp.json"
+        stamp.write_text(
+            json.dumps(
+                {
+                    "verifiedAt": datetime.datetime.now(datetime.UTC).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    "gatesPassed": ["post-implement"],
+                    "stampedBy": "manual",
+                }
+            ),
+            encoding="utf-8",
+        )
+        now = time.time()
+        os.utime(app, (now - 10, now - 10))
+        os.utime(stamp, (now, now))
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "canonical" in reason
+        assert "pipeline.execute_verify" in reason
+
     def test_unknown_gate_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """current_gate with unknown value → fail-closed (block)."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
@@ -911,7 +1075,7 @@ class TestNestedGitRepoRoot:
         assert result == sub
 
     def test_git_root_with_tmp_ref_is_returned_directly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """git root with tmp/ref/ is returned directly."""
+        """git root with tmp/ref/ is returned when no cwd ancestor has tmp/ref/."""
         import ui_clone.hooks._common as _common
         from ui_clone.hooks._common import find_project_root
 
@@ -919,6 +1083,12 @@ class TestNestedGitRepoRoot:
         monkeypatch.setattr(_common, "_cached_project_root", None)
 
         (tmp_path / "tmp" / "ref").mkdir(parents=True)
+        # chdir to a sibling so the cwd walk does NOT find the tmp_path/tmp/ref/
+        # — otherwise the (new) cwd-first precedence would return the walk-found
+        # root before git rev-parse fires.
+        sibling = tmp_path.parent / f"{tmp_path.name}-sibling"
+        sibling.mkdir(exist_ok=True)
+        monkeypatch.chdir(sibling)
 
         def fake_run(cmd: Any, **kwargs: Any) -> Any:
             class R:
@@ -932,6 +1102,47 @@ class TestNestedGitRepoRoot:
 
         result = find_project_root()
         assert result == tmp_path
+
+    def test_scratch_loop_root_preferred_over_env_and_git(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Loop-56/57 root-cause regression: when nested session runs from a
+        scratch/loop-N/ ancestor with its own tmp/ref/, that loop root MUST
+        win over both $CLAUDE_PROJECT_DIR and the git root. External
+        diagnoses of loop-8/56/57 traced "passed but actually broken"
+        Stop-hook decisions to env_root preempting the cwd walk; this test
+        pins the corrected ordering.
+        """
+        import ui_clone.hooks._common as _common
+        from ui_clone.hooks._common import find_project_root
+
+        monkeypatch.setattr(_common, "_cached_project_root", None)
+
+        # Fake repo root with stale tmp/ref/
+        repo_root = tmp_path / "repo"
+        (repo_root / "tmp" / "ref").mkdir(parents=True)
+        # Fake scratch loop ancestor with its OWN tmp/ref/
+        loop_root = tmp_path / "repo" / "scratch" / "loop-99"
+        (loop_root / "tmp" / "ref" / "realfood-main").mkdir(parents=True)
+        # cwd is the impl/ subdir inside the loop — typical nested-session layout
+        impl_dir = loop_root / "impl" / "src" / "components"
+        impl_dir.mkdir(parents=True)
+        monkeypatch.chdir(impl_dir)
+        # Env var points to the repo (as if launched with --plugin-dir repo)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_root))
+
+        def fake_run(cmd: Any, **kwargs: Any) -> Any:
+            class R:
+                returncode = 0
+                stdout = str(repo_root) + "\n"
+
+            return R()
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        result = find_project_root()
+        assert result == loop_root, (
+            f"scratch loop root must win over env/git. got: {result}, "
+            f"expected: {loop_root}"
+        )
 
 
 class TestPostVerifyVerificationNotRun:
@@ -1255,9 +1466,12 @@ class TestSectionGateStateVerification:
                         "reference",
                         "extraction",
                         "bundle",
+                        "paid-features",
                         "spec",
                         "pre-generate",
                         "post-implement",
+                        "boundary",
+                        "font-parity",
                     ],
                     "current_gate": "section-compare",
                     "last_updated": "2026-01-01T01:00:00Z",
@@ -1500,6 +1714,41 @@ def _set_section_compare_state(ref_dir: Path) -> None:
     )
 
 
+def _set_extraction_state(ref_dir: Path) -> None:
+    """Write pipeline-state.json after reference pass, before extraction pass."""
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": ref_dir.name,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": ["reference"],
+                "current_gate": "extraction",
+                "last_updated": "2026-01-01T00:05:00Z",
+                "gate_fail_counts": {},
+                "unclonable_reasons": [],
+            }
+        )
+    )
+
+
+def _set_post_implement_state(ref_dir: Path) -> None:
+    """Write pipeline-state.json after pre-generate pass; implementation may run."""
+    from ui_clone.state import GATE_ORDER as _GO
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": ref_dir.name,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": list(_GO[:6]),
+                "current_gate": "post-implement",
+                "last_updated": "2026-01-01T01:30:00Z",
+                "gate_fail_counts": {},
+                "unclonable_reasons": [],
+            }
+        )
+    )
+
+
 def _write_passing_result_txt(ref_dir: Path) -> None:
     sections_dir = ref_dir / "sections"
     sections_dir.mkdir(exist_ok=True)
@@ -1553,6 +1802,78 @@ class TestPreBash:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
+
+    def test_section_compare_blocked_until_dom_mirror_check_passes(self, tmp_path: Path) -> None:
+        """section-compare is not useful if DOM mirror has already hard-failed/missing."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+        _set_section_compare_state(ref_dir)
+        (ref_dir / "verification-plan.json").write_text(json.dumps({
+            "requiredChecks": [
+                {
+                    "id": "dom-mirror-check",
+                    "produces": "dom-mirror-check.json",
+                    "severity": "block",
+                    "tier": "quick",
+                }
+            ]
+        }))
+
+        cmd = (
+            "bash skills/visual-debug/scripts/section-compare.sh "
+            f"https://example.com http://localhost:3000 sess {ref_dir}"
+        )
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(cmd),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "dom-mirror-check" in reason
+        assert "section-compare" in reason
+
+    def test_section_compare_blocked_until_proxy_mirror_check_passes(self, tmp_path: Path) -> None:
+        """Visual compare must not run before original-runtime proxy mirrors are ruled out."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+        _set_section_compare_state(ref_dir)
+        (ref_dir / "verification-plan.json").write_text(json.dumps({
+            "requiredChecks": [
+                {
+                    "id": "proxy-mirror-check",
+                    "produces": "proxy-mirror-check.json",
+                    "severity": "block",
+                    "tier": "quick",
+                }
+            ]
+        }))
+
+        cmd = (
+            "bash skills/visual-debug/scripts/section-compare.sh "
+            f"https://example.com http://localhost:3000 sess {ref_dir}"
+        )
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(cmd),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "proxy-mirror-check" in reason
+        assert "section-compare" in reason
 
     def test_git_commit_blocked_when_state_not_done(self, tmp_path: Path) -> None:
         """WIP + git commit + state != done → deny."""
@@ -1687,6 +2008,239 @@ class TestPreBash:
             stdin_data="not json{{{",
             env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
         )
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+
+class TestPreBashFreshFolderStaticMirror:
+    """Fresh natural prompts must enter the ui_clone pipeline, not mirror the
+    live site into impl/public and self-verify with HTTP checks."""
+
+    MODULE = "ui_clone.hooks.pre_bash"
+
+    def test_wget_static_mirror_blocked_before_pipeline(self, tmp_path: Path) -> None:
+        """No Phase 1 evidence + wget mirror into impl/public → deny."""
+        make_search_root(tmp_path)
+        target = tmp_path / "scratch" / "loop-60" / "impl" / "public"
+        target.mkdir(parents=True)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                f"wget -E -H -k -K -p -P {target} https://example.com/"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "fresh-folder enforcement" in reason
+        assert "pipeline driver FIRST" in reason
+
+    def test_curl_static_html_save_blocked_before_pipeline(self, tmp_path: Path) -> None:
+        """No Phase 1 evidence + curl writes live HTML to impl/public → deny."""
+        make_search_root(tmp_path)
+        target = tmp_path / "scratch" / "loop-60" / "impl" / "public" / "index.html"
+        target.parent.mkdir(parents=True)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(f"curl -L https://example.com -o {target}"),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "fresh-folder enforcement" in reason
+        assert "pipeline driver FIRST" in reason
+
+    def test_static_server_blocked_before_pipeline(self, tmp_path: Path) -> None:
+        """No Phase 1 evidence + serving impl/public → deny shallow mirror completion."""
+        make_search_root(tmp_path)
+        server = tmp_path / "scratch" / "loop-60" / "impl" / "server.js"
+        server.parent.mkdir(parents=True)
+        server.write_text("require('node:http').createServer().listen(3060)")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(f"node {server}"),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "fresh-folder enforcement" in reason
+        assert "pipeline driver FIRST" in reason
+
+    def test_static_mirror_tools_allowed_after_pipeline_evidence(self, tmp_path: Path) -> None:
+        """Once pipeline-state exists, fresh-folder enforcement no longer owns the command."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        _set_section_compare_state(ref_dir)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input("curl -I https://example.com"),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+
+class TestPreBashPipelineStateStaticMirror:
+    """A partial pipeline-state file must not unlock copied HTML mirrors."""
+
+    MODULE = "ui_clone.hooks.pre_bash"
+
+    def test_wget_static_mirror_blocked_while_extraction_incomplete(self, tmp_path: Path) -> None:
+        """Loop-61: current_gate=extraction + wget into impl/public → deny."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="realfood")
+        _set_extraction_state(ref_dir)
+        target = tmp_path / "scratch" / "loop-61" / "impl" / "public"
+        target.mkdir(parents=True)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                f"wget -E -H -k -K -p -P {target} https://example.com/"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "static mirror" in reason
+        assert "pipeline" in reason
+
+    def test_whole_document_outer_html_snapshot_blocked(self, tmp_path: Path) -> None:
+        """Loop-67: documentElement.outerHTML → tmp/ref/live.html is a static mirror seed."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="loop-67")
+        _set_extraction_state(ref_dir)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "agent-browser --session loop-67 eval "
+                '"(() => document.documentElement.outerHTML)()" '
+                "> tmp/ref/loop-67/live.html"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "whole-document" in reason
+        assert "static mirror" in reason
+
+    def test_section_outer_html_probe_allowed(self, tmp_path: Path) -> None:
+        """Per-section outerHTML is legitimate extraction evidence; only whole-doc is blocked."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="loop-67")
+        _set_extraction_state(ref_dir)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "agent-browser --session loop-67 eval "
+                '"(() => document.querySelector(\\\"section\\\")?.outerHTML || \\\"\\\")()" '
+                "> tmp/ref/loop-67/hero-section.html"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    def test_impl_index_html_from_live_snapshot_blocked(self, tmp_path: Path) -> None:
+        """Loop-67: live-unwrapped.html → impl/index.html is copied static HTML, not impl code."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="loop-67")
+        _set_post_implement_state(ref_dir)
+        target = tmp_path / "scratch" / "loop-67" / "impl" / "index.html"
+        target.parent.mkdir(parents=True)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "node <<'NODE'\n"
+                "const fs = require('fs');\n"
+                "const html = fs.readFileSync('tmp/ref/loop-67/live-unwrapped.html', 'utf8');\n"
+                f"fs.writeFileSync('{target}', html);\n"
+                "NODE"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "impl/index.html" in reason
+        assert "static mirror" in reason
+
+    def test_static_server_blocked_until_post_implement_gate(self, tmp_path: Path) -> None:
+        """Loop-61: serving copied public files before implementation gate → deny."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="realfood")
+        _set_extraction_state(ref_dir)
+        server = tmp_path / "scratch" / "loop-61" / "impl" / "server.js"
+        server.parent.mkdir(parents=True)
+        server.write_text("require('node:http').createServer().listen(3061)")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(f"node {server}"),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "post-implement" in reason
+
+    def test_dev_server_allowed_after_pre_generate_passes(self, tmp_path: Path) -> None:
+        """After current_gate=post-implement, dev-server commands are normal verification."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="realfood")
+        _set_post_implement_state(ref_dir)
+        server = tmp_path / "scratch" / "loop-61" / "impl" / "server.js"
+        server.parent.mkdir(parents=True)
+        server.write_text("require('node:http').createServer().listen(3061)")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(f"node {server}"),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
@@ -2083,3 +2637,418 @@ class TestPreBashBenchmarkSetupAlignment:
         assert result.stdout.strip() == "", (
             "UI_RE_SKIP_BASH_GATE=1 must short-circuit even the alignment check"
         )
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Loop-61 architectural fix — _resolve_impl_dir prefers per-ref-dir
+# impl_root over a single repo-root <project>/impl convention. Prevents
+# the cascade where a stray <repo>/impl symlink false-positives every
+# prior tmp/ref/<c>/ as "active" and fires the verify-stamp gate against
+# unrelated months-old clones.
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestResolveImplDir:
+    """`_resolve_impl_dir` must prefer per-ref-dir impl_root over the
+    legacy <repo>/impl convention. Direct import + call is fine here —
+    the function is pure and synchronous.
+    """
+
+    @staticmethod
+    def _import() -> Callable[..., Path | None]:
+        from ui_clone.hooks.section_gate import _resolve_impl_dir
+        return _resolve_impl_dir
+
+    def test_uses_pipeline_state_impl_root_when_set(self, tmp_path: Path) -> None:
+        """When pipeline-state.json records impl_root, use it — not the
+        convention path. Otherwise a rogue <repo>/impl symlink would
+        false-positive every ref dir.
+        """
+        _resolve_impl_dir = self._import()
+        ref_dir = tmp_path / "tmp" / "ref" / "loop-A"
+        ref_dir.mkdir(parents=True)
+        target_impl = tmp_path / "scratch" / "loop-A" / "impl"
+        target_impl.mkdir(parents=True)
+        rogue_impl = tmp_path / "impl"
+        rogue_impl.mkdir()
+
+        (ref_dir / "pipeline-state.json").write_text(json.dumps({
+            "component": "loop-A",
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_steps": [],
+            "current_gate": "reference",
+            "last_updated": "2026-01-01T00:00:00Z",
+            "implRoot": str(target_impl),
+            "impl_root": str(target_impl),
+        }))
+
+        resolved = _resolve_impl_dir(ref_dir, fallback_root=tmp_path)
+        assert resolved == target_impl, (
+            f"impl_root from pipeline-state must win over rogue {rogue_impl}; "
+            f"got {resolved}"
+        )
+
+    def test_uses_marker_file_when_state_missing(self, tmp_path: Path) -> None:
+        """`.impl-root` marker file is the fallback for ref dirs that have
+        no pipeline-state.json yet (Phase 0 or early Phase 1). Same
+        precedence as the state field — wins over <repo>/impl convention.
+        """
+        _resolve_impl_dir = self._import()
+        ref_dir = tmp_path / "tmp" / "ref" / "loop-B"
+        ref_dir.mkdir(parents=True)
+        target_impl = tmp_path / "scratch" / "loop-B" / "impl"
+        target_impl.mkdir(parents=True)
+        (tmp_path / "impl").mkdir()  # rogue convention symlink
+
+        (ref_dir / ".impl-root").write_text(str(target_impl) + "\n", encoding="utf-8")
+
+        resolved = _resolve_impl_dir(ref_dir, fallback_root=tmp_path)
+        assert resolved == target_impl, (
+            f".impl-root marker must win over convention <repo>/impl; got {resolved}"
+        )
+
+    def test_env_override_wins_over_state(self, tmp_path: Path) -> None:
+        """UI_CLONE_IMPL_ROOT is the operator override — wins over both the
+        state field and the marker. Lets nested-loop testing point at
+        whichever impl the operator is currently iterating on.
+        """
+        _resolve_impl_dir = self._import()
+        ref_dir = tmp_path / "tmp" / "ref" / "loop-C"
+        ref_dir.mkdir(parents=True)
+
+        env_target = tmp_path / "operator-override-impl"
+        env_target.mkdir()
+        state_target = tmp_path / "scratch" / "loop-C" / "impl"
+        state_target.mkdir(parents=True)
+
+        (ref_dir / "pipeline-state.json").write_text(json.dumps({
+            "component": "loop-C",
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_steps": [],
+            "current_gate": "reference",
+            "last_updated": "2026-01-01T00:00:00Z",
+            "implRoot": str(state_target),
+            "impl_root": str(state_target),
+        }))
+
+        old_env = os.environ.get("UI_CLONE_IMPL_ROOT")
+        os.environ["UI_CLONE_IMPL_ROOT"] = str(env_target)
+        try:
+            resolved = _resolve_impl_dir(ref_dir, fallback_root=tmp_path)
+        finally:
+            if old_env is None:
+                os.environ.pop("UI_CLONE_IMPL_ROOT", None)
+            else:
+                os.environ["UI_CLONE_IMPL_ROOT"] = old_env
+        assert resolved == env_target, resolved
+
+    def test_falls_back_to_convention_when_nothing_recorded(self, tmp_path: Path) -> None:
+        """No impl_root anywhere → fall back to <fallback_root>/impl.
+        Preserves legacy behavior for ref dirs that predate the field.
+        """
+        _resolve_impl_dir = self._import()
+        ref_dir = tmp_path / "tmp" / "ref" / "loop-D"
+        ref_dir.mkdir(parents=True)
+        convention = tmp_path / "impl"
+        convention.mkdir()
+
+        resolved = _resolve_impl_dir(ref_dir, fallback_root=tmp_path)
+        assert resolved == convention, resolved
+
+    def test_returns_none_when_no_impl_exists(self, tmp_path: Path) -> None:
+        """Returns None so callers can branch on "no impl is wired up"
+        — they should not silently grab a stale convention path or fire
+        the verify-stamp gate against an empty ref.
+        """
+        _resolve_impl_dir = self._import()
+        ref_dir = tmp_path / "tmp" / "ref" / "loop-E"
+        ref_dir.mkdir(parents=True)
+
+        resolved = _resolve_impl_dir(ref_dir, fallback_root=tmp_path)
+        assert resolved is None
+
+
+# ───────────────────────────────────────────────────────────────────────
+
+
+def _set_phase2_only_state(ref_dir: Path) -> None:
+    """Phase 2 ran but Phase 3+ has not. current_gate is still at the
+    bundle gate — pre-generate has not been reached. Mimics the loop-codex-5
+    state where extract-dom + dom-scaffold produced their artifacts but
+    bundle / paid-features / spec / pre-generate were never run.
+    """
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps({
+            "component": ref_dir.name,
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_steps": ["reference", "extraction"],
+            "current_gate": "bundle",
+            "last_updated": "2026-01-01T00:30:00Z",
+        })
+    )
+
+
+def _set_pre_generate_passed_state(ref_dir: Path) -> None:
+    """pre-generate gate has passed — scaffold commands should run unblocked."""
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps({
+            "component": ref_dir.name,
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_steps": [
+                "reference", "extraction", "bundle",
+                "paid-features", "spec", "pre-generate",
+            ],
+            "current_gate": "post-implement",
+            "last_updated": "2026-01-01T01:00:00Z",
+        })
+    )
+
+
+class TestImplScaffoldGate:
+    """Loop-codex-5 surfaced the gap: pre_generate fires on Write/Edit only;
+    `npm create vite`/`npx create-*` etc. route through Bash and produce
+    impl/ files without triggering the gate. pre_bash now blocks scaffold
+    commands until current_gate >= pre-generate. These fixtures pin the
+    behavior so a future refactor cannot silently reopen the bypass.
+    """
+    MODULE = "ui_clone.hooks.pre_bash"
+
+    def test_blocks_npm_create_vite_when_pre_generate_not_reached(
+        self, tmp_path: Path
+    ) -> None:
+        search_root = make_search_root(tmp_path)
+        ref = make_ref_dir(search_root, name="loop-codex-N")
+        # State mirrors loop-codex-5: Phase 2 ran but bundle gate still pending.
+        _set_phase2_only_state(ref)
+        # Phase 2 evidence file present — makes _is_fresh_state() return False
+        # so the existing fresh-folder guard would NOT catch this.
+        (ref / "regions.json").write_text(json.dumps({"sections": []}))
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "npm create vite@latest scratch/loop-codex-N/impl -- --template react"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        # Hook emits permission denial as JSON on stdout, exits 0.
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected block JSON, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        hook_out = data.get("hookSpecificOutput", {})
+        assert hook_out.get("permissionDecision") == "deny"
+        reason = hook_out.get("permissionDecisionReason", "")
+        assert "impl-scaffold gate" in reason, reason
+        assert "bundle" in reason, reason  # current gate label in message
+
+    def test_blocks_npx_create_react_app_too(self, tmp_path: Path) -> None:
+        search_root = make_search_root(tmp_path)
+        ref = make_ref_dir(search_root, name="loop-codex-N")
+        _set_phase2_only_state(ref)
+        (ref / "regions.json").write_text(json.dumps({"sections": []}))
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "npx create-vite scratch/loop-codex-N/impl --template react"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip(), "expected block JSON for npx create-vite"
+
+    def test_blocks_when_no_ref_dir_exists_at_all(self, tmp_path: Path) -> None:
+        """Strictest form of bypass: bootstrap impl/ before any Phase 1
+        evidence. Make tmp/ref exist but empty so _candidate_ref_roots
+        returns at least one root."""
+        make_search_root(tmp_path)
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "npm create vite@latest scratch/loop-bare/impl -- --template react"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, "expected block JSON when no ref dir exists"
+        data = json.loads(out)
+        reason = data.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        assert "impl-scaffold gate" in reason, reason
+
+    def test_allows_scaffold_after_pre_generate_passed(self, tmp_path: Path) -> None:
+        search_root = make_search_root(tmp_path)
+        ref = make_ref_dir(search_root, name="loop-codex-N")
+        _set_pre_generate_passed_state(ref)
+        (ref / "regions.json").write_text(json.dumps({"sections": []}))
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "npm create vite@latest scratch/loop-codex-N/impl -- --template react"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        # No block emitted — once pre-generate has passed, scaffolders are
+        # fine. The agent can iterate on the impl freely.
+        out = result.stdout.strip()
+        if out:
+            data = json.loads(out)
+            hook_out = data.get("hookSpecificOutput", {})
+            assert hook_out.get("permissionDecision") != "deny", (
+                f"scaffold should be allowed post-pre-generate, got: {hook_out}"
+            )
+
+    def test_allows_unrelated_npm_commands_when_phase2_only(
+        self, tmp_path: Path
+    ) -> None:
+        """npm install / npm run build / npm run lint are NOT scaffolders —
+        they manipulate an already-existing impl. The guard must not be
+        overbroad and flag every npm invocation.
+        """
+        search_root = make_search_root(tmp_path)
+        ref = make_ref_dir(search_root, name="loop-codex-N")
+        _set_phase2_only_state(ref)
+        (ref / "regions.json").write_text(json.dumps({"sections": []}))
+        for cmd in (
+            "npm install",
+            "npm run build",
+            "npm run lint",
+            "npm ls",
+        ):
+            result = run_hook(
+                self.MODULE,
+                stdin_data=_bash_input(cmd),
+                env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            )
+            assert result.returncode == 0
+            out = result.stdout.strip()
+            if out:
+                data = json.loads(out)
+                reason = (
+                    data.get("hookSpecificOutput", {})
+                    .get("permissionDecisionReason", "")
+                )
+                assert "impl-scaffold gate" not in reason, (
+                    f"impl-scaffold gate must not fire on `{cmd}`; got: {reason}"
+                )
+
+    def test_bypass_env_var_disables_scaffold_check(self, tmp_path: Path) -> None:
+        """UI_RE_SKIP_BASH_GATE=1 is the documented emergency escape; it
+        must short-circuit even the scaffold guard."""
+        search_root = make_search_root(tmp_path)
+        ref = make_ref_dir(search_root, name="loop-codex-N")
+        _set_phase2_only_state(ref)
+        (ref / "regions.json").write_text(json.dumps({"sections": []}))
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "npm create vite@latest scratch/loop-codex-N/impl -- --template react"
+            ),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_RE_SKIP_BASH_GATE": "1",
+            },
+        )
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        if out:
+            data = json.loads(out)
+            hook_out = data.get("hookSpecificOutput", {})
+            assert hook_out.get("permissionDecision") != "deny", (
+                f"UI_RE_SKIP_BASH_GATE=1 must short-circuit the scaffold "
+                f"guard; got: {hook_out}"
+            )
+
+
+    def test_blocks_scaffold_when_only_scratch_nested_ref_dir_exists(
+        self, tmp_path: Path
+    ) -> None:
+        """Loop-codex-7 closure: agent creates scratch/loop-codex-N/tmp/ref/<c>/
+        with a fake pipeline-state.json reporting done (e.g. by copying a prior
+        loop's completed ref dir into the scratch subtree). The closest-ancestor
+        walk in find_project_root finds the scratch-nested tmp/ref first; the
+        impl-scaffold gate must NOT accept that as evidence of pipeline progress.
+        """
+        repo = tmp_path
+        scratch_ref = repo / "scratch" / "loop-codex-N" / "tmp" / "ref" / "realfood"
+        scratch_ref.mkdir(parents=True)
+        # Fake completed state — exactly what codex-7 produced by copy.
+        (scratch_ref / "pipeline-state.json").write_text(json.dumps({
+            "component": "realfood",
+            "started_at": "2026-05-19T15:09:58Z",
+            "completed_steps": [
+                "reference", "extraction", "bundle", "paid-features",
+                "spec", "pre-generate", "post-implement", "boundary",
+                "font-parity", "section-compare",
+            ],
+            "current_gate": "done",
+            "last_updated": "2026-05-19T16:00:00Z",
+        }))
+        # No canonical <repo>/tmp/ref/ — the canonical surface is empty.
+        # The gate should block the scaffold because there's no canonical
+        # evidence the pipeline ran, even though the scratch-nested dir
+        # reports done.
+        (repo / "tmp" / "ref").mkdir(parents=True)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "npm create vite@latest scratch/loop-codex-N/impl -- --template react"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(repo)},
+        )
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, (
+            "expected block JSON; scratch-nested ref must not satisfy "
+            f"impl-scaffold gate. stderr: {result.stderr}"
+        )
+        data = json.loads(out)
+        hook_out = data.get("hookSpecificOutput", {})
+        assert hook_out.get("permissionDecision") == "deny", (
+            f"scratch-nested ref dir spoof must be rejected; got: {hook_out}"
+        )
+        reason = hook_out.get("permissionDecisionReason", "")
+        assert "impl-scaffold gate" in reason, reason
+
+    def test_allows_scaffold_when_canonical_repo_root_ref_at_pre_generate(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical legitimate flow: <repo>/tmp/ref/<c>/pipeline-state.json
+        shows pre-generate. Even if a scratch-nested ref also exists with
+        a higher gate, the canonical one is what counts (and the scaffold
+        runs because canonical reached pre-generate)."""
+        repo = tmp_path
+        canonical_ref = repo / "tmp" / "ref" / "loop-codex-N"
+        canonical_ref.mkdir(parents=True)
+        _set_pre_generate_passed_state(canonical_ref)
+        (canonical_ref / "regions.json").write_text(json.dumps({"sections": []}))
+        # Scratch-nested copy that the previous test rejected — here it
+        # exists, but the canonical ref is the source of truth.
+        scratch_ref = repo / "scratch" / "loop-codex-N" / "tmp" / "ref" / "realfood"
+        scratch_ref.mkdir(parents=True)
+        from ui_clone.state import GATE_ORDER as _GO_INLINE
+        (scratch_ref / "pipeline-state.json").write_text(json.dumps({
+            "component": "realfood",
+            "started_at": "2026-05-19T15:09:58Z",
+            "completed_steps": list(_GO_INLINE),
+            "current_gate": "done",
+            "last_updated": "2026-05-19T16:00:00Z",
+        }))
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(
+                "npm create vite@latest scratch/loop-codex-N/impl -- --template react"
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(repo)},
+        )
+        # canonical = pre-generate → scaffold allowed.
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        if out:
+            data = json.loads(out)
+            hook_out = data.get("hookSpecificOutput", {})
+            assert hook_out.get("permissionDecision") != "deny", (
+                f"canonical ref at pre-generate must allow scaffold; got: {hook_out}"
+            )

@@ -59,6 +59,10 @@ fi
 REPO_ROOT="$(cd "$(dirname "$_self")" && pwd)"
 MARKETPLACE_NAME="voidmatcha"
 PLUGIN_NAME="ui-clone-skills"
+CODEX_MARKETPLACE_NAME="local"
+CODEX_PERSONAL_MARKETPLACE="$HOME/.agents/plugins/marketplace.json"
+CODEX_PLUGIN_DIR="$HOME/plugins/$PLUGIN_NAME"
+CODEX_PLUGIN_SOURCE_PATH="./plugins/$PLUGIN_NAME"
 
 NO_DEPS=0
 NO_MARKETPLACE=0
@@ -244,6 +248,7 @@ loop_setup_notice() {
       # Append to ~/.codex/config.toml:
       [features]
       goals = true
+      plugin_hooks = true
       # Restart Codex, then in the REPL run:
       /goal Drive the ui-clone-skills pipeline for tmp/ref/<component> until python -m ui_clone.goal tmp/ref/<component> --check-done exits 0.
 
@@ -266,18 +271,146 @@ register_marketplace() {
   fi
 }
 
+prepare_codex_plugin_projection() {
+  # Codex installs a local plugin by copying its source path into a cache. Point
+  # that source at a small projection instead of the development checkout; the
+  # repo can contain local scratch runs, screenshots, venvs, and caches.
+  local plugin_dir="$CODEX_PLUGIN_DIR"
+  local resolved_repo
+  resolved_repo="$(cd "$REPO_ROOT" && pwd -P)"
+
+  if [ -L "$plugin_dir" ]; then
+    rm -f "$plugin_dir"
+  fi
+
+  if [ -d "$plugin_dir" ]; then
+    local resolved_plugin
+    resolved_plugin="$(cd "$plugin_dir" && pwd -P)"
+    if [ "$resolved_plugin" = "$resolved_repo" ]; then
+      err "Refusing to use Codex plugin projection at repo root: $plugin_dir"
+      return 1
+    fi
+  elif [ -e "$plugin_dir" ]; then
+    err "Codex plugin path exists but is not a directory: $plugin_dir"
+    return 1
+  fi
+
+  mkdir -p "$plugin_dir"
+
+  local item src dst
+  for item in .codex-plugin skills hooks scripts ui_clone docs AGENTS.md README.md pyproject.toml uv.lock LICENSE.txt; do
+    src="$REPO_ROOT/$item"
+    dst="$plugin_dir/$item"
+    if [ ! -e "$src" ]; then
+      continue
+    fi
+    mkdir -p "$(dirname "$dst")"
+    rm -rf "$dst"
+    ln -s "$src" "$dst"
+  done
+
+  ok "Codex plugin projection → $plugin_dir"
+}
+
+write_codex_personal_marketplace() {
+  local marketplace="$CODEX_PERSONAL_MARKETPLACE"
+  mkdir -p "$(dirname "$marketplace")"
+
+  if have python3; then
+    MARKETPLACE_PATH="$marketplace" PLUGIN_NAME="$PLUGIN_NAME" PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["MARKETPLACE_PATH"]).expanduser()
+plugin = os.environ["PLUGIN_NAME"]
+source_path = os.environ["PLUGIN_SOURCE_PATH"]
+entry = {
+    "name": plugin,
+    "source": {
+        "source": "local",
+        "path": source_path,
+    },
+    "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL",
+    },
+    "category": "Developer Tools",
+}
+
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        data = {}
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    data = {}
+data.setdefault("name", "local")
+interface = data.setdefault("interface", {})
+if isinstance(interface, dict):
+    interface.setdefault("displayName", "Local Plugins")
+else:
+    data["interface"] = {"displayName": "Local Plugins"}
+
+plugins = data.get("plugins")
+if not isinstance(plugins, list):
+    plugins = []
+plugins = [item for item in plugins if not (isinstance(item, dict) and item.get("name") == plugin)]
+plugins.append(entry)
+data["plugins"] = plugins
+
+path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+  else
+    cat > "$marketplace" <<EOF
+{
+  "name": "local",
+  "interface": {
+    "displayName": "Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "$PLUGIN_NAME",
+      "source": {
+        "source": "local",
+        "path": "$CODEX_PLUGIN_SOURCE_PATH"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
+EOF
+  fi
+
+  ok "Codex personal marketplace → $marketplace"
+}
+
 register_codex_marketplace() {
   if ! have codex; then
     warn "Codex CLI ('codex') not found on PATH — skipping Codex marketplace registration."
-    warn "Install Codex CLI, then run: codex plugin marketplace add $(shell_quote "$REPO_ROOT")"
+    warn "Install Codex CLI, then re-run: ./install.sh --codex-only"
     return
   fi
-  act "Registering local repo as Codex marketplace"
-  # `codex plugin marketplace add` exits non-zero if already registered; treat as skip.
-  if codex plugin marketplace add "$REPO_ROOT" >/dev/null 2>&1; then
-    ok "Codex marketplace registered → $REPO_ROOT"
+
+  act "Preparing Codex personal plugin source"
+  prepare_codex_plugin_projection || return
+  write_codex_personal_marketplace || return
+
+  act "Installing Codex plugin from personal marketplace"
+  if codex plugin list 2>/dev/null | grep -qE "^[[:space:]]+$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME \\(installed\\)"; then
+    skip "Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+  elif codex plugin add "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME" >/dev/null 2>&1; then
+    ok "Codex plugin installed → $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
   else
-    skip "Codex marketplace already registered (or CLI declined re-add)"
+    warn "Codex personal marketplace is ready, but plugin install did not complete."
+    warn "Run manually: codex plugin add $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
   fi
 }
 
@@ -330,7 +463,7 @@ main() {
 
       Add this checkout as a plugin source for your agent host.
       Claude Code: run install.sh without --no-marketplace, then /plugin install ${PLUGIN_NAME}@${MARKETPLACE_NAME}
-      Codex:       run codex plugin marketplace add $(shell_quote "$REPO_ROOT")
+      Codex:       run install.sh --codex-only, then verify codex plugin list shows ${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME} installed
 
   Verify deps:
       agent-browser --version && uv --version && ffmpeg -version | head -1
@@ -348,6 +481,8 @@ EOF
       cat <<EOF
 
       Codex: restart the CLI to pick up the registered marketplace.
+             Verify: codex plugin list | grep '${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME} (installed)'
+             Enable hooks: codex --enable plugin_hooks
 EOF
     fi
     cat <<EOF

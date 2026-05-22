@@ -139,8 +139,8 @@ for pct in $TRAJECTORY_POINTS; do
   IMPL_PNG="$OUT_DIR/impl/${pct}.png"
   DIFF_PNG="$OUT_DIR/diff/${pct}.png"
 
-  agent-browser --session "$SESSION_REF"  screenshot --output "$REF_PNG"  >/dev/null
-  agent-browser --session "$SESSION_IMPL" screenshot --output "$IMPL_PNG" >/dev/null
+  agent-browser --session "$SESSION_REF"  screenshot "$REF_PNG"  >/dev/null
+  agent-browser --session "$SESSION_IMPL" screenshot "$IMPL_PNG" >/dev/null
 
   if [ ! -s "$REF_PNG" ] || [ ! -s "$IMPL_PNG" ]; then
     printf "| %s%% | ERROR | — | ⚠️ |\n" "$pct" >> "$REPORT"

@@ -2,10 +2,6 @@
 # extract-dom.sh — invoke the Fix 13 DOM extraction eval as a real callable.
 #
 # Bash 4+ self-relaunch: this script uses heredoc shapes / array syntax that
-# macOS's bundled bash 3.2 mis-parses (loop-6 nested agent hit this — line
-# 289 EOF error). When `/usr/bin/env bash` resolves to bash 3.2 we re-exec
-# under a bash 4+ binary if one exists in the usual Homebrew locations,
-# falling back to a clear error message instead of a cryptic syntax error.
 if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
   for _bashcand in /opt/homebrew/bin/bash /usr/local/bin/bash; do
     [ -x "$_bashcand" ] && exec "$_bashcand" "$0" "$@"
@@ -203,8 +199,48 @@ EXTRACT_JS=$(cat <<'JSEOF'
     }
     return out;
   };
-  const extract = (el, depth = 0) => {
-    if (depth > 10) return null;
+  const SVG_TAGS = new Set([
+    'svg','g','defs','use','symbol','marker','clippath','clip-path',
+    'mask','pattern','filter','feblend','fecolormatrix',
+    'fecomposite','fegaussianblur','femerge','femergenode','feoffset',
+    'feflood','fetile','feturbulence','fedropshadow','fediffuselighting',
+    'fespecularlighting','femorphology','feimage','fedisplacementmap',
+    'lineargradient','linear-gradient','radialgradient','radial-gradient',
+    'stop',
+    'path','rect','circle','ellipse','line','polyline','polygon',
+    'text','textpath','tspan','title','desc','foreignobject',
+  ]);
+  const SVG_ATTR_KEYS = [
+    'id','viewBox','xmlns','xmlns:xlink',
+    'fill','stroke','stroke-width','stroke-linecap','stroke-linejoin',
+    'stroke-miterlimit','stroke-dasharray','stroke-dashoffset',
+    'fill-rule','fill-opacity','clip-rule','clip-path','mask','filter',
+    'opacity',
+    'd','points','x','y','x1','y1','x2','y2','cx','cy','r','rx','ry',
+    'width','height','transform','preserveAspectRatio',
+    'offset','stop-color','stop-opacity',
+    'gradientTransform','gradientUnits','spreadMethod',
+    'href','xlink:href','xlink:title',
+    'patternUnits','patternContentUnits','patternTransform',
+    'markerUnits','refX','refY','orient','overflow',
+    'in','in2','result','values','operator','mode','type',
+    'stdDeviation','floodColor','floodOpacity',
+  ];
+  const SVG_DEPTH_CAP = 30;
+  const HTML_DEPTH_CAP = 10;
+
+  const isSvgNode = (el) => {
+    try {
+      if (typeof SVGElement !== 'undefined' && el instanceof SVGElement) return true;
+    } catch (e) { /* ignore */ }
+    const tag = (el.tagName || '').toLowerCase();
+    return SVG_TAGS.has(tag);
+  };
+
+  const extract = (el, depth = 0, insideSvg = false) => {
+    const elIsSvg = insideSvg || isSvgNode(el);
+    const cap = elIsSvg ? SVG_DEPTH_CAP : HTML_DEPTH_CAP;
+    if (depth > cap) return null;
     const s = getComputedStyle(el);
     const text = directText(el);
     const styles = {};
@@ -217,8 +253,9 @@ EXTRACT_JS=$(cat <<'JSEOF'
       class: (typeof el.className === 'string' ? el.className : el.className?.baseVal || '').slice(0, 80),
       display: s.display,
       position: s.position,
-      children: Array.from(el.children).map(c => extract(c, depth + 1)).filter(Boolean),
+      children: Array.from(el.children).map(c => extract(c, depth + 1, elIsSvg)).filter(Boolean),
     };
+    if (elIsSvg) out.svg = true;
     if (text) out.text = text;
     if (Object.keys(styles).length) out.styles = styles;
     // Fix 18 — pseudo styles attached to the node so the transpiler can
@@ -237,9 +274,28 @@ EXTRACT_JS=$(cat <<'JSEOF'
     // placeholder boxes for every media element, which inflates section-compare
     // AE by ~700k per image-heavy section.
     const ATTR_KEYS = ['src','href','alt','poster','srcset','sizes','type','target','rel','aria-label','title','role','data-src','data-poster'];
-    for (const k of ATTR_KEYS) {
+    const keys = elIsSvg ? ATTR_KEYS.concat(SVG_ATTR_KEYS) : ATTR_KEYS;
+    for (const k of keys) {
       const v = el.getAttribute ? el.getAttribute(k) : null;
-      if (v && v.length < 800) out[k] = v;
+      if (v && v.length < 2000) out[k] = v;
+    }
+    // Codex universality audit HIGH FN: SVG attr whitelist drops
+    // unfamiliar icon-system attrs silently. For SVG nodes, capture
+    // EVERY attribute (subject to the same length cap), then the
+    // JSX emitter can apply the kebab→camel rename to whatever it
+    // sees. Attrs already in keys[] above are simply overwritten
+    // with the same value — idempotent.
+    if (elIsSvg && el.attributes) {
+      for (const a of el.attributes) {
+        const nm = a.name;
+        // Skip standard HTML attrs already in keys[] and React-
+        // unfriendly attrs starting with `on*` (event handlers).
+        if (nm.startsWith('on')) continue;
+        const v = a.value;
+        if (v && v.length < 2000 && !(nm in out)) {
+          out[nm] = v;
+        }
+      }
     }
     return out;
   };

@@ -152,6 +152,24 @@ def test_mark_passed_does_not_regress_from_done(tmp_path: Path) -> None:
     assert reloaded.current_gate == "done"
 
 
+def test_mark_passed_rejects_out_of_order_gate(tmp_path: Path) -> None:
+    """A later gate must not be recorded before all earlier gates passed.
+
+    Loop feedback: a state file with current_gate='post-implement' but no
+    reference/extraction completion let agents start closing out a partially
+    traversed pipeline. State writes must preserve the gate prefix invariant.
+    """
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    state = PipelineState.load(ref_dir)
+
+    state.mark_passed("post-implement", ref_dir)
+
+    reloaded = PipelineState.load(ref_dir)
+    assert reloaded.current_gate == "reference"
+    assert "post-implement" not in reloaded.completed_steps
+
+
 # ── PipelineState.demote_to ──
 
 

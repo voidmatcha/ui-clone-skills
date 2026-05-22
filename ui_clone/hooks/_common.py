@@ -47,19 +47,69 @@ _cached_project_root: Path | None = None
 
 
 def find_project_root() -> Path:
-    """Discover project root.
+    """Discover project root (where pipeline state's tmp/ref/ lives).
 
-    Priority:
-    1. $CLAUDE_PROJECT_DIR env var
-    2. git rev-parse --show-toplevel (cached per process to avoid repeated subprocess calls)
-    3. Walk up from cwd looking for tmp/ref/
-    4. cwd fallback
+    Priority — designed so nested sessions running from scratch/loop-N/
+    resolve to the LOOP's state instead of the parent repo's stale state:
+
+    1. If $CLAUDE_PROJECT_DIR is set AND cwd is INSIDE that env root,
+       walk UP from cwd toward env_root looking for tmp/ref/ — the
+       CLOSEST ancestor wins. This is the scratch-loop fix: when the
+       Claude Code session is launched with `--plugin-dir <repo>` and
+       a sub-tool runs from `scratch/loop-N/impl/`, the walk finds
+       `scratch/loop-N/tmp/ref/` BEFORE `<repo>/tmp/ref/` and returns
+       the loop root, so hooks see the actual loop state, not the
+       repo's stale copy.
+       If no ancestor in that chain has tmp/ref/, fall back to env_root.
+    2. If $CLAUDE_PROJECT_DIR is set AND cwd is OUTSIDE env_root,
+       return env_root directly — preserves test fixtures that point
+       env at a temp path while the test runs from the project repo.
+    3. git rev-parse --show-toplevel — only when it has tmp/ref/.
+    4. Free cwd walk — any ancestor with tmp/ref/.
+    5. cwd fallback.
+
+    Without this ordering, external diagnoses of audit incident / audit incident /
+    audit incident traced "passed but actually broken" Stop-hook decisions
+    to env_root preempting the cwd walk: pipeline-state.json sat at
+    scratch/loop-N/tmp/ref/ but the Stop hook read repo-root state.
     """
     global _cached_project_root
 
+    cwd = Path.cwd().resolve()
     env_root = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if env_root and Path(env_root).is_dir():
-        return Path(env_root)
+
+    if env_root:
+        try:
+            env_path = Path(env_root).resolve()
+        except (OSError, RuntimeError):
+            env_path = None
+        if env_path is not None and env_path.is_dir():
+            # Determine whether cwd is inside env_root.
+            try:
+                cwd.relative_to(env_path)
+                cwd_inside_env = True
+            except ValueError:
+                cwd_inside_env = False
+            if cwd_inside_env:
+                # Walk cwd UP to (and including) env_path looking for tmp/ref/.
+                # Closest ancestor wins — picks scratch/loop-N over the parent repo.
+                cur = cwd
+                while True:
+                    if (cur / "tmp" / "ref").is_dir():
+                        _cached_project_root = cur
+                        return cur
+                    if cur == env_path:
+                        break
+                    parent = cur.parent
+                    if parent == cur:
+                        break
+                    cur = parent
+                # No tmp/ref/ found in the chain — return env_root.
+                _cached_project_root = env_path
+                return env_path
+            # cwd is OUTSIDE env_root — env_root is the explicit project pointer.
+            _cached_project_root = env_path
+            return env_path
 
     if _cached_project_root is not None:
         return _cached_project_root
@@ -73,15 +123,13 @@ def find_project_root() -> Path:
         )
         if result.returncode == 0 and result.stdout.strip():
             git_root = Path(result.stdout.strip())
-            # Verify this git root actually contains tmp/ref/ — guards nested-repo
-            # setups where the monorepo parent is the git root, not the project dir.
             if (git_root / "tmp" / "ref").is_dir():
                 _cached_project_root = git_root
                 return git_root
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    cwd = Path.cwd()
+    # Free cwd walk (no env, no git tmp/ref).
     cur = cwd
     while cur != cur.parent:
         if (cur / "tmp" / "ref").is_dir():
@@ -221,6 +269,7 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "component-map.json",
         # Phase 6 — Aggregated + final
         "extracted.json",
+        "generation-plan.json",
         "animations-detected.json",
         "pipeline-state.json",
         "artifact-provenance.json",
@@ -254,6 +303,7 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "transition-spec-coverage.json",
         "runtime-spec-coverage.json",
         "text-fidelity-check.json",
+        "lottie-runtime.json",
         "asset-transfer.json",
         "asset-utilization.json",
         "bundle-impl-coverage.json",
@@ -361,6 +411,17 @@ def is_component_file(file_path: str) -> bool:
     - /src/projects/**         — project-scoped component trees (monorepo layouts)
     - /src/app/**/page.*       — Next.js App Router page files only
                                  (layout.tsx, route.ts etc. are excluded)
+    - /src/main.{jsx,tsx,js,ts}    — Vite / CRA / generic React entry point
+    - /src/App.{jsx,tsx,js,ts}     — top-level App component (when hand-authored)
+    - /src/app/layout.{tsx,jsx}    — Next.js App Router root layout
+    - /src/pages/**            — Next.js Pages Router
+
+    Codex audit (signal #2): heavy-motion site agent wrote impl/src/main.jsx
+    by hand after scaffold-to-jsx failed; the old substring set
+    (components/, projects/, app/**/page.*) did NOT cover main.jsx, so
+    pre_generate / pre_bash silently allowed the handcrafted entry to
+    ship without going through the canonical pipeline. Entry-point
+    filenames are explicitly enforced now.
 
     Override via UI_RE_COMPONENT_PATHS env var (colon-separated substrings):
         UI_RE_COMPONENT_PATHS=/src/components/:/app/components/
@@ -372,8 +433,22 @@ def is_component_file(file_path: str) -> bool:
         return any(p in file_path for p in custom.split(":") if p)
     if any(sub in file_path for sub in _DEFAULT_COMPONENT_SUBSTRINGS):
         return True
+    if "/src/pages/" in file_path:
+        return True
     if _DEFAULT_APP_PREFIX in file_path:
         return any(seg.startswith("page.") for seg in file_path.split("/"))
+    # Top-level React entry-point filenames under /src/.
+    entry_filenames = {
+        "main.jsx", "main.tsx", "main.js", "main.ts",
+        "App.jsx", "App.tsx", "App.js", "App.ts",
+        "index.jsx", "index.tsx",  # plain index entries (CRA / Vite)
+    }
+    for entry in entry_filenames:
+        if file_path.endswith(f"/src/{entry}") or file_path.endswith(f"/{entry}"):
+            # Restrict to paths that include /src/ to avoid catching
+            # arbitrary main.jsx outside a project tree.
+            if "/src/" in file_path:
+                return True
     return False
 
 

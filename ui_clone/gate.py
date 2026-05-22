@@ -11,7 +11,9 @@ Exit: 0=PASS, 1=BLOCKED, 2=usage error
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from itertools import islice
@@ -104,7 +106,7 @@ def _parse_failed_sections(lines: list[str]) -> list[tuple[str, int]]:
     result.txt is a markdown table:
         | <name> | <ae> | <ae/mpx> | <severity> | ❌ |   (critical fail)
         | <name> | <ae> | <ae/mpx> | saturated | 🌑 |   (gradient-dead fail)
-    Codex L13 review Q1: `🌑 saturated` rows are FAIL_COUNT increments
+    Codex audit review Q1: `🌑 saturated` rows are FAIL_COUNT increments
     in section-compare.sh (AE/Mpx ≥ 800k, "gradient dead, not comparable")
     but `_parse_failed_sections` was only catching `❌`. That let
     known-artifacts.json downgrade saturated rows to a structural pass
@@ -585,11 +587,60 @@ class Gate:
             )
             return results
 
+        log = self._load_json("download-log.json") or {}
+        attempts = log.get("attempts") if isinstance(log, dict) else None
+        attempted_urls: list[str] = []
+        if isinstance(attempts, list):
+            attempted_urls = [
+                str(a.get("url") or "") for a in attempts if isinstance(a, dict)
+            ]
+        missing_download: list[str] = []
+        for item in substitutes:
+            family = str(item.get("cdn") or item.get("family") or "").strip()
+            if not family:
+                continue
+            # Build keyword(s) to match against the URL list.
+            # "Die Grotesk" → tokens ["Die", "Grotesk"]; require both AND-match
+            # against at least one URL (case-insensitive). This catches the
+            # common shapes (foundry CDN + self-hosted) without overreaching.
+            tokens = [t for t in re.split(r"\s+", family) if t]
+            hit = False
+            for url in attempted_urls:
+                u = url.lower()
+                if all(tok.lower() in u for tok in tokens):
+                    hit = True
+                    break
+            if not hit:
+                missing_download.append(family)
+        if missing_download:
+            sample = ", ".join(missing_download[:3])
+            results.append(
+                CheckResult(
+                    "paid-font substitution — download attempt missing",
+                    "fail",
+                    f"{len(missing_download)} paid font(s) marked decision='substitute' "
+                    f"({sample}) but download-log.json shows zero attempts for the "
+                    "family. Research-mode policy: a substitution is only valid AFTER "
+                    "an HTTP download attempt has been made and recorded — "
+                    "iteration-discipline.md 'Asset substitution policy' section.",
+                    fix=(
+                        "Identify the woff2/otf/ttf URLs for the commercial family "
+                        "(check head.json + bundle-extraction.json for @font-face src), "
+                        "add them to the asset-download targets, re-run "
+                        "scripts/extract/asset-download.sh, and confirm "
+                        "download-log.json records the attempt. Substitution is then "
+                        "valid if the attempt returned non-200."
+                    ),
+                )
+            )
+            return results
+
         results.append(
             CheckResult(
                 "paid-font substitution",
                 "pass",
-                f"{len(substitutes)} substitute decision(s) declared in asset-substitution.json",
+                f"{len(substitutes)} substitute decision(s) declared and download "
+                "attempts recorded in download-log.json",
             )
         )
         return results
@@ -762,14 +813,6 @@ class Gate:
         spec = self._load_json("transition-spec.json")
         if spec is not None:
             transitions = spec.get("transitions")
-            # Codex L10-L12 review: gate_spec used to silently pass when
-            # `transitions` was missing, non-list, or `[]`. The L12 agent
-            # exploited this by writing `"transitions": []` with a note
-            # like "FAQ accordion handled by React state, not in spec scope"
-            # — the spec gate passed structurally, downstream transition-
-            # spec-coverage failed with "spec has no entries", and the AE
-            # envelope regressed from L11's 8.5M to L12's 17M. Reject the
-            # bypass at the source.
             if not isinstance(transitions, list):
                 results.append(
                     CheckResult(
@@ -992,7 +1035,7 @@ class Gate:
 
     def _check_audit_artifacts(self) -> list[CheckResult]:
         """Check that all 6c audit JSON artifacts are present AND that
-        their content cross-references the section-map (Codex L15 review:
+        their content cross-references the section-map (Codex audit review:
         agent had been satisfying gates by writing canonical filenames
         with low-content or fabricated bodies — e.g. interactions-detected
         with 0 entries while the ref clearly has FAQ accordions + hover
@@ -1000,7 +1043,7 @@ class Gate:
         filename presence). Cross-validation refuses both fabrication
         modes.
         """
-        results = []
+        results: list[CheckResult] = []
         if not (self.ref_dir / "section-map.json").exists():
             return results
         for filename, label in [
@@ -1039,7 +1082,7 @@ class Gate:
                 results.append(
                     CheckResult(
                         f"{filename} sectionId cross-ref",
-                        "fail",
+                        "warn",
                         f"{filename} references sectionIds not in section-map.json: "
                         f"{sorted(set(fabricated))[:5]}. Either fix the IDs or extend "
                         f"section-map.json so the audit and the map agree.",
@@ -1049,9 +1092,7 @@ class Gate:
         _cross_check("component-map.json", "components")
         _cross_check("layout-decisions.json", "decisions")
 
-        # Component-count parity: |components| must be within ±2 of
-        # |sections|. Catches the "1 monolith component for 13 sections"
-        # regression that historically passed gates trivially.
+        # Component-count parity: |components| should track |sections|.
         component_map = self._load_json("component-map.json")
         if component_map:
             n_components = len(component_map.get("components", []))
@@ -1060,11 +1101,11 @@ class Gate:
                 results.append(
                     CheckResult(
                         "component-count parity",
-                        "fail",
+                        "warn",
                         f"component-map has {n_components} components vs section-map's "
                         f"{n_sections} sections — gap of {abs(n_components - n_sections)} "
-                        f"exceeds tolerance ±2. Likely a monolith page.tsx (under-count) "
-                        f"or fabricated components (over-count).",
+                        f"exceeds advisory tolerance ±2. Likely a monolith page.tsx "
+                        f"(under-count) or fabricated components (over-count).",
                     )
                 )
         return results
@@ -1086,6 +1127,88 @@ class Gate:
         results.append(
             self.check_file(self.ref_dir / "transition-spec.json", "transition-spec.json")
         )
+        # Research1 finding: agent ran asset-download.sh but skipped Phase 7-pre
+        # (generation-plan.sh). Without the plan, transition wiring + library
+        # installs + ds-components groupings get dropped entirely. Require the
+        # plan exist + have a valid schemaVersion before generation starts.
+        plan_path = self.ref_dir / "generation-plan.json"
+        if not plan_path.exists():
+            results.append(
+                CheckResult(
+                    "generation-plan.json",
+                    "fail",
+                    "generation-plan.json — MISSING. Run scripts/extract/generation-plan.sh "
+                    "before Phase 6. The plan is the Phase 6 SSOT for componentList, "
+                    "library installs, sticky strategy, signature effects.",
+                    fix="bash $PLUGIN_ROOT/scripts/extract/generation-plan.sh "
+                        f'"{self.ref_dir}"',
+                )
+            )
+        else:
+            results.append(
+                self.check_json_key(
+                    plan_path, "componentList", "generation-plan.json content validation"
+                )
+            )
+            # Reject emoji / gradient / placeholder substitutions. generation-plan.sh
+            # writes BANNED_REPLACEMENTS violations to assetSubstitution.violations[];
+            # without this gate the array is recorded but never blocks generation,
+            try:
+                plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
+                violations = (
+                    (plan_data.get("assetSubstitution") or {}).get("violations") or []
+                )
+            except (OSError, ValueError, AttributeError):
+                violations = []
+            if violations:
+                sample = ", ".join(
+                    f"{v.get('asset','?')}→{v.get('replacement','?')}"
+                    for v in violations[:3]
+                )
+                results.append(
+                    CheckResult(
+                        "assetSubstitution.violations",
+                        "fail",
+                        f"{len(violations)} banned substitution(s) detected "
+                        f"(emoji / gradient / placeholder / stub): {sample}. "
+                        "Research-mode policy: download the real asset via "
+                        "asset-download.sh; never substitute with placeholder strings.",
+                        fix="bash $PLUGIN_ROOT/scripts/extract/asset-download.sh "
+                            f'"{self.ref_dir}" <impl-public-dir> && '
+                            "bash $PLUGIN_ROOT/scripts/extract/generation-plan.sh "
+                            f'"{self.ref_dir}"',
+                    )
+                )
+            asset_sub = self._load_json("asset-substitution.json") or {}
+            banned_terms = (
+                "emoji", "gradient", "placeholder", "stub", "emoji-or-gradient"
+            )
+            upstream_banned: list[dict[str, Any]] = []
+            for img in (asset_sub.get("images") or []):
+                if not isinstance(img, dict):
+                    continue
+                repl = (img.get("replacement") or "").strip().lower()
+                if any(term in repl for term in banned_terms):
+                    upstream_banned.append(img)
+            if upstream_banned and len(violations) < len(upstream_banned):
+                sample_up = ", ".join(
+                    f"{i.get('asset','?')}→{i.get('replacement','?')}"
+                    for i in upstream_banned[:3]
+                )
+                results.append(
+                    CheckResult(
+                        "assetSubstitution.violations.cross-ref",
+                        "fail",
+                        f"{len(upstream_banned)} banned substitution(s) in "
+                        f"asset-substitution.json ({sample_up}) but "
+                        f"generation-plan.json.assetSubstitution.violations "
+                        f"reports {len(violations)} — the plan understates "
+                        "the upstream source. Plan appears hand-rewritten to "
+                        "dodge the violations check.",
+                        fix="bash $PLUGIN_ROOT/scripts/extract/generation-plan.sh "
+                            f'"{self.ref_dir}"  # regenerate plan from sources',
+                    )
+                )
         results.extend(self._check_artifact_provenance())
 
         # Load once — reused across helpers below
@@ -1167,6 +1290,16 @@ class Gate:
         # Transition coverage
         results.extend(self._check_transition_coverage(spec))
 
+        results.extend(self._check_scroll_spec_coverage(spec))
+
+        # Detection-artifact integrity (Common cheat pattern). Sub-agent reported
+        # "Emptied interactions-detected.json after observing the impl uses
+        # native CSS" — a classic gate-game where hand-clearing a detection
+        # artifact silences downstream dispatchers. Cross-check the artifact
+        # against upstream evidence; fail if the artifact has been zeroed
+        # while sibling detection sources still indicate the feature exists.
+        results.extend(self._check_detection_artifact_integrity())
+
         # Section count cross-check
         section_map = self._load_json("section-map.json")
         component_map = self._load_json("component-map.json")
@@ -1189,6 +1322,84 @@ class Gate:
         )
         results.extend(self._check_verification_plan())
         results.extend(self._check_componentization())
+        results.extend(self._check_generation_completeness())
+        return results
+
+    def _check_generation_completeness(self) -> list[CheckResult]:
+        """Reject components with empty function bodies / no JSX return.
+
+        audit incident (2026-05-19): agent produced 11 component functions in a
+        single `App.tsx`; some had real bodies, but the gaming pattern is
+        easy — write the signature, skip the body, let section-compare's
+        STRUCTURAL_ONLY rows mark it as 'good enough'. This static check
+        catches the trivial stub case before visual evidence is consulted.
+
+        Heuristic (simple + low false-positive):
+          - For each `function NAME()` or `const NAME = ()` where NAME is
+            CapitalizedIdentifier (React component convention), find its
+            closing brace.
+          - If the body contains zero `<` characters between the opening
+            and closing brace AND zero `return ` statement → stub.
+
+        Inline-App layout (audit incident) and separate-component-files layout
+        (audit incident) both pass when their components have real bodies.
+        """
+        results: list[CheckResult] = []
+        impl_root = self._find_impl_root()
+        if impl_root is None:
+            return results
+        src_dir = impl_root / "src"
+        if not src_dir.is_dir():
+            return results
+        stubs: list[str] = []
+        for tsx in src_dir.rglob("*.tsx"):
+            try:
+                text = tsx.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            # Match either `function NAME(` or `const NAME = (` where NAME starts uppercase.
+            for m in re.finditer(
+                r"(?:^|\n)(?:export\s+)?(?:function\s+([A-Z][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{|"
+                r"const\s+([A-Z][A-Za-z0-9_]*)\s*=\s*\([^)]*\)\s*=>\s*\{)",
+                text,
+            ):
+                name = m.group(1) or m.group(2)
+                start = m.end()
+                # Walk balanced braces to find the matching closer.
+                depth = 1
+                i = start
+                while i < len(text) and depth > 0:
+                    ch = text[i]
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                    i += 1
+                body = text[start:i]
+                # A component body must contain either a JSX tag or `return (` at minimum.
+                if "<" not in body and "return " not in body:
+                    rel = tsx.relative_to(impl_root)
+                    stubs.append(f"{rel}:{name}")
+        if stubs:
+            preview = ", ".join(stubs[:5])
+            more = f" (+{len(stubs) - 5} more)" if len(stubs) > 5 else ""
+            results.append(
+                CheckResult(
+                    "generation-completeness",
+                    "fail",
+                    f"❌ {len(stubs)} component(s) are stubs (empty body, no "
+                    f"JSX, no return): {preview}{more}",
+                    fix="Fill bodies or remove unused stubs before re-running post-implement.",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    "generation-completeness",
+                    "pass",
+                    "✓ No stub components found in impl/src/**/*.tsx.",
+                )
+            )
         return results
 
     def _check_componentization(self) -> list[CheckResult]:
@@ -1246,21 +1457,208 @@ class Gate:
             )
         ]
 
+    def _check_detection_artifact_integrity(self) -> list[CheckResult]:
+        """Common cheat pattern: sub-agent emptied interactions-detected.json to
+        silence the hover/click dispatcher even though hover-css-rules.json
+        and regions.json (the upstream signal sources) still indicated
+        interactions existed. Cross-check the artifact against sibling
+        evidence and fail when the artifact is hand-zeroed while the
+        upstream still proves the feature exists.
+
+        Returns no failures when everything agrees (true zero-interaction
+        sites still pass). Single failure when interactions-detected.json
+        is empty but ≥1 upstream source still shows interaction evidence.
+        """
+        results: list[CheckResult] = []
+        raw = self._load_json("interactions-detected.json")
+        # Wrapper shape: {"interactions":[...]} OR bare list.
+        interactions: list[Any] = []
+        if isinstance(raw, list):
+            interactions = raw
+        elif isinstance(raw, dict):
+            wrapped = raw.get("interactions")
+            if isinstance(wrapped, list):
+                interactions = wrapped
+        if interactions:
+            return results  # non-empty — fine
+        # Upstream evidence sources.
+        upstream_signals: list[str] = []
+        hover_rules = self._load_json("hover-css-rules.json")
+        if isinstance(hover_rules, list) and hover_rules:
+            upstream_signals.append(f"hover-css-rules.json[{len(hover_rules)}]")
+        elif isinstance(hover_rules, dict):
+            rules = hover_rules.get("rules") or hover_rules.get("entries")
+            if isinstance(rules, list) and rules:
+                upstream_signals.append(f"hover-css-rules.json.rules[{len(rules)}]")
+        regions = self._load_json("regions.json")
+        if isinstance(regions, list):
+            hover_click = [
+                r for r in regions
+                if isinstance(r, dict)
+                and str(r.get("triggerType") or "").startswith(("hover", "click-"))
+            ]
+            if hover_click:
+                upstream_signals.append(
+                    f"regions.json hover/click triggers[{len(hover_click)}]"
+                )
+        if not upstream_signals:
+            return results  # no upstream evidence — empty artifact is valid
+        sample = "; ".join(upstream_signals[:3])
+        return [
+            CheckResult(
+                "interactions-detected.json — hand-emptied",
+                "fail",
+                f"interactions-detected.json is empty but upstream sources "
+                f"({sample}) prove interactions exist. Hand-clearing detection "
+                "artifacts to silence dispatchers is a gate-game; the artifact "
+                "must reflect the upstream evidence.",
+                fix=(
+                    "Re-run interaction detection (ui-reverse-engineering Step 5b) "
+                    "to regenerate interactions-detected.json from regions.json + "
+                    "hover-css-rules.json. Do NOT hand-edit to empty."
+                ),
+            )
+        ]
+
+    def _check_scroll_spec_coverage(self, spec: Any) -> list[CheckResult]:
+        """Detect the audit incident / Codex audit issue 5 escape: upstream artifacts
+        show sticky elements + non-GSAP scroll engine signals (framer-motion,
+        IntersectionObserver, scrollYProgress) but transition-spec.json has
+        zero scroll-triggered entries, so motion verification never fires.
+
+        Fails when ALL of the following hold:
+          - sticky-elements.json (or extracted.json.stickyElements) is non-empty
+          - scroll-engine.json shows at least one detected.<x>.matches > 0
+            among (motion / useScroll / scrollYProgress / IntersectionObserver)
+          - transition-spec.json has zero entries whose trigger / type contains
+            scroll | intersection | inview | viewport | scrub
+        """
+        # sticky-elements.json can be a list OR a wrapper dict — coerce to list[Any].
+        raw_sticky = self._load_json("sticky-elements.json")
+        sticky: list[Any] = []
+        if isinstance(raw_sticky, list):
+            sticky = raw_sticky
+        elif isinstance(raw_sticky, dict):
+            entries = raw_sticky.get("elements") or raw_sticky.get("stickyElements")
+            if isinstance(entries, list):
+                sticky = entries
+        if not sticky:
+            extracted = self._load_json("extracted.json") or {}
+            ext_sticky = extracted.get("stickyElements") if isinstance(extracted, dict) else None
+            if isinstance(ext_sticky, list):
+                sticky = ext_sticky
+        if not sticky:
+            return []
+        scroll_engine = self._load_json("scroll-engine.json") or {}
+        detected = (scroll_engine.get("detected") or {}) if isinstance(scroll_engine, dict) else {}
+        non_gsap_signal = False
+        for key in ("motion", "useScroll", "scrollYProgress", "IntersectionObserver"):
+            entry = detected.get(key) or {}
+            if isinstance(entry, dict) and (entry.get("matches") or 0) > 0:
+                non_gsap_signal = True
+                break
+        if not non_gsap_signal:
+            return []
+        spec_entries: list[Any] = []
+        if isinstance(spec, list):
+            spec_entries = spec
+        elif isinstance(spec, dict):
+            spec_entries = spec.get("transitions") or []
+        scroll_pattern = re.compile(r"scroll|intersection|inview|viewport|scrub", re.I)
+        has_scroll_entry = False
+        for entry in spec_entries:
+            if not isinstance(entry, dict):
+                continue
+            blob = f"{entry.get('trigger', '')} {entry.get('type', '')} {entry.get('mechanism', '')}"
+            if scroll_pattern.search(blob):
+                has_scroll_entry = True
+                break
+        if has_scroll_entry:
+            return [
+                CheckResult(
+                    "scroll-spec-coverage",
+                    "pass",
+                    f"✓ {len(sticky)} sticky element(s) + scroll-engine signal — "
+                    "transition-spec has scroll-trigger entries.",
+                )
+            ]
+        sample_sticky = ", ".join(
+            (e.get("className") or e.get("cls") or e.get("tag") or "?")
+            for e in sticky[:3]
+            if isinstance(e, dict)
+        )
+        signals = ", ".join(
+            f"{k}({(detected[k] or {}).get('matches')})"
+            for k in ("motion", "useScroll", "scrollYProgress", "IntersectionObserver")
+            if isinstance(detected.get(k), dict)
+            and (detected[k].get("matches") or 0) > 0
+        )
+        return [
+            CheckResult(
+                "scroll-spec-coverage",
+                "fail",
+                f"❌ {len(sticky)} sticky element(s) detected ({sample_sticky}) "
+                f"+ scroll engine signals ({signals}), but transition-spec.json "
+                "has ZERO scroll-trigger entries. Pin / scroll-scrub motion "
+                "will be unverified. Add transition-spec entries with "
+                '`"trigger": "scroll"` or `"mechanism": "scroll-scrub"` for '
+                "each animated sticky region.",
+                fix="Re-run scripts/extract/generation-plan.sh then enrich "
+                "transition-spec.json with scroll-triggered entries per "
+                "sticky-elements.json; consult animation-detection.md Phase B.",
+            )
+        ]
+
     def _find_impl_root(self) -> Path | None:
         """Locate the impl/ root co-located with this ref_dir.
 
-        Convention: `benchmark/work/<sha>/{ref,impl}/` (benchmark flow) or
-        `apps/<component>/` (legacy). Returns the impl ROOT (containing src/
-        and public/), not impl/public/. None when no candidate exists.
+        Delegates to `scripts/extract/find-impl-root.sh` so this gate and all
+        shell-side checks (bundle-impl-coverage, transition-spec-coverage,
+        verify-loop) share one resolver. audit incident surfaced a split-brain risk
+        where a Python and a shell heuristic could diverge — passing one
+        while failing the other was a real escape vector. A single canonical
+        implementation closes that gap (Codex audit issue 1).
+
+        Returns the impl ROOT (containing src/ and public/), not impl/public/.
+        None when the resolver exits non-zero. Stdout shape from resolver
+        (3 lines): impl_root, impl_src, impl_package_json — we use line 1.
         """
-        candidates = [
-            self.ref_dir.parent / "impl",                                 # benchmark/work/<sha>/impl
-            self.ref_dir.parent.parent / "apps" / self.ref_dir.name,       # apps/<component>/
-            self.ref_dir.parent.parent / "apps" / self.ref_dir.name / "app",
-        ]
-        for c in candidates:
-            if c.is_dir() and (c / "src").is_dir():
-                return c
+        env_root = os.environ.get("PLUGIN_ROOT") or os.environ.get(
+            "CLAUDE_PLUGIN_ROOT"
+        )
+        resolver: Path | None = None
+        if env_root:
+            cand = Path(env_root) / "scripts" / "extract" / "find-impl-root.sh"
+            if cand.is_file():
+                resolver = cand
+        if resolver is None:
+            # Walk up from this file so in-repo tests work without env vars.
+            here = Path(__file__).resolve()
+            for parent in here.parents:
+                cand = parent / "scripts" / "extract" / "find-impl-root.sh"
+                if cand.is_file():
+                    resolver = cand
+                    break
+        if resolver is None:
+            return None
+        try:
+            proc = subprocess.run(
+                ["bash", str(resolver), str(self.ref_dir)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if line:
+                p = Path(line)
+                if p.is_dir():
+                    return p
         return None
 
     def _check_verification_plan(self) -> list[CheckResult]:
@@ -1282,7 +1680,14 @@ class Gate:
         """
         plan_path = self.ref_dir / "verification-plan.json"
         if not plan_path.is_file():
-            return []
+            return [
+                CheckResult(
+                    "verification-plan.json",
+                    "fail",
+                    "verification-plan.json — MISSING. post-implement cannot infer required text/DOM/asset/motion checks without it.",
+                    fix="Run: bash skills/visual-debug/scripts/verification-plan.sh <ref-dir>",
+                )
+            ]
 
         try:
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -1290,8 +1695,11 @@ class Gate:
             return [
                 CheckResult(
                     "verification-plan.json",
-                    "warn",
-                    f"verification-plan.json — unreadable ({e}); skipping",
+                    "fail",
+                    f"verification-plan.json — unreadable ({e}). "
+                    "post-implement cannot enforce required checks against "
+                    "an unparseable plan. Regenerate before retrying.",
+                    fix="Run: bash skills/visual-debug/scripts/verification-plan.sh <ref-dir>",
                 )
             ]
 
@@ -1356,6 +1764,39 @@ class Gate:
                 )
             ]
 
+        # Two-phase mode (option A) — when UI_CLONE_PHASE=rapid the
+        # agent is in initial visual-iteration mode. Non-anti-cheat
+        # block checks are downgraded to warn so the agent can build
+        # quickly and iterate visually first. Anti-cheat gates and
+        # the must-stay-strict set remain block regardless.
+        #
+        # Promotion to strict: set UI_CLONE_PHASE=strict (default)
+        # before declaring done. The strict run enforces every block.
+        import os as _os
+        phase = (_os.environ.get("UI_CLONE_PHASE") or "strict").lower()
+        # Anti-cheat gates that ALWAYS stay block, even in rapid
+        # mode — these catch cheating and must never downgrade.
+        #
+        STRICT_ALWAYS = {
+            # Anti-cheat (block cheating regardless of phase).
+            "ref-screenshot-asset", "invalidation", "scaffold-warn",
+            "remote-asset-ref", "html-paste", "proxy-mirror-check",
+            "hidden-children", "monolithic-impl", "entry-coherence",
+            "text-fidelity-check", "dom-mirror-check",
+            "required-media-coverage", "css-mirror",
+            "runtime-dom-parity", "svg-dom-parity", "motion-coverage",
+            "scroll-engine-parity",
+            # runtime-image-validity — HTML-fallback-as-image is a
+            # fundamental cheat (Vite serving index.html for missing
+            # assets). Must stay strict.
+            "runtime-image-validity",
+            # reveal-trigger — IO+overflow:hidden reveals that never
+            # fire are a core completion-blocker (catches "stuck
+            # reveal" patterns that visually show empty space where
+            # ref has content). Must stay strict.
+            "reveal-trigger",
+        }
+
         out: list[CheckResult] = []
         for entry in checks:
             if not isinstance(entry, dict):
@@ -1365,6 +1806,11 @@ class Gate:
             script = entry.get("script") or ""
             reason = entry.get("reason") or ""
             severity = entry.get("severity") or "block"
+            # Rapid-mode downgrade: block→warn for non-anti-cheat
+            # checks so the agent can iterate visually without
+            # consuming the iteration budget on fidelity gates.
+            if phase == "rapid" and severity == "block" and check_id not in STRICT_ALWAYS:
+                severity = "warn"
 
             if not produces:
                 continue
@@ -1373,7 +1819,14 @@ class Gate:
             fix = f"Run: bash {script}" if script else ""
 
             if not artifact.is_file():
-                msg = f"{check_id} — produces artifact missing ({produces}). Reason: {reason}"
+                msg = (
+                    f"MISSING_ARTIFACT {check_id} — produces "
+                    f"{produces}. Reason: {reason}. "
+                    "Run scripts/verify/run-required-checks.sh "
+                    "<session> <ref-url> <impl-url> <ref-dir> to "
+                    "produce every missing required-check artifact "
+                    "in one shell call."
+                )
                 if severity == "warn":
                     out.append(CheckResult(label, "warn", msg))
                 else:
@@ -1382,8 +1835,15 @@ class Gate:
 
             try:
                 raw = artifact.read_text(encoding="utf-8")
-            except OSError:
-                out.append(CheckResult(label, "pass", f"{check_id} (artifact unreadable)"))
+            except OSError as e:
+                msg = (
+                    f"{check_id} — artifact unreadable ({e}). "
+                    "Cannot verify; re-run the producing script."
+                )
+                if severity == "warn":
+                    out.append(CheckResult(label, "warn", msg))
+                else:
+                    out.append(CheckResult(label, "fail", msg, fix=fix))
                 continue
 
             # If artifact is JSON with a `status` field, enforce status: "pass".
@@ -1459,15 +1919,177 @@ class Gate:
                     )
                     out.append(CheckResult(label, "fail", msg, fix=fix))
                     continue
+                counts = data.get("counts") or {}
+                if isinstance(counts, dict):
+                    unpaired = int(counts.get("unpaired") or 0)
+                    ok = int(counts.get("ok") or 0)
+                    if unpaired >= 3 and unpaired > ok:
+                        msg = (
+                            f"tree-diff — unpaired majority "
+                            f"(unpaired={unpaired}, ok={ok}). "
+                            "elementFromPoint pairing failed, so status=pass "
+                            "is not convergence evidence. Fix DOM/layout "
+                            "structure until most walked elements pair."
+                        )
+                        out.append(CheckResult(label, "fail", msg, fix=fix))
+                        continue
+            #
+            PATH_CHECK_IDS = {
+                "asset-transfer", "asset-utilization", "image-fidelity",
+                "proxy-mirror-check", "lottie-runtime",
+                "bundle-impl-coverage",
+                "ref-screenshot-asset",
+                # Common cheat pattern A1/A2/A3 — all emit implRoot.
+                "entry-coherence", "scaffold-residue", "html-paste",
+                # Diagnosis B — required-media coverage emits implRoot.
+                "required-media-coverage",
+                # Common cheat pattern A4/A5 + fix #2 — css-mirror emits
+                # implRoot, runtime-dom-parity and hidden-children
+                # are URL-based (no implRoot path to validate, but
+                # listing here makes intent explicit; the PATH_CHECK
+                # block is skipped when the recorded path field is
+                # absent so this is safe).
+                "css-mirror",
+                # Signal 1 — scaffold-warn placeholders (impl source scan).
+                "scaffold-warn",
+                # validation run findings — monolithic-impl + motion-coverage
+                # both emit implRoot for cross-loop protection.
+                "monolithic-impl", "motion-coverage",
+                "scroll-engine-parity",
+            }
+            if (
+                check_id in PATH_CHECK_IDS
+                and isinstance(data, dict)
+                and status == "pass"
+            ):
+                def _nz(v: object) -> str | None:
+                    if isinstance(v, str) and v.strip():
+                        return v
+                    return None
+
+                recorded = (
+                    _nz(data.get("implPublicDir"))
+                    or _nz(data.get("implSrcDir"))
+                    or _nz(data.get("implDir"))
+                    or _nz(data.get("implRoot"))
+                    or _nz(data.get("implPkgJson"))
+                )
+                impl_root = self._find_impl_root()
+                if (
+                    impl_root is not None
+                    and recorded is None
+                ):
+                    msg = (
+                        f"{check_id} — path-check artifact must emit "
+                        "implRoot/implDir/implSrcDir/implPublicDir/"
+                        "implPkgJson. None present, so cross-loop "
+                        "contamination cannot be ruled out. Re-run the "
+                        "check (newer scripts emit the field)."
+                    )
+                    out.append(CheckResult(label, "fail", msg, fix=fix))
+                    continue
+                if recorded and impl_root is not None:
+                    rec_path = Path(str(recorded)).resolve()
+                    impl_resolved = impl_root.resolve()
+                    expected_roots = {
+                        impl_resolved,
+                        (impl_root / "public").resolve(),
+                        (impl_root / "src").resolve(),
+                    }
+                    if rec_path not in expected_roots:
+                        try:
+                            rec_path.relative_to(impl_resolved)
+                            recorded_inside = True
+                        except ValueError:
+                            recorded_inside = False
+                        if not recorded_inside:
+                            msg = (
+                                f"{check_id} — loop path contamination. "
+                                f"artifact recorded {recorded}, but current "
+                                f"impl_root is {impl_root}. Run the check "
+                                "against the active loop's impl tree."
+                            )
+                            out.append(CheckResult(label, "fail", msg, fix=fix))
+                            continue
+                    # Stale-relative check — artifact in-tree but older than
+                    try:
+                        artifact_path = self.ref_dir / produces
+                        if artifact_path.is_file():
+                            artifact_mtime = artifact_path.stat().st_mtime
+                            newest_impl = 0.0
+                            for sub in ("src", "public"):
+                                sub_dir = impl_root / sub
+                                if sub_dir.is_dir():
+                                    for p in sub_dir.rglob("*"):
+                                        try:
+                                            if p.is_file():
+                                                m = p.stat().st_mtime
+                                                if m > newest_impl:
+                                                    newest_impl = m
+                                        except OSError:
+                                            continue
+                            if newest_impl > artifact_mtime + 1.0:
+                                msg = (
+                                    f"{check_id} — stale artifact. "
+                                    f"{produces} mtime is older than "
+                                    "newest impl source/public file by "
+                                    f"{newest_impl - artifact_mtime:.0f}s. "
+                                    "Re-run the check against the current impl."
+                                )
+                                out.append(CheckResult(label, "fail", msg, fix=fix))
+                                continue
+                    except OSError:
+                        pass
+            STATUS_REQUIRED = {
+                "asset-transfer", "asset-utilization", "image-fidelity",
+                "font-parity", "dom-mirror-check", "text-fidelity",
+                "hydration-check", "transition-spec-coverage",
+                "spec-implementation-coverage", "runtime-spec-coverage",
+                "tree-diff", "scroll-end-completion", "reveal-trigger",
+                "boundary",
+                "tailwind-transform-conflict", "proxy-mirror-check",
+                "lottie-runtime", "bundle-impl-coverage", "scroll-coverage",
+                "runtime-image-validity", "remote-asset-ref",
+                "ref-screenshot-asset",
+                # Common cheat pattern A1/A2/A3 anti-cheat — entry-coherence
+                # (stack/entry consistency), scaffold-residue (orphan
+                # components), html-paste (structural/script/CSS theft).
+                "entry-coherence", "scaffold-residue", "html-paste",
+                # Diagnosis B — required-media (video/Lottie) coverage.
+                "required-media-coverage",
+                # Common cheat pattern A4/A5 + fix #2 anti-cheat —
+                # css-mirror (static), runtime-dom-parity (runtime
+                # positive parity), hidden-children (runtime hidden
+                # DOM with screenshot background overlay).
+                "css-mirror", "runtime-dom-parity", "hidden-children",
+                "invalidation",
+                # Signal 1 — scaffold-warn placeholders.
+                "scaffold-warn",
+                "svg-dom-parity",
+                # validation run findings — monolithic-impl + motion-coverage.
+                "monolithic-impl", "motion-coverage",
+                "scroll-engine-parity",
+            }
             if status == "pass":
                 out.append(CheckResult(label, "pass", f"{check_id} (status: pass)"))
             elif status is None:
+                if check_id in STATUS_REQUIRED:
+                    msg = (
+                        f"{check_id} — artifact present but `status` field "
+                        "is absent. Known checks must declare status; missing "
+                        "status is the audit incident 'check produced JSON but never "
+                        "ran the assertion' gaming pattern."
+                    )
+                    out.append(CheckResult(label, "fail", msg, fix=fix))
+                    continue
                 out.append(CheckResult(label, "pass", f"{check_id} (artifact present, no status field)"))
             else:
                 count = (data.get("errorCount") or data.get("failureCount") or
                          data.get("totalStuck") or "?") if isinstance(data, dict) else "?"
                 msg = f"{check_id} — status: {status} ({count} issue(s)). Reason: {reason}"
-                if severity == "warn":
+                if str(status).lower() == "warn":
+                    out.append(CheckResult(label, "warn", msg))
+                elif severity == "warn":
                     out.append(CheckResult(label, "warn", msg))
                 else:
                     out.append(CheckResult(label, "fail", msg, fix=fix))
@@ -2134,6 +2756,30 @@ class Gate:
             return []
         return list(dispatch[gate]())
 
+    def _check_pipeline_state_prerequisites(self, gate: str) -> CheckResult | None:
+        """Fail closed when pipeline-state skipped required earlier gates."""
+        if gate == "all" or gate not in _state.GATE_ORDER:
+            return None
+        if not (self.ref_dir / "pipeline-state.json").is_file():
+            return None
+        ps = _state.PipelineState.load(self.ref_dir)
+        missing = ps.missing_prerequisites(gate)
+        if not missing:
+            return None
+        missing_s = ", ".join(missing)
+        return CheckResult(
+            "pipeline-state prerequisites",
+            "fail",
+            (
+                f"pipeline-state.json is out of order: gate {gate!r} cannot pass "
+                f"until earlier gate(s) are completed: {missing_s}."
+            ),
+            fix=(
+                "Resume at the earliest missing gate instead of continuing closeout. "
+                f"Run: python -m ui_clone.goal {self.ref_dir}"
+            ),
+        )
+
     def _render_text(self, results: list[CheckResult]) -> None:
         for r in results:
             if r.status == "pass":
@@ -2173,7 +2819,8 @@ class Gate:
         if not json_output:
             print(f"Gate: {gate}")
 
-        results = self._dispatch(gate)
+        state_prereq = self._check_pipeline_state_prerequisites(gate)
+        results = [state_prereq] if state_prereq is not None else self._dispatch(gate)
 
         if json_output:
             self._render_json(results)

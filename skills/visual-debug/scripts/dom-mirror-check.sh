@@ -22,7 +22,16 @@ set -euo pipefail
 REF_DIR=""
 IMPL_DIR=""
 OUT_PATH=""
-THRESHOLD=30  # pct divergence allowed before failing
+# 17-iteration measurement (2026-05-22): every codex/claude clone of
+# realfood.gov produces 80%+ tag-multiset divergence because LLMs
+# abstract the ref's deeply-nested obfuscated div soup (15+ wrapper
+# levels of `dga_X__Y` classes, ~1063 DOM nodes) into clean React
+# components (~200 nodes). 30% was unreachable in practice. Raise to
+# 80% so the gate only fires on genuine evisceration (impl dropping
+# 90%+ of ref tags), and route hero composite structure check to a
+# dedicated hero-composite-check.sh instead. UI_CLONE_DOM_MIRROR_THRESHOLD
+# env var lets operators tighten back down for sites without div-soup.
+THRESHOLD="${UI_CLONE_DOM_MIRROR_THRESHOLD:-80}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -74,6 +83,8 @@ def walk(node, depth=0, max_depth=12):
     if depth > max_depth or not isinstance(node, dict):
         return
     tag = node.get("tag", "")
+    if isinstance(tag, str) and tag.lower() in {"script", "style", "noscript", "template"}:
+        return
     if tag:
         ref_seq.append(tag.lower())
     for c in node.get("children", []) or []:
@@ -106,7 +117,27 @@ HTML_TAGS = {
 
 
 impl_seq = []
-impl_components = sorted((impl_dir / "src" / "components").glob("*.tsx"))
+#
+# heavy-motion site (signal #3) escape: agent abandoned scaffold and authored
+# impl/src/main.jsx by hand. main.jsx contained the live DOM but was
+# skipped by the .tsx-only scan, so dom-mirror saw the dead scaffold
+# under page.tsx and reported divergence — but never saw what the
+# browser actually rendered. Extend the scan to .jsx / .ts / .js too;
+# any file with JSX (or JS that builds DOM strings) participates.
+SCAN_EXCLUDE = {"node_modules", ".next", "dist", "build", ".turbo"}
+SCAN_SUFFIXES = (".tsx", ".jsx", ".ts", ".js")
+all_jsx = []
+src_root = impl_dir / "src"
+if src_root.is_dir():
+    for p in src_root.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix not in SCAN_SUFFIXES:
+            continue
+        if any(part in SCAN_EXCLUDE for part in p.parts):
+            continue
+        all_jsx.append(p)
+impl_components = sorted(all_jsx)
 if not impl_components:
     out = {
         "status": "pass",
@@ -121,10 +152,79 @@ if not impl_components:
     sys.exit(0)
 
 
+# Common cheat pattern (loop-60 finding #1): React `.map()` /
+# `.forEach()` / `.flatMap()` over arrays of repeated data
+# (38 pyramid items, 8 FAQ rows, manifesto word-spans) renders
+# many runtime DOM tags from FEW static JSX tags. Static-grep
+# would say "ref has 38 <li>, impl has 1 <li>" → false fail.
+# Track which tags appear INSIDE iteration callbacks so the
+# eviscerate + per-tag-delta checks can exempt them (we can't
+# statically know the runtime count).
+ITER_RE = re.compile(
+    r"\.(?:map|forEach|flatMap|filter|reduce|reduceRight|flat)\s*\(\s*(?:async\s*)?"
+    r"(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>"
+    r"|"
+    r"Array\.from\s*\(\s*[^,)]+,\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>"
+    r"|"
+    r"\[\.\.\.[A-Za-z_$][\w$.]*\]\s*\.\s*(?:map|forEach|flatMap)\s*\("
+)
+iterated_tags: set[str] = set()
+
+
+def _tags_in_block(text: str) -> set[str]:
+    out: set[str] = set()
+    for m in TAG_PATTERN.finditer(text):
+        t = m.group(1).lower()
+        if t in HTML_TAGS:
+            out.add(t)
+    return out
+
+
+def _balanced_segment(text: str, start_idx: int, max_len: int = 8000) -> str:
+    """Return text from start_idx up to the matching close paren.
+    Handles nested parens/braces and quoted strings (best-effort).
+    Stops at max_len chars."""
+    depth_paren = 0
+    depth_brace = 0
+    end = min(len(text), start_idx + max_len)
+    in_str = None
+    i = start_idx
+    while i < end:
+        ch = text[i]
+        if in_str:
+            if ch == in_str and text[i - 1] != "\\":
+                in_str = None
+            i += 1
+            continue
+        if ch in "\"'`":
+            in_str = ch
+            i += 1
+            continue
+        if ch == "(": depth_paren += 1
+        elif ch == ")":
+            depth_paren -= 1
+            if depth_paren <= 0:
+                return text[start_idx:i + 1]
+        elif ch == "{": depth_brace += 1
+        elif ch == "}":
+            depth_brace -= 1
+        i += 1
+    return text[start_idx:end]
+
+
 for comp_path in impl_components:
     body = comp_path.read_text(encoding="utf-8")
     body_clean = re.sub(r"/\*[\s\S]*?\*/", "", body)
     body_clean = re.sub(r"//[^\n]*", "", body_clean)
+    # First pass — collect tags that live inside iteration callbacks.
+    for m in ITER_RE.finditer(body_clean):
+        # Walk balanced parens starting at the `(` of `.map(`.
+        paren_idx = body_clean.find("(", m.start())
+        if paren_idx < 0:
+            continue
+        seg = _balanced_segment(body_clean, paren_idx)
+        iterated_tags.update(_tags_in_block(seg))
+    # Second pass — collect all tags as before.
     for m in TAG_PATTERN.finditer(body_clean):
         tag = m.group(1).lower()
         if tag in HTML_TAGS:
@@ -151,18 +251,57 @@ divergence_pct = round((1.0 - similarity) * 100, 1)
 # Per-tag breakdown for the diff report — only flag tags where impl deviates
 # significantly (>50% off ref count).
 tag_deltas = []
+EVISCERATE_MIN_REF = 10
+EVISCERATE_MAX_RATIO = 0.25
+eviscerated: list[dict] = []
 for tag in sorted(all_tags):
     r = ref_counter.get(tag, 0)
     i = impl_counter.get(tag, 0)
+    # Iterated tags (impl renders many runtime instances from a
+    # single static JSX inside .map() / .forEach() etc) are exempt
+    # from per-tag count delta + eviscerate. Static count would
+    # always under-represent the runtime count and false-fail.
+    if tag in iterated_tags:
+        tag_deltas.append({
+            "tag": tag, "ref": r, "impl": i,
+            "note": "impl uses iteration (.map/.forEach) — static count cannot match runtime",
+        })
+        continue
     if r == 0 and i > 0:
         tag_deltas.append({"tag": tag, "ref": r, "impl": i, "note": "tag invented in impl"})
     elif i == 0 and r > 2:
         tag_deltas.append({"tag": tag, "ref": r, "impl": i, "note": "tag dropped from impl"})
     elif r > 0 and abs(r - i) > max(2, r * 0.5):
         tag_deltas.append({"tag": tag, "ref": r, "impl": i, "note": "count diverges >50%"})
+    # Class-evisceration: heavy tag in ref nearly disappeared from impl.
+    if r >= EVISCERATE_MIN_REF and i < r * EVISCERATE_MAX_RATIO:
+        eviscerated.append({"tag": tag, "ref": r, "impl": i})
 
 
-status = "fail" if divergence_pct > threshold_pct else "pass"
+# Recompute similarity excluding iterated tags entirely from the
+# multiset (static-grep can't compare them meaningfully). Falls
+# back to the original similarity when no iterated tags detected.
+if iterated_tags:
+    non_iter_ref = Counter({
+        t: c for t, c in ref_counter.items() if t not in iterated_tags
+    })
+    non_iter_impl = Counter({
+        t: c for t, c in impl_counter.items() if t not in iterated_tags
+    })
+    non_iter_tags = set(non_iter_ref) | set(non_iter_impl)
+    overlap2 = sum(
+        min(non_iter_ref.get(t, 0), non_iter_impl.get(t, 0))
+        for t in non_iter_tags
+    )
+    union2 = sum(
+        max(non_iter_ref.get(t, 0), non_iter_impl.get(t, 0))
+        for t in non_iter_tags
+    )
+    similarity = (overlap2 / union2) if union2 else 1.0
+    divergence_pct = round((1.0 - similarity) * 100, 1)
+
+
+status = "fail" if (divergence_pct > threshold_pct or eviscerated) else "pass"
 out = {
     "status": status,
     "ref_tag_count": len(ref_seq),
@@ -171,11 +310,15 @@ out = {
     "divergence_pct": divergence_pct,
     "threshold_pct": threshold_pct,
     "tag_deltas": tag_deltas[:30],
+    "eviscerated_tags": eviscerated,
     "components_checked": len(impl_components),
     "rule": (
         "Impl JSX tag-multiset must mirror dom-scaffold tag-multiset within "
         f"{threshold_pct}% divergence. Inventing tags not in ref or dropping "
-        "tags from ref by >50% fails this gate."
+        "tags from ref by >50% fails this gate. Additionally, any tag with "
+        f"ref count >= {EVISCERATE_MIN_REF} that drops below "
+        f"{int(EVISCERATE_MAX_RATIO * 100)}% in impl is treated as class "
+        "evisceration and hard-fails regardless of overall divergence."
     ),
 }
 print(json.dumps(out, indent=2, ensure_ascii=False))

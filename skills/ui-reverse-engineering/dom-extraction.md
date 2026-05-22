@@ -123,6 +123,27 @@ agent-browser --session <project-name> eval "
 
 **Save output to** `tmp/ref/<component>/structure.json`
 
+### Aggregate per-tag / per-class styles (MANDATORY)
+
+`structure.json` carries computed CSS per node. `dom-scaffold.sh` consumes the
+per-tag and per-first-class **aggregate** — not the raw per-node form — so the
+aggregate has to be produced before the scaffold can run.
+
+**Preferred — automated producer.** `run --phases 2` invokes this for you:
+
+```bash
+bash skills/visual-debug/scripts/extract-styles.sh tmp/ref/<component>
+```
+
+The script reads `structure.json`, settles each `(tag-or-class, key)` to its
+modal value (`background-image` wins over `background-color` when both are
+present), and emits `tmp/ref/<component>/styles.json` in the
+`{ "tag": {...}, ".class": {...} }` shape `dom-scaffold.sh`'s `resolve_styles()`
+expects. No browser round-trip — it's a pure read of `structure.json`.
+
+If you skip this step, `dom-scaffold.sh` aborts with `missing input: styles.json`
+and the pipeline stalls at Phase 2.
+
 ### Post-extraction sanitization check
 
 After saving `structure.json`, scan it for suspicious content:
@@ -138,6 +159,16 @@ If suspicious content is found: **log it to the user**, remove or neutralize the
 
 After extracting `structure.json`, enumerate every top-level semantic container on the page. This is the **ground truth** for how many components to generate. Missing a `<footer>` or `<aside>` here means it won't exist in the implementation.
 
+**Preferred — automated producer.** The pipeline's `run --phases 2` driver already invokes this for you. If you need to re-run it standalone (e.g. after manually correcting a section recursion bug):
+
+```bash
+bash skills/visual-debug/scripts/extract-section-map.sh tmp/ref/<component> <project-name>
+```
+
+The script writes `tmp/ref/<component>/section-map.json` directly and runs the same enumeration JS shown below. Prefer it over pasting the eval by hand — they were drifting before, and a manual run on a fresh ref dir was the long-standing reason `dom-scaffold.sh` aborted with "missing section-map.json" on first-time pipelines.
+
+**Equivalent manual eval (kept for reference / patching the JS):**
+
 ```bash
 agent-browser --session <project-name> eval "
 (() => {
@@ -146,20 +177,48 @@ agent-browser --session <project-name> eval "
   const semanticRoles = new Set(['region', 'main', 'banner', 'contentinfo', 'navigation']);
   const containers = [];
 
-  function collectSections(parent) {
+  // Codex universality audit FN + loop-59 root-cause: prior version
+  // stopped recursing when a div had no semantic children. NAVER-style
+  // sites where <main> contains nothing but <div class="dga_*"> sub-
+  // sections produced only 2 sections (main + footer) for a 21k-tall
+  // page. Two recursion triggers added:
+  //   1. Semantic containers taller than 2× viewport are decomposed
+  //      instead of being added wholesale — they're almost certainly
+  //      wrapping the page-scrolled content.
+  //   2. Div containers with >= 2 large div children (each >= 50% of
+  //      viewport height) recurse even without semantic children —
+  //      catches the dga_* sibling pattern.
+  const VIEWPORT_H = window.innerHeight || 800;
+  const LARGE_DIV_H = Math.min(VIEWPORT_H * 0.5, 600);
+  function collectSections(parent, depth = 0) {
+    if (depth > 4) return;  // safety bound
     Array.from(parent.children).forEach(el => {
       const tag = el.tagName.toLowerCase();
+      if (['script','style','noscript','template'].includes(tag)) return;
       const h = el.getBoundingClientRect().height;
       const role = el.getAttribute('role');
       if ((semanticTags.has(tag) || semanticRoles.has(role)) && h > 50) {
-        containers.push(el);
+        // Decompose huge semantic containers (>2× viewport) into
+        // their sub-sections; otherwise add as-is.
+        if (h > VIEWPORT_H * 2) {
+          collectSections(el, depth + 1);
+        } else {
+          containers.push(el);
+        }
       } else if (tag === 'div' && h > 100) {
-        const hasSemanticChildren = Array.from(el.children).some(c =>
+        const childrenArr = Array.from(el.children);
+        const hasSemanticChildren = childrenArr.some(c =>
           semanticTags.has(c.tagName.toLowerCase()) || semanticRoles.has(c.getAttribute('role') || '')
         );
+        const bigDivChildren = childrenArr.filter(c =>
+          c.tagName === 'DIV' && c.getBoundingClientRect().height >= LARGE_DIV_H
+        );
         if (hasSemanticChildren) {
-          collectSections(el);
-        } else if (h > Math.min(window.innerHeight * 0.25, 400)) {
+          collectSections(el, depth + 1);
+        } else if (bigDivChildren.length >= 2) {
+          // Multi-sub-container div (NAVER dga_* pattern) — descend.
+          collectSections(el, depth + 1);
+        } else if (h > Math.min(VIEWPORT_H * 0.25, 400)) {
           containers.push(el);
         }
       }

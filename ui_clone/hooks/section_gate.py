@@ -36,6 +36,73 @@ def _get_stale_seconds() -> float:
     return days * 24 * 3600
 
 
+def _resolve_impl_dir(ref_dir: Path, fallback_root: Path | None = None) -> Path | None:
+    """Resolve the impl/ directory for `ref_dir`, preferring the per-ref-dir
+    `impl_root` recorded in pipeline-state.json.
+
+    Loop-61 architectural diagnosis (closure of the false-positive cascade):
+    `ref_dir.parent.parent.parent / "impl"` and `project_root / "impl"` both
+    assume one canonical impl/ per project. When a stray `<repo>/impl`
+    symlink lives at the repo root (rogue subagent state, a hand-symlink, a
+    leftover convention), every prior `tmp/ref/<c>/` false-positives as
+    "active" and the verify-stamp gate fires against unrelated months-old
+    clones. Now that `PipelineState.impl_root` and the `.impl-root` marker
+    are written at Phase 1 start, the resolver can be precise per ref dir.
+
+    Priority order:
+    1. UI_CLONE_IMPL_ROOT env (operator override / nested-loop testing)
+    2. `pipeline-state.json` → `impl_root` (set by Phase 1 of the pipeline)
+    3. `<ref_dir>/.impl-root` marker file (set alongside the state field)
+    4. Fallback to the convention path (`<fallback_root or repo>/impl`)
+       — preserves legacy behavior for ref dirs that predate the impl_root
+       field; the fallback still produces the same single-impl assumption
+       failures as before, but only when the per-ref-dir resolution found
+       nothing.
+
+    Returns None when no resolution exists at all, so callers can branch
+    on "no impl is wired up to this ref" instead of grabbing a rogue symlink.
+    """
+    env_root = os.environ.get("UI_CLONE_IMPL_ROOT", "").strip()
+    if env_root:
+        p = Path(env_root)
+        if p.is_dir():
+            return p
+
+    try:
+        state = PipelineState.load(ref_dir)
+        if state.impl_root:
+            p = Path(state.impl_root)
+            if p.is_dir():
+                return p
+    except OSError:
+        pass
+
+    marker = ref_dir / ".impl-root"
+    if marker.is_file():
+        try:
+            marker_value = marker.read_text(encoding="utf-8").strip()
+            if marker_value:
+                p = Path(marker_value)
+                if p.is_dir():
+                    return p
+        except OSError:
+            pass
+
+    candidates: list[Path] = []
+    if fallback_root is not None:
+        candidates.append(fallback_root / "impl")
+    # ref_dir.parent.parent.parent matches the legacy derivation
+    # (tmp/ref/<c>/.. = tmp/ref/.. = tmp/.. = <project-root>).
+    try:
+        candidates.append(ref_dir.parent.parent.parent / "impl")
+    except (IndexError, OSError):
+        pass
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+    return None
+
+
 def _find_active_markers(search_root: Path) -> list[Path]:
     """Return ref dirs that should engage the Stop hook.
 
@@ -44,7 +111,7 @@ def _find_active_markers(search_root: Path) -> list[Path]:
        first passing pre-generate gate. This is the canonical "I am in a
        ui-re flow" signal.
     2. impl/ alongside tmp/ref/<c>/ even without the explicit marker —
-       loop-6 post-mortem: nested agents that skip Phase 5/6 (spec) never
+       audit incident post-mortem: nested agents that skip Phase 5/6 (spec) never
        pass pre-generate, the marker never gets written, and the Stop hook
        used to release silently. Treat the bare presence of impl/ as a
        sufficient signal that an agent is mid-clone, so the verify-stamp
@@ -55,17 +122,22 @@ def _find_active_markers(search_root: Path) -> list[Path]:
     dirs: list[Path] = []
     # project_root is the parent of tmp/, which is the parent of search_root.
     project_root = search_root.parent.parent
-    impl_dir = project_root / "impl"
-    impl_present = impl_dir.is_dir()
     for d in sorted(search_root.iterdir()):
         if not d.is_dir():
             continue
         if (d / ".ui-re-active").is_file():
             dirs.append(d)
-        elif impl_present and any(d.iterdir()):
-            # impl/ exists but the canonical marker is missing — implicit
-            # activation. Skip empty ref dirs to avoid false positives on
-            # totally cold fresh starts.
+            continue
+        # Implicit activation: impl/ exists but the canonical marker is missing.
+        # Loop-61 false-positive fix: resolve impl per ref dir (impl_root /
+        # .impl-root marker / env), not from a single repo-root convention.
+        # A rogue <project_root>/impl symlink no longer false-positives every
+        # prior tmp/ref/<c>/ — only ref dirs whose recorded impl_root exists
+        # implicit-activate.
+        impl_dir = _resolve_impl_dir(d, fallback_root=project_root)
+        if impl_dir is not None and any(d.iterdir()):
+            # Skip empty ref dirs to avoid false positives on totally cold
+            # fresh starts.
             dirs.append(d)
     return dirs
 
@@ -146,12 +218,67 @@ def _unknown_gate_block_reason(current_gate: str, ref_dir: Path) -> str:
 _VERIFY_STAMP_MAX_AGE_S = 1800  # 30 min — generous so the agent has time to
 # finish the response after running verify, but short enough that stale
 # stamps from a previous run don't satisfy the gate.
+_VERIFY_STAMP_WATCH_EXTS = {
+    ".css",
+    ".gif",
+    ".html",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".json",
+    ".jsx",
+    ".mp4",
+    ".png",
+    ".scss",
+    ".svg",
+    ".ts",
+    ".tsx",
+    ".webm",
+    ".webp",
+}
+_VERIFY_STAMP_SKIP_DIRS = {
+    ".git",
+    ".next",
+    "build",
+    "dist",
+    "node_modules",
+}
+
+
+def _newer_impl_files(impl_dir: Path, stamp_path: Path, limit: int = 5) -> list[Path]:
+    """Return impl files modified after verify-stamp.json.
+
+    A fresh timestamp alone is not enough: agents can run `pipeline ... verify`,
+    then patch JSX/CSS/assets and stop within the 30-minute stamp window. Scan
+    the implementation surface and force a new verify when source changed.
+    """
+    try:
+        stamp_mtime = stamp_path.stat().st_mtime
+    except OSError:
+        return []
+
+    changed: list[Path] = []
+    for path in impl_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in _VERIFY_STAMP_SKIP_DIRS for part in path.parts):
+            continue
+        if path.suffix.lower() not in _VERIFY_STAMP_WATCH_EXTS:
+            continue
+        try:
+            if path.stat().st_mtime > stamp_mtime + 0.001:
+                changed.append(path)
+        except OSError:
+            continue
+        if len(changed) >= limit:
+            break
+    return changed
 
 
 def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     """Block Stop unless pipeline.execute_verify wrote a fresh stamp.
 
-    Codex Q1 (loop-5 post-mortem): the SKILL.md mandate to run
+    Codex Q1 (audit incident post-mortem): the SKILL.md mandate to run
     `pipeline ... verify` was bypassed because the agent invoked
     individual verification scripts directly. This check closes the
     bypass — Stop blocks unless `verify-stamp.json` exists AND is
@@ -160,12 +287,14 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     Only fires when impl/ exists (post-generation). Pre-generation
     loops are governed by the regular current_gate enforcement.
     """
-    # impl/ is resolved relative to cwd because that's what
-    # pipeline.execute_verify uses; for the Stop-hook caller cwd
-    # may differ from ref_dir's parent (especially in scratch/loop-N
-    # validation runs), so we walk up from ref_dir to find it.
-    impl_dir = ref_dir.parent.parent.parent / "impl"  # tmp/ref/<c>/.. = tmp/ref/.. = tmp/.. = loop-N/
-    if not impl_dir.is_dir():
+    # impl/ is resolved via the per-ref-dir impl_root field (loop-61
+    # architectural fix). The legacy ref_dir.parent.parent.parent / "impl"
+    # walk is kept as a fallback inside _resolve_impl_dir for ref dirs that
+    # predate the field, but the prior single-impl-per-project assumption
+    # no longer false-positives every ref dir when a rogue <repo>/impl
+    # symlink exists.
+    impl_dir = _resolve_impl_dir(ref_dir)
+    if impl_dir is None or not impl_dir.is_dir():
         return None  # pre-generation — no stamp required yet
 
     stamp_path = ref_dir / "verify-stamp.json"
@@ -175,6 +304,9 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
             f"impl/ exists at {impl_dir} but no verify-stamp.json. The Stop hook\n"
             f"requires `python -m ui_clone.pipeline ... verify` to have run and\n"
             f"passed before the response can end.\n\n"
+            f"Build success, HTTP 200/title checks, local render, and visual spot checks\n"
+            f"are not completion evidence. Missing artifacts are hard failures, not\n"
+            f"substitutes for canonical verification.\n\n"
             f"Fix:\n"
             f"  python -m ui_clone.pipeline <url> <component> <session> verify\n\n"
             f"Verify drives the post-impl gates in GATE_ORDER (post-implement,\n"
@@ -195,11 +327,43 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
             f"{exc}\n\n"
             f"Re-run `python -m ui_clone.pipeline ... verify` to regenerate.\n"
         )
+    required_gates = {"spec", "post-implement", "boundary", "font-parity", "section-compare"}
+    stamped_by = stamp.get("stampedBy")
+    gates_passed = stamp.get("gatesPassed")
+    missing_gates: list[str] = []
+    if isinstance(gates_passed, list):
+        passed_set = {str(g) for g in gates_passed}
+        missing_gates = sorted(required_gates - passed_set)
+    else:
+        missing_gates = sorted(required_gates)
+    if stamped_by != "pipeline.execute_verify" or missing_gates:
+        missing = ", ".join(missing_gates) if missing_gates else "none"
+        return (
+            f"⛔ UI-RE Verify-stamp gate: non-canonical stamp for {ref_dir}\n\n"
+            f"verify-stamp.json must be written by pipeline.execute_verify after the\n"
+            f"canonical post-implementation gate suite passes. Current stampedBy={stamped_by!r};\n"
+            f"missing required gate evidence: {missing}.\n\n"
+            f"Build success, HTTP 200/title checks, local render, and visual spot checks\n"
+            f"are not completion evidence.\n\n"
+            f"Re-run:\n"
+            f"  python -m ui_clone.pipeline <url> <component> <session> verify\n"
+        )
     if age_s > _VERIFY_STAMP_MAX_AGE_S:
         return (
             f"⛔ UI-RE Verify-stamp gate: STALE stamp for {ref_dir}\n\n"
             f"verify-stamp.json is {int(age_s)}s old (max {_VERIFY_STAMP_MAX_AGE_S}s).\n"
             f"impl/ was likely modified after the last verify. Re-run:\n\n"
+            f"  python -m ui_clone.pipeline <url> <component> <session> verify\n"
+        )
+
+    changed = _newer_impl_files(impl_dir, stamp_path)
+    if changed:
+        sample = "\n".join(f"  - {p}" for p in changed)
+        return (
+            f"⛔ UI-RE Verify-stamp gate: impl changed after verify for {ref_dir}\n\n"
+            f"These implementation files are newer than verify-stamp.json:\n"
+            f"{sample}\n\n"
+            f"Re-run the canonical closeout after the last code/asset edit:\n\n"
             f"  python -m ui_clone.pipeline <url> <component> <session> verify\n"
         )
     return None
@@ -211,18 +375,20 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     state = PipelineState.load(ref_dir)
     current_gate = state.current_gate
 
-    # Verify-stamp short-circuit (loop-9 post-mortem). When impl/ exists,
-    # the Stop hook trusts the verify-stamp + the canonical
-    # pipeline.execute_verify entry point as the SOLE release decision and
-    # does NOT re-run section-compare itself. Re-running the gate inline
-    # caused a fire-storm in loop-9 — 440 Stop-hook injections in 1.5 h —
-    # because section-compare permanently reports the same critical FAILs
-    # on textually-correct clones with substituted fonts / approximated
-    # videos / canvas reveals. The gate is still enforced (pipeline verify
-    # runs it on every invocation), but it runs ONCE per agent-initiated
-    # cycle, not once per Stop event.
-    impl_dir = ref_dir.parent.parent.parent / "impl"
-    if impl_dir.is_dir():
+    # Unclonable short-circuit (Common cheat pattern): when pipeline-state.json
+    # records unclonable_reasons (paid font with no substitution, DRM canvas,
+    # auth-gated content, or — per ui_clone.goal abort_banner — a hard-cap
+    # gate-fail count), release Stop instead of re-enforcing the gate that
+    # produced the abort. Without this, Stop fires every turn while
+    # `python -m ui_clone.goal --check-done` returns exit 2 — the two signals
+    # disagree and external loops can't terminate cleanly. The orchestrator
+    # halts loop spawning on --check-done exit 2; this hook stops firing
+    # blocking-reason text symmetrically.
+    if state.unclonable_reasons:
+        return None
+
+    impl_dir = _resolve_impl_dir(ref_dir)
+    if impl_dir is not None and impl_dir.is_dir():
         return _enforce_verify_stamp(ref_dir)
 
     if current_gate in {"section-compare", "done"}:

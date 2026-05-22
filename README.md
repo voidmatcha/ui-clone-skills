@@ -40,7 +40,7 @@ These are the decisions that shape how the plugin is structured. They aim to kee
 
 - **Real values, not guesses.** Every number — font-size, easing curve, scroll offset, stagger delay — comes from `getComputedStyle`, raw CSS, or a JS bundle grep. The plugin refuses to ship approximations.
 - **Near-zero vision tokens for comparison.** AE and SSIM CLI tools handle pixel diff — the LLM never reads ref vs impl screenshots side-by-side. Vision tokens are only used when: (1) reading a single diff image on AE/SSIM failure, (2) Phase E final semantic review (~44K tokens, mandatory).
-- **Progressive-disclosure sub-docs.** Each SKILL.md contains only the pipeline and core rules (~5.9K tokens total across 3 skills). Detailed procedures live in 46 focused sub-docs loaded only when that step runs. Common paths stay lean; specialized paths expand on demand.
+- **Progressive-disclosure sub-docs.** Each SKILL.md contains only the pipeline and core rules (~5.9K tokens total across 3 skills). Detailed procedures live in 48 focused sub-docs loaded only when that step runs. Common paths stay lean; specialized paths expand on demand.
 - **Single source of truth for transitions.** `transition-spec.json` is produced once from bundle analysis. Implementation reads the spec, never re-greps the bundle — avoiding wasted work and the risk of picking the wrong conditional branch.
 - **Automation over introspection.** Python gates (`python -m ui_clone.gate`, `python -m ui_clone.pipeline`, `scripts/verify/auto-verify.sh`) decide whether a step is complete. Agents don't self-certify "looks good enough."
 - **No judgment, data only.** Every decision must be backed by extracted data, captured screenshots, or script output. "Probably", "close enough", and "just a content difference" are forbidden — each has a documented failure case.
@@ -73,7 +73,13 @@ Inside Claude Code, after the installer finishes:
 /plugin install ui-clone-skills@voidmatcha
 ```
 
-For Codex: restart the CLI — the marketplace is already registered. If your Codex build does not support trusted plugin hooks yet, the skills still load without the hook gate chain.
+For Codex: the installer creates a lightweight personal plugin source at `~/plugins/ui-clone-skills`, writes `~/.agents/plugins/marketplace.json`, and runs `codex plugin add ui-clone-skills@local`. Verify `codex plugin list` shows `ui-clone-skills@local (installed)`, then launch Codex with plugin hooks enabled:
+
+```bash
+codex --enable plugin_hooks
+```
+
+If your Codex build does not support trusted plugin hooks yet, the skills may load without the hook gate chain. Treat that as docs-only mode for validation: it can guide the agent, but it cannot block bypasses.
 
 The installer is idempotent: it bootstraps shared dependencies, registers the local checkout for whichever host(s) are present, and skips anything already installed.
 
@@ -190,6 +196,7 @@ The `ui-reverse-engineering` skill is auto-loaded so the prompt does not need to
 # ~/.codex/config.toml — enable once, restart Codex
 [features]
 goals = true
+plugin_hooks = true
 ```
 
 In the Codex REPL, run a one-line `/goal` invocation (the `ui-reverse-engineering` skill ships an `AGENTS.md` block that Codex auto-loads, so the goal prompt doesn't re-embed the full pipeline briefing): `/goal Drive the ui-clone-skills pipeline for tmp/ref/<component> until python -m ui_clone.goal tmp/ref/<component> --check-done exits 0. Never declare completion until the exit code is 0.` Use `/goal pause` to narrow scope mid-run, `/goal resume` to continue.
@@ -238,7 +245,7 @@ The pipeline runs automatically. `python -m ui_clone.pipeline` detects the curre
 
 If verification fails, the pipeline iterates up to 3 rounds (Phase H self-healing loop) before asking for human review.
 
-**Hooks are already registered** on install through the host manifest. Both Claude Code and Codex route through `hooks/shim.sh`, so premature write blocks and unverified completion warnings stay shared.
+**Hooks are already registered** on install through the host manifest. Both Claude Code and Codex route through `hooks/shim.sh`, so premature write blocks and unverified completion warnings stay shared. In Codex, also confirm `features.plugin_hooks = true` or launch with `codex --enable plugin_hooks`; without that, validation runs are docs-only.
 
 ---
 
@@ -405,7 +412,7 @@ UI cloning sessions are token-intensive — DOM trees, computed styles, and JS b
 | Strategy | How |
 |---|---|
 | Zero vision tokens for verification | AE/SSIM CLI tools diff screenshots. LLM only reads a single diff image on FAIL |
-| Progressive-disclosure sub-docs | SKILL.md ~6K tokens. 46 sub-docs load only when their step runs |
+| Progressive-disclosure sub-docs | SKILL.md ~6K tokens. 48 sub-docs load only when their step runs |
 | Pipe-to-file rule | Large `eval` output goes to `tmp/ref/*.json`, then `Read`/`Grep` specific lines |
 | Single source of truth | `transition-spec.json` produced once — implementation reads it, never re-greps bundles |
 | Bash loop breaker | After 10+ consecutive Bash calls, stop and analyze before continuing |

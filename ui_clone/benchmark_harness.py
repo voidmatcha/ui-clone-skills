@@ -138,6 +138,16 @@ def check_strict_done(ref_dir: Path, impl_dir: Path) -> tuple[bool, list[str]]:
             f"tree-diff status={td.get('status')!r} "
             f"(errorCount={td.get('errorCount')}; reason={td.get('reason')})"
         )
+    elif isinstance(td, dict):
+        counts = td.get("counts") or {}
+        if isinstance(counts, dict):
+            unpaired = int(counts.get("unpaired") or 0)
+            ok = int(counts.get("ok") or 0)
+            if unpaired >= 3 and unpaired > ok:
+                unmet.append(
+                    f"tree-diff unpaired={unpaired} ok={ok} "
+                    "(pairing failed despite status='pass')"
+                )
 
     # transitions/result.txt
     tr = ref_dir / "transitions" / "result.txt"

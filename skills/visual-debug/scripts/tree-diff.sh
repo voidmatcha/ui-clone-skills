@@ -202,7 +202,23 @@ ref_by_i = {r["i"]: r for r in ref}
 CRITICAL = {"fontFamily", "fontWeight", "color", "display"}
 MAJOR    = {"fontSize", "lineHeight", "letterSpacing", "textTransform",
             "backgroundColor", "padding", "margin", "borderRadius"}
+ADVISORY: set[str] = set()
 # everything else = minor
+
+try:
+    _subs_path = os.path.join(out_dir, "asset-substitution.json")
+    if os.path.exists(_subs_path):
+        _subs = json.loads(open(_subs_path).read())
+        _patterns = _subs.get("structuralOnlySections") or []
+        if _subs.get("fonts") and "*" in _patterns:
+            # Wildcard substitution: font cascade is fully acknowledged.
+            CRITICAL = CRITICAL - {"fontFamily", "fontWeight", "color"}
+            MAJOR = MAJOR - {"fontFamily", "fontWeight", "color"}
+            ADVISORY = ADVISORY | {"fontFamily", "fontWeight", "color",
+                                   "fontSize", "lineHeight", "letterSpacing"}
+except (OSError, ValueError):
+    # Treat unreadable/malformed substitution as absent — keep strict mode.
+    pass
 
 # Bbox tolerance (px). Layout is paired-only, so it's relative to a successful pair.
 LAYOUT_MINOR_PX = 1.5  # sub-pixel / anti-aliasing
@@ -247,6 +263,7 @@ def diff_layout(impl_el, ref_el):
 def severity_of(diffs):
     if any(d[0] in CRITICAL for d in diffs): return "critical"
     if any(d[0] in MAJOR    for d in diffs): return "major"
+    if any(d[0] in ADVISORY for d in diffs): return "advisory"
     if diffs:                                return "minor"
     return "ok"
 
@@ -255,7 +272,7 @@ def layout_severity(layout_diffs):
     if any(d[3] >= LAYOUT_MAJOR_PX for d in layout_diffs): return "layout-major"
     return "layout-minor"
 
-SEV_RANK = {"critical": 5, "unpaired": 4, "layout-major": 3, "major": 2, "layout-minor": 1, "minor": 1, "ok": 0}
+SEV_RANK = {"critical": 5, "unpaired": 4, "layout-major": 3, "major": 2, "advisory": 1, "layout-minor": 1, "minor": 1, "ok": 0}
 
 rows = []
 for i, ie in enumerate(impl):
@@ -295,7 +312,7 @@ for i, ie in enumerate(impl):
 rows.sort(key=lambda r: (-SEV_RANK[r["sev"]], -impl[r["i"]]["area"]))
 
 # Counts
-counts = {"critical": 0, "major": 0, "layout-major": 0, "minor": 0, "layout-minor": 0, "ok": 0, "unpaired": 0}
+counts = {"critical": 0, "major": 0, "layout-major": 0, "advisory": 0, "minor": 0, "layout-minor": 0, "ok": 0, "unpaired": 0}
 for r in rows: counts[r["sev"]] += 1
 
 SEV_ICON = {"critical": "🔴", "major": "🟠", "layout-major": "🟣",
@@ -312,6 +329,7 @@ with open(md_path, "w") as f:
     f.write(f"**Critical**: {counts['critical']}  ")
     f.write(f"**Major**: {counts['major']}  ")
     f.write(f"**Layout-major**: {counts['layout-major']}  ")
+    f.write(f"**Advisory**: {counts['advisory']}  ")
     f.write(f"**Minor**: {counts['minor']}  ")
     f.write(f"**Layout-minor**: {counts['layout-minor']}  ")
     f.write(f"**Unpaired**: {counts['unpaired']}  ")
@@ -349,27 +367,31 @@ with open(json_path, "w") as f:
 # pair exists — same definition as the exit code below.
 status_path = os.path.join(out_dir, "tree-diff-status.json")
 total_fail = counts["critical"] + counts["major"] + counts["layout-major"]
+pairing_fail = counts["unpaired"] >= 3 and counts["unpaired"] > counts["ok"]
+status = "fail" if total_fail > 0 or pairing_fail else "pass"
+if total_fail > 0:
+    reason = f"{total_fail} critical/major element mismatch(es)"
+elif pairing_fail:
+    reason = f"tree pairing failed: unpaired={counts['unpaired']} ok={counts['ok']}"
+else:
+    reason = f"All {len(impl)} elements within style + layout tolerance"
 with open(status_path, "w") as f:
     json.dump({
         "schemaVersion": 1,
-        "status": "fail" if total_fail > 0 else "pass",
+        "status": status,
         "elements_walked": len(impl),
         "counts": counts,
-        "errorCount": total_fail,
-        "reason": (
-            f"{total_fail} critical/major element mismatch(es)"
-            if total_fail > 0
-            else f"All {len(impl)} elements within style + layout tolerance"
-        ),
+        "errorCount": total_fail + (counts["unpaired"] if pairing_fail else 0),
+        "reason": reason,
     }, f, indent=2)
 
 # ── Stdout ──
 print(f"  Walked {len(impl)} elements")
-print(f"  🔴 critical: {counts['critical']}   🟠 major: {counts['major']}   🟣 layout-major: {counts['layout-major']}   🟡 minor: {counts['minor']}   🟦 layout-minor: {counts['layout-minor']}   ⚪ unpaired: {counts['unpaired']}   ✓ ok: {counts['ok']}")
+print(f"  🔴 critical: {counts['critical']}   🟠 major: {counts['major']}   🟣 layout-major: {counts['layout-major']}   🔶 advisory: {counts['advisory']}   🟡 minor: {counts['minor']}   🟦 layout-minor: {counts['layout-minor']}   ⚪ unpaired: {counts['unpaired']}   ✓ ok: {counts['ok']}")
 print(f"  Report: {md_path}")
 print(f"  Raw:    {json_path}")
 print()
-if counts["critical"] or counts["major"] or counts["layout-major"]:
+if counts["critical"] or counts["major"] or counts["layout-major"] or pairing_fail:
     print("Top critical/major/layout-major:")
     for r in rows[:8]:
         if r["sev"] in ("ok", "minor", "layout-minor"): continue
@@ -384,5 +406,5 @@ if counts["critical"] or counts["major"] or counts["layout-major"]:
         d = "; ".join(bits) or "(unpaired)"
         print(f"  {sev_label} #{r['i']}  {impl_id}  '{txt}'  | {d}")
 
-sys.exit(1 if (counts["critical"] or counts["major"] or counts["layout-major"]) else 0)
+sys.exit(1 if (counts["critical"] or counts["major"] or counts["layout-major"] or pairing_fail) else 0)
 PYEOF

@@ -379,7 +379,8 @@ impl_els = json.loads(open('$DIR/transitions/impl-elements.json').read())
 hover_states = json.loads(open('$DIR/transitions/hover-states.json').read())
 
 # Match by selector similarity
-def find_impl_match(ref_sel, impl_list):
+def find_impl_match(ref_el, impl_list):
+    ref_sel = ref_el['selector']
     # Exact match
     for im in impl_list:
         if im['selector'] == ref_sel:
@@ -390,6 +391,22 @@ def find_impl_match(ref_sel, impl_list):
         im_cls = im['selector'].replace('.', '').replace('#', '')
         if ref_cls and im_cls and (ref_cls in im_cls or im_cls in ref_cls):
             return im
+    ref_text = (ref_el.get('text') or '').strip()
+    if ref_text and len(ref_text) >= 6:
+        for im in impl_list:
+            im_text = (im.get('text') or '').strip()
+            if im_text and (ref_text == im_text or ref_text in im_text or im_text in ref_text):
+                return im
+    # CSS-module hash strip: dga_hero__AjMaf -> dga_hero
+    # Only strip if the suffix looks like a hash (__ + 6+ alnum chars).
+    import re as _re
+    ref_root = _re.sub(r'__[A-Za-z0-9]{6,}$', '', ref_cls or '')
+    if ref_root and ref_root != ref_cls:
+        for im in impl_list:
+            im_cls = im['selector'].replace('.', '').replace('#', '')
+            im_root = _re.sub(r'__[A-Za-z0-9]{6,}$', '', im_cls or '')
+            if im_root and (ref_root == im_root or ref_root in im_root or im_root in ref_root):
+                return im
     return None
 
 report = []
@@ -397,7 +414,7 @@ pass_count = 0
 fail_count = 0
 
 for ref_el in ref_els:
-    impl_el = find_impl_match(ref_el['selector'], impl_els)
+    impl_el = find_impl_match(ref_el, impl_els)
 
     entry = {
         'selector': ref_el['selector'],
@@ -470,6 +487,19 @@ for ref_el in ref_els:
 
 json.dump(report, open('$DIR/transitions/report.json', 'w'), indent=2)
 
+# Common failure pattern: gates expect transitions/result.txt but
+# transition-compare only emits report.json. Emit a flat result.txt
+# alongside so dispatcher + gate.py post-implement enforcement can
+# read a stable text artifact for FAIL counting.
+with open('$DIR/transitions/result.txt', 'w') as fh:
+    fh.write(f'Transition compare: {pass_count} PASS, {fail_count} FAIL\n')
+    for r in report:
+        marker = '✅ PASS' if r['status'] == 'PASS' else '❌ FAIL'
+        sel = r.get('selector', '?')[:60]
+        fh.write(f'{marker}  {sel}\n')
+        for iss in (r.get('issues') or [])[:3]:
+            fh.write(f'    - {iss[:120]}\n')
+
 # Print summary
 print('')
 print('| Element | Status | Issues |')
@@ -484,5 +514,6 @@ print(f'**Result: {pass_count} PASS, {fail_count} FAIL**')
 
 echo ""
 echo "═══ Transition Compare Complete ═══"
-echo "  Report: $DIR/transitions/report.json"
-echo "  States: $DIR/transitions/{ref,impl}/"
+echo "  Report:  $DIR/transitions/report.json"
+echo "  Summary: $DIR/transitions/result.txt"
+echo "  States:  $DIR/transitions/{ref,impl}/"

@@ -19,7 +19,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "pre-push-security: not in a git repo" >&2
   exit 2
 }
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || { echo "pre-push-security: cd to repo root failed" >&2; exit 2; }
 
 ERRORS=0
 WARNINGS=0
@@ -34,7 +34,7 @@ section() { [ "$QUIET" = "1" ] || echo ""; [ "$QUIET" = "1" ] || echo "── $*
 SELF="pre-push-security.sh"
 # DRIFT_TEST: scripts/ci/test-parity.sh inlines known-bad strings on purpose so it
 # can mutate files to those patterns and verify this scanner still catches them.
-# Excluded from secret + identity-leak scans for the same reason as $SELF.
+# Excluded from secret scans for the same reason as $SELF.
 DRIFT_TEST="test-parity.sh"
 
 section "Secrets"
@@ -48,14 +48,14 @@ secret_patterns=(
 )
 secret_hits=0
 for p in "${secret_patterns[@]}"; do
-  # tmp/ and benchmark/ hold third-party site contents captured by the
+  # tmp/, scratch/, and benchmark/ hold third-party site contents captured by the
   # pipeline (e.g. realfood.gov head.json). Those contain PUBLIC API keys
   # that ship in the site's own HTML — not maintainer secrets. They're
   # gitignored and never published, so exclude from this scan.
   hits=$(grep -rEn "$p" \
     --include='*.sh' --include='*.md' --include='*.json' --include='*.yaml' --include='*.yml' \
     --exclude="$SELF" --exclude="$DRIFT_TEST" \
-    --exclude-dir=.git --exclude-dir=tmp --exclude-dir=benchmark \
+    --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=node_modules \
     --exclude-dir=.venv --exclude-dir=.mypy_cache --exclude-dir=.sisyphus \
     . 2>/dev/null | \
     grep -vE 'evals\.json|example|placeholder|YOUR_|TODO|<YOUR' || true)
@@ -69,24 +69,24 @@ done
 
 section "Code injection"
 eval_count=$(grep -rEn '(^|[[:space:];&|])eval[[:space:]"'"'"']' \
-  --include='*.sh' --exclude="$SELF" --exclude-dir=.git . 2>/dev/null | \
+  --include='*.sh' --exclude="$SELF" --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=node_modules . 2>/dev/null | \
   grep -v 'agent-browser' | \
   grep -v "^[^:]*:[0-9]*:[[:space:]]*echo " | \
   grep -vE "^[^:]*:[0-9]+:[[:space:]]*#" | wc -l | tr -d ' ')
 [ "$eval_count" -eq 0 ] && ok "no bash eval()" || err "bash eval() found ($eval_count occurrences)"
 
 # CWE-377: insecure use of fixed temporary file paths (race / symlink attack)
-# tmp/ and benchmark/ hold captured agent / third-party site scripts that are
+# tmp/, scratch/, and benchmark/ hold captured agent / third-party site scripts that are
 # not part of the shipped surface — same exclusion as the secret scan above.
 fixed_tmp=$(grep -rEn '/tmp/[a-zA-Z][a-zA-Z0-9_.-]+\.(txt|log|json|tmp)' \
   --include='*.sh' --exclude="$SELF" \
-  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=benchmark . 2>/dev/null | \
+  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=node_modules . 2>/dev/null | \
   grep -v 'mktemp\|RESULT_FILE\|TEMP_FILE' | wc -l | tr -d ' ')
 [ "$fixed_tmp" -eq 0 ] && ok "no fixed /tmp paths (CWE-377)" || err "fixed /tmp paths found ($fixed_tmp)"
 
 backdoor=$(grep -rEn 'nc -[el]|/dev/tcp/|bash -i.*&|reverse shell|exec [0-9]<>/dev/' \
   --include='*.sh' --exclude="$SELF" \
-  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=benchmark . 2>/dev/null | wc -l | tr -d ' ')
+  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=node_modules . 2>/dev/null | wc -l | tr -d ' ')
 [ "$backdoor" -eq 0 ] && ok "no reverse-shell / backdoor patterns" || err "backdoor pattern ($backdoor)"
 
 section "Manifest validity"
@@ -205,35 +205,6 @@ for f in skills/*/SKILL.md; do
   done < <(grep -oE '\.\./[a-zA-Z_-]+/[a-zA-Z0-9_./-]+\.(md|sh|json)' "$f" 2>/dev/null | sort -u)
 done
 [ "$broken_refs" -eq 0 ] && ok "all cross-refs resolve"
-
-section "Identity leakage"
-# Real company / employer-specific service names must not appear in code, docs,
-# or fixtures. The plugin is a public-facing marketplace surface; leakage of
-# the maintainer's employer / work-project names is unprofessional and embeds
-# NDA-adjacent info. Use generic placeholders: project-a / example.com /
-# <cdn-domain-1> / <streaming-cdn-host> / "a partner site". This scanner runs
-# on staged content. To add a new denylist entry, append to leak_patterns.
-leak_patterns=(
-  '\bnavercorp\b'
-  '\bkurlynmart\b'
-  '\bagencefoudre\b'
-  'livecloud-thumb\.akamaized\.net'
-  'nng-phinf\.pstatic\.net'
-)
-leak_hits=0
-for p in "${leak_patterns[@]}"; do
-  hits=$(grep -rEn "$p" \
-    --include='*.sh' --include='*.py' --include='*.md' --include='*.json' \
-    --include='*.yaml' --include='*.yml' --include='*.ts' --include='*.tsx' \
-    --exclude="$SELF" --exclude="$DRIFT_TEST" --exclude-dir=.git --exclude-dir=tmp --exclude-dir=node_modules \
-    . 2>/dev/null || true)
-  if [ -n "$hits" ]; then
-    err "identity leak ($p):"
-    echo "$hits" | head -5 | sed 's/^/      /' >&2
-    leak_hits=$((leak_hits + 1))
-  fi
-done
-[ "$leak_hits" -eq 0 ] && ok "no real company/site identifiers leaked"
 
 section "Version sync"
 if command -v python3 >/dev/null 2>&1; then

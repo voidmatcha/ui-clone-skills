@@ -142,6 +142,151 @@ def test_section_compare_with_failing_rows_routes_to_visual_judge(tmp_path: Path
     assert "priority_fix" in card or "selector_hint" in card
 
 
+def test_section_compare_failure_guard_blocks_false_converged_stop(tmp_path: Path) -> None:
+    """Loop-55 regression: a run with 0 PASS rows and saturated failures is
+    not converged just because transition/tree gates passed. The goal card
+    must make the clean-stop disqualifiers explicit before a nested agent
+    can emit INCOMPLETE-CONVERGED.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "realfood"
+    _write_state(ref_dir, "section-compare")
+
+    sections_dir = ref_dir / "sections"
+    ref_pngs = sections_dir / "ref"
+    impl_pngs = sections_dir / "impl"
+    ref_pngs.mkdir(parents=True)
+    impl_pngs.mkdir(parents=True)
+    for name in ("section-4", "section-7"):
+        (ref_pngs / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (impl_pngs / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    (sections_dir / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| section-4 | 1231280 | 989677 | saturated | ❌ |\n"
+        "| section-7 | 1256000 | 1000000 | saturated | ❌ |\n"
+        "\n"
+        "**Result: 0 PASS, 2 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+
+    assert "visual-judge.sh" in card
+    assert "Do not emit INCOMPLETE-CONVERGED" in card
+    assert "0 PASS rows" in card
+    assert "2 saturated row(s)" in card
+    assert "no visual-judge refinement artifact" in card
+    assert "restart the dev server" in card
+
+
+def test_section_compare_failure_guard_blocks_majority_fail_converged_stop(tmp_path: Path) -> None:
+    """Loop-56 regression: 1 PASS / many FAIL rows is still overwhelmingly
+    red, even when no rows are saturated and visual-judge artifacts exist.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "realfood"
+    _write_state(ref_dir, "section-compare")
+    sections_dir = ref_dir / "sections"
+    (sections_dir / "ref").mkdir(parents=True)
+    (sections_dir / "impl").mkdir(parents=True)
+    for name in ("section-1", "section-2", "section-3"):
+        (sections_dir / "ref" / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (sections_dir / "impl" / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (sections_dir / "visual-judge-section-1.json").write_text("{}", encoding="utf-8")
+    (sections_dir / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| section-0 | 0 | 0 | ok | ✅ |\n"
+        "| section-1 | 321376 | 262562 | critical | ❌ |\n"
+        "| section-2 | 239371 | 195565 | critical | ❌ |\n"
+        "| section-3 | 291710 | 238325 | critical | ❌ |\n"
+        "\n"
+        "**Result: 1 PASS, 3 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+
+    assert "Do not emit INCOMPLETE-CONVERGED" in card
+    assert "3 FAIL row(s) vs 1 PASS row(s)" in card
+
+
+def test_section_compare_failure_guard_blocks_tree_diff_failure(tmp_path: Path) -> None:
+    """INCOMPLETE-CONVERGED is not defensible when tree-diff still has
+    critical/major mismatches.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "realfood"
+    _write_state(ref_dir, "section-compare")
+    sections_dir = ref_dir / "sections"
+    (sections_dir / "ref").mkdir(parents=True)
+    (sections_dir / "impl").mkdir(parents=True)
+    for name in ("section-1", "section-2"):
+        (sections_dir / "ref" / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (sections_dir / "impl" / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (sections_dir / "visual-judge-section-1.json").write_text("{}", encoding="utf-8")
+    (sections_dir / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| section-0 | 0 | 0 | ok | ✅ |\n"
+        "| section-1 | 321376 | 262562 | critical | ❌ |\n"
+        "\n"
+        "**Result: 1 PASS, 1 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    (ref_dir / "tree-diff-status.json").write_text(
+        '{"status":"fail","counts":{"critical":4},"reason":"4 critical/major element mismatch(es)"}',
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+
+    assert "Do not emit INCOMPLETE-CONVERGED" in card
+    assert "tree-diff-status.json status=fail" in card
+
+
+def test_section_compare_failure_guard_blocks_tree_diff_unpaired_majority(tmp_path: Path) -> None:
+    """A tree-diff status=pass with mostly unpaired rows is still not clean
+    evidence for a converged incomplete stop.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "realfood"
+    _write_state(ref_dir, "section-compare")
+    sections_dir = ref_dir / "sections"
+    (sections_dir / "ref").mkdir(parents=True)
+    (sections_dir / "impl").mkdir(parents=True)
+    (sections_dir / "visual-judge-section-1.json").write_text("{}", encoding="utf-8")
+    (sections_dir / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| section-0 | 0 | 0 | ok | ✅ |\n"
+        "| section-1 | 321376 | 262562 | critical | ❌ |\n"
+        "\n"
+        "**Result: 1 PASS, 1 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    (ref_dir / "tree-diff-status.json").write_text(
+        json.dumps({
+            "status": "pass",
+            "elements_walked": 90,
+            "counts": {"unpaired": 80, "ok": 10},
+            "reason": "all paired elements within tolerance",
+        }),
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+
+    assert "Do not emit INCOMPLETE-CONVERGED" in card
+    assert "tree-diff unpaired=80 ok=10" in card
+
+
 def test_visual_judge_routing_fires_on_post_implement_too(tmp_path: Path) -> None:
     """The post-implement gate transitively fails when section-compare has
     FAIL rows, but `current_gate` stays at 'post-implement' and never advances

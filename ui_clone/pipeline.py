@@ -601,6 +601,37 @@ class Pipeline:
         # Ensure ref dir exists for downstream artifact targets.
         self.ref_dir.mkdir(parents=True, exist_ok=True)
 
+        # Universal impl-root resolution (writes implRoot field to
+        # pipeline-state.json so find-impl-root.sh can read it back
+        # regardless of directory naming convention).
+        # Priority: UI_CLONE_IMPL_ROOT env > existing state.impl_root >
+        # canonical guess (<plugin_root>/impl OR <cwd>/impl).
+        from ui_clone.state import PipelineState as _PS
+        _state = _PS.load(self.ref_dir)
+        impl_root_resolved = (
+            os.environ.get("UI_CLONE_IMPL_ROOT", "").strip()
+            or _state.impl_root
+            or ""
+        )
+        if not impl_root_resolved:
+            for cand in (
+                Path(plugin_root) / "impl",
+                Path.cwd() / "impl",
+            ):
+                if cand.is_dir() and (cand / "package.json").is_file():
+                    impl_root_resolved = str(cand.resolve())
+                    break
+        if impl_root_resolved and _state.impl_root != impl_root_resolved:
+            _state.impl_root = impl_root_resolved
+            try:
+                _state.save(self.ref_dir)
+                # Also write the bare marker file the resolver checks.
+                (self.ref_dir / ".impl-root").write_text(
+                    impl_root_resolved + "\n", encoding="utf-8",
+                )
+            except OSError:
+                pass
+
         def _run(cmd: list[str], label: str) -> bool:
             print(f"\n{_BOLD}== execute: {label}{_NC}")
             print(f"  $ {' '.join(cmd)}")
@@ -625,13 +656,17 @@ class Pipeline:
 
         for phase in phases:
             if phase == "0A":
-                # Phase 0A is a pure detection that the status checker
-                # already runs lazily; no driver work required here. Just
-                # validate.
-                # check_phase_0a is invoked for its side effect — it
-                # writes canvas-webgl-detection.json on first call. The
-                # return value is unused here; we validate by checking
-                # the artefact below.
+                detect = visual_scripts / "canvas-webgl-detect.sh"
+                if not detect.is_file():
+                    print(
+                        f"\n{_RED}Phase 0A failed: canvas-webgl-detect.sh not found at {detect}{_NC}"
+                    )
+                    return 1
+                if not _run(
+                    ["bash", str(detect), self.url, self.session, str(self.ref_dir)],
+                    "Phase 0A — canvas/WebGL detection",
+                ):
+                    return 1
                 self.check_phase_0a()
                 if not (self.ref_dir / "canvas-webgl-detection.json").is_file():
                     print(
@@ -661,17 +696,58 @@ class Pipeline:
 
             if phase == "2":
                 # Phase 2 covers DOM extraction (extract-dom.sh + scaffold)
-                # and asset/style extraction. The two known invocations
-                # come from skills/visual-debug/scripts/.
+                # and asset/style extraction. dom-scaffold.sh consumes three
+                # artifacts (structure.json + styles.json + section-map.json),
+                # so Phase 2 produces all three before scaffolding.
+                #
+                # Loop-13 fresh-only diagnosis: extract-dom.sh wrote only
+                # structure.json; the other two were documented in
+                # skills/ui-reverse-engineering/dom-extraction.md as manual
+                # agent-browser evals, which made the pipeline depend on
+                # stale scratch dir artifacts for the section-map and styles.
+                # Adding extract-section-map.sh + extract-styles.sh closes
+                # that contract gap so fresh-only runs reach the scaffold.
                 extract_dom = visual_scripts / "extract-dom.sh"
+                extract_section_map = visual_scripts / "extract-section-map.sh"
+                extract_styles = visual_scripts / "extract-styles.sh"
                 scaffold = visual_scripts / "dom-scaffold.sh"
-                # extract-dom.sh and dom-scaffold.sh are agent-browser
-                # invocations; both target the ref dir. They are run
-                # sequentially; the second consumes the first's outputs.
                 if extract_dom.is_file() and not _run(
-                    ["bash", str(extract_dom), self.session, str(self.ref_dir)],
+                    ["bash", str(extract_dom), str(self.ref_dir), self.session, "body"],
                     "Phase 2 — DOM extraction",
                 ):
+                    return 1
+                # section-map.json: agent-browser eval, runs against the
+                # same session extract-dom.sh just used.
+                if extract_section_map.is_file() and not _run(
+                    [
+                        "bash",
+                        str(extract_section_map),
+                        str(self.ref_dir),
+                        self.session,
+                    ],
+                    "Phase 2 — section-map enumeration",
+                ):
+                    return 1
+                # styles.json: aggregates from the structure.json we just
+                # wrote, no browser round-trip.
+                if extract_styles.is_file() and not _run(
+                    ["bash", str(extract_styles), str(self.ref_dir)],
+                    "Phase 2 — styles aggregation",
+                ):
+                    return 1
+                required_for_scaffold = ["structure.json", "styles.json", "section-map.json"]
+                missing_for_scaffold = [
+                    name for name in required_for_scaffold if not (self.ref_dir / name).is_file()
+                ]
+                if missing_for_scaffold:
+                    has_ref = (self.ref_dir / "regions.json").is_file()
+                    self.next_phase = ""
+                    self.next_step = ""
+                    self.check_phase_2(has_ref)
+                    missing = ", ".join(missing_for_scaffold)
+                    print(
+                        f"\n{_RED}Phase 2 failed: dom-scaffold inputs missing: {missing}.{_NC}"
+                    )
                     return 1
                 if scaffold.is_file() and not _run(
                     ["bash", str(scaffold), str(self.ref_dir)],
@@ -680,11 +756,15 @@ class Pipeline:
                     return 1
                 # Validate the artifact gate.
                 has_ref = (self.ref_dir / "regions.json").is_file()
+                self.next_phase = ""
+                self.next_step = ""
                 self.check_phase_2(has_ref)
-                if not (self.ref_dir / "section-map.json").is_file():
+                if self.next_phase == "2":
                     print(
-                        f"\n{_RED}Phase 2 failed: section-map.json missing.{_NC}"
+                        f"\n{_RED}Phase 2 failed: extraction validator still reports missing artifacts.{_NC}"
                     )
+                    if self.next_step:
+                        print(f"  Next: {self.next_step}")
                     return 1
                 continue
 
@@ -700,28 +780,11 @@ class Pipeline:
 
     # ── verify action: drive post-generation gates ─────────────────────────
     #
-    # Codex structural review (loop-3/4 convergence trigger): the run driver
-    # stops after Phase 2 and Phase 3+ verification gates are advisory only,
-    # which lets nested agents claim "완료" while the impl/ silently fails
-    # boundary / font-parity / section-compare. `verify` closes the loop:
-    # one canonical entry that drives every post-impl gate in GATE_ORDER and
-    # returns non-zero on the first failure so the nested agent (and the
-    # autonomous outer loop) can react.
     #
     # The gates themselves live in ui_clone.gate; we shell out so the gate
     # module's argparse + exit codes stay the source of truth.
     def execute_verify(self) -> int:
         import subprocess
-        # Gate suite run by verify. Codex L14 review: `spec` was originally
-        # left out because conceptually it's pre-impl (transition-spec.json
-        # is produced at Step 5d, before generation). But loop-14 exposed
-        # the bypass: the agent wrote `{"transitions": [], "notes": "FAQ
-        # accordion is React state, not in spec scope"}`, passed the four
-        # post-impl gates, and shipped verify-stamp.json — while the spec
-        # was empty (identical to the loop-12 regression that
-        # commit-with-empty-spec-rejection was supposed to close). Adding
-        # `spec` here makes the new gate.py validation actually fire during
-        # verify, so empty/malformed specs block the stamp.
         gates_post_impl = (
             "spec",
             "post-implement",

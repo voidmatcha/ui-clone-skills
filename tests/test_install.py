@@ -16,10 +16,20 @@ def _extract_shell_quote() -> str:
     return match.group(0)
 
 
-def test_codex_marketplace_output_uses_shell_quoted_repo_root() -> None:
+def test_codex_install_does_not_register_working_repo_as_marketplace() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
-    assert text.count('codex plugin marketplace add $(shell_quote "$REPO_ROOT")') == 2
+    assert 'codex plugin marketplace add "$REPO_ROOT"' not in text
+    assert 'codex plugin marketplace add $(shell_quote "$REPO_ROOT")' not in text
+
+
+def test_codex_install_uses_personal_projection_marketplace() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert 'CODEX_PERSONAL_MARKETPLACE="$HOME/.agents/plugins/marketplace.json"' in text
+    assert 'CODEX_PLUGIN_DIR="$HOME/plugins/$PLUGIN_NAME"' in text
+    assert 'CODEX_PLUGIN_SOURCE_PATH="./plugins/$PLUGIN_NAME"' in text
+    assert 'codex plugin add "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"' in text
 
 
 def test_shell_quote_produces_copy_paste_safe_codex_command() -> None:

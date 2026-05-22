@@ -239,6 +239,72 @@ def test_run_gate_fail_bumps_consecutive_fail_count(tmp_path: Path) -> None:
         assert state.current_gate == "reference"
 
 
+def test_run_gate_fails_when_pipeline_state_skips_prerequisites(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A later active gate with missing earlier completed_steps must fail closed."""
+    from ui_clone.state import PipelineState
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": "ref",
+                "completed_steps": ["extraction"],
+                "current_gate": "post-implement",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = Gate(ref).run("post-implement", json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    failures = data["failures"]
+
+    assert code == 1
+    assert any(f["label"] == "pipeline-state prerequisites" for f in failures)
+    reason = " ".join(f["reason"] for f in failures)
+    assert "reference" in reason
+    assert "pre-generate" in reason
+    state = PipelineState.load(ref)
+    assert state.current_gate == "post-implement"
+    assert "post-implement" not in state.completed_steps
+
+
+def test_gate_post_implement_requires_verification_plan(tmp_path: Path) -> None:
+    """post-implement must not silently skip site-specific verification rows."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "extracted.json").write_text(json.dumps({"sections": []}), encoding="utf-8")
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "hero-reveal",
+                        "trigger": "intersection",
+                        "source_chunk": "bundle.js",
+                        "bundle_branch": "IntersectionObserver",
+                        "target": ".hero",
+                        "animation": {"type": "fade-up"},
+                        "reference_frames": ["static/ref/0.png"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    static_ref = ref / "static" / "ref"
+    static_ref.mkdir(parents=True)
+    for i in range(5):
+        (static_ref / f"{i}.png").write_bytes(b"\x89PNG" + b"\0" * 20)
+
+    failures = [r for r in Gate(ref).gate_post_implement() if r.status == "fail"]
+
+    assert any(r.label == "verification-plan.json" for r in failures)
+
+
 # ── gate_pre_generate — footer check ──
 
 
@@ -249,10 +315,6 @@ def test_gate_pre_generate_blocks_when_footer_missing_from_component_map(tmp_pat
 
     # Minimal artifacts required by gate_pre_generate
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    # Codex L10-L12 review: empty transitions list is now a hard fail
-    # in gate_spec (silently accepting it was the L12 bypass). Tests that
-    # used to seed `transitions: []` must declare at least one entry with
-    # all required keys so gate_spec sees a structurally valid spec.
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -315,10 +377,6 @@ def test_gate_pre_generate_fails_when_hover_timing_unknown(tmp_path: Path) -> No
     ref.mkdir()
 
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    # Codex L10-L12 review: empty transitions list is now a hard fail
-    # in gate_spec (silently accepting it was the L12 bypass). Tests that
-    # used to seed `transitions: []` must declare at least one entry with
-    # all required keys so gate_spec sees a structurally valid spec.
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -370,10 +428,6 @@ def test_gate_pre_generate_fails_when_hover_timing_unknown(tmp_path: Path) -> No
 def _write_pre_generate_baseline(ref: Path) -> None:
     """Write enough artifacts for pre-generate so provenance is the only blocker."""
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    # Codex L10-L12 review: empty transitions list is now a hard fail
-    # in gate_spec (silently accepting it was the L12 bypass). Tests that
-    # used to seed `transitions: []` must declare at least one entry with
-    # all required keys so gate_spec sees a structurally valid spec.
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -593,10 +647,6 @@ def test_gate_spec_fails_when_bundle_map_missing(tmp_path: Path) -> None:
     """gate_spec must fail when bundle-map.json is absent."""
     ref = tmp_path / "ref"
     ref.mkdir()
-    # Codex L10-L12 review: empty transitions list is now a hard fail
-    # in gate_spec (silently accepting it was the L12 bypass). Tests that
-    # used to seed `transitions: []` must declare at least one entry with
-    # all required keys so gate_spec sees a structurally valid spec.
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -623,10 +673,6 @@ def test_gate_spec_passes_with_required_files(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
-    # Codex L10-L12 review: empty transitions list is now a hard fail
-    # in gate_spec (silently accepting it was the L12 bypass). Tests that
-    # used to seed `transitions: []` must declare at least one entry with
-    # all required keys so gate_spec sees a structurally valid spec.
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -659,10 +705,6 @@ def test_gate_spec_fails_when_verification_plan_missing(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
-    # Codex L10-L12 review: empty transitions list is now a hard fail
-    # in gate_spec (silently accepting it was the L12 bypass). Tests that
-    # used to seed `transitions: []` must declare at least one entry with
-    # all required keys so gate_spec sees a structurally valid spec.
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -751,14 +793,10 @@ def test_gate_post_implement_fails_when_extracted_missing(tmp_path: Path) -> Non
 
 
 def test_gate_post_implement_passes_with_required_files(tmp_path: Path) -> None:
-    """gate_post_implement must pass when extracted.json, transition-spec.json, and screenshots exist."""
+    """gate_post_implement must pass when required closeout artifacts exist."""
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    # Codex L10-L12 review: empty transitions list is now a hard fail
-    # in gate_spec (silently accepting it was the L12 bypass). Tests that
-    # used to seed `transitions: []` must declare at least one entry with
-    # all required keys so gate_spec sees a structurally valid spec.
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -774,6 +812,10 @@ def test_gate_post_implement_passes_with_required_files(tmp_path: Path) -> None:
     screenshots.mkdir(parents=True)
     for i in range(5):
         (screenshots / f"scroll_{i:02d}.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []}),
+        encoding="utf-8",
+    )
 
     gate = Gate(ref)
     results = gate.gate_post_implement()
@@ -782,12 +824,8 @@ def test_gate_post_implement_passes_with_required_files(tmp_path: Path) -> None:
 
 
 def _post_implement_baseline(ref: Path) -> None:
-    """Write minimal artifacts so gate_post_implement passes the legacy checks."""
+    """Write minimal artifacts so gate_post_implement passes baseline checks."""
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
-    # Codex L10-L12 review: empty transitions list is now a hard fail
-    # in gate_spec (silently accepting it was the L12 bypass). Tests that
-    # used to seed `transitions: []` must declare at least one entry with
-    # all required keys so gate_spec sees a structurally valid spec.
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -803,6 +841,10 @@ def _post_implement_baseline(ref: Path) -> None:
     screenshots.mkdir(parents=True, exist_ok=True)
     for i in range(5):
         (screenshots / f"scroll_{i:02d}.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []}),
+        encoding="utf-8",
+    )
 
 
 def test_componentization_gate_fails_on_monolithic_page(tmp_path: Path) -> None:
@@ -859,6 +901,81 @@ def test_componentization_gate_skipped_when_no_impl(tmp_path: Path) -> None:
     assert not any(r.label == "componentization" for r in failures)
 
 
+def _build_renamed_impl(loop_root: Path, name: str, page_loc: int) -> Path:
+    """Helper for rename-resolver tests. Creates
+    `loop_root/<name>/{package.json, src/app/page.tsx}` with `page_loc` LOC.
+    Returns the impl dir.
+    """
+    impl = loop_root / name
+    (impl / "src" / "app").mkdir(parents=True)
+    (impl / "package.json").write_text('{"name":"clone","version":"0.1.0"}\n')
+    (impl / "src" / "app" / "page.tsx").write_text(
+        "\n".join(f"// line {i}" for i in range(page_loc)) + "\n", encoding="utf-8"
+    )
+    return impl
+
+
+def test_find_impl_root_detects_renamed_sibling(tmp_path: Path) -> None:
+    """Codex L38 issue 11 — adversarial rename happy path.
+
+    Loop-37 sub-agent renamed `impl/` → `realfood-clone/` to bypass gate
+    hooks that hard-coded the `impl/` path. The shared resolver
+    (`scripts/extract/find-impl-root.sh`, wired into Gate._find_impl_root)
+    must detect any sibling directory that LOOKS like an impl scaffold
+    (package.json + src/app + .tsx) regardless of its name.
+    """
+    loop_root = tmp_path / "scratch" / "loop-X"
+    ref = loop_root / "tmp" / "ref" / "realfood-main"
+    ref.mkdir(parents=True)
+    _post_implement_baseline(ref)
+    _build_renamed_impl(loop_root, "realfood-clone", page_loc=220)
+    gate = Gate(ref)
+    resolved = gate._find_impl_root()
+    assert resolved is not None, "resolver must locate renamed impl dir"
+    assert resolved.name == "realfood-clone", f"got {resolved}"
+
+
+def test_find_impl_root_skips_skip_dir_names(tmp_path: Path) -> None:
+    """Codex L38 issue 11 — adversarial rename negative path.
+
+    A sub-agent renaming impl/ to a name in the resolver's skip-list
+    (`dist`, `node_modules`, `.next`, `.git`, `benchmark`, `tmp`, `scratch`,
+    `scripts`) MUST NOT escape detection by sneaking through the heuristic
+    — instead, the resolver should return None so downstream gates that
+    require impl_root cannot silently no-op. The right UX is "we cannot
+    find impl/" → gate fails loudly, not "looks fine, nothing to check".
+    """
+    loop_root = tmp_path / "scratch" / "loop-Y"
+    ref = loop_root / "tmp" / "ref" / "realfood-main"
+    ref.mkdir(parents=True)
+    _post_implement_baseline(ref)
+    _build_renamed_impl(loop_root, "dist", page_loc=220)
+    gate = Gate(ref)
+    assert gate._find_impl_root() is None, (
+        "resolver must not return a skip-dir-named candidate"
+    )
+
+
+def test_find_impl_root_disambiguates_multiple_candidates(tmp_path: Path) -> None:
+    """When two impl-shaped directories exist, the resolver should fail
+    with AMBIGUOUS rather than picking arbitrarily — this prevents a
+    sub-agent from making a second clone to hide the broken first one.
+    """
+    loop_root = tmp_path / "scratch" / "loop-Z"
+    ref = loop_root / "tmp" / "ref" / "realfood-main"
+    ref.mkdir(parents=True)
+    _post_implement_baseline(ref)
+    _build_renamed_impl(loop_root, "realfood-clone-a", page_loc=50)
+    _build_renamed_impl(loop_root, "realfood-clone-b", page_loc=50)
+    gate = Gate(ref)
+    # Resolver script exits 2 with AMBIGUOUS message when neither has a
+    # framework config marker (next.config / vite.config) — gate returns
+    # None on non-zero exit.
+    assert gate._find_impl_root() is None, (
+        "resolver must refuse to pick between two impl-shaped siblings"
+    )
+
+
 def test_componentization_gate_skipped_when_page_small(tmp_path: Path) -> None:
     """page.tsx ≤ 200 LOC → silent skip even if components/ is empty.
     A small monolith is still legible and the split forcing is unnecessary.
@@ -877,16 +994,16 @@ def test_componentization_gate_skipped_when_page_small(tmp_path: Path) -> None:
     assert not any(r.label == "componentization" for r in failures)
 
 
-def test_verification_plan_missing_keeps_legacy_behavior(tmp_path: Path) -> None:
-    """No verification-plan.json → gate behaves exactly as before (no extra failures)."""
+def test_verification_plan_missing_fails_post_implement(tmp_path: Path) -> None:
+    """No verification-plan.json → post-implement fails instead of skipping checks."""
     ref = tmp_path / "ref"
     ref.mkdir()
     _post_implement_baseline(ref)
+    (ref / "verification-plan.json").unlink()
     gate = Gate(ref)
     results = gate.gate_post_implement()
     failures = [r for r in results if r.status == "fail"]
-    assert not failures
-    assert not any(r.label.startswith("required:") for r in results)
+    assert any(r.label == "verification-plan.json" for r in failures)
 
 
 def test_verification_plan_missing_artifact_fails_block(tmp_path: Path) -> None:
@@ -1059,6 +1176,41 @@ def test_verification_plan_tree_diff_floor_passes_on_real_walk(tmp_path: Path) -
     failures = [r for r in gate.gate_post_implement() if r.status == "fail"]
     assert not any("tree-diff" in r.label for r in failures), (
         f"tree-diff with walked=200 should pass; got: {failures}"
+    )
+
+
+def test_verification_plan_tree_diff_unpaired_majority_fails(tmp_path: Path) -> None:
+    """Loop-58 regression: tree-diff status=pass is not meaningful when most
+    walked elements are unpaired. That means elementFromPoint pairing failed,
+    not that styles converged.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "requiredChecks": [
+            {"id": "tree-diff", "produces": "tree-diff-status.json",
+             "reason": "primary convergence gate", "severity": "block"}
+        ],
+    }))
+    (ref / "section-map.json").write_text(json.dumps({
+        "totalCount": 9,
+        "sections": [{"tag": "section", "id": f"s{i}", "y": i*1000, "height": 1000, "width": 1440} for i in range(9)],
+    }))
+    (ref / "tree-diff-status.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass",
+        "elements_walked": 90,
+        "counts": {
+            "critical": 0, "major": 0, "layout-major": 0,
+            "minor": 0, "layout-minor": 0, "ok": 10, "unpaired": 80,
+        },
+        "errorCount": 0, "reason": "all paired elements within tolerance",
+    }))
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_post_implement() if r.status == "fail"]
+    assert any("tree-diff" in r.label and "unpaired" in r.message for r in failures), (
+        f"tree-diff with unpaired majority must fail; got: {[(r.label, r.message[:100]) for r in failures]}"
     )
 
 
@@ -1424,6 +1576,25 @@ def test_verification_plan_emits_spec_implementation_coverage_when_spec_present(
     assert "transition-spec-coverage" in ids
 
 
+def test_verification_plan_emits_transition_compare_when_spec_present_without_hover(
+    tmp_path: Path,
+) -> None:
+    """A transition spec requires runtime comparison even when hover is absent."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-scroll", "trigger": "scroll", "type": "scroll-driven"}]
+    }))
+
+    plan = _run_verification_plan(ref)
+    ids = [c["id"] for c in plan["requiredChecks"]]
+
+    assert "transition-compare" in ids, (
+        "transition-compare must be required for transition-spec.json, not only "
+        f"hover signals: {ids}"
+    )
+
+
 def test_verification_plan_spec_implementation_coverage_tier_is_standard(tmp_path: Path) -> None:
     """spec-implementation-coverage must be tagged tier=standard.
 
@@ -1511,6 +1682,301 @@ def test_spec_implementation_coverage_passes_when_motion_declared(tmp_path: Path
     assert artifact["withMotion"] == 1
 
 
+def test_spec_implementation_coverage_fails_marker_only_trigger_hooks(tmp_path: Path) -> None:
+    """Loop-56 regression: hidden marker strings and generic useScroll text
+    must not count as real trigger-specific transition implementations.
+    """
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src" / "app").mkdir(parents=True)
+    (impl / "src" / "components").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "page-load-reveal", "trigger": "load", "type": "reveal", "selector": "main section"},
+            {"id": "smooth-scroll-lenis", "trigger": "scroll", "type": "scroll", "selector": "html"},
+            {"id": "nav-dot-hover", "trigger": "hover", "type": "hover", "selector": ".nav_dot_button__kZB4V"},
+            {"id": "faq-click-state", "trigger": "click", "type": "accordion", "selector": "section"},
+        ]
+    }))
+    (impl / "src" / "app" / "page.tsx").write_text(
+        "export default function Page() {\n"
+        "  return <main data-transition=\"page-load-reveal smooth-scroll-lenis nav-dot-hover faq-click-state\">\n"
+        "    <section data-scroll-hook=\"Lenis useScroll scroll(\" data-hover-hook=\":hover onPointerEnter\">static</section>\n"
+        "  </main>;\n"
+        "}\n"
+    )
+    (impl / "src" / "components" / "TransitionHooks.tsx").write_text(
+        "export function TransitionHooks() {\n"
+        "  const hooks = [\n"
+        "    'page-load-reveal',\n"
+        "    'smooth-scroll-lenis',\n"
+        "    'nav-dot-hover',\n"
+        "    'faq-click-state',\n"
+        "    'main section',\n"
+        "    '.nav_dot_button__kZB4V',\n"
+        "    'Lenis',\n"
+        "    'useScroll',\n"
+        "    ':hover',\n"
+        "    'onPointerEnter',\n"
+        "  ];\n"
+        "  return <span hidden data-transition-hooks={hooks.join(' ')} />;\n"
+        "}\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["presenceOnly"] == 4
+    assert artifact["markerOnly"] == 4
+
+
+def test_spec_implementation_coverage_fails_unrelated_generic_motion(tmp_path: Path) -> None:
+    """A generic motion hook in a matched file must not satisfy a different
+    trigger family such as click/accordion.
+    """
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "faq-click-state",
+            "trigger": "click",
+            "type": "accordion",
+            "selector": ".faq",
+        }]
+    }))
+    (impl / "src" / "Faq.tsx").write_text(
+        "import { useScroll } from 'framer-motion';\n"
+        "export function Faq() {\n"
+        "  const scroll = useScroll();\n"
+        "  return <section className=\"faq\" data-scroll={String(scroll)}>static</section>;\n"
+        "}\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["triggerStatic"] == 1
+
+
+def test_spec_implementation_coverage_passes_trigger_specific_impls(tmp_path: Path) -> None:
+    """Trigger-specific implementations should pass without relying on
+    unrelated generic motion keywords.
+    """
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "nav-dot-hover", "trigger": "hover", "type": "hover", "selector": ".nav-dot"},
+            {"id": "faq-click-state", "trigger": "click", "type": "accordion", "selector": ".faq"},
+            {"id": "smooth-scroll-lenis", "trigger": "scroll", "type": "smooth-scroll", "selector": "html"},
+        ]
+    }))
+    (impl / "src" / "Interactions.tsx").write_text(
+        "import Lenis from 'lenis';\n"
+        "import { useState } from 'react';\n"
+        "export function Interactions() {\n"
+        "  const [open, setOpen] = useState(false);\n"
+        "  const lenis = new Lenis({ smoothWheel: true });\n"
+        "  return <main>\n"
+        "    <button className=\"nav-dot transition-transform hover:scale-105\" onPointerEnter={() => lenis.raf(performance.now())}>dot</button>\n"
+        "    <section className=\"faq\" aria-expanded={open} onClick={() => setOpen(!open)} style={{ transition: 'height .3s' }}>faq</section>\n"
+        "  </main>;\n"
+        "}\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"expected exit 0, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["triggerStatic"] == 0
+
+
+def test_spec_implementation_coverage_fails_scroll_scrub_css_only(tmp_path: Path) -> None:
+    """Loop-55 regression: a scroll-scrub entry must not pass just because
+    the selector appears next to a CSS transition. Pinned scrollytelling needs
+    a scroll progress source and a sticky/pin structure.
+    """
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "line-pin",
+            "trigger": "scroll",
+            "type": "scroll-scrub",
+            "selector": ".line",
+        }]
+    }))
+    (impl / "src" / "Line.tsx").write_text(
+        "export function Line() {\n"
+        "  return <section className=\"line\" style={{ transition: 'opacity .45s, transform .45s' }}>static</section>;\n"
+        "}\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["scrollScrubStatic"] == 1
+
+
+def test_spec_implementation_coverage_passes_scroll_scrub_with_progress_and_pin(tmp_path: Path) -> None:
+    """scroll-scrub passes when matched source has both scroll progress wiring
+    and sticky/pin structure.
+    """
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "line-pin",
+            "trigger": "scroll",
+            "type": "scroll-scrub",
+            "selector": ".line",
+        }]
+    }))
+    (impl / "src" / "Line.tsx").write_text(
+        "import { useScroll, useTransform } from \"framer-motion\";\n"
+        "export function Line() {\n"
+        "  const { scrollYProgress } = useScroll();\n"
+        "  const opacity = useTransform(scrollYProgress, [0, 1], [0, 1]);\n"
+        "  return <section className=\"line\" style={{ position: 'sticky', top: 0, opacity }}>animated</section>;\n"
+        "}\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"expected exit 0, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["scrollScrubStatic"] == 0
+
+
+def test_spec_implementation_coverage_fails_intersection_reveal_css_only(tmp_path: Path) -> None:
+    """Intersection reveal needs viewport/observer wiring. A CSS transition on
+    the selector is only a style declaration, not an in-view implementation.
+    """
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "pyramid-reveal",
+            "trigger": "intersection",
+            "type": "intersection-reveal",
+            "selector": ".pyramid",
+        }]
+    }))
+    (impl / "src" / "Pyramid.tsx").write_text(
+        "export function Pyramid() {\n"
+        "  return <section className=\"pyramid\" style={{ transition: 'opacity .45s, transform .45s' }}>static</section>;\n"
+        "}\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["intersectionStatic"] == 1
+
+
+def test_spec_implementation_coverage_fails_intersection_reveal_data_attr_css_only(tmp_path: Path) -> None:
+    """A data-in-view CSS state is not observer wiring by itself."""
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "pyramid-reveal",
+            "trigger": "intersection",
+            "type": "intersection-reveal",
+            "selector": ".pyramid",
+        }]
+    }))
+    (impl / "src" / "styles.css").write_text(
+        ".pyramid { transition: opacity .45s, transform .45s; }\n"
+        ".pyramid[data-in-view=\"true\"] { opacity: 1; transform: none; }\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["intersectionStatic"] == 1
+
+
+def test_spec_implementation_coverage_passes_intersection_reveal_with_observer(tmp_path: Path) -> None:
+    """Intersection reveal passes when matched source has viewport observer
+    wiring.
+    """
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "pyramid-reveal",
+            "trigger": "intersection",
+            "type": "intersection-reveal",
+            "selector": ".pyramid",
+        }]
+    }))
+    (impl / "src" / "Pyramid.tsx").write_text(
+        "export function Pyramid() {\n"
+        "  const observer = new IntersectionObserver(() => {});\n"
+        "  return <section className=\"pyramid\" style={{ transition: 'opacity .45s, transform .45s' }}>animated</section>;\n"
+        "}\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"expected exit 0, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["intersectionStatic"] == 0
+
+
 # ── verification-plan tier filtering ──
 #
 # Tier system: quick < standard < comprehensive. Each add_check is tagged with
@@ -1562,6 +2028,9 @@ def test_verification_plan_quick_tier_filters_to_static_checks(tmp_path: Path) -
     Static-only set (with all signals firing): hydration-check,
     tailwind-transform-conflict, transition-spec-coverage, runtime-spec-coverage,
     plus the Fix 8 anti-fabrication gates (text-fidelity-check, dom-mirror-check)
+    and proxy-mirror-check, which blocks original-runtime proxy/cache mirrors;
+    plus the loop-9 ref-screenshot-asset anti-cheat (static filesystem scan +
+    sha256 fingerprint of impl tree vs ref's captured screenshot dirs);
     which are pure static AST/tree comparison — no browser, no LLM, no IO.
     Everything else (one-shot browser + 60fps video) must be filtered out.
     """
@@ -1578,6 +2047,50 @@ def test_verification_plan_quick_tier_filters_to_static_checks(tmp_path: Path) -
         "runtime-spec-coverage",
         "text-fidelity-check",
         "dom-mirror-check",
+        "proxy-mirror-check",
+        "ref-screenshot-asset",
+        # Loop-9 family A1/A2/A3 anti-cheat (static):
+        "entry-coherence",
+        "scaffold-residue",
+        "html-paste",
+        # Loop-9 family A5 (static CSS mirror):
+        "css-mirror",
+        # Loop-9 fix #4 — explicit invalidation stamp:
+        "invalidation",
+        # Signal 1 — scaffold-warn placeholders:
+        "scaffold-warn",
+        # Diagnosis B — required-media coverage (dispatched
+        # unconditionally; script self-skips when ref has no required
+        # video/Lottie/SVG):
+        "required-media-coverage",
+        # Codex-2 findings — monolithic-impl + motion-coverage:
+        "monolithic-impl",
+        "motion-coverage",
+        # scroll-engine-parity — engine class match (Lenis / GSAP
+        # ScrollTrigger / scroll-scrub / scroll-pin):
+        "scroll-engine-parity",
+        # 2026-05-22 retune (user direction A) — hero-composite spot-check
+        # replaces dom-mirror's structural-enforcement role. Verifies the
+        # 4-element hero pattern (video + button + h1/h2 + label) which
+        # LLMs consistently flatten away. Pure static (regex over impl
+        # source + structure.json walk), so tier=quick.
+        "hero-composite-check",
+        # 2026-05-22 codex-rescue (a125b997) — composite roll-ups +
+        # ref-js-loader anti-cheat. All three are pure file IO (rollups
+        # read existing artifacts; loader does static grep on impl
+        # source) so they belong in tier=quick.
+        "runtime-proof",
+        "transition-proof",
+        "ref-js-loader",
+        # 2026-05-22 user observation (gate-cheat block) — impl-scope
+        # guard runs `git diff` only, no browser. tier=quick.
+        "impl-scope",
+        # 2026-05-22 codex-rescue grounding audit — color-token diff
+        # against ref palette. Pure regex + math, no browser → quick.
+        "color-token-grounding",
+        # 2026-05-22 user request — duration/easing grounding. Pure
+        # source scan, no browser → quick.
+        "duration-easing-grounding",
     }, f"quick tier emitted unexpected ids: {ids}"
     # Every emitted check must be tagged tier=quick.
     tiers = {c["tier"] for c in plan["requiredChecks"]}
@@ -2165,6 +2678,25 @@ def test_gate_spec_passes_when_substitute_and_fonts_declared(tmp_path: Path) -> 
             }
         )
     )
+    # Loop-38 fix: substitute decision is only valid AFTER a download attempt.
+    # download-log.json must record at least one URL matching the family/CDN.
+    (ref / "download-log.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "attempts": [
+                    {
+                        "url": "https://use.typekit.net/k/whatever-garamond.woff2",
+                        "status": 403,
+                        "error": "license-blocked",
+                    }
+                ],
+                "succeeded": 0,
+                "failed": 1,
+                "totalAttempted": 1,
+            }
+        )
+    )
 
     gate = Gate(ref)
     results = gate.gate_spec()
@@ -2176,6 +2708,57 @@ def test_gate_spec_passes_when_substitute_and_fonts_declared(tmp_path: Path) -> 
     assert not failures, f"declared substitute must pass: {failures}"
     sub_pass = [r for r in results if r.label == "paid-font substitution"]
     assert sub_pass and sub_pass[0].status == "pass"
+
+
+def test_gate_spec_fails_when_substitute_without_download_attempt(tmp_path: Path) -> None:
+    """Loop-38 regression: paid font marked decision='substitute' with
+    asset-substitution.json declaration but ZERO download attempt in
+    download-log.json must FAIL. Research-mode policy enforced.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_min_spec_artifacts(ref)
+    (ref / "paid-features.json").write_text(
+        json.dumps(
+            {
+                "paidFonts": [
+                    {
+                        "family": None,
+                        "cdn": "Die Grotesk",
+                        "evidence": "css/variables.txt:38",
+                        "decision": "substitute",
+                        "substituteFamily": "Inter Variable",
+                    }
+                ]
+            }
+        )
+    )
+    (ref / "asset-substitution.json").write_text(
+        json.dumps(
+            {"fonts": [{"from": "Die Grotesk", "to": "Inter Variable"}]}
+        )
+    )
+    (ref / "download-log.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "attempts": [
+                    # 46 image attempts — no font URL anywhere
+                    {"url": "https://cdn.example/hero.png", "status": 200},
+                    {"url": "https://cdn.example/logo.svg", "status": 200},
+                ],
+                "succeeded": 2,
+                "failed": 0,
+                "totalAttempted": 2,
+            }
+        )
+    )
+    gate = Gate(ref)
+    results = gate.gate_spec()
+    fail_labels = [r.label for r in results if r.status == "fail"]
+    assert any(
+        "download attempt missing" in label for label in fail_labels
+    ), f"loop-38 regression — must fail without download attempt: {fail_labels}"
 
 
 def test_gate_spec_skips_substitution_check_when_no_paid_features_json(tmp_path: Path) -> None:
@@ -2854,6 +3437,10 @@ def test_image_fidelity_passes_when_impl_references_all_urls(tmp_path: Path) -> 
     artifact = json.loads((ref / "image-fidelity.json").read_text())
     assert artifact["status"] == "pass"
     assert artifact["matched"] == 2
+    assert artifact["implRoot"] == str(impl)
+    assert artifact["implDir"] == str(impl)
+    assert artifact["implSrcDir"] == str(impl / "src")
+    assert artifact["implPkgJson"] == str(impl / "package.json")
 
 
 def test_image_fidelity_fails_when_url_dropped(tmp_path: Path) -> None:
@@ -2920,6 +3507,43 @@ def test_image_fidelity_warns_on_dimension_mismatch(tmp_path: Path) -> None:
     assert "width: ref=1000 impl=200" in artifact["dimensionMismatches"][0]["issues"]
 
 
+def test_image_fidelity_fails_on_local_cdn_optimizer_runtime_path(tmp_path: Path) -> None:
+    """Loop-55 regression: static basename matching passed even though the
+    browser loaded `/cdn-cgi/image/widtth=.../foo.webp` from the local Next app.
+
+    The asset existed in public/ and the source mentioned `foo.webp`, so
+    image-fidelity + asset-transfer both passed. At runtime, the local app
+    does not serve Cloudflare image optimizer URLs, and a JS string typo
+    (`widt\\u0074h`) made the path even worse. This must be a blocking
+    image-fidelity failure, not a pixel-diff-only discovery.
+    """
+    import subprocess
+
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "visible-images.json").write_text(json.dumps([
+        {"type": "image", "src": "https://cdn.example.com/images/foo.webp", "element": "img.foo"},
+    ]))
+    (impl / "src" / "Foo.tsx").write_text(
+        'export const Foo = () => <img src="/cdn-cgi/image/widt\\u0074h=640,quality=90/images/foo.webp" />;\n',
+        encoding="utf-8",
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "image-fidelity-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "image-fidelity.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["matched"] == 1
+    assert artifact["runtimeImageIssues"]
+    assert artifact["runtimeImageIssues"][0]["kind"] == "local-cdn-optimizer-path"
+    assert "widt\\u0074h" in artifact["runtimeImageIssues"][0]["snippet"]
+
+
 def test_image_fidelity_skips_when_no_visible_images_json(tmp_path: Path) -> None:
     """Missing visible-images.json → status=pass, exit 0 (no-op, not an error).
 
@@ -2942,6 +3566,113 @@ def test_image_fidelity_skips_when_no_visible_images_json(tmp_path: Path) -> Non
     assert proc.returncode == 0
     artifact = json.loads((ref / "image-fidelity.json").read_text())
     assert artifact["status"] == "pass"
+
+
+def test_image_fidelity_rejects_hidden_reference_manifest_only_usage(tmp_path: Path) -> None:
+    """Hidden reference manifests are not rendered asset usage.
+
+    Loop validation found impls that stuffed every ref URL into a hidden
+    `reference-manifest` node so static string matching passed while the
+    visible page still used placeholders. image-fidelity must ignore that
+    manifest surface and fail the actually unmatched images.
+    """
+    import subprocess
+
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    urls = [f"https://cdn.example.com/food-{i}.webp" for i in range(5)]
+    (ref / "visible-images.json").write_text(json.dumps([
+        {"type": "image", "src": url, "element": f"img.food-{i}"}
+        for i, url in enumerate(urls)
+    ]))
+    (impl / "src" / "reference-manifest.tsx").write_text(
+        "export function ReferenceManifest() {\n"
+        "  return <div className=\"reference-manifest\" hidden>\n"
+        + "\n".join(f"    <span>{url}</span>" for url in urls)
+        + "\n  </div>;\n}\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "image-fidelity-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert proc.returncode == 1, f"hidden manifest must fail: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "image-fidelity.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["matched"] == 0
+    assert len(artifact["unmatched"]) == 5
+
+
+def test_asset_utilization_rejects_hidden_reference_manifest_only_usage(tmp_path: Path) -> None:
+    """asset-utilization must not count hidden reference-manifest strings as usage."""
+    import subprocess
+
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    urls = [f"https://cdn.example.com/asset-{i}.png" for i in range(5)]
+    (ref / "visible-images.json").write_text(json.dumps([
+        {"type": "image", "src": url, "element": f"img.asset-{i}"}
+        for i, url in enumerate(urls)
+    ]))
+    (impl / "src" / "App.tsx").write_text(
+        "export default function App() {\n"
+        "  return <div className=\"reference-manifest\" style={{ display: 'none' }}>\n"
+        + "\n".join(f"    <span>{url}</span>" for url in urls)
+        + "\n  </div>;\n}\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "asset-utilization-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl / "src")],
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert proc.returncode == 1, f"hidden manifest must fail: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "asset-utilization.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["referenced"] == 0
+    assert "reference-manifest" in artifact["reason"]
+
+
+def test_asset_utilization_rejects_low_opacity_asset_rail_usage(tmp_path: Path) -> None:
+    """Bulk low-opacity/offscreen asset rails are not original-position usage."""
+    import subprocess
+
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    urls = [f"https://cdn.example.com/photo-{i}.webp" for i in range(6)]
+    (ref / "visible-images.json").write_text(json.dumps([
+        {"type": "image", "src": url, "element": f"section:nth-child({i + 1}) img"}
+        for i, url in enumerate(urls)
+    ]))
+    (impl / "src" / "App.tsx").write_text(
+        "export default function App() {\n"
+        "  return <div className=\"asset-rail fixed bottom-0 opacity-10 pointer-events-none blur-sm\" aria-hidden>\n"
+        + "\n".join(f"    <img src=\"/images/{Path(url).name}\" />" for url in urls)
+        + "\n  </div>;\n}\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "asset-utilization-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl / "src")],
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert proc.returncode == 1, f"asset rail must fail: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "asset-utilization.json").read_text())
+    assert artifact["status"] == "fail"
+    assert "asset rail" in artifact["reason"]
 
 
 def test_verification_plan_emits_image_fidelity_when_visible_images_present(tmp_path: Path) -> None:
@@ -2986,6 +3717,26 @@ def test_verification_plan_emits_asset_utilization_when_visible_images_present(t
     assert rows["asset-utilization"]["severity"] == "block"
     assert rows["asset-utilization"]["tier"] == "quick"
     assert rows["asset-utilization"]["produces"] == "asset-utilization.json"
+
+
+def test_verification_plan_emits_lottie_runtime_when_lottie_detected(tmp_path: Path) -> None:
+    """Lottie/bodymovin evidence must dispatch a hard runtime/json gate.
+
+    Without this row, an impl can replace the original animation with generic
+    GSAP/CSS motion and still satisfy unrelated transition marker checks.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "bundle-map.json").write_text(json.dumps({
+        "resources": ["https://cdn.example.com/bodymovin.min.js"],
+        "notes": "lottie-web registered animations",
+    }))
+    plan = _run_verification_plan(ref, tier="quick")
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+    assert "lottie-runtime" in rows
+    assert rows["lottie-runtime"]["severity"] == "block"
+    assert rows["lottie-runtime"]["tier"] == "quick"
+    assert rows["lottie-runtime"]["produces"] == "lottie-runtime.json"
 
 
 def test_verification_plan_emits_bundle_impl_coverage_when_bundle_map_present(tmp_path: Path) -> None:

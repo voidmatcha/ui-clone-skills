@@ -148,9 +148,59 @@ RAW=$(agent-browser --session "$SESSION" eval "(async () => {
 
 DATA=$(echo "$RAW" | sed 's/^"//;s/"$//' | sed 's/\\"/"/g')
 
+ART_OUT="${REF_DIR:-}"
+if [ -n "$ART_OUT" ] && [ -d "$ART_OUT" ]; then
+  ART_FILE="$ART_OUT/reveal-trigger.json"
+else
+  ART_FILE=""
+fi
+
 if [ -z "$DATA" ] || [ "$DATA" = "[]" ] || [ "$DATA" = "null" ]; then
   echo "✅ No stuck reveals found."
+  if [ -n "$ART_FILE" ]; then
+    cat > "$ART_FILE" <<JSON
+{
+  "schemaVersion": 1,
+  "status": "pass",
+  "implUrl": "$URL",
+  "viewport": "${VIEW_W}x${VIEW_H}",
+  "stuckCount": 0,
+  "stuck": []
+}
+JSON
+  fi
   exit 0
+fi
+# Emit fail artifact (data is JSON array of stuck entries).
+if [ -n "$ART_FILE" ]; then
+  python3 - "$DATA" "$URL" "${VIEW_W}x${VIEW_H}" "$ART_FILE" <<'PY'
+import json, sys
+data_raw, url, viewport, out_path = sys.argv[1:5]
+try:
+    entries = json.loads(data_raw)
+except ValueError:
+    entries = []
+if not isinstance(entries, list):
+    entries = []
+result = {
+    "schemaVersion": 1,
+    "status": "fail",
+    "implUrl": url,
+    "viewport": viewport,
+    "stuckCount": len(entries),
+    "stuck": entries[:30],
+    "rule": (
+        "Elements with hidden-init style (opacity:0 or non-identity "
+        "transform) must advance to a visible state after being "
+        "scrolled into view. Stuck reveals indicate an IO+overflow:"
+        "hidden bug class — IntersectionObserver attached to the "
+        "transformed child instead of the non-moving outer wrapper, "
+        "or a CSS reset killing the transition."
+    ),
+}
+with open(out_path, "w", encoding="utf-8") as fh:
+    json.dump(result, fh, indent=2)
+PY
 fi
 
 echo "═══ Stuck Reveal Detection ═══"

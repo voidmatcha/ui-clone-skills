@@ -151,12 +151,6 @@ dist_exists = (impl_root / "dist").is_dir() or (impl_root / ".next").is_dir()
 def verdict(ok):
     return "PASS" if ok else "FAIL"
 
-# O2 mode switch (Codex Q2 — loop-7 post-mortem). When the clone has
-# declared an approved font / asset substitution via asset-substitution.json,
-# raw full-page AE is no longer the canonical pass signal — it permanently
-# fails on font-rendered text it can't help. Fall back to the agent's own
-# section-compare result.txt, which already classifies sections as PASS /
-# STRUCTURAL_ONLY (substituted) / FAIL.
 asset_sub_files = list(pathlib.Path(loopdir).rglob("asset-substitution.json"))
 section_result_files = list(pathlib.Path(loopdir).rglob("sections/result.txt"))
 structural_mode = bool(asset_sub_files) and bool(section_result_files)
@@ -165,14 +159,6 @@ if structural_mode:
     # Lines look like: "| hero | — | — | substituted | 🔁 STRUCTURAL_ONLY |"
     # or              "| pyramid | 1114010 | 910139 | saturated | ❌ |"
     rows = [r for r in result_text.splitlines() if r.startswith("|") and "Section" not in r and "---" not in r]
-    # Codex L13 review Q1: `🌑 saturated` rows are counted as FAIL by
-    # section-compare.sh itself (FAIL_COUNT increments at AE/Mpx >= 800k,
-    # described as "gradient dead, not comparable"). The outer parser
-    # previously missed them entirely — they weren't pass, structural,
-    # or fail — so a clone with 5 saturated + 6 structural + 3 critical
-    # tallied 6 PASS+structural / 14 total and just missed the 50% bar.
-    # Counting saturated as FAIL gives the parser the same accounting
-    # as the producer.
     fail_rows = [r for r in rows if "❌" in r or "🌑" in r]
     structural_rows = [r for r in rows if "STRUCTURAL_ONLY" in r]
     pass_rows = [r for r in rows if "✅" in r or " PASS " in r]

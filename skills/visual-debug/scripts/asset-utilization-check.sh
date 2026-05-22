@@ -157,6 +157,97 @@ if [ "$BASENAME_COUNT" -lt "$MIN_SAMPLE" ]; then
   exit 0
 fi
 
+HIDDEN_MANIFEST_FILE="$REF_DIR/.asset-utilization.hidden-manifest.tmp"
+python3 - "$IMPL_SRC" "$BASENAMES_FILE" > "$HIDDEN_MANIFEST_FILE" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+impl_src = Path(sys.argv[1])
+basenames_path = Path(sys.argv[2])
+basenames = [line.strip() for line in basenames_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+text_exts = {".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".json", ".mdx"}
+matched = set()
+for path in impl_src.rglob("*"):
+    if not path.is_file() or path.suffix.lower() not in text_exts:
+        continue
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        continue
+    marker = f"{path.name}\n{text}".lower()
+    if "reference-manifest" not in marker and "asset-manifest" not in marker:
+        continue
+    for base in basenames:
+        stem = os.path.splitext(base)[0]
+        if base in text or (len(stem) >= 4 and stem in text):
+            matched.add(base)
+for base in sorted(matched):
+    print(base)
+PY
+HIDDEN_MANIFEST_COUNT=$(wc -l < "$HIDDEN_MANIFEST_FILE" | tr -d ' ')
+if [ "$HIDDEN_MANIFEST_COUNT" -gt 0 ]; then
+  HIDDEN_STR=$(cat "$HIDDEN_MANIFEST_FILE")
+  write_json fail "$BASENAME_COUNT" 0 0.0 "$THRESHOLD" "$HIDDEN_STR" "$IMPL_SRC" "reference-manifest/asset-manifest contains ref image strings; hidden/static manifests are not rendered asset usage"
+  echo "✗ asset-utilization: hidden reference-manifest strings are not rendered usage" >&2
+  rm -f "$BASENAMES_FILE" "$HIDDEN_MANIFEST_FILE"
+  exit 1
+fi
+rm -f "$HIDDEN_MANIFEST_FILE"
+
+ASSET_RAIL_FILE="$REF_DIR/.asset-utilization.asset-rail.tmp"
+python3 - "$IMPL_SRC" "$BASENAMES_FILE" > "$ASSET_RAIL_FILE" <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+impl_src = Path(sys.argv[1])
+basenames_path = Path(sys.argv[2])
+basenames = [line.strip() for line in basenames_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+text_exts = {".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".mdx"}
+
+rail_name_re = re.compile(r"(?:asset|reference|manifest|image)[-_ ]?(?:rail|strip|manifest)", re.I)
+low_opacity_re = re.compile(r"(?:opacity-(?:0|5|10|15|20)\b|opacity\s*[:=]\s*['\"]?0(?:\.\d+)?)", re.I)
+non_content_re = re.compile(
+    r"(?:aria-hidden|pointer-events-none|fixed\s+bottom|bottom-0|blur(?:-|\\b)|"
+    r"offscreen|sr-only|display\s*:\s*none|visibility\s*:\s*hidden|w-\[?1px|h-\[?1px)",
+    re.I,
+)
+
+suspicious = set()
+for path in impl_src.rglob("*"):
+    if not path.is_file() or path.suffix.lower() not in text_exts:
+        continue
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        continue
+    matched = []
+    for base in basenames:
+        stem = os.path.splitext(base)[0]
+        if base in text or (len(stem) >= 4 and stem in text):
+            matched.append(base)
+    if len(matched) < 5:
+        continue
+    named_rail = bool(rail_name_re.search(text))
+    low_opacity_noncontent = bool(low_opacity_re.search(text) and non_content_re.search(text))
+    if named_rail or low_opacity_noncontent:
+        suspicious.update(matched)
+
+for base in sorted(suspicious):
+    print(base)
+PY
+ASSET_RAIL_COUNT=$(wc -l < "$ASSET_RAIL_FILE" | tr -d ' ')
+if [ "$ASSET_RAIL_COUNT" -gt 0 ]; then
+  RAIL_STR=$(cat "$ASSET_RAIL_FILE")
+  write_json fail "$BASENAME_COUNT" 0 0.0 "$THRESHOLD" "$RAIL_STR" "$IMPL_SRC" "bulk asset rail / low-opacity offscreen image strip contains ref image strings; images must be used in their original section/viewport positions"
+  echo "✗ asset-utilization: bulk asset rail is not original-position asset usage" >&2
+  rm -f "$BASENAMES_FILE" "$ASSET_RAIL_FILE"
+  exit 1
+fi
+rm -f "$ASSET_RAIL_FILE"
+
 REFERENCED=0
 ORPHANS=()
 while IFS= read -r base; do
@@ -164,11 +255,13 @@ while IFS= read -r base; do
   # Match basename (with or without extension) in source files. .webp_ trailing
   # underscore quirks are tolerated by stripping non-alphanumeric tail.
   stem="${base%.*}"
-  if grep -rqlF --include='*.tsx' --include='*.ts' --include='*.jsx' --include='*.js' \
+  if grep -rqlF --exclude='*reference-manifest*' --exclude='*asset-manifest*' \
+                --include='*.tsx' --include='*.ts' --include='*.jsx' --include='*.js' \
                 --include='*.css' --include='*.scss' \
                 "$base" "$IMPL_SRC" 2>/dev/null; then
     REFERENCED=$((REFERENCED + 1))
-  elif grep -rqlF --include='*.tsx' --include='*.ts' --include='*.jsx' --include='*.js' \
+  elif grep -rqlF --exclude='*reference-manifest*' --exclude='*asset-manifest*' \
+                  --include='*.tsx' --include='*.ts' --include='*.jsx' --include='*.js' \
                   --include='*.css' --include='*.scss' \
                   "$stem" "$IMPL_SRC" 2>/dev/null; then
     REFERENCED=$((REFERENCED + 1))

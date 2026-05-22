@@ -87,6 +87,12 @@ IGNORE_REGEX="$BUILTIN_IGNORE"
 # component name" does not trip the check, broad enough to catch all variants.
 HYDRATION_PATTERNS='(Hydration failed|Text content did not match|did not match the server-rendered HTML|Expected server HTML to contain|HydrationMismatch|hydrating but some attributes|did not match\. Server: ".*" Client: ".*")'
 
+# Fatal client exceptions are not always phrased as hydration mismatches. Loop
+# validation exposed a proxy/local-IP case where `crypto.randomUUID()` crashed
+# the Next app on non-secure HTTP origins; prior versions counted it as
+# `otherErrorCount` and still passed. These are page-breaking, so fail them.
+FATAL_PATTERNS='(Application error: a client-side exception|Uncaught (TypeError|ReferenceError|Error)|crypto\.randomUUID is not a function|Minified React error #418|Minified React error #423)'
+
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Step 1: navigate and let bundle settle. We rely on agent-browser's
@@ -123,6 +129,7 @@ node -e "
 const data = JSON.parse(process.argv[1] || '{}');
 const ignoreRe = new RegExp(process.argv[2], 'i');
 const hydroRe  = new RegExp(process.argv[3], 'i');
+const fatalRe  = new RegExp(process.argv[4], 'i');
 
 if (data.missing) {
   console.error('WARNING: __hydrationCapture missing on settled page — likely cross-origin navigation reset window. Treating as inconclusive.');
@@ -137,19 +144,23 @@ for (const e of all) {
   real.push(e);
 }
 const hydrationErrors = real.filter(e => hydroRe.test(e.text));
+const hydrationSet = new Set(hydrationErrors);
+const fatalErrors = real.filter(e => fatalRe.test(e.text) && !hydrationSet.has(e));
 const output = {
-  status: hydrationErrors.length === 0 ? 'pass' : 'fail',
+  status: hydrationErrors.length === 0 && fatalErrors.length === 0 ? 'pass' : 'fail',
   errorCount: hydrationErrors.length,
   errors: hydrationErrors.slice(0, 10),
-  otherErrorCount: real.length - hydrationErrors.length,
+  fatalErrorCount: fatalErrors.length,
+  fatalErrors: fatalErrors.slice(0, 10),
+  otherErrorCount: real.length - hydrationErrors.length - fatalErrors.length,
   filteredCount: ignored.length,
-  url: process.argv[4],
-  viewport: process.argv[5] + 'x' + process.argv[6],
-  generatedAt: process.argv[7],
+  url: process.argv[5],
+  viewport: process.argv[6] + 'x' + process.argv[7],
+  generatedAt: process.argv[8],
 };
 process.stdout.write(JSON.stringify(output, null, 2));
-process.exit(hydrationErrors.length === 0 ? 0 : 1);
-" "$DATA" "$IGNORE_REGEX" "$HYDRATION_PATTERNS" "$URL" "$VIEW_W" "$VIEW_H" "$NOW" > "$OUT"
+process.exit(hydrationErrors.length === 0 && fatalErrors.length === 0 ? 0 : 1);
+" "$DATA" "$IGNORE_REGEX" "$HYDRATION_PATTERNS" "$FATAL_PATTERNS" "$URL" "$VIEW_W" "$VIEW_H" "$NOW" > "$OUT"
 NODE_EXIT=$?
 
 if [ "$NODE_EXIT" -eq 0 ]; then
@@ -163,7 +174,8 @@ if [ "$NODE_EXIT" -eq 0 ]; then
 fi
 
 ERRCOUNT=$(grep -o '"errorCount": [0-9]*' "$OUT" | grep -o '[0-9]*$')
-echo "❌ Hydration: FAIL — ${ERRCOUNT:-?} mismatch error(s)"
+FATALCOUNT=$(grep -o '"fatalErrorCount": [0-9]*' "$OUT" | grep -o '[0-9]*$')
+echo "❌ Hydration: FAIL — ${ERRCOUNT:-0} mismatch error(s), ${FATALCOUNT:-0} fatal client error(s)"
 echo "   Output: $OUT"
 echo ""
 echo "   Common causes:"

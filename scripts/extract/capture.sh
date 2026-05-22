@@ -89,7 +89,7 @@ cat > "${ABS_REF}/regions.json" <<JSEOF
 JSEOF
 
 echo "capture.sh: Phase 1 artifacts written to ${ABS_REF}"
-echo "  static/ref/: $(ls "${ABS_REF}/static/ref/" | wc -l) screenshots"
-echo "  scroll-video/ref/: $(ls "${ABS_REF}/scroll-video/ref/" | wc -l) videos"
-echo "  transitions/ref/: $(ls "${ABS_REF}/transitions/ref/" | wc -l) videos"
+echo "  static/ref/: $(find "${ABS_REF}/static/ref" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ') screenshots"
+echo "  scroll-video/ref/: $(find "${ABS_REF}/scroll-video/ref" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ') videos"
+echo "  transitions/ref/: $(find "${ABS_REF}/transitions/ref" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ') videos"
 echo "  regions.json: $([ -f "${ABS_REF}/regions.json" ] && echo ok || echo MISSING)"

@@ -67,6 +67,45 @@ PAID_FONT_HOSTS=(
   "typesquare.com"       # TypeSquare / Morisawa (Japan)
 )
 
+# Commercial font family-name detection (Common cheat pattern): when a site
+# self-hosts a paid foundry's typeface, the URL never points at a paid CDN
+# — only the font-family name reveals the license requirement. Scan
+# fonts.json / styles.json / extracted.json for family names from known
+# commercial foundries. Match must be case-insensitive and word-boundary
+# anchored to avoid false positives (e.g. "Inter" generic match vs "Inter
+# Tight" Klim font).
+COMMERCIAL_FONT_FAMILIES=(
+  # Klim Type Foundry (klim.co.nz) — Inter Tight is open but distinct from these
+  "Die Grotesk"
+  "Söhne"
+  "Calibre"
+  "Founders Grotesk"
+  "Untitled Sans"
+  "Untitled Serif"
+  # Commercial Type (commercialtype.com)
+  "Publico"
+  "Marr Sans"
+  "Druk"
+  "Action Condensed"
+  # Lineto (lineto.com)
+  "LL Akkurat"
+  "LL Brown"
+  "LL Replica"
+  "LL Circular"
+  # House Industries (houseind.com) — common in landing pages
+  "Velo Sans"
+  "Eames"
+  "Neutraface"
+  # Pangram Pangram (pangrampangram.com) — popular indie commercial
+  "Editorial New"
+  "PP Neue Montreal"
+  "PP Mori"
+  "PP Right Grotesk"
+  # Production Type (productiontype.com)
+  "Spectral"
+  "Beausite"
+)
+
 FONT_FINDINGS=()
 
 # Search roots — only paths we know contain extracted source-of-truth artifacts.
@@ -98,6 +137,13 @@ for host in "${PAID_FONT_HOSTS[@]}"; do
   hit="$(grep_first "$host" || true)"
   if [ -n "$hit" ]; then
     FONT_FINDINGS+=("$host|$hit")
+  fi
+done
+
+for family in "${COMMERCIAL_FONT_FAMILIES[@]}"; do
+  hit="$(grep_first "$family" || true)"
+  if [ -n "$hit" ]; then
+    FONT_FINDINGS+=("$family|$hit")
   fi
 done
 

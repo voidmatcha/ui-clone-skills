@@ -185,6 +185,83 @@ def _failing_sections_by_ae(ref_dir: Path, limit: int = 3) -> list[tuple[str, in
     return failing[:limit]
 
 
+def _section_compare_row_counts(ref_dir: Path) -> dict[str, int]:
+    """Return table-row counts from sections/result.txt.
+
+    The summary footer contains words like PASS/FAIL, so only markdown table
+    rows are counted. Saturated rows are still failing rows, but surfacing the
+    saturated count separately helps benchmark drivers avoid false convergence
+    stops when AE has no useful gradient.
+    """
+    result = ref_dir / "sections" / "result.txt"
+    counts = {"pass": 0, "fail": 0, "saturated": 0}
+    if not result.is_file():
+        return counts
+    for raw_line in result.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("|"):
+            continue
+        if "✅" in line:
+            counts["pass"] += 1
+        if "❌" in line:
+            counts["fail"] += 1
+        if "saturated" in line or "🌑" in line:
+            counts["saturated"] += 1
+    return counts
+
+
+def _section_compare_stop_guard(ref_dir: Path) -> str | None:
+    """Return a hard stop-warning when section failures cannot be converged.
+
+    Benchmark runs may use the graded `INCOMPLETE-CONVERGED` marker, but only
+    after the section signal has improved enough to be meaningful. Loop-55
+    exposed a bad stop: 0 PASS rows plus saturated sections was reported as
+    converged. Loop-56 exposed the next bad stop: 1 PASS / 14 FAIL plus a
+    failing tree-diff was still reported as converged. This guard makes the
+    disqualifiers explicit in every goal card that sees failed section evidence.
+    """
+    counts = _section_compare_row_counts(ref_dir)
+    if counts["fail"] == 0:
+        return None
+
+    visual_judge_count = sum(1 for _ in (ref_dir / "sections").glob("visual-judge-*.json"))
+    reasons: list[str] = []
+    if counts["pass"] == 0:
+        reasons.append("0 PASS rows")
+    if counts["saturated"] > 0:
+        reasons.append(f"{counts['saturated']} saturated row(s)")
+    if counts["fail"] >= 2 and counts["fail"] > counts["pass"]:
+        reasons.append(f"{counts['fail']} FAIL row(s) vs {counts['pass']} PASS row(s)")
+    if visual_judge_count == 0:
+        reasons.append("no visual-judge refinement artifact")
+    tree_diff = ref_dir / "tree-diff-status.json"
+    if tree_diff.is_file():
+        try:
+            tree_diff_data = json.loads(tree_diff.read_text(encoding="utf-8", errors="replace"))
+            status = tree_diff_data.get("status")
+        except (json.JSONDecodeError, OSError, AttributeError):
+            status = None
+            tree_diff_data = {}
+        if status and status != "pass":
+            reasons.append(f"tree-diff-status.json status={status}")
+        if isinstance(tree_diff_data, dict):
+            tree_counts = tree_diff_data.get("counts") or {}
+            if isinstance(tree_counts, dict):
+                unpaired = int(tree_counts.get("unpaired") or 0)
+                ok = int(tree_counts.get("ok") or 0)
+                if unpaired >= 3 and unpaired > ok:
+                    reasons.append(f"tree-diff unpaired={unpaired} ok={ok}")
+    if not reasons:
+        return None
+
+    return (
+        "Do not emit INCOMPLETE-CONVERGED or any terminal clean-stop marker yet: "
+        f"{', '.join(reasons)}. Continue the visual-judge refinement loop, "
+        "apply concrete component/CSS fixes, restart the dev server, and re-run "
+        "section-compare."
+    )
+
+
 def _visual_judge_next_action(ref_dir: Path) -> str | None:
     """If section-compare has failing rows AND ref/impl section PNGs exist,
     emit a concrete visual-judge next-action with the worst-AE sections
@@ -266,8 +343,11 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     # cuts the runaway loop.
     if gate in ("section-compare", "post-implement"):
         vj_action = _visual_judge_next_action(ref_dir)
+        stop_guard = _section_compare_stop_guard(ref_dir)
         if vj_action is not None:
             next_action = vj_action
+        if stop_guard is not None:
+            next_action = f"{next_action} {stop_guard}"
 
     # Stuck banner: bumped by gate.py CLI on consecutive BLOCKED runs of the
     # active gate. Once we cross the threshold, the worker is grinding the same
@@ -395,6 +475,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(card.to_json(), ensure_ascii=False, indent=2))
     else:
         print(build_goal_card(args.ref_dir))
+    # Abort banner is terminal, not advisory. Text-mode drivers that call
+    # `python -m ui_clone.goal <ref-dir>` (not --check-done) would otherwise
+    # loop past the hard gate-fail cap (loop-37/cmp-opus2 hit 182 retries
+    # past _MAX_GATE_FAILS=10 because text mode returned 0). Match the
+    # --check-done exit code so any host driver reading process exit
+    # halts at the cap. (Codex L24 Q5 patch)
+    if card.abort_banner is not None:
+        return 2
     return 0
 
 

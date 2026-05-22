@@ -326,10 +326,12 @@ Claude Code-style example:
 ```
 Agent({
   description: "Phase E LLM review — N positions",
-  subagent_type: "general-purpose",
+  subagent_type: "ui-clone-skills:visual-debug-reviewer",
   prompt: "<paste the Procedure block below verbatim, with absolute paths substituted>"
 })
 ```
+
+`visual-debug-reviewer` is a plugin sub-agent pinned to `model: opus` (see `.claude-plugin/agents/visual-debug-reviewer.md`), so the vision verdict stays high-quality regardless of the parent agent's model. Falling back to `subagent_type: "general-purpose"` is acceptable on hosts that don't expose plugin agents (e.g. Codex inline), but on Claude Code the explicit form is preferred — `general-purpose` inherits the parent model and silently degrades when a sonnet-tier parent dispatches Phase E.
 
 The subagent has its own context, reads every pair, returns the table. Main context cost: ~500 tokens (the table) instead of ~44K. Do **not** run Phase E inline, because that defeats the entire visual-debug "near-zero vision tokens" guarantee for any session that reaches this step.
 

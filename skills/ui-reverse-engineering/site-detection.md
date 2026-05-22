@@ -131,6 +131,12 @@ agent-browser --session <s> eval "(() => {
 
 **When to use:** Complex sites with CSS Modules, GSAP, Lottie, Canvas, or 200KB+ HTML.
 
+This mode is still a component-generation strategy, not a whole-page static
+mirror. Never dump `document.documentElement.outerHTML` / `document.body.innerHTML`
+or a captured `live.html` into `impl/index.html`; that preserves a frozen DOM
+state while dropping the original transition runtime. Use section-level HTML
+only, preserve runtime libraries/data, and run the normal verification gates.
+
 1. Extract outerHTML of each major section from the original site
 2. Download ALL CSS files and serve from `/public/css/`
 3. Download ALL fonts, images, Lottie JSON to `/public/assets/`

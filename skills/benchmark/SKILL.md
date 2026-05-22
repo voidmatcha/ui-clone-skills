@@ -123,6 +123,50 @@ column to one of:
   should land within one factor of two of each other; a wider gap means
   the fresh path is degraded — find which step diverged before merging.
 
+### Prompt neutrality (validation runs)
+
+Benchmark / loop-validation prompts must be user-like, not harness-like. The
+prompt given to the agent may contain only the request a real user would type:
+the target URL and, if isolation is needed, the output directory. Keep model,
+reasoning effort, permissions, cache flags, and working directory in CLI launch
+flags or the outer runner — not in the prompt text.
+
+Allowed natural prompt examples:
+
+```text
+Clone https://realfood.gov into scratch/loop-N/impl.
+```
+
+```text
+Use ui-clone-skills to clone https://realfood.gov into scratch/loop-N/impl.
+```
+
+Forbidden in a natural validation prompt:
+
+- Pipeline / goal-card / stop-marker instructions.
+- Script names such as `section-compare.sh`, `dom-scaffold.sh`, or
+  `spec-implementation-coverage.sh`.
+- Agent-browser operational rules (`--session`, IIFE evals, close sessions).
+- Previous-loop findings, required adjustments, known bug explanations,
+  gate-game examples, or gate-specific remediation hints.
+
+If a natural validation prompt produces a static mirror, HTTP-only verification,
+missing `pipeline-state.json`, or no section-compare artifacts, treat that as a
+skill or hook failure to fix in this repository. Do not add pipeline
+instructions to the prompt to make the next run pass.
+The same applies when a run creates an early `pipeline-state.json` but then
+copies the live site into `impl/public` before `post-implement`.
+
+Those details must be learned from the loaded skill docs, hooks, AGENTS.md, and
+repo code. Adding them to the prompt turns the run into a guided diagnostic
+attempt rather than a skill validation.
+
+When a loop exposes a failure pattern, encode the lesson in the repo first:
+update the relevant skill doc, gate script, tests, or hook, verify it, commit
+and push it, then rerun the same natural prompt shape. A bespoke
+feedback-filled or harness-instructed prompt is allowed only for diagnosis, and
+its result must not be compared as a benchmark/history row.
+
 ## Procedure
 
 ### Step 1 — Setup (MANDATORY, single command)
@@ -327,6 +371,12 @@ Follow the normal ui-reverse-engineering pipeline:
      you do nothing here, AE on scroll sections inflates to ~1M permanently
      and visual-judge has no leverage to reduce it (it can only suggest
      Tailwind tweaks, not author behavior).
+     Transition proof must be runtime behavior, not static markers:
+     hidden spans, `data-transition-hooks`, `data-scroll-hook`,
+     `data-hover-hook`, and generic motion words placed in inert attributes
+     are benchmark contamination. `spec-implementation-coverage.json` must
+     pass for real trigger wiring before the motion row can be treated as
+     comparable.
   6. **Responsive variants**: the benchmark target is also rendered on
      mobile (375 / 414), tablet (768 / 834) and desktop (1280 / 1440)
      viewports. The deterministic transpiler captures the 1440 snapshot
@@ -340,17 +390,16 @@ Follow the normal ui-reverse-engineering pipeline:
      impl renders broken on the very viewports `verification-plan.json`
      expects to verify, and any "responsive" sub-check in the gate fails
      deterministically.
-  7. **Section-matcher: flat `<section>` children at top of `<main>`**.
-     `section-compare.sh`'s fingerprint algorithm pairs ref↔impl by
-     `<section>` className token intersection at depth 1 — it does NOT
-     traverse into wrapper `<div>`s. If you wrap sections in color-zone
-     wrappers (`<div className="dga_dark">...</div>`), every section
-     inside becomes invisible to the matcher and AE explodes (observed
-     Loop 19 → 12 ref ↔ 12 impl only after wrapper removal). The correct
-     pattern: apply each color-zone as a `style={{ background: ... }}`
-     on the `<section>` itself, and keep `<main>`'s direct children as
-     a flat list of `<section>` elements that mirror ref's CSS-module
-     class names verbatim (`dga_hero__AjMaf`, `dga_stats__Wj1Kx`, etc.).
+  7. **Section-matcher: real sections, not sentinel hacks**.
+     `section-compare.sh` descends `<main>` wrapper divs when they contain
+     multiple nested `<section>` / `<main>` descendants, but the robust
+     implementation pattern is still a flat list of real `<section>` elements
+     under `<main>`. Apply each color-zone as a `style={{ background: ... }}`
+     on the `<section>` itself when possible, preserve the ref CSS-module
+     class names verbatim (`dga_hero__AjMaf`, `dga_stats__Wj1Kx`, etc.), and
+     never add hidden sentinel / dummy children solely to manipulate verifier
+     enumeration. Hidden enumeration sentinels are a gate-game signal; fix the
+     section structure instead.
   8. **No other-SHA impl bootstrap**. Do NOT copy
      `benchmark/work/<other-sha>/impl/` as a warm-start base for the
      current SHA — that contaminates the measurement (you're benchmarking
@@ -421,6 +470,23 @@ Follow the normal ui-reverse-engineering pipeline:
     `video-motion-compare`, `scroll-end-completion`, `text-fidelity-check`,
     `dom-mirror-check`, `image-fidelity`.
 
+  **Hard disqualifiers.** Before emitting `INCOMPLETE-CONVERGED`, inspect the
+  current `sections/result.txt` and `sections/visual-judge-*.json` artifacts.
+  The graded stop is forbidden when any of these are true:
+
+  - The section summary has `0 PASS` rows.
+  - FAIL rows outnumber PASS rows.
+  - Any row is marked `saturated` / `🌑`.
+  - No `visual-judge-*.json` refinement artifact exists for the current
+    failed section-compare run.
+  - `tree-diff-status.json.status != "pass"`.
+
+  These are not "close enough" states. Route through
+  `python -m ui_clone.goal "$REF_DIR"` again, apply the visual-judge
+  `priority_fix` findings to concrete component/CSS files, restart the dev
+  server, and re-run section-compare before deciding whether convergence is
+  defensible.
+
   Record outcome `INCOMPLETE-CONVERGED` via `benchmark-harvest.sh` when
   these hold. Treat it as a clean stop, not a forced quit — the data
   point is valid and the agent should not keep iterating against
@@ -481,12 +547,16 @@ You may emit "DONE" and stop ONLY when EVERY condition below is true:
 - **SECTION_THRESHOLD integrity**: every `minor` / `ok` row in result.txt
   has AE/Mpx ≤ 2000 (the gate detects classifier inflation and fails it).
 - **tree-diff convergence**: `tree-diff-status.json.status == "pass"` AND
-  `elements_walked >= max(30, section_count * 5)` (the gate enforces the
-  floor — a near-empty impl that walks 11 elements does not count).
+  `elements_walked >= max(30, section_count * 5)` AND `counts.unpaired` is
+  not greater than `counts.ok` (the gate enforces the floor and pairing
+  integrity — a near-empty impl that walks 11 elements or a layout where most
+  walked elements cannot pair does not count).
 - **Motion**: `transitions/result.txt` exists AND has 0 ❌ FAIL rows.
   If `transition-spec.json` declares any transitions, `result.txt` must
   contain at least one ✅/❌ measurement row (the gate fails an empty
-  artifact as "transition-compare never ran").
+  artifact as "transition-compare never ran") and
+  `spec-implementation-coverage.json.status == "pass"` with no marker-only
+  implementation proof.
 - **Composition**: `bundle-impl-coverage.json.status == "pass"` (every lib
   detected in `bundle-map.json` is installed in `impl/package.json`) AND
   `asset-utilization.json.status == "pass"` with `downloaded >= 5`.
@@ -525,6 +595,7 @@ dependency stack. Investigate before the next release.
 |---|---|
 | `DONE` | All STRICT v2 stop conditions satisfied; `--check-done` exit 0. |
 | `ABORT` | `pipeline-state.json.unclonable_reasons[]` non-empty (paid font, DRM canvas, auth-gated). Records the reason but no AE/SSIM. |
+| `INCOMPLETE-CONVERGED` | Graded clean stop: STRICT v2 is not done, but all Phase 5b graded-stop conditions and hard disqualifiers above pass. |
 | `INCOMPLETE` | Catch-all for "not done, not aborted" — agent decided the run cannot make further progress (cost cap, persistent failure, etc.). Inspect `pipeline-state.json.completed_gates` + `gate_fail_counts` for which gate halted. |
 
 ## Headless / CI path (optional)

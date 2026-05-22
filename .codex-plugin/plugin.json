@@ -1,6 +1,6 @@
 {
   "name": "ui-clone-skills",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Clone any live website into React + Tailwind code with extraction-first verification — no vision tokens. Three skills: ui-reverse-engineering (URL → React + Tailwind, supports GSAP / Framer Motion / Lenis / Webflow IX2 / Next.js / Tailwind v4), ui-capture (reference + transitions), visual-debug (AE/SSIM diff + computed-style mismatch diagnosis).",
   "author": {
     "name": "YONGJAE LEE"
@@ -60,10 +60,9 @@
     ],
     "websiteURL": "https://github.com/voidmatcha/ui-clone-skills",
     "defaultPrompt": [
-      "Use ui-reverse-engineering for live URL builds, uncertain routing, partial or failed runs, and completed-state handoff into React + Tailwind.",
-      "Use ui-capture only to capture fresh reference screenshots, scroll evidence, transitions, or implementation clips.",
-      "Use visual-debug only when reference and implementation evidence already exist and the task is AE/SSIM mismatch diagnosis.",
-      "For continuation, run python -m ui_clone.goal <ref-dir> and follow the goal card as one bounded delegated-worker action; stop when current_gate == \"done\" and section comparison is clean. This is not an infinite loop."
+      "Use ui-reverse-engineering for live URL builds. Phase 6: run asset-download.sh + generation-plan.sh, enrich plan inline.",
+      "Research-mode default: download every image first; substitute only on actual HTTP failure. No emoji/gradient placeholders.",
+      "Goal card: run python -m ui_clone.goal <ref-dir>; stop when current_gate == \"done\". Not an infinite loop. On gate fail follow diagnosis.md."
     ],
     "brandColor": "#10A37F"
   }

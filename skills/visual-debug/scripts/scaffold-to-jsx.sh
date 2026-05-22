@@ -61,6 +61,7 @@ fi
 
 python3 - "$STRUCT" "$SECMAP" "$OUT_DIR" <<'PY'
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -76,10 +77,85 @@ SKIP_TAGS = {"script","style","link","meta","noscript","template"}
 # HTML→JSX attribute renames.
 ATTR_RENAMES = {"class": "className", "for": "htmlFor"}
 
+# SVG tags whose presence triggers the kebab→camelCase SVG attr map.
+SVG_TAGS = {
+    "svg","g","defs","use","symbol","marker","clippath","clip-path",
+    "mask","pattern","filter","feblend","fecolormatrix","fecomposite",
+    "fegaussianblur","femerge","femergenode","feoffset","feflood","fetile",
+    "feturbulence","fedropshadow","fediffuselighting","fespecularlighting",
+    "femorphology","feimage","fedisplacementmap",
+    "lineargradient","radialgradient","stop",
+    "path","rect","circle","ellipse","line","polyline","polygon",
+    "text","textpath","tspan","title","desc","foreignobject",
+}
+# Subset of SVG attrs that need kebab→camelCase remap for JSX. Tags
+# in SVG_TAGS get this mapping applied before emit.
+SVG_ATTR_RENAMES = {
+    "viewBox": "viewBox", "preserveAspectRatio": "preserveAspectRatio",
+    "stroke-width": "strokeWidth",
+    "stroke-linecap": "strokeLinecap",
+    "stroke-linejoin": "strokeLinejoin",
+    "stroke-miterlimit": "strokeMiterlimit",
+    "stroke-dasharray": "strokeDasharray",
+    "stroke-dashoffset": "strokeDashoffset",
+    "stroke-opacity": "strokeOpacity",
+    "fill-rule": "fillRule",
+    "fill-opacity": "fillOpacity",
+    "clip-rule": "clipRule",
+    "clip-path": "clipPath",
+    "stop-color": "stopColor",
+    "stop-opacity": "stopOpacity",
+    "gradientTransform": "gradientTransform",
+    "gradientUnits": "gradientUnits",
+    "spreadMethod": "spreadMethod",
+    "xlink:href": "xlinkHref",
+    "xlink:title": "xlinkTitle",
+    "patternUnits": "patternUnits",
+    "patternContentUnits": "patternContentUnits",
+    "patternTransform": "patternTransform",
+    "markerUnits": "markerUnits",
+    "refX": "refX", "refY": "refY",
+    "flood-color": "floodColor",
+    "flood-opacity": "floodOpacity",
+    "stdDeviation": "stdDeviation",
+}
+# SVG geometry/styling attrs (no rename needed but pass through to JSX).
+SVG_PASSTHROUGH_ATTRS = {
+    "id","xmlns","fill","stroke","opacity","mask","filter",
+    "d","points","x","y","x1","y1","x2","y2","cx","cy","r","rx","ry",
+    "width","height","transform","offset",
+    "href","in","in2","result","values","operator","mode","type",
+    "orient","overflow",
+}
+
 
 def kebab_to_camel(s):
     parts = s.split("-")
     return parts[0] + "".join(p.title() for p in parts[1:])
+
+
+def rewrite_css_urls(value):
+    """Replace every `url(...)` URL inside a CSS value with its
+    locally-rewritten equivalent. Codex audit gap #3 — fixes the
+    pseudo/background-image SVG leak where extract-dom captured a
+    `background-image: url("https://cdn/.../ic.svg")` and
+    scaffold-to-jsx emitted it verbatim. After this, the JSX style
+    literal references /images/ic.svg matching the locally-downloaded
+    file. Handles double-quote, single-quote, and unquoted URL forms.
+    """
+    if not isinstance(value, str) or "url(" not in value:
+        return value
+
+    def _replace(m):
+        url = m.group("url")
+        local = rewrite_asset_url(url)
+        return f'url("{local}")'
+
+    return re.sub(
+        r'url\(\s*["\']?(?P<url>[^"\')]+?)["\']?\s*\)',
+        _replace,
+        value,
+    )
 
 
 def style_to_jsx(styles):
@@ -87,12 +163,53 @@ def style_to_jsx(styles):
     if not styles:
         return ""
     items = []
+    # Properties whose values can hold url(...) tokens that need
+    # rewriting to the locally-downloaded asset paths.
+    URL_BEARING = {
+        "background", "background-image", "mask", "mask-image",
+        "border-image", "border-image-source",
+        "list-style", "list-style-image",
+        "cursor", "content", "src",
+        "clip-path", "filter",
+    }
     for k, v in styles.items():
+        if k in URL_BEARING:
+            v = rewrite_css_urls(v)
         ck = kebab_to_camel(k)
         # Escape backticks/double-quotes inside values.
         v_safe = v.replace("\\", "\\\\").replace('"', '\\"')
         items.append(f'{ck}: "{v_safe}"')
     return "{{ " + ", ".join(items) + " }}"
+
+
+def rewrite_asset_url(v):
+    """Rewrite ref CDN/image-optimizer URLs to local public asset paths."""
+    if not isinstance(v, str) or not v:
+        return v
+    base = os.path.basename(v.split("?", 1)[0])
+    m = re.search(r'/cdn-cgi/image/[^/]+/(.+)', v)
+    if m:
+        base = os.path.basename(m.group(1))
+    ext = os.path.splitext(base)[1].lower()
+    if ext in (".mp4", ".webm", ".mov"):
+        return f"/videos/{base}"
+    if ext in (".webp", ".png", ".jpg", ".jpeg", ".svg", ".gif", ".avif"):
+        return f"/images/{base}"
+    return v
+
+
+def rewrite_srcset(v):
+    """Rewrite each srcset candidate URL while preserving descriptors."""
+    candidates = []
+    for raw_candidate in re.split(r",\s+", v):
+        candidate = raw_candidate.strip()
+        if not candidate:
+            continue
+        parts = candidate.split()
+        rewritten = rewrite_asset_url(parts[0])
+        descriptor = " ".join(parts[1:])
+        candidates.append(" ".join(part for part in (rewritten, descriptor) if part))
+    return ", ".join(candidates)
 
 
 def escape_jsx_text(t):
@@ -157,27 +274,47 @@ def render(node, indent=2, hover_rules=None):
         "aria-label": "aria-label", "title": "title", "role": "role",
         "data-src": "data-src", "data-poster": "data-poster",
     }
-    extra_attrs = ""
+    attr_emit: dict[str, str] = {}
     for src_key, jsx_key in attr_map.items():
         v = node.get(src_key)
         if not isinstance(v, str) or not v:
             continue
-        # For <img src> rewrite the CDN URL to the locally-downloaded path
-        # under /images/ or /videos/ so Next.js serves from impl/public.
+        # For image/video URLs rewrite the CDN optimizer path to the
+        # locally-downloaded path under /images/ or /videos/ so Next.js serves
+        # from impl/public. srcset needs the same treatment: if it keeps a
+        # /cdn-cgi/image/... candidate, the browser will pick that broken
+        # runtime path even when src itself is correct.
         if src_key in ("src", "poster"):
-            import os as _os, re as _re
-            base = _os.path.basename(v.split("?")[0])
-            m = _re.search(r'/cdn-cgi/image/[^/]+/(.+)', v)
-            if m:
-                base = _os.path.basename(m.group(1))
-            ext = _os.path.splitext(base)[1].lower()
-            if ext in (".mp4", ".webm", ".mov"):
-                v = f"/videos/{base}"
-            elif ext in (".webp", ".png", ".jpg", ".jpeg", ".svg", ".gif", ".avif"):
-                v = f"/images/{base}"
-            # else leave URL as-is (rare)
+            v = rewrite_asset_url(v)
+        elif src_key == "srcset":
+            v = rewrite_srcset(v)
         v_safe = v.replace("\\", "\\\\").replace('"', '\\"')
-        extra_attrs += f' {jsx_key}="{v_safe}"'
+        attr_emit[jsx_key] = v_safe
+
+    if tag in SVG_TAGS or node.get("svg"):
+        # Use_href + xlinkHref both shipped so refs across SVG <use>
+        # work whether the captured side used href or xlink:href.
+        for src_key in list(SVG_ATTR_RENAMES.keys()) + list(SVG_PASSTHROUGH_ATTRS):
+            v = node.get(src_key)
+            if not isinstance(v, str) or not v:
+                continue
+            jsx_key = SVG_ATTR_RENAMES.get(src_key, src_key)
+            # If the value contains a url(...) reference (mask, filter,
+            # clipPath, fill, stroke, href on <use>), rewrite to the
+            # locally-downloaded asset path so the runtime resolves
+            # against impl/public/ instead of the ref's CDN.
+            if "url(" in v:
+                v = rewrite_css_urls(v)
+            elif src_key in {"href", "xlink:href"} and v.startswith(
+                ("http://", "https://"),
+            ):
+                v = rewrite_asset_url(v)
+            v_safe = v.replace("\\", "\\\\").replace('"', '\\"')
+            attr_emit[jsx_key] = v_safe
+
+    extra_attrs = "".join(
+        f' {k}="{v}"' for k, v in attr_emit.items()
+    )
     cls_attr += extra_attrs
 
     # Fix 18 — pseudo-element synthesis. When extract-dom captured a non-
@@ -336,17 +473,6 @@ for i, sec in enumerate(sections):
         name = base
     subtree = find_subtree_for_section(structure, sec, consumed)
     hover_rules = []  # Fix 19 — collected during render(); emitted as <style>.
-    # Fix 20 (Loop 16) — inject per-section dominant background color EARLY.
-    # Phase 2 captures `background-color` on whatever node *literally* carries
-    # it; on realfood.gov the colored backdrop lives on a wrapping
-    # `<div class="dga_dark__...">` outside the section, so the section root's
-    # styles report `background-color: rgba(0,0,0,0)`. The impl then renders
-    # the section on white, mismatching every dark/sand/off-white region by
-    # ~38% AE per Loop 15 measurement. When section-map.json carries a
-    # `dominantBg` (computed from the ref clip), promote it onto the section
-    # subtree's `background-color` BEFORE render() runs so the deterministic
-    # scaffold already paints the correct backdrop without waiting for LLM
-    # refinement to discover it.
     dominant_bg = sec.get("dominantBg") if isinstance(sec, dict) else None
     if subtree is not None and dominant_bg:
         sub_styles = subtree.get("styles") or {}
@@ -411,18 +537,65 @@ for i, sec in enumerate(sections):
 index_body = "\n".join(f'export {{ default as {n} }} from "./{n}";' for n in exports) + "\n"
 (out_dir / "index.ts").write_text(index_body, encoding="utf-8")
 
-# Fix 15 — auto-emit page.tsx. V11 (220c969) showed that the transpiler
-# produced pixel-accurate per-section components, but agent-written page.tsx
-# wrapped them in a misconfigured outer element so section-compare couldn't
-# match the impl to the right ref sections (hero/lineInTheSand/stats stayed
-# at ~900k AE because the impl <main> wrapper was 19826px tall — the entire
-# page — matched against ref's 700px hero section).
+# Fix 15 + Codex universality audit CRITICAL: prior version always
+# emitted Next App Router `app/page.tsx`, coercing Vite/Astro/SvelteKit/
+# Remix/Parcel impls into the wrong entry shape. Detect impl stack
+# from package.json + characteristic config files, then emit the
+# stack-appropriate entry.
 #
-# Auto-generated page.tsx removes that wiring drift by mirroring the
-# structure.json root tag/styles and importing sections in section-map order.
-page_dir = out_dir.parent / "app"
-page_dir.mkdir(parents=True, exist_ok=True)
-page_path = page_dir / "page.tsx"
+# Layout assumption: out_dir is impl/src/components, so impl root is
+# out_dir.parent.parent.
+impl_root = out_dir.parent.parent
+pkg_json_path = impl_root / "package.json"
+pkg_deps: dict[str, str] = {}
+pkg_scripts: dict[str, str] = {}
+if pkg_json_path.is_file():
+    try:
+        pkg_data = json.loads(pkg_json_path.read_text(encoding="utf-8"))
+        for key in ("dependencies", "devDependencies", "peerDependencies"):
+            d = pkg_data.get(key) or {}
+            if isinstance(d, dict):
+                pkg_deps.update({k: str(v) for k, v in d.items()})
+        scripts = pkg_data.get("scripts") or {}
+        if isinstance(scripts, dict):
+            pkg_scripts.update({k: str(v) for k, v in scripts.items()})
+    except (OSError, ValueError):
+        pass
+
+
+def _detect_stack() -> str:
+    has_next = "next" in pkg_deps
+    has_vite = "vite" in pkg_deps or "@vitejs/plugin-react" in pkg_deps
+    has_remix = "@remix-run/react" in pkg_deps or "@remix-run/node" in pkg_deps
+    has_astro = "astro" in pkg_deps
+    has_sveltekit = "@sveltejs/kit" in pkg_deps
+    next_eff = has_next and any(
+        (impl_root / cf).is_file()
+        for cf in ("next.config.ts", "next.config.js", "next.config.mjs")
+    ) or "next" in (pkg_scripts.get("dev") or pkg_scripts.get("build") or "")
+    vite_eff = has_vite and any(
+        (impl_root / cf).is_file()
+        for cf in ("vite.config.ts", "vite.config.js", "vite.config.mjs")
+    ) or "vite" in (pkg_scripts.get("dev") or pkg_scripts.get("build") or "")
+    if has_remix:
+        return "remix"
+    if has_astro:
+        return "astro"
+    if has_sveltekit:
+        return "sveltekit"
+    if next_eff:
+        return "next"
+    if vite_eff:
+        return "vite"
+    if has_next:
+        return "next"
+    if has_vite:
+        return "vite"
+    return "vite"  # safest default — React+Tailwind+Vite is the
+                  # plugin's documented default scaffold
+
+
+stack = _detect_stack()
 
 # Root element from structure.json (typically <main> or <body>).
 root_tag = (structure.get("tag") or "main").lower()
@@ -432,31 +605,157 @@ root_cls_attr = f' className="{root_cls}"' if root_cls else ""
 root_style_attr = f" style={style_to_jsx(root_styles)}" if root_styles else ""
 
 # Sections in section-map order — they're already ordered by `top` upstream.
-imports = "\n".join(f'import {n} from "@/components/{n}";' for n in exports)
 section_jsx = "\n".join(f"      <{n} />" for n in exports)
 
-page_body = (
-    "// Auto-generated by skills/visual-debug/scripts/scaffold-to-jsx.sh (Fix 15).\n"
-    "// DO NOT hand-edit — re-run the transpiler if the ref changes.\n"
-    "// Section composition + root wrapper mirror the ref DOM structure exactly.\n"
-    "\n"
-    f"{imports}\n"
-    "\n"
-    "export default function Page() {\n"
-    "  return (\n"
-    f"    <{root_tag}{root_cls_attr}{root_style_attr}>\n"
-    f"{section_jsx}\n"
-    f"    </{root_tag}>\n"
-    "  );\n"
-    "}\n"
-)
-page_path.write_text(page_body, encoding="utf-8")
+
+def _emit_next_page() -> Path:
+    page_dir = out_dir.parent / "app"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    page_path = page_dir / "page.tsx"
+    imports = "\n".join(
+        f'import {n} from "@/components/{n}";' for n in exports
+    )
+    body = (
+        "// Auto-generated by skills/visual-debug/scripts/scaffold-to-jsx.sh.\n"
+        "// DO NOT hand-edit — re-run the transpiler if the ref changes.\n"
+        "// stack: next App Router\n"
+        "\n"
+        f"{imports}\n"
+        "\n"
+        "export default function Page() {\n"
+        "  return (\n"
+        f"    <{root_tag}{root_cls_attr}{root_style_attr}>\n"
+        f"{section_jsx}\n"
+        f"    </{root_tag}>\n"
+        "  );\n"
+        "}\n"
+    )
+    page_path.write_text(body, encoding="utf-8")
+    return page_path
+
+
+def _emit_vite_entry() -> Path:
+    # Vite+React: emit src/App.tsx wrapping the components. main.tsx
+    # is typically already written by `npm create vite` and renders
+    # <App />; we don't overwrite main.tsx, only App.tsx.
+    app_path = out_dir.parent / "App.tsx"
+    imports = "\n".join(
+        f"import {n} from './components/{n}';" for n in exports
+    )
+    body = (
+        "// Auto-generated by skills/visual-debug/scripts/scaffold-to-jsx.sh.\n"
+        "// DO NOT hand-edit — re-run the transpiler if the ref changes.\n"
+        "// stack: vite + react\n"
+        "\n"
+        f"{imports}\n"
+        "\n"
+        "export default function App() {\n"
+        "  return (\n"
+        f"    <{root_tag}{root_cls_attr}{root_style_attr}>\n"
+        f"{section_jsx}\n"
+        f"    </{root_tag}>\n"
+        "  );\n"
+        "}\n"
+    )
+    app_path.write_text(body, encoding="utf-8")
+    return app_path
+
+
+def _emit_remix_root() -> Path:
+    page_dir = impl_root / "app"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    page_path = page_dir / "_index.tsx"
+    try:
+        rel = Path("../") / out_dir.relative_to(impl_root)
+    except ValueError:
+        rel = out_dir
+    imports = "\n".join(
+        f"import {n} from '{rel.as_posix()}/{n}';" for n in exports
+    )
+    body = (
+        "// Auto-generated by skills/visual-debug/scripts/scaffold-to-jsx.sh.\n"
+        "// stack: remix\n"
+        "\n"
+        f"{imports}\n"
+        "\n"
+        "export default function Index() {\n"
+        "  return (\n"
+        f"    <{root_tag}{root_cls_attr}{root_style_attr}>\n"
+        f"{section_jsx}\n"
+        f"    </{root_tag}>\n"
+        "  );\n"
+        "}\n"
+    )
+    page_path.write_text(body, encoding="utf-8")
+    return page_path
+
+
+def _emit_astro_index() -> Path:
+    page_dir = impl_root / "src" / "pages"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    page_path = page_dir / "index.astro"
+    imports = "\n".join(
+        f"import {n} from '../components/{n}.tsx';" for n in exports
+    )
+    children = "\n".join(f"  <{n} client:load />" for n in exports)
+    body = (
+        "---\n"
+        "// Auto-generated by skills/visual-debug/scripts/scaffold-to-jsx.sh.\n"
+        "// stack: astro\n"
+        f"{imports}\n"
+        "---\n"
+        f"<{root_tag}>\n"
+        f"{children}\n"
+        f"</{root_tag}>\n"
+    )
+    page_path.write_text(body, encoding="utf-8")
+    return page_path
+
+
+def _emit_sveltekit_route() -> Path:
+    page_dir = impl_root / "src" / "routes"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    page_path = page_dir / "+page.svelte"
+    try:
+        rel_to_route = Path("../../") / out_dir.relative_to(impl_root)
+    except ValueError:
+        rel_to_route = out_dir
+    imports = "\n".join(
+        f"  import {n} from '{rel_to_route.as_posix()}/{n}.tsx';"
+        for n in exports
+    )
+    children = "\n".join(f"  <{n} />" for n in exports)
+    body = (
+        "<!-- Auto-generated by skills/visual-debug/scripts/scaffold-to-jsx.sh -->\n"
+        "<!-- stack: sveltekit -->\n"
+        "<script lang=\"ts\">\n"
+        f"{imports}\n"
+        "</script>\n"
+        "\n"
+        f"<{root_tag}>\n"
+        f"{children}\n"
+        f"</{root_tag}>\n"
+    )
+    page_path.write_text(body, encoding="utf-8")
+    return page_path
+
+
+EMITTERS = {
+    "next": _emit_next_page,
+    "vite": _emit_vite_entry,
+    "remix": _emit_remix_root,
+    "astro": _emit_astro_index,
+    "sveltekit": _emit_sveltekit_route,
+}
+
+emitter = EMITTERS.get(stack, _emit_vite_entry)
+page_path = emitter()
 
 print(f"scaffold-to-jsx: wrote {len(written)} components to {out_dir}")
 for name in written[:6]:
     print(f"  - {name}")
 if len(written) > 6:
     print(f"  ... +{len(written) - 6} more")
-print(f"scaffold-to-jsx: wrote page.tsx at {page_path}")
+print(f"scaffold-to-jsx: stack={stack} → wrote entry at {page_path}")
 print(f"  root tag: <{root_tag}>, imports: {len(exports)} sections")
 PY

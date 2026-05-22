@@ -29,16 +29,26 @@
 
 set -uo pipefail
 
-COMP_DIR="${1:?Usage: transition-spec-coverage.sh <component-dir> <impl-src-dir>}"
-IMPL_DIR="${2:?Missing impl-src-dir}"
+COMP_DIR="${1:?Usage: transition-spec-coverage.sh <component-dir> [<impl-src-dir>]}"
+IMPL_DIR="${2:-}"
 SPEC="$COMP_DIR/transition-spec.json"
+
+if [ -z "$IMPL_DIR" ] || [ ! -d "$IMPL_DIR" ]; then
+  RESOLVER="${PLUGIN_ROOT:-$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")}/scripts/extract/find-impl-root.sh"
+  if [ -x "$RESOLVER" ]; then
+    RESOLVED=$(bash "$RESOLVER" "$COMP_DIR" 2>/dev/null | sed -n '2p')
+    if [ -n "$RESOLVED" ] && [ -d "$RESOLVED" ]; then
+      IMPL_DIR="$RESOLVED"
+    fi
+  fi
+fi
 
 if [ ! -f "$SPEC" ]; then
   echo "ERROR: transition-spec.json not found at $SPEC"
   exit 2
 fi
-if [ ! -d "$IMPL_DIR" ]; then
-  echo "ERROR: impl source dir not found at $IMPL_DIR"
+if [ -z "$IMPL_DIR" ] || [ ! -d "$IMPL_DIR" ]; then
+  echo "ERROR: impl source dir not found (tried arg + find-impl-root.sh fallback)"
   exit 2
 fi
 if ! command -v node &>/dev/null; then

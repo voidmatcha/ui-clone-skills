@@ -1,6 +1,11 @@
 ---
 name: ui-capture
-description: Use when capturing reference evidence from a website: baseline screenshots, scroll videos, hover, mousemove/parallax, auto-timer recordings, and transition regions. Triggers on "take baseline screenshots of <URL>", "record the hover effects", "capture scroll animations", "record the parallax", "capture every transition on <URL>". Works standalone or as an evidence handoff from ui-reverse-engineering, visual-debug, or orchestration workflows. For post-implementation mismatch diagnosis, use visual-debug.
+description: >-
+  Capture reference evidence from a website: baseline screenshots,
+  scroll videos, hover, parallax, transitions. Triggers on "take
+  baseline screenshots of <URL>", "record hover effects", "capture
+  scroll animations". Routes to visual-debug for post-implementation
+  mismatch diagnosis.
 metadata:
   filePattern:
     - "**/tmp/ref/**/regions.json"

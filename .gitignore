@@ -22,3 +22,13 @@ benchmark/work/
 
 # benchmark loop-iteration screenshots saved to repo root during sessions
 loop*.png
+
+# Validation loop workspaces — local clone targets, downloaded assets,
+# per-loop ref dirs. Never committed to public repo (commercial-asset risk).
+scratch/
+
+# test-parity drift backups — auto-created during CI drift smoke tests
+*.parity-backup
+
+# Internal scratch dir for maintainer-only experiments
+internal/
