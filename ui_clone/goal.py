@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from ui_clone.state import GATE_ORDER, PipelineState
+from ui_clone.state import GATE_ORDER, HARD_CAP_GATE_FAILS, PipelineState
 
 
 @dataclass(frozen=True)
@@ -69,9 +69,11 @@ _STUCK_THRESHOLD = 3
 # climbed to `gate_fail_counts[post-implement] == 445` while the stuck banner
 # was being emitted on every cycle). Beyond this count, the goal card flips
 # to abort_banner mode which is terminal: `--check-done` exits 2 and external
-# loop drivers stop iterating. 10 leaves the agent ~7 cycles after the stuck
-# advisory to actually change approach before the loop is forced shut.
-_MAX_GATE_FAILS = 10
+# loop drivers stop iterating. The canonical source for this threshold is now
+# `state.HARD_CAP_GATE_FAILS` (which also drives the auto-record of an
+# `unclonable_reasons` entry from `PipelineState.mark_failed`). The aliased
+# name is kept for back-compat with `benchmark_harness.py` which imports it.
+_MAX_GATE_FAILS = HARD_CAP_GATE_FAILS
 
 
 _GOAL_BY_GATE: dict[str, GoalStep] = {
@@ -337,9 +339,9 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     # matters because post-implement's check transitively includes
     # section-compare evidence — when section-compare fails, post-implement
     # also fails, but current_gate stays at "post-implement" and never advances
-    # to "section-compare". The 3-round benchmark (Round 1 / A / B) observed
-    # this: gate_fail_counts[post-implement] climbed past 400 while the
-    # routing override never fired. Broadening the trigger to post-implement
+    # to "section-compare". Observed across multiple benchmark runs:
+    # gate_fail_counts[post-implement] climbed past 400 while the routing
+    # override never fired. Broadening the trigger to post-implement
     # cuts the runaway loop.
     if gate in ("section-compare", "post-implement"):
         vj_action = _visual_judge_next_action(ref_dir)
@@ -410,11 +412,29 @@ def build_goal_card(ref_dir: Path) -> str:
     """Return a deterministic, host-neutral goal card for a ref directory."""
     card = build_goal_card_data(ref_dir)
 
-    lines = [f"Goal Card: {card.component}"]
-    # Abort takes precedence — if the site is unclonable, the worker shouldn't
-    # waste a turn on the next bounded action.
+    # Abort-active rendering: ONLY emit terminal-state lines. The runnable
+    # block (Mission / Current goal / Next action / Stop condition / Required
+    # evidence / No infinite loop) is suppressed because LLMs observed
+    # prioritizing "Next action" over "ABORT" when both appear in the same
+    # card — linear-app reached 97 post-implement failures and realfood-gov 6
+    # before the human had to manually stop. JSON drivers (to_json) still see
+    # the full structured fields; this change is text-rendering only.
     if card.abort_banner is not None:
-        lines.append(card.abort_banner)
+        lines = [
+            f"Goal Card: {card.component}",
+            card.abort_banner,
+            (
+                "Terminal state — this card is terminal. Do not run any "
+                "further pipeline commands. pipeline-state.json has recorded "
+                "unclonable_reasons; `python -m ui_clone.goal <ref-dir> "
+                "--check-done` returns exit 2 so external loop drivers stop."
+            ),
+            f"Current gate: {card.current_gate}",
+            f"Manual refresh: {card.manual_refresh}",
+        ]
+        return "\n".join(lines)
+
+    lines = [f"Goal Card: {card.component}"]
     if card.stuck_banner is not None:
         lines.append(card.stuck_banner)
     lines.extend([
@@ -477,10 +497,10 @@ def main(argv: list[str] | None = None) -> int:
         print(build_goal_card(args.ref_dir))
     # Abort banner is terminal, not advisory. Text-mode drivers that call
     # `python -m ui_clone.goal <ref-dir>` (not --check-done) would otherwise
-    # loop past the hard gate-fail cap (loop-37/cmp-opus2 hit 182 retries
+    # loop past the hard gate-fail cap (observed runs hit 180+ retries
     # past _MAX_GATE_FAILS=10 because text mode returned 0). Match the
     # --check-done exit code so any host driver reading process exit
-    # halts at the cap. (Codex L24 Q5 patch)
+    # halts at the cap.
     if card.abort_banner is not None:
         return 2
     return 0

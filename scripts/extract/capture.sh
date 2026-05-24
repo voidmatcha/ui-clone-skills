@@ -7,6 +7,13 @@
 # transition-region segmentation. Those stay in the ui-capture skill for
 # now and can be wired in later from `run --phases 1-5`.
 #
+# Deterministic plumbing (page-height parsing, regions.json emission,
+# count summary) lives in scripts/extract/_capture_artifacts.py so it's
+# unit-testable. agent-browser orchestration (open/eval/record/screenshot)
+# stays in this shell wrapper because tests would need a real browser
+# regardless. Per codex review (agentId a541f8a835d9e8569, verdict
+# partial_migrate).
+#
 # Usage: capture.sh <url> <session> <ref_dir>
 #
 # Produces:
@@ -29,6 +36,13 @@ command -v agent-browser >/dev/null 2>&1 || {
   exit 2
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ARTIFACTS_PY="$SCRIPT_DIR/_capture_artifacts.py"
+[ -f "$ARTIFACTS_PY" ] || {
+  echo "capture.sh: missing $ARTIFACTS_PY" >&2
+  exit 2
+}
+
 mkdir -p "$REF_DIR"/{static,scroll-video,transitions,clip}/{ref,impl}
 
 # Open + canonical viewport. `set viewport` must follow `open` (the skill
@@ -37,13 +51,12 @@ agent-browser --session "$SESSION" open "$URL"
 agent-browser --session "$SESSION" set viewport 1440 900
 agent-browser --session "$SESSION" wait 3000
 
-# Page height for evenly-spaced scroll screenshots.
+# Page height for evenly-spaced scroll screenshots. The Python helper
+# handles the agent-browser double-encode + non-numeric fallback so we
+# never divide by zero downstream.
 PAGE_H_RAW=$(agent-browser --session "$SESSION" eval \
   "(() => document.documentElement.scrollHeight)()")
-# agent-browser eval double-encodes the return value; jq -r unwraps once.
-# Falls back to a sane default so we don't divide by zero later.
-PAGE_H=$(printf '%s' "$PAGE_H_RAW" | jq -r 'tonumber? // 5000' 2>/dev/null || echo 5000)
-if ! [[ "$PAGE_H" =~ ^[0-9]+$ ]]; then PAGE_H=5000; fi
+PAGE_H=$(python3 "$ARTIFACTS_PY" parse-height "$PAGE_H_RAW")
 
 # 5 screenshots at evenly-spaced scroll positions. Absolute path to dodge
 # the cwd-leaks-between-commands footgun the skill calls out.
@@ -80,16 +93,9 @@ agent-browser --session "$SESSION" record stop
 
 # Single full-page region as the minimal regions.json — proper region
 # segmentation is the ui-capture skill's job; this only unblocks the gate.
-cat > "${ABS_REF}/regions.json" <<JSEOF
-{
-  "regions": [
-    {"name": "full-page", "x": 0, "y": 0, "width": 1440, "height": ${PAGE_H}}
-  ]
-}
-JSEOF
+python3 "$ARTIFACTS_PY" write-regions "$ABS_REF" "$PAGE_H"
 
-echo "capture.sh: Phase 1 artifacts written to ${ABS_REF}"
-echo "  static/ref/: $(find "${ABS_REF}/static/ref" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ') screenshots"
-echo "  scroll-video/ref/: $(find "${ABS_REF}/scroll-video/ref" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ') videos"
-echo "  transitions/ref/: $(find "${ABS_REF}/transitions/ref" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ') videos"
-echo "  regions.json: $([ -f "${ABS_REF}/regions.json" ] && echo ok || echo MISSING)"
+# Count + report (matches the textual block the prior inline version
+# emitted, so any callers grepping for "static/ref/: N screenshots" etc.
+# keep working).
+python3 "$ARTIFACTS_PY" summarize "$ABS_REF"

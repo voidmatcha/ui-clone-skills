@@ -169,8 +169,10 @@ SIGNATURES = {
     "invalidation-check.sh": "{ref_dir}",
     "required-media-coverage-check.sh": "{ref_dir} {impl_root}",
     "remote-asset-ref-check.sh": "{ref_dir}",
+    "capture-artifact-inventory-check.sh": "{ref_dir}",
     "asset-transfer-check.sh": "{ref_dir} {impl_public}",
     "asset-utilization-check.sh": "{ref_dir} {impl_src}",
+    "asset-placement-check.sh": "{ref_dir} {impl_root}",
     "image-fidelity-check.sh": "{ref_dir} {impl_src}",
     "proxy-mirror-check.sh": "{ref_dir}",
     "transition-spec-coverage.sh": "{ref_dir} {impl_src}",
@@ -224,10 +226,10 @@ SIGNATURES = {
     # is passed.
     "ref-js-loader-check.sh":
         "{ref_dir} {impl_root} {impl_url}",
-    # 2026-05-22: runtime-env gate — catches Vite preamble traps,
-    # hydration mismatches, port-routing collisions from orphan dev
-    # servers. Empirical: codex-19 (NODE_ENV trap), codex-18 (orphan
-    # port). Needs ref-dir + impl-root + impl-url.
+    # runtime-env gate — catches Vite preamble traps, hydration
+    # mismatches, port-routing collisions from orphan dev servers.
+    # Observed failure modes: NODE_ENV=production trap and orphan-port
+    # interception. Needs ref-dir + impl-root + impl-url.
     "runtime-env-check.sh":
         "{ref_dir} {impl_root} {impl_url}",
     # 2026-05-22: video-play-proof — currentTime advancement check.

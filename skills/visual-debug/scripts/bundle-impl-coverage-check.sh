@@ -87,9 +87,9 @@ SIG_TO_PKG = {
 detected_libs = []
 notes_libs = []
 
-# Mapping for the newer `libraries: {gsap: bool, ...}` schema (Round 2)
-# to the signature names used in the OLDER `chunks[].libs[]` schema.
-# Both shapes coexist in the field — bundle-map.sh varies by site.
+# Mapping for the newer `libraries: {gsap: bool, ...}` schema to the
+# signature names used in the older `chunks[].libs[]` schema. Both shapes
+# coexist in the field — bundle-map.sh varies by site.
 LIBRARIES_TO_SIG = {
     "gsap": "gsap-like-strings",
     "scrollTrigger": "gsap-like-strings",

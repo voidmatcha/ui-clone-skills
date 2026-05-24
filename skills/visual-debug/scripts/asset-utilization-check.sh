@@ -98,8 +98,8 @@ fi
 # Collect basenames of non-substituted visible images.
 # Schema-tolerant: `visible-images.json` may be either a top-level list
 # `[{src, ...}]` (older shape) OR `{images: [{src, ...}]}` (newer shape).
-# Round 2 of the realfood benchmark shipped the newer shape and the prior
-# list-only parser silent-skipped with "too few samples". Flatten both.
+# A newer schema variant ships `{images: [...]}` and the prior list-only
+# parser silent-skipped with "too few samples". Flatten both shapes.
 python3 - "$VISIBLE" "$SUBST" > "$REF_DIR/.asset-utilization.basenames.tmp" <<'PY'
 import json
 import os

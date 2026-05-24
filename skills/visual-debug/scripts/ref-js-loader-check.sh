@@ -6,7 +6,7 @@
 #   ref-js-loader-check.sh <ref-dir> <impl-root> [<impl-url>]
 #
 #
-#   <script src="https://realfood.gov/_next/static/chunks/main-X.js" />
+#   <script src="https://example.com/_next/static/chunks/main-X.js" />
 #   import "https://example.com/ref-bundle.js"  // component-side
 #   const mod = await import("/public/ref-vendor.js")
 #

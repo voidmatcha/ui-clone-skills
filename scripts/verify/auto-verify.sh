@@ -167,6 +167,44 @@ fi
 run_check "Gate: post-implement" \
   uv run --project "$REPO_ROOT" python -m ui_clone.gate "$REF_DIR" post-implement
 
+# ── Visual-debug stamp ──
+# Emit visual-debug-stamp.json so downstream gates can prove this canonical
+# entry was used (not bare section-compare.sh / transition-compare.sh). The
+# HTML-paste + screenshot-substitution cheats slipped when an agent ran the
+# leaf scripts directly and never invoked the visual-debug umbrella that
+# bundles anti-cheat baseline checks. Gate now requires the stamp when
+# sections/result.txt has ≥1 PASS. Phase E LLM review is OPTIONAL but, when
+# run, writes phase-e-result.json which downstream gates consume.
+STAMP_PATH="$REF_DIR/visual-debug-stamp.json"
+PHASE_E_PATH="$REF_DIR/phase-e-result.json"
+PHASE_E_PRESENT="false"
+[ -f "$PHASE_E_PATH" ] && PHASE_E_PRESENT="true"
+STAMP_VERIFIED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [ "$TOTAL_FAIL" -gt 0 ]; then
+  STAMP_PASSED="false"
+  STAMP_EXIT_CODE=1
+else
+  STAMP_PASSED="true"
+  STAMP_EXIT_CODE=0
+fi
+python3 - "$STAMP_PATH" "$STAMP_VERIFIED_AT" "$STAMP_PASSED" "$STAMP_EXIT_CODE" "$PHASE_E_PRESENT" "$TOTAL_CHECKS" "$TOTAL_FAIL" <<'PY'
+import json, sys
+path, verified_at, passed, exit_code, phase_e, total_checks, total_fail = sys.argv[1:]
+stamp = {
+    "schemaVersion": 1,
+    "stampedBy": "scripts/verify/auto-verify.sh",
+    "verifiedAt": verified_at,
+    "passed": passed == "true",
+    "exitCode": int(exit_code),
+    "totalChecks": int(total_checks),
+    "totalFail": int(total_fail),
+    "phaseE": phase_e == "true",
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(stamp, fh, indent=2)
+    fh.write("\n")
+PY
+
 # ── Summary ──
 echo -e "\n${BOLD}═══ RESULT ═══${NC}"
 if [ "$TOTAL_FAIL" -gt 0 ]; then

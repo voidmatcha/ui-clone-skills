@@ -26,6 +26,15 @@ GATE_ORDER: list[str] = [
     "section-compare",
 ]
 
+# Hard cap on consecutive failures of any single gate. When mark_failed()
+# pushes gate_fail_counts[<gate>] to this value, the state self-records a
+# canonical `category="hard-cap-fail"` reason into unclonable_reasons so
+# every downstream consumer (Stop hook, goal card, benchmark harness,
+# `--check-done` exit code) terminates from one persisted source of truth
+# instead of inventing terminal semantics independently. goal.py re-exports
+# this constant as `_MAX_GATE_FAILS` for back-compat with benchmark_harness.
+HARD_CAP_GATE_FAILS = 10
+
 
 def prerequisite_gates(gate: str) -> list[str]:
     """Return gates that must be completed before `gate` can pass."""
@@ -34,6 +43,64 @@ def prerequisite_gates(gate: str) -> list[str]:
     if gate not in GATE_ORDER:
         return []
     return GATE_ORDER[:GATE_ORDER.index(gate)]
+
+
+# Step G — canonical fallback suggestions keyed by (gate, category).
+# When record_unclonable() is called with a known category and no explicit
+# suggestions list, we fall back to these. Adding a new category here
+# makes the receipt HTML, goal cards, and downstream loop drivers all
+# see consistent remediation guidance.
+_FALLBACK_SUGGESTIONS: dict[tuple[str, str], list[str]] = {
+    ("paid-features", "commercial-font"): [
+        "Substitute with a free font near the original metrics (Inter / Manrope for sans, JetBrains Mono / Geist Mono for mono).",
+        "If production fidelity matters, license the font from its vendor and ship under impl/public/fonts/.",
+        "Render text as <img> for hero copy only — keeps the visual identity without licensing exposure.",
+    ],
+    ("paid-features", "paid-component"): [
+        "Re-implement the component pattern from scratch using captured layout + computed style values.",
+        "Substitute with an open equivalent from shadcn/ui or Radix Primitives.",
+    ],
+    ("post-implement", "drm-canvas"): [
+        "Mock the canvas with a static SVG/PNG placeholder that captures the visual end state.",
+        "If decorative-only, use CSS @property + animation-timeline for scroll-driven motion (no canvas, GPU-cheap).",
+        "Document the section as out-of-scope and link to the live original (with Not-affiliated disclaimer).",
+    ],
+    ("post-implement", "auth-gated"): [
+        "Capture once via agent-browser --profile <profile-with-cookies>, then extract from the logged-in snapshot.",
+        "Limit clone scope to the public landing — flag auth-gated sections as out-of-scope.",
+    ],
+    ("post-implement", "class-signature-preservation-mismatch"): [
+        "Re-run extraction with --interactions to capture more class tokens.",
+        "Verify pipeline Phase 1-6 ran (tmp/ref/<c>/ should have html/, dom-scaffold.json, structure.json). If not, the impl is freehand and won't preserve signatures.",
+        "Increase scope: include hover/focus states so dynamic classes are captured.",
+    ],
+    ("section-compare", "hard-cap-fail"): [
+        "Increase iteration budget on highest-AE sections first (goal card → fail_count > 5).",
+        "Switch to STRUCTURAL_ONLY scoring if pixel-level match is genuinely unreachable (animated gradients, video poster frames, font subpixel diffs).",
+        "Check ref-screenshot freshness — stale capture vs. fresh impl causes phantom diffs.",
+    ],
+    ("section-compare", "irreproducible-bitmap"): [
+        "Captured-asset section: include the original raster directly (impl/public/...) when copyright permits — fastest path to pixel parity.",
+        "Generate a procedural equivalent in CSS/SVG; accept STRUCTURAL_ONLY verdict.",
+    ],
+    ("boundary", "partial-convergence-driver-retired"): [
+        "Continue iteration if pixel diff is still trending down across loops.",
+        "Stop and accept STRUCTURAL_ONLY if AE saturated for >3 loops at the same value.",
+    ],
+    ("font-parity", "subpixel-rendering-diff"): [
+        "Disable anti-alias subpixel differences via text-rendering: geometricPrecision on impl side.",
+        "Capture ref + impl at the same OS / browser to eliminate OS-level font hint differences.",
+    ],
+}
+
+
+def suggest_fallbacks(gate: str, category: str) -> list[str]:
+    """Return canonical fallback suggestions for a (gate, category) pair.
+
+    Returns empty list when no canonical suggestions exist. Callers can
+    fall through to passing their own explicit list to record_unclonable.
+    """
+    return list(_FALLBACK_SUGGESTIONS.get((gate, category), []))
 
 
 @dataclass
@@ -60,6 +127,15 @@ class PipelineState:
     # find-impl-root.sh as a universal layout-independent resolver.
     # Empty string when not yet established (pre-extraction).
     impl_root: str = ""
+    # Closeout proof contract this pipeline run uses to satisfy the Stop
+    # hook. Default "canonical" requires verify-stamp.json written by
+    # pipeline.execute_verify after every GATE_ORDER post-impl gate
+    # passes — the strict path every legacy run uses. "structural" opts
+    # into the section-staged convergence plan's alternate proof:
+    # structural-convergence-stamp.json written by check-converged.sh
+    # when sections/result.txt shows 0 FAIL. The two stamps are NEVER
+    # interchangeable; the field gates which one the Stop hook accepts.
+    closeout_policy: str = "canonical"
 
     @classmethod
     def load(cls, ref_dir: Path) -> PipelineState:
@@ -84,6 +160,15 @@ class PipelineState:
                     data.get("implRoot")
                     or data.get("impl_root")
                     or ""
+                ),
+                # Accept camelCase `closeoutPolicy` (the on-disk wire form,
+                # matching implRoot precedent) or snake_case `closeout_policy`
+                # (forward-compat). Default to "canonical" when absent so
+                # legacy state files keep their existing semantics.
+                closeout_policy=(
+                    data.get("closeoutPolicy")
+                    or data.get("closeout_policy")
+                    or "canonical"
                 ),
             )
         except json.JSONDecodeError:
@@ -122,6 +207,10 @@ class PipelineState:
                     # legacy state files compact.
                     **({"implRoot": self.impl_root, "impl_root": self.impl_root}
                        if self.impl_root else {}),
+                    # closeout_policy persists only when non-default to avoid
+                    # diff churn on every save on legacy canonical runs.
+                    **({"closeoutPolicy": self.closeout_policy}
+                       if self.closeout_policy != "canonical" else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -180,6 +269,10 @@ class PipelineState:
                     # legacy state files compact.
                     **({"implRoot": self.impl_root, "impl_root": self.impl_root}
                        if self.impl_root else {}),
+                    # closeout_policy persists only when non-default to avoid
+                    # diff churn on every save on legacy canonical runs.
+                    **({"closeoutPolicy": self.closeout_policy}
+                       if self.closeout_policy != "canonical" else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -268,6 +361,10 @@ class PipelineState:
                     # legacy state files compact.
                     **({"implRoot": self.impl_root, "impl_root": self.impl_root}
                        if self.impl_root else {}),
+                    # closeout_policy persists only when non-default to avoid
+                    # diff churn on every save on legacy canonical runs.
+                    **({"closeoutPolicy": self.closeout_policy}
+                       if self.closeout_policy != "canonical" else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -282,6 +379,17 @@ class PipelineState:
         Only bumps when `gate` is the current_gate — failing a gate earlier
         than the cursor (e.g. re-running `reference` after pipeline is at
         `extraction`) does not count as "stuck on the active gate".
+
+        Hard-cap auto-termination: when the bumped counter is at or past
+        HARD_CAP_GATE_FAILS, also writes a canonical `category="hard-cap-fail"`
+        entry into unclonable_reasons (via record_unclonable, which handles
+        dedup + on-disk persistence). This makes terminalization a property
+        of the persisted state instead of a banner that hooks/banners/harness
+        each interpret separately. Observed before this fix: linear-app hit
+        97 consecutive post-implement failures and realfood-gov hit 6 without
+        any of them triggering the Stop-hook bypass — abort_banner fired in
+        goal.py but pipeline-state.json had no canonical reason, so the Stop
+        hook re-enforced the gate forever.
         """
         if gate not in GATE_ORDER:
             return
@@ -312,6 +420,10 @@ class PipelineState:
                     # legacy state files compact.
                     **({"implRoot": self.impl_root, "impl_root": self.impl_root}
                        if self.impl_root else {}),
+                    # closeout_policy persists only when non-default to avoid
+                    # diff churn on every save on legacy canonical runs.
+                    **({"closeoutPolicy": self.closeout_policy}
+                       if self.closeout_policy != "canonical" else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -320,24 +432,67 @@ class PipelineState:
         )
         tmp.replace(path)
 
+        # Hard-cap terminalization. record_unclonable() dedups by (gate,
+        # reason) — the reason string deliberately omits the live count
+        # (uses the cap only) so subsequent bumps after the cap don't
+        # produce N-duplicate entries. The exact count at the moment of
+        # termination is still reconstructable from gate_fail_counts on
+        # disk; detected_at is auto-added by record_unclonable.
+        if self.gate_fail_counts[gate] >= HARD_CAP_GATE_FAILS:
+            self.record_unclonable(
+                gate=gate,
+                reason=(
+                    f"hard cap reached: gate '{gate}' failed "
+                    f"{HARD_CAP_GATE_FAILS} consecutive times "
+                    f"(auto-terminated by state.mark_failed)"
+                ),
+                ref_dir=ref_dir,
+                category="hard-cap-fail",
+            )
+
     def record_unclonable(
-        self, gate: str, reason: str, ref_dir: Path, detail: dict | None = None
+        self,
+        gate: str,
+        reason: str,
+        ref_dir: Path,
+        detail: dict | None = None,
+        category: str | None = None,
+        fallback_suggestions: list[str] | None = None,
     ) -> None:
         """Record a hard-blocker that the pipeline cannot work past.
 
         Deduplicates by (gate, reason). Triggers goal.py --check-done exit
         code 2 (distinct from 1 = not-yet-done) so external loop drivers can
         stop on an unwinnable target instead of burning iterations.
+
+        category (Step G): short machine-readable kind name (e.g.,
+            "drm-canvas", "commercial-font", "auth-gated", "hard-cap-fail",
+            "class-signature-preservation-mismatch"). Used by the receipt
+            HTML to look up downstream documentation.
+
+        fallback_suggestions (Step G): ordered list of human-readable
+            remediation suggestions. Callers pass either an explicit list
+            OR pass `category` alone and we look up canonical defaults
+            from suggest_fallbacks(). Empty / None → field omitted from
+            the persisted entry for compat with pre-G readers.
         """
         for existing in self.unclonable_reasons:
             if existing.get("gate") == gate and existing.get("reason") == reason:
                 return
+
+        # Suggestion resolution: explicit > category-default > none.
+        if fallback_suggestions is None and category:
+            fallback_suggestions = suggest_fallbacks(gate, category)
 
         entry: dict = {
             "gate": gate,
             "reason": reason,
             "detected_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+        if category:
+            entry["category"] = category
+        if fallback_suggestions:
+            entry["fallback_suggestions"] = list(fallback_suggestions)
         if detail is not None:
             entry["detail"] = detail
         self.unclonable_reasons.append(entry)
@@ -365,6 +520,10 @@ class PipelineState:
                     # legacy state files compact.
                     **({"implRoot": self.impl_root, "impl_root": self.impl_root}
                        if self.impl_root else {}),
+                    # closeout_policy persists only when non-default to avoid
+                    # diff churn on every save on legacy canonical runs.
+                    **({"closeoutPolicy": self.closeout_policy}
+                       if self.closeout_policy != "canonical" else {}),
                 },
                 ensure_ascii=False,
                 indent=2,

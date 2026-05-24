@@ -166,6 +166,16 @@ agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
 
 **Repeat identically for impl** (change ref → impl in paths, use the same y values).
 
+Update that region in `regions.json` with:
+
+```json
+"artifacts": {
+  "before": "clip/ref/<name>-before.png",
+  "mid": "clip/ref/<name>-mid.png",
+  "after": "clip/ref/<name>-after.png"
+}
+```
+
 ---
 
 ## Step 2C: Hover / interactive transitions
@@ -302,6 +312,11 @@ agent-browser --session <project> screenshot \
 > ```
 > Adjust the eval above with the confirmed class name.
 
+Update each `css-hover` / `js-class` region with `artifacts.idle` and
+`artifacts.active`, and each `intersection` region with `artifacts.before` and
+`artifacts.after`. Run `capture-artifact-inventory-check.sh` before handoff;
+do not leave bare trigger metadata for generation to interpret.
+
 ---
 
 ## Step 2C-click: Click-Toggle / Click-Cycle Capture
@@ -385,9 +400,9 @@ agent-browser --session <project> wait 300
   "selector": "button[data-tab='pricing']",
   "bounds": { "x": 100, "y": 500, "w": 200, "h": 40 },
   "stateCount": 1,
-  "captures": {
-    "idle": "regions/click-toggle-pricing/idle.png",
-    "active": "regions/click-toggle-pricing/active.png"
+  "artifacts": {
+    "idle": "transitions/ref/pricing-idle.png",
+    "active": "transitions/ref/pricing-active.png"
   }
 }
 ```
@@ -399,10 +414,10 @@ agent-browser --session <project> wait 300
   "selector": ".tab-group",
   "bounds": { "x": 100, "y": 500, "w": 800, "h": 400 },
   "stateCount": 3,
-  "captures": {
-    "state-0": "regions/click-cycle-tabs/state-0.png",
-    "state-1": "regions/click-cycle-tabs/state-1.png",
-    "state-2": "regions/click-cycle-tabs/state-2.png"
+  "artifacts": {
+    "state-0": "transitions/ref/tabs-state-0.png",
+    "state-1": "transitions/ref/tabs-state-1.png",
+    "state-2": "transitions/ref/tabs-state-2.png"
   }
 }
 ```
@@ -470,6 +485,12 @@ agent-browser --session <project> record stop
 
 This single video shows the cursor sweeping the full element in a raster pattern — every region covered, movement visible throughout.
 
+Update the region with:
+
+```json
+"artifacts": { "video": "transitions/ref/mousemove-<name>.webm" }
+```
+
 ---
 
 ## Step 2E: Auto-timer transitions
@@ -488,6 +509,12 @@ agent-browser --session <project> wait 1000
 # Wait for 2-3 full cycles
 agent-browser --session <project> wait <interval_ms * 3>
 agent-browser --session <project> record stop
+```
+
+Update the region with:
+
+```json
+"artifacts": { "video": "transitions/ref/timer-<name>.webm" }
 ```
 
 ---

@@ -385,7 +385,7 @@ def section_component_name(section, index):
     sid = (section.get("id") or "").strip()
     cls = (section.get("cls") or section.get("className") or "").strip()
     name = sid or cls.split()[0] if cls else f"Section{index}"
-    # Strip CSS Module hash suffixes like dga_hero__AjMaf → DgaHero.
+    # Strip CSS Module hash suffixes like prefix_hero__AjMaf → PrefixHero.
     name = re.sub(r"__\w+$", "", name)
     # Replace separators.
     name = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_") or f"Section{index}"
@@ -405,7 +405,7 @@ def find_subtree_for_section(root, section, consumed):
     used to return the *first* DOM match per section, regardless of whether
     that subtree had already been assigned to an earlier section. When
     section-map.json contained multiple entries sharing a class prefix
-    (CSS-Module suffixes like dga_section__k3uwv-2, -3, ...), 8 of 15
+    (CSS-Module suffixes like prefix_section__hash-2, -3, ...), 8 of 15
     sections collapsed to the same subtree and rendered identical JSX —
     section-compare scored every duplicate at ~1.2M AE (the max possible).
     The `consumed` set tracks Python id() of already-assigned subtrees so

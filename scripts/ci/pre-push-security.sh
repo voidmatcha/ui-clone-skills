@@ -49,7 +49,7 @@ secret_patterns=(
 secret_hits=0
 for p in "${secret_patterns[@]}"; do
   # tmp/, scratch/, and benchmark/ hold third-party site contents captured by the
-  # pipeline (e.g. realfood.gov head.json). Those contain PUBLIC API keys
+  # pipeline (e.g. each ref site's head.json). Those contain PUBLIC API keys
   # that ship in the site's own HTML — not maintainer secrets. They're
   # gitignored and never published, so exclude from this scan.
   hits=$(grep -rEn "$p" \
@@ -205,6 +205,16 @@ for f in skills/*/SKILL.md; do
   done < <(grep -oE '\.\./[a-zA-Z_-]+/[a-zA-Z0-9_./-]+\.(md|sh|json)' "$f" 2>/dev/null | sort -u)
 done
 [ "$broken_refs" -eq 0 ] && ok "all cross-refs resolve"
+
+section "Universality"
+# Maintainer-bias drift gate — blocks loop-N attribution, benchmark site
+# names, brand leakage, personal paths, Hangul in production source.
+# Full pattern list lives in scripts/ci/check-universality.sh header.
+if bash "$REPO_ROOT/scripts/ci/check-universality.sh" >/dev/null 2>&1; then
+  ok "no maintainer-bias drift"
+else
+  err "universality violations — run \`bash scripts/ci/check-universality.sh\` for details"
+fi
 
 section "Version sync"
 if command -v python3 >/dev/null 2>&1; then

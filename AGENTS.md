@@ -1,5 +1,7 @@
 # AGENTS.md — ui-clone-skills development guide
 
+ui-clone-skills is motion forensics for the animated web — four jobs against a live URL (`decode` / `clone` / `verify` / `extract`) backed by one extraction engine that pulls real CSS + animation params from JS bundles and verifies with AE/SSIM diff.
+
 Canonical project guide for Claude Code, Codex, and other agent hosts. Claude Code loads `CLAUDE.md`, which imports this file via `@AGENTS.md`; Codex and other `AGENTS.md`-aware tools read this file directly.
 
 ## Project structure

@@ -187,7 +187,7 @@ EXTRACT_JS=$(cat <<'JSEOF'
   // when the ref draws decorations via ::before / ::after (glow rings, icon
   // dots, gradient overlays, divider lines etc.). Without this the impl is
   // missing the entire pseudo-element layer — a dominant cause of the
-  // "전체 레이아웃 못 잡는다" feel reported after V15.
+  // "the impl doesn't capture the overall layout" failure mode.
   const capturePseudo = (el, which) => {
     const ps = getComputedStyle(el, which);
     const content = ps.getPropertyValue('content');

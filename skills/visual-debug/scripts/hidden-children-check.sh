@@ -73,8 +73,9 @@ EVAL_JS='(async () => {
       r.width < 2 || r.height < 2;
   };
   const bad = [];
-  // Codex universality audit FN: NAVER-style div-only layouts
-  // (`<div class="dga_*">`) bypass the semantic-tag query. After
+  // Universality fix: div-only layouts using opaque hashed classes
+  // (`<div class="prefix_name__hash">` with no `<section>` /
+  // `<article>` / role="region") bypass the semantic-tag query. After
   // collecting semantic sections, if fewer than 3 are found, also
   // pick up large container divs whose area is >=15% of viewport
   // and whose direct children count >=2 — geometric proxy for

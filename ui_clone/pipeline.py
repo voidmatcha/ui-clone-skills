@@ -4,28 +4,41 @@ Pipeline status — determines current phase and reports next action.
 Usage:
     python -m ui_clone.pipeline <url> <component> <session> status [--json]
 Exit: 0 on success, 1 on missing dependencies, 2 on usage error.
+
+The per-phase check/execute/verify bodies live in
+`ui_clone.pipeline_phases.*` to keep this module focused on the
+`Pipeline` class shim and CLI. Public surface (Pipeline methods,
+module-level helpers, dataclasses) is unchanged.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
-from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
 
-from ui_clone import dag as _dag
 from ui_clone.gate import Gate
 from ui_clone.hooks._common import BOLD as _BOLD
 from ui_clone.hooks._common import GREEN as _GREEN
 from ui_clone.hooks._common import NC as _NC
 from ui_clone.hooks._common import RED as _RED
 from ui_clone.hooks._common import YELLOW as _YELLOW
-from ui_clone.hooks._common import find_project_root, load_json_safe
+from ui_clone.hooks._common import find_project_root
+from ui_clone.pipeline_phases.types import PhaseCheck, PhaseResult
 from ui_clone.state import GATE_ORDER, PipelineState
+
+__all__ = [
+    "Pipeline",
+    "PhaseCheck",
+    "PhaseResult",
+    "_check_dependencies",
+    "_count_tsx_files",
+    "_find_app_dir",
+    "_has_files",
+]
 
 # Required CLI tools and install hints
 _REQUIRED_TOOLS: list[tuple[str, str]] = [
@@ -43,27 +56,6 @@ _OPTIONAL_TOOLS: list[tuple[str, str]] = [
 ]
 
 
-@dataclass
-class PhaseCheck:
-    """Single artifact check within a phase."""
-
-    label: str
-    passed: bool
-    message: str = ""
-
-
-@dataclass
-class PhaseResult:
-    """Result of checking one pipeline phase."""
-
-    name: str
-    title: str
-    checks: list[PhaseCheck] = field(default_factory=list)
-    next_step: str = ""
-    skipped: bool = False
-    skip_reason: str = ""
-
-
 def _check_dependencies() -> list[str]:
     """Check for required CLI tools. Returns list of missing tool names."""
     missing: list[str] = []
@@ -72,7 +64,7 @@ def _check_dependencies() -> list[str]:
             missing.append(f"{tool} ({hint})")
     for tool, hint in _OPTIONAL_TOOLS:
         if shutil.which(tool) is None:
-            print(f"  {_YELLOW}\u26a0{_NC} Optional: {tool} ({hint})")
+            print(f"  {_YELLOW}⚠{_NC} Optional: {tool} ({hint})")
     return missing
 
 
@@ -125,19 +117,26 @@ def _count_tsx_files(app_dir: Path) -> int:
 
 
 class Pipeline:
-    """Pipeline status checker — determines current phase and next action."""
+    """Pipeline status checker — determines current phase and next action.
+
+    Per-phase logic lives in `ui_clone.pipeline_phases.checks` (check_phase_*),
+    `ui_clone.pipeline_phases.execute` (execute_phases), and
+    `ui_clone.pipeline_phases.verify` (execute_verify). The methods below
+    are thin shims so existing call-sites (`p.check_phase_2(...)`,
+    `p.execute_phases(...)`, etc.) keep working.
+    """
 
     def __init__(self, url: str, component: str, session: str) -> None:
         self.url = url
         self.component = component
         self.session = session
         # v1.3: prefer cwd as the project root scope so iterations launched
-        # from `scratch/loop-N/` or similar isolated subdirs land their
-        # artifacts inside that subdir, not in the plugin repo's top-level
-        # tmp/ref. find_project_root() walks up to the git root, which is
-        # right for cross-process hook resolution but wrong for per-loop
-        # output isolation. Fall back to find_project_root() only when the
-        # cwd is clearly not a working dir (system root, /tmp, /var/tmp).
+        # from a nested sub-workspace land their artifacts inside that
+        # sub-workspace, not in the plugin repo's top-level tmp/ref.
+        # find_project_root() walks up to the git root, which is right for
+        # cross-process hook resolution but wrong for per-workspace output
+        # isolation. Fall back to find_project_root() only when the cwd is
+        # clearly not a working dir (system root, /tmp, /var/tmp).
         cwd = Path.cwd()
         if str(cwd) in ("/", "/tmp", "/var/tmp", "/usr", "/etc"):
             self.project_root = find_project_root()
@@ -156,300 +155,48 @@ class Pipeline:
     def _check(self, label: str, condition: bool) -> PhaseCheck:
         """Create a phase check and print its status."""
         if condition:
-            print(f"  {_GREEN}\u2713{_NC} {label}")
+            print(f"  {_GREEN}✓{_NC} {label}")
         else:
-            print(f"  {_YELLOW}\u25cb{_NC} {label}")
+            print(f"  {_YELLOW}○{_NC} {label}")
         return PhaseCheck(label=label, passed=condition)
 
+    # ── phase check shims ──
     def check_phase_0a(self) -> PhaseResult:
-        """Phase 0A: Canvas/WebGL render type detection."""
-        result = PhaseResult(name="0A", title="Render Type Detection")
-        print(f"{_BOLD}Phase 0A \u2014 Render Type Detection{_NC}")
-
-        detect_path = self.ref_dir / "canvas-webgl-detection.json"
-        data = load_json_safe(detect_path)
-
-        if data is not None:
-            render_type = data.get("primaryRenderType", "unknown")
-            has_canvas = data.get("hasCanvas", False)
-            has_webgl = data.get("hasWebGL", False)
-            print(
-                f"  {_GREEN}\u2713{_NC} Render type: {render_type} (canvas={has_canvas}, webgl={has_webgl})"
-            )
-            result.checks.append(PhaseCheck("canvas-webgl-detection.json", True))
-
-            if has_canvas or has_webgl:
-                print(
-                    f"  {_YELLOW}\u26a0{_NC}  Canvas/WebGL detected \u2014 CSS replication will be APPROXIMATE."
-                )
-                print("       Read canvas-webgl-extraction.md before Phase 2 extraction.")
-        else:
-            print(
-                f"  {_YELLOW}\u25cb{_NC} canvas-webgl-detection.json missing \u2014 run detection FIRST"
-            )
-            print(f"     agent-browser --session {self.session} open {self.url}")
-            result.checks.append(PhaseCheck("canvas-webgl-detection.json", False))
-            if not self.ref_dir.is_dir():
-                self._set_next("0A", "Run canvas/WebGL detection, then re-run status.")
-                result.next_step = "Run canvas/WebGL detection, then re-run status."
-
-        print()
-        return result
+        from ui_clone.pipeline_phases.checks import check_phase_0a as _impl
+        return _impl(self)
 
     def check_phase_0(self) -> PhaseResult:
-        """Phase 0: Check for prior data."""
-        result = PhaseResult(name="0", title="Prior Data")
-        print(f"{_BOLD}Phase 0 \u2014 Prior Data{_NC}")
-
-        has_spec = (self.ref_dir / "transition-spec.json").is_file()
-        if has_spec:
-            print(f"  {_GREEN}\u2713{_NC} transition-spec.json exists \u2014 READ THIS FIRST")
-        else:
-            print(f"  {_YELLOW}\u25cb{_NC} No prior transition-spec.json")
-
-        has_extracted = (self.ref_dir / "extracted.json").is_file()
-        if has_extracted:
-            print(f"  {_GREEN}\u2713{_NC} extracted.json exists")
-
-        result.checks.append(PhaseCheck("transition-spec.json", has_spec))
-        result.checks.append(PhaseCheck("extracted.json", has_extracted))
-        print()
-        return result
+        from ui_clone.pipeline_phases.checks import check_phase_0 as _impl
+        return _impl(self)
 
     def check_phase_1(self) -> PhaseResult:
-        """Phase 1: Reference capture."""
-        result = PhaseResult(name="1", title="Reference Capture")
-        print(f"{_BOLD}Phase 1 \u2014 Reference Capture{_NC}")
-
-        has_ref = _has_files(self.ref_dir / "static" / "ref", "*.png", 5)
-        result.checks.append(self._check("static/ref/ screenshots (\u22655 files)", has_ref))
-        result.checks.append(
-            self._check(
-                "scroll-video/ref/ video",
-                _has_files(self.ref_dir / "scroll-video" / "ref", "*.webm", 1),
-            )
-        )
-        result.checks.append(
-            self._check(
-                "transitions/ref/ videos",
-                _has_files(self.ref_dir / "transitions" / "ref", "*.webm", 1),
-            )
-        )
-        result.checks.append(self._check("regions.json", (self.ref_dir / "regions.json").is_file()))
-
-        if not has_ref:
-            self._set_next("1", f"Invoke /ui-capture {self.url}. See SKILL.md Phase 1.")
-            result.next_step = f"Invoke /ui-capture {self.url}. See SKILL.md Phase 1."
-        print()
-        return result
+        from ui_clone.pipeline_phases.checks import check_phase_1 as _impl
+        return _impl(self)
 
     def check_phase_2(self, has_ref: bool) -> PhaseResult:
-        """Phase 2: Extraction checks."""
-        result = PhaseResult(name="2", title="Extraction")
-        print(f"{_BOLD}Phase 2 \u2014 Extraction{_NC}")
-
-        if not has_ref:
-            print(f"  {_YELLOW}\u25cb{_NC} (skipped \u2014 complete Phase 1 first)")
-            result.skipped = True
-            result.skip_reason = "Complete Phase 1 first"
-            print()
-            return result
-
-        extraction_steps: list[tuple[str, str, str]] = [
-            (
-                "structure.json",
-                "section-map.json",
-                "Read dom-extraction.md \u2192 run Step 2 (structure) + semantic section enumeration.",
-            ),
-            (
-                "head.json",
-                "fonts.json",
-                "Read asset-extraction.md \u2192 extract head, assets, fonts.",
-            ),
-        ]
-        for file_a, file_b, step_msg in extraction_steps:
-            passed = (self.ref_dir / file_a).is_file() and (self.ref_dir / file_b).is_file()
-            self._check(f"{file_a} + {file_b}", passed)
-            if not passed:
-                self._set_next("2", step_msg)
-
-        single_file_steps: list[tuple[str, str, str]] = [
-            (
-                "svg-text-elements.json",
-                "Step 2.5b",
-                "Read dom-extraction.md Step 2.5b \u2192 SVG-as-text detection.",
-            ),
-            (
-                "animation-init-styles.json",
-                "Step 2.6",
-                "Read dom-extraction.md Steps 2.6a-b \u2192 extract animation init styles.",
-            ),
-        ]
-        for filename, step_label, step_msg in single_file_steps:
-            passed = (self.ref_dir / filename).is_file()
-            self._check(f"{step_label}: {filename}", passed)
-            if not passed:
-                self._set_next("2", step_msg)
-
-        # Step 3: Styles
-        styles_ok = (self.ref_dir / "styles.json").is_file() and (
-            self.ref_dir / "design-bundles.json"
-        ).is_file()
-        self._check("Step 3: styles.json + design-bundles.json", styles_ok)
-        if not styles_ok:
-            self._set_next("2", "Read style-extraction.md \u2192 extract computed styles.")
-
-        # Step 4: Responsive
-        bp_ok = (self.ref_dir / "detected-breakpoints.json").is_file()
-        self._check("Step 4: detected-breakpoints.json", bp_ok)
-        if not bp_ok:
-            self._set_next("2", "Read responsive-detection.md \u2192 sweep viewports.")
-
-        sizing_ok = (self.ref_dir / "responsive" / "sizing-expressions.json").is_file()
-        self._check("Step 4-C2: sizing-expressions.json", sizing_ok)
-        if not sizing_ok:
-            self._set_next(
-                "2", "Read responsive-detection.md Step 4-C2 \u2192 multi-viewport element sizing."
-            )
-
-        # Step 5: Interactions
-        inter_ok = (self.ref_dir / "interactions-detected.json").is_file()
-        self._check("Step 5: interactions-detected.json", inter_ok)
-        if not inter_ok:
-            self._set_next("2", "Read interaction-detection.md \u2192 detect interactions.")
-
-        # Step 5c: Bundles
-        bundles_ok = _has_files(self.ref_dir / "bundles", "*.js", 1)
-        self._check("Step 5c: bundles/ (\u22651 JS file)", bundles_ok)
-        if not bundles_ok:
-            self._set_next(
-                "2", "Read bundle-analysis.md \u2192 download ALL JS chunks. Gate: bundle"
-            )
-
-        # Advisory: warn when <3 chunks
-        if bundles_ok and not _has_files(self.ref_dir / "bundles", "*.js", 3):
-            js_count = sum(1 for _ in (self.ref_dir / "bundles").rglob("*.js"))
-            print(
-                f"  {_YELLOW}\u26a0{_NC}  Only {js_count} JS chunk(s) \u2014 typical SPAs have \u22653."
-            )
-
-        sdks_ok = (self.ref_dir / "external-sdks.json").is_file()
-        self._check("Step 5c: external-sdks.json", sdks_ok)
-        if not sdks_ok:
-            self._set_next(
-                "2",
-                "Read bundle-analysis.md \u2192 detect external SDKs. Write external-sdks.json.",
-            )
-
-        # Step 5d: Spec + hover artifacts
-        spec_ok = (self.ref_dir / "transition-spec.json").is_file()
-        self._check("Step 5d: transition-spec.json", spec_ok)
-        if not spec_ok:
-            self._set_next(
-                "2",
-                "Read bundle-analysis.md + transition-spec-rules.md \u2192 write transition-spec.json. Gate: spec",
-            )
-
-        hover_ok = (self.ref_dir / "hover-css-rules.json").is_file()
-        self._check("Step 5d-2b: hover-css-rules.json", hover_ok)
-        if not hover_ok:
-            self._set_next(
-                "2", "Read interaction-detection.md Step 5d-2b \u2192 extract ALL :hover CSS rules."
-            )
-
-        # Step 6b: Assembled extraction
-        extracted_ok = (self.ref_dir / "extracted.json").is_file()
-        self._check("Step 6b: extracted.json (assembled)", extracted_ok)
-        if not extracted_ok:
-            self._set_next("2", "Assemble extracted.json from all artifacts.")
-
-        # Staleness check
-        if extracted_ok:
-            stale_issues = _dag.check_staleness(self.ref_dir)
-            stale_parents = [i.because_of for i in stale_issues if i.stale == "extracted.json"]
-            if stale_parents:
-                print(
-                    f"  {_YELLOW}\u26a0{_NC}  extracted.json is STALE \u2014 changed after assembly: {' '.join(stale_parents)}"
-                )
-                print("     Re-run Step 6b (assemble) before generating code.")
-
-        # Step 6c: Section audit
-        cmap_ok = (self.ref_dir / "component-map.json").is_file()
-        self._check("Step 6c: component-map.json (section audit)", cmap_ok)
-        if not cmap_ok:
-            self._set_next(
-                "2",
-                "Read section-audit.md \u2192 six-stage audit \u2192 component-map.json. Gate: pre-generate",
-            )
-
-        print()
-        return result
+        from ui_clone.pipeline_phases.checks import check_phase_2 as _impl
+        return _impl(self, has_ref)
 
     def check_pre_generate_gate(self) -> bool:
-        """Run pre-generate gate. Returns True if passed."""
-        if self.next_phase or not self.ref_dir.is_dir():
-            return False
-
-        print(f"{_BOLD}Pre-generate gate (auto){_NC}")
-        gate = Gate(self.ref_dir)
-        exit_code = gate.run("pre-generate")
-        if exit_code != 0:
-            self._set_next(
-                "2", "Pre-generate gate FAILED. Fix missing artifacts before code generation."
-            )
-            print()
-            return False
-        print()
-        return True
+        from ui_clone.pipeline_phases.checks import check_pre_generate_gate as _impl
+        return _impl(self)
 
     def check_phase_3(self) -> PhaseResult:
-        """Phase 3: Generation check."""
-        result = PhaseResult(name="3", title="Generation")
-        print(f"{_BOLD}Phase 3 \u2014 Generation{_NC}")
-
-        app_dir = _find_app_dir(self.project_root, self.component)
-        if app_dir is not None:
-            comp_count = _count_tsx_files(app_dir)
-            min_comp = int(os.environ.get("MIN_COMPONENT_COUNT", "1"))
-            passed = comp_count >= min_comp
-            self._check(f"Components generated ({comp_count} .tsx files)", passed)
-            if not passed:
-                self._set_next(
-                    "3",
-                    "Read component-generation.md \u2192 generate from extracted.json. Gate: pre-generate",
-                )
-                result.next_step = "Generate components from extracted.json"
-            # Monorepo fallback warning
-            if app_dir != self.project_root and (self.project_root / "apps").is_dir():
-                # Check if it's the first-match fallback
-                comp_dir = self.project_root / "apps" / self.component
-                if not comp_dir.is_dir():
-                    print(
-                        f"  {_YELLOW}\u26a0{_NC}  Monorepo: using first app dir found. Set CLAUDE_PROJECT_DIR to target workspace."
-                    )
-        else:
-            print(f"  {_YELLOW}\u25cb{_NC} No app directory found")
-            self._set_next("3", "Scaffold app, then read component-generation.md.")
-
-        print()
-        return result
+        from ui_clone.pipeline_phases.checks import check_phase_3 as _impl
+        return _impl(self)
 
     def check_phase_4(self) -> PhaseResult:
-        """Phase 4: Verification check."""
-        result = PhaseResult(name="4", title="Verification")
-        print(f"{_BOLD}Phase 4 \u2014 Verification{_NC}")
+        from ui_clone.pipeline_phases.checks import check_phase_4 as _impl
+        return _impl(self)
 
-        impl_ok = _has_files(self.ref_dir / "static" / "impl", "*.png", 5)
-        self._check("impl screenshots captured", impl_ok)
+    # ── execute/verify shims ──
+    def execute_phases(self, phases: tuple[str, ...] = ("0A", "1", "2")) -> int:
+        from ui_clone.pipeline_phases.execute import execute_phases as _impl
+        return _impl(self, phases)
 
-        diff_ok = _has_files(self.ref_dir / "static" / "diff", "*.png", 1)
-        self._check("diff images generated", diff_ok)
-
-        if not self.next_phase:
-            self._set_next("4", "Run scripts/verify/auto-verify.sh. Gate: post-implement")
-
-        print()
-        return result
+    def execute_verify(self) -> int:
+        from ui_clone.pipeline_phases.verify import execute_verify as _impl
+        return _impl(self)
 
     def run(self, json_output: bool = False) -> int:
         """Run full pipeline status check.
@@ -461,7 +208,7 @@ class Pipeline:
         if missing:
             print(f"{_RED}Missing required tools:{_NC}")
             for m in missing:
-                print(f"  {_RED}\u2717{_NC} {m}")
+                print(f"  {_RED}✗{_NC} {m}")
             print("  brew install imagemagick ffmpeg dssim && npm i -g agent-browser")
             return 1
 
@@ -469,24 +216,24 @@ class Pipeline:
         state = PipelineState.load(self.ref_dir)
         total_gates = len(GATE_ORDER)
         completed = len(state.completed_steps)
-        print(f"{_BOLD}\u2501\u2501\u2501 Pipeline State \u2501\u2501\u2501{_NC}")
+        print(f"{_BOLD}━━━ Pipeline State ━━━{_NC}")
         print(f"  Component  : {state.component or self.component}")
         print(f"  Progress   : {completed}/{total_gates} gates completed")
         if state.current_gate == "done":
-            print("  Current    : \u2705 ALL GATES COMPLETE")
+            print("  Current    : ✅ ALL GATES COMPLETE")
         else:
             print(f"  Current    : {state.current_gate}")
         if state.last_updated:
             print(f"  Updated    : {state.last_updated}")
         print(
-            f"{_BOLD}\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501{_NC}"
+            f"{_BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━{_NC}"
         )
         print()
 
         # Short-circuit if all gates done
         if state.current_gate == "done":
             print(
-                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
             print(f"{_GREEN}All phases complete!{_NC}")
             if json_output:
@@ -520,11 +267,11 @@ class Pipeline:
 
         # Next action
         print(
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
         if self.next_phase:
             print(f"{_BOLD}NEXT: Phase {self.next_phase}{_NC}")
-            print(f"{_YELLOW}\u2192 {self.next_step}{_NC}")
+            print(f"{_YELLOW}→ {self.next_step}{_NC}")
 
             # Run extraction gate for additional context
             if self.next_phase == "2" and self.ref_dir.is_dir():
@@ -559,285 +306,6 @@ class Pipeline:
             "next_step": self.next_step or None,
         }
         print(json.dumps(output, ensure_ascii=False, indent=2))
-
-
-    # ── run action: deterministic Phase 0A-2 executor ──
-    #
-    # Codex review v0.8 → v1.0: hook policy closed the negative space
-    # (ad-hoc artifact writes denied), but the natural-prompt nested agent
-    # got stuck in Phase 1 because hooks can't force forward progress.
-    # This driver does the forward push: each phase invokes the canonical
-    # script, then runs the existing check_phase_* validators to confirm
-    # the artifacts appeared. On any failure, abort with a clear message
-    # — no silent fallback to ad-hoc dumping.
-    #
-    # Initial coverage is Phase 0A → 1 → 2 (Codex's 4-hour scope).
-    # Phase 3+ stays under check-only / SKILL.md guidance for now;
-    # extending coverage is `--phases 3-5` follow-up work.
-
-    def execute_phases(self, phases: tuple[str, ...] = ("0A", "1", "2")) -> int:
-        """Run the canonical scripts for each named phase, validate, repeat.
-
-        Returns 0 on success (all requested phases pass their check_phase_*
-        validator), non-zero on the first phase that fails. Each phase
-        invocation prints a header so the operator (or the wrapping nested
-        agent) can see exactly which step blocked.
-        """
-        import subprocess
-
-        # Resolve $PLUGIN_ROOT for the wrapper scripts. Mirrors the cascade
-        # used by hooks/shim.sh so the run command works both inside the
-        # plugin checkout and from a fresh top-level folder where the
-        # plugin is installed elsewhere.
-        plugin_root = os.environ.get("PLUGIN_ROOT") or os.environ.get(
-            "CLAUDE_PLUGIN_ROOT"
-        ) or os.environ.get("CODEX_PLUGIN_ROOT")
-        if not plugin_root or not (Path(plugin_root) / "scripts" / "extract").is_dir():
-            # Fallback: pipeline.py lives in ui_clone/, plugin root is two up.
-            plugin_root = str(Path(__file__).resolve().parent.parent)
-        scripts = Path(plugin_root) / "scripts" / "extract"
-        visual_scripts = Path(plugin_root) / "skills" / "visual-debug" / "scripts"
-
-        # Ensure ref dir exists for downstream artifact targets.
-        self.ref_dir.mkdir(parents=True, exist_ok=True)
-
-        # Universal impl-root resolution (writes implRoot field to
-        # pipeline-state.json so find-impl-root.sh can read it back
-        # regardless of directory naming convention).
-        # Priority: UI_CLONE_IMPL_ROOT env > existing state.impl_root >
-        # canonical guess (<plugin_root>/impl OR <cwd>/impl).
-        from ui_clone.state import PipelineState as _PS
-        _state = _PS.load(self.ref_dir)
-        impl_root_resolved = (
-            os.environ.get("UI_CLONE_IMPL_ROOT", "").strip()
-            or _state.impl_root
-            or ""
-        )
-        if not impl_root_resolved:
-            for cand in (
-                Path(plugin_root) / "impl",
-                Path.cwd() / "impl",
-            ):
-                if cand.is_dir() and (cand / "package.json").is_file():
-                    impl_root_resolved = str(cand.resolve())
-                    break
-        if impl_root_resolved and _state.impl_root != impl_root_resolved:
-            _state.impl_root = impl_root_resolved
-            try:
-                _state.save(self.ref_dir)
-                # Also write the bare marker file the resolver checks.
-                (self.ref_dir / ".impl-root").write_text(
-                    impl_root_resolved + "\n", encoding="utf-8",
-                )
-            except OSError:
-                pass
-
-        def _run(cmd: list[str], label: str) -> bool:
-            print(f"\n{_BOLD}== execute: {label}{_NC}")
-            print(f"  $ {' '.join(cmd)}")
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=600,
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-                print(f"  {_RED}✗{_NC} {label} failed: {exc}")
-                return False
-            if result.returncode != 0:
-                print(f"  {_RED}✗{_NC} {label} exit {result.returncode}")
-                if result.stderr.strip():
-                    print(f"  stderr:\n{result.stderr.rstrip()}")
-                return False
-            if result.stdout.strip():
-                print(result.stdout.rstrip())
-            return True
-
-        for phase in phases:
-            if phase == "0A":
-                detect = visual_scripts / "canvas-webgl-detect.sh"
-                if not detect.is_file():
-                    print(
-                        f"\n{_RED}Phase 0A failed: canvas-webgl-detect.sh not found at {detect}{_NC}"
-                    )
-                    return 1
-                if not _run(
-                    ["bash", str(detect), self.url, self.session, str(self.ref_dir)],
-                    "Phase 0A — canvas/WebGL detection",
-                ):
-                    return 1
-                self.check_phase_0a()
-                if not (self.ref_dir / "canvas-webgl-detection.json").is_file():
-                    print(
-                        f"\n{_RED}Phase 0A failed: canvas-webgl-detection.json absent.{_NC}"
-                    )
-                    return 1
-                continue
-
-            if phase == "1":
-                capture = scripts / "capture.sh"
-                if not capture.is_file():
-                    print(f"\n{_RED}Phase 1 failed: capture.sh not found at {capture}{_NC}")
-                    return 1
-                if not _run(
-                    ["bash", str(capture), self.url, self.session, str(self.ref_dir)],
-                    "Phase 1 — reference capture",
-                ):
-                    return 1
-                has_ref = (self.ref_dir / "regions.json").is_file()
-                self.check_phase_1()
-                if not has_ref:
-                    print(
-                        f"\n{_RED}Phase 1 failed: regions.json missing after capture.{_NC}"
-                    )
-                    return 1
-                continue
-
-            if phase == "2":
-                # Phase 2 covers DOM extraction (extract-dom.sh + scaffold)
-                # and asset/style extraction. dom-scaffold.sh consumes three
-                # artifacts (structure.json + styles.json + section-map.json),
-                # so Phase 2 produces all three before scaffolding.
-                #
-                # Loop-13 fresh-only diagnosis: extract-dom.sh wrote only
-                # structure.json; the other two were documented in
-                # skills/ui-reverse-engineering/dom-extraction.md as manual
-                # agent-browser evals, which made the pipeline depend on
-                # stale scratch dir artifacts for the section-map and styles.
-                # Adding extract-section-map.sh + extract-styles.sh closes
-                # that contract gap so fresh-only runs reach the scaffold.
-                extract_dom = visual_scripts / "extract-dom.sh"
-                extract_section_map = visual_scripts / "extract-section-map.sh"
-                extract_styles = visual_scripts / "extract-styles.sh"
-                scaffold = visual_scripts / "dom-scaffold.sh"
-                if extract_dom.is_file() and not _run(
-                    ["bash", str(extract_dom), str(self.ref_dir), self.session, "body"],
-                    "Phase 2 — DOM extraction",
-                ):
-                    return 1
-                # section-map.json: agent-browser eval, runs against the
-                # same session extract-dom.sh just used.
-                if extract_section_map.is_file() and not _run(
-                    [
-                        "bash",
-                        str(extract_section_map),
-                        str(self.ref_dir),
-                        self.session,
-                    ],
-                    "Phase 2 — section-map enumeration",
-                ):
-                    return 1
-                # styles.json: aggregates from the structure.json we just
-                # wrote, no browser round-trip.
-                if extract_styles.is_file() and not _run(
-                    ["bash", str(extract_styles), str(self.ref_dir)],
-                    "Phase 2 — styles aggregation",
-                ):
-                    return 1
-                required_for_scaffold = ["structure.json", "styles.json", "section-map.json"]
-                missing_for_scaffold = [
-                    name for name in required_for_scaffold if not (self.ref_dir / name).is_file()
-                ]
-                if missing_for_scaffold:
-                    has_ref = (self.ref_dir / "regions.json").is_file()
-                    self.next_phase = ""
-                    self.next_step = ""
-                    self.check_phase_2(has_ref)
-                    missing = ", ".join(missing_for_scaffold)
-                    print(
-                        f"\n{_RED}Phase 2 failed: dom-scaffold inputs missing: {missing}.{_NC}"
-                    )
-                    return 1
-                if scaffold.is_file() and not _run(
-                    ["bash", str(scaffold), str(self.ref_dir)],
-                    "Phase 2 — DOM scaffold",
-                ):
-                    return 1
-                # Validate the artifact gate.
-                has_ref = (self.ref_dir / "regions.json").is_file()
-                self.next_phase = ""
-                self.next_step = ""
-                self.check_phase_2(has_ref)
-                if self.next_phase == "2":
-                    print(
-                        f"\n{_RED}Phase 2 failed: extraction validator still reports missing artifacts.{_NC}"
-                    )
-                    if self.next_step:
-                        print(f"  Next: {self.next_step}")
-                    return 1
-                continue
-
-            print(
-                f"\n{_YELLOW}Phase {phase} not yet supported by the run driver. "
-                f"Use status to see the next step.{_NC}"
-            )
-            return 1
-
-        print(f"\n{_GREEN}{_BOLD}run: requested phases complete: {','.join(phases)}{_NC}")
-        return 0
-
-
-    # ── verify action: drive post-generation gates ─────────────────────────
-    #
-    #
-    # The gates themselves live in ui_clone.gate; we shell out so the gate
-    # module's argparse + exit codes stay the source of truth.
-    def execute_verify(self) -> int:
-        import subprocess
-        gates_post_impl = (
-            "spec",
-            "post-implement",
-            "boundary",
-            "font-parity",
-            "section-compare",
-        )
-        impl_dir = Path.cwd() / "impl"
-        if not impl_dir.is_dir():
-            print(
-                f"{_RED}verify: impl/ not found at {impl_dir}. "
-                f"Generate components first, then re-run verify.{_NC}"
-            )
-            return 1
-
-        failures: list[str] = []
-        for gate_name in gates_post_impl:
-            print(f"\n{_BOLD}== verify: gate {gate_name}{_NC}")
-            result = subprocess.run(
-                [sys.executable, "-m", "ui_clone.gate", str(self.ref_dir), gate_name],
-                capture_output=False,  # stream gate output to operator
-            )
-            if result.returncode != 0:
-                failures.append(gate_name)
-                print(
-                    f"  {_RED}✗{_NC} {gate_name} exit {result.returncode} "
-                    f"— continuing to surface every failure rather than short-circuit"
-                )
-        if failures:
-            print(
-                f"\n{_RED}{_BOLD}verify: {len(failures)} gate(s) failed: "
-                f"{', '.join(failures)}{_NC}"
-            )
-            return 1
-        # Stop-hook stamp (Codex Q1 critical-path fix). On success, write a
-        # current-run-fresh marker that the Stop hook checks before allowing
-        # the agent to claim "완료". Without this stamp, the Stop hook will
-        # block — closing the bypass loop-5 exposed (agent ran individual
-        # verification scripts directly, never reached the canonical entry).
-        import datetime
-        stamp = {
-            "verifiedAt": datetime.datetime.now(datetime.UTC)
-                .strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "gatesPassed": list(gates_post_impl),
-            "stampedBy": "pipeline.execute_verify",
-            "implDir": str(impl_dir),
-            "refDir": str(self.ref_dir),
-        }
-        stamp_path = self.ref_dir / "verify-stamp.json"
-        stamp_path.write_text(json.dumps(stamp, indent=2) + "\n")
-        print(f"\n{_GREEN}{_BOLD}verify: all post-impl gates passed{_NC}")
-        print(f"  stamp: {stamp_path}")
-        return 0
 
 
 def main() -> None:

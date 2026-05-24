@@ -3,7 +3,7 @@
 # Single source of truth so gate.py, bundle-impl-coverage-check.sh,
 # transition-spec-coverage.sh, verify-loop.sh, measure.py, and future
 # impl-source checks all locate the same target — even when the agent
-# renamed `impl/` to `realfood-clone/` etc.
+# renamed `impl/` to `<component>-clone/` etc.
 #
 #
 # Usage: find-impl-root.sh <ref-dir>
@@ -84,22 +84,22 @@ candidates.append(ref_dir.parent / "impl")  # benchmark/work/<sha>/impl
 candidates.append(ref_dir.parent.parent / "apps" / ref_dir.name)
 candidates.append(ref_dir.parent.parent / "apps" / ref_dir.name / "app")
 if len(ref_dir.parents) >= 3:
-    candidates.append(ref_dir.parents[2] / "impl")  # scratch/loop-N/impl
+    candidates.append(ref_dir.parents[2] / "impl")  # nested workspace impl (3-up sibling)
 
 # Structural heuristic — find ANY directory that looks like an impl
 # tree (package.json + src/ or app/ or pages/ with .tsx/.jsx/.vue/
 # .svelte/.astro), regardless of its name. This makes the resolver
 # work for arbitrary project layouts:
-#   - <repo>/impl/                           (legacy convention)
-#   - <repo>/scratch/loop-N/impl/            (loop-naming convention)
-#   - <repo>/scratch/loop-claude-N/impl/     (extended convention)
+#   - <repo>/impl/                           (canonical)
+#   - <repo>/apps/<component>/               (monorepo)
+#   - <repo>/<workspace>/impl/               (nested per-workspace layout)
 #   - <repo>/clones/<arbitrary>/             (no convention)
 #   - <repo>/experiments/<sha>/              (no convention)
 #
 # Depth-bounded walk from the common parent of ref-and-candidate-impls.
 # For ref at <repo>/tmp/ref/<c>/ the common parent is <repo>; for
-# ref at <repo>/scratch/loop-N/tmp/ref/<c>/ the common parent is
-# <repo>/scratch/loop-N/. Walk depth ≤ 3 to keep it bounded but
+# ref at <repo>/<workspace>/tmp/ref/<c>/ the common parent is
+# <repo>/<workspace>/. Walk depth ≤ 3 to keep it bounded but
 # reachable for nested layouts.
 #
 # Skip set is INTENTIONALLY EMPTY for impl candidates — we don't
@@ -188,7 +188,7 @@ for sr in search_roots:
 
 
 def is_valid_convention(p: Path) -> bool:
-    """Convention candidates (impl/, apps/<comp>/, scratch/loop-N/impl/) are
+    """Convention candidates (impl/, apps/<comp>/, <workspace>/impl/) are
     canonical locations — accept on src/ or app/ presence alone. Requiring
     package.json here would break legacy back-compat where the impl scaffold
     is checked in piecemeal.

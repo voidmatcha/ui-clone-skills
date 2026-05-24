@@ -66,7 +66,14 @@ for f in CHANGELOG.md .claude-plugin/plugin.json .claude-plugin/marketplace.json
 done
 
 if [ -n "$missing" ]; then
-  echo "⚠️ skills/ changed but missing:$missing"
-  echo "decision: block"
+  # stderr (not stdout) so Claude Code's PreToolUse hook harness surfaces
+  # the reason. The harness shows "No stderr output" and discards stdout,
+  # so a stdout-only reject looks like an opaque hook failure and burns
+  # iterations debugging. Other reject branches in this script already
+  # use >&2; this one was the odd-out.
+  echo "⚠️ skills/ changed but missing:$missing" >&2
+  echo "Bump CHANGELOG.md and the 3 plugin manifests together, or revert" >&2
+  echo "the skills/ change if it was incidental." >&2
+  echo "decision: block" >&2
   exit 2
 fi

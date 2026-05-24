@@ -5,14 +5,14 @@
 # the scaffold consumes structure.json + styles.json + section-map.json, but
 # only structure.json was produced by extract-dom.sh. section-map.json was
 # documented in skills/ui-reverse-engineering/dom-extraction.md as a manual
-# agent-browser eval the agent had to run by hand. Loop-13 fresh-only runs
-# hit "missing section-map.json" and aborted; nested loops only worked because
-# they reused stale artifacts from older scratch dirs.
+# agent-browser eval the agent had to run by hand. Fresh-only runs hit
+# "missing section-map.json" and aborted; sub-workspace runs only worked
+# because they reused stale artifacts from older scratch dirs.
 #
 # The agent-browser JS below is the same enumeration logic in dom-extraction.md
-# (Codex universality audit FN + loop-59 recursion fix for div-only layouts).
-# Producing it from a real script means fresh-only runs no longer depend on
-# an agent reading the prose and pasting the JS by hand.
+# (with the recursion fix for div-only layouts). Producing it from a real
+# script means fresh-only runs no longer depend on an agent reading the prose
+# and pasting the JS by hand.
 #
 # Usage:
 #   extract-section-map.sh <ref-dir> <session-name>
@@ -47,17 +47,17 @@ EVAL_JS=$(cat <<'JSEOF'
   const semanticRoles = new Set(['region', 'main', 'banner', 'contentinfo', 'navigation']);
   const containers = [];
 
-  // Codex universality audit FN + loop-59 root-cause: prior version stopped
-  // recursing when a div had no semantic children. NAVER-style sites where
-  // <main> contains nothing but <div class="dga_*"> sub-sections produced
-  // only 2 sections (main + footer) for a 21k-tall page. Two recursion
-  // triggers added:
+  // Universality fix: a prior version stopped recursing when a div had
+  // no semantic children. Sites where `<main>` contains nothing but
+  // `<div>`s with opaque hashed classes (no `<section>` / `<article>` /
+  // role="region") produced only 2 sections (main + footer) for a
+  // 21k-tall page. Two recursion triggers added:
   //   1. Semantic containers taller than 2x viewport are decomposed
   //      instead of being added wholesale — they almost certainly wrap
   //      the page-scrolled content.
   //   2. Div containers with >= 2 large div children (each >= 50% of
   //      viewport height) recurse even without semantic children —
-  //      catches the dga_* sibling pattern.
+  //      catches the opaque-hashed-class sibling pattern.
   const VIEWPORT_H = window.innerHeight || 800;
   const LARGE_DIV_H = Math.min(VIEWPORT_H * 0.5, 600);
   function collectSections(parent, depth) {

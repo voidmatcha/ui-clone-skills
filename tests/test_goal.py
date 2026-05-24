@@ -317,7 +317,12 @@ def test_visual_judge_routing_fires_on_post_implement_too(tmp_path: Path) -> Non
                 ],
                 "current_gate": "post-implement",
                 "last_updated": "2026-01-01T01:00:00Z",
-                "gate_fail_counts": {"post-implement": 41},
+                # Below HARD_CAP_GATE_FAILS=10 so the abort terminalization
+                # doesn't fire and suppress the runnable block we're testing.
+                # The visual-judge routing's purpose is to redirect mid-loop
+                # iterations, not terminal states — once abort fires the
+                # whole runnable block is correctly hidden.
+                "gate_fail_counts": {"post-implement": 5},
             }
         ),
         encoding="utf-8",
@@ -426,6 +431,95 @@ def test_max_gate_fails_only_fires_above_threshold(tmp_path: Path) -> None:
     assert "STUCK" in card.stuck_banner
     # Critical: 5 is between stuck (3) and abort (10) — no abort yet.
     assert card.abort_banner is None
+
+
+def test_abort_banner_suppresses_next_action_block(tmp_path: Path) -> None:
+    """When abort_banner is present, the rendered text goal card MUST NOT
+    include 'Next action:' or 'Required evidence:' lines. The LLM driving the
+    loop reads 'Next action' and 'Required evidence' as imperative even when
+    'ABORT' appears earlier in the same banner, producing the 97-fail run on
+    linear-app and the 6-fail run on realfood-gov: ABORT was advisory, Next
+    action was load-bearing. Suppressing the runnable block under abort
+    removes the contradiction without touching to_json() — JSON drivers still
+    see the full structured fields.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "linear-app"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": ref_dir.name,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": [
+                    "reference",
+                    "extraction",
+                    "bundle",
+                    "paid-features",
+                    "spec",
+                    "pre-generate",
+                ],
+                "current_gate": "post-implement",
+                "last_updated": "2026-01-01T01:00:00Z",
+                "gate_fail_counts": {"post-implement": 50},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+    assert "ABORT" in card
+    # The contradiction-killers. These strings must not appear in a terminal
+    # card. The LLM cannot rationalize "Next action" / "Required evidence"
+    # into existence if they are not emitted.
+    assert "Next action:" not in card
+    assert "Required evidence:" not in card
+    assert "Mission:" not in card
+    # Keep the abort reason itself + a human escape hatch (manual refresh)
+    # — those don't suggest a runnable continuation.
+    assert "hard cap" in card
+    assert "Manual refresh" in card
+
+
+def test_abort_banner_card_includes_terminal_marker(tmp_path: Path) -> None:
+    """The suppressed card must positively signal terminal-state so a
+    downstream LLM reading the partial card cannot interpret silence as
+    "this is the start of a normal goal card". Explicit > implicit.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "x"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": "x",
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": ["reference", "extraction", "bundle",
+                                    "paid-features", "spec", "pre-generate"],
+                "current_gate": "post-implement",
+                "last_updated": "2026-01-01T01:00:00Z",
+                "gate_fail_counts": {"post-implement": 20},
+            }
+        ),
+        encoding="utf-8",
+    )
+    card = build_goal_card(ref_dir)
+    assert "Terminal state" in card
+
+
+def test_non_abort_card_still_emits_next_action(tmp_path: Path) -> None:
+    """Sanity-check the inverse: a healthy (no-abort) card still emits the
+    full runnable block. The suppression must only fire under abort_banner."""
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "hero"
+    _write_state(ref_dir, "reference")
+    card = build_goal_card(ref_dir)
+    assert "Next action:" in card
+    assert "Required evidence:" in card
+    assert "Mission:" in card
 
 
 def test_visual_judge_routing_skips_when_no_result(tmp_path: Path) -> None:
@@ -633,16 +727,30 @@ def test_codex_default_prompt_mentions_goal_card_and_stop_condition() -> None:
 
 
 def test_readme_documents_goal_driven_continuation_without_new_public_skill() -> None:
+    """The README + its detail pages must teach the goal-card pattern.
+
+    HANDOVER.md Item 3 split README.md into a thin top-level marketing
+    page (≤250 lines) and a `README_detail/` directory of dedicated
+    topic pages. The goal-card content moved to
+    `README_detail/pipeline.md`. This test now reads the joined corpus
+    so the assertion is robust to future reshuffles.
+    """
     repo = Path(__file__).resolve().parents[1]
     readme = (repo / "README.md").read_text(encoding="utf-8")
+    detail_root = repo / "README_detail"
+    detail_text = ""
+    if detail_root.is_dir():
+        for md in sorted(detail_root.rglob("*.md")):
+            detail_text += md.read_text(encoding="utf-8") + "\n"
+    corpus = readme + "\n" + detail_text
     skill_dirs = sorted(path.name for path in (repo / "skills").iterdir() if path.is_dir())
 
-    assert "goal card" in readme.lower()
-    assert "python -m ui_clone.goal <ref-dir>" in readme
+    assert "goal card" in corpus.lower()
+    assert "python -m ui_clone.goal <ref-dir>" in corpus
     # Agent-driven continuation lives in a single Claude Code / Codex
     # session — explicitly NOT an external scheduler / daemon.
-    assert "no external scheduler" in readme.lower()
-    assert "background daemon" in readme.lower() or "no external scheduler" in readme.lower()
+    assert "no external scheduler" in corpus.lower()
+    assert "background daemon" in corpus.lower() or "no external scheduler" in corpus.lower()
     # 3 public + N internal (see scripts/ci/review.sh internal_skills allowlist + AGENTS.md).
     internal_skills = {"benchmark"}
     public_skill_dirs = [d for d in skill_dirs if d not in internal_skills]

@@ -31,7 +31,7 @@ Outcomes:
 
 Usage:
     python -m ui_clone.benchmark_harness <ref-dir> \\
-        --orig-url https://realfood.gov \\
+        --orig-url <site-url> \\
         --impl-url http://localhost:3000 \\
         --impl-dir benchmark/work/<sha>/impl \\
         --max-iter 100 \\
@@ -199,23 +199,24 @@ def collect_recent_failures(ref_dir: Path, impl_dir: Path) -> str:
 
 _INITIAL_PROMPT = """You are running ui-clone-skills benchmark iter 1 against the canonical site.
 
-Goal: clone {orig_url} into {impl_dir} until every STRICT v2 condition in
-the plan file at `~/.claude/plans/happy-finding-pelican.md` is met.
+Goal: clone {orig_url} into {impl_dir} until every STRICT v2 condition
+documented in the benchmark plan is met (see ui_clone/benchmark_harness.py
+`check_strict_done` for the canonical condition list).
 
-REF dir is `{ref_dir}` (already symlinked from tmp/ref/realfood).
+REF dir is `{ref_dir}` (already symlinked from tmp/ref/{component}).
 IMPL dir is `{impl_dir}`.
 
 Pipeline phases:
-1. (if static/ref/ has <5 PNGs) `/ui-capture {orig_url} '' realfood` — populates {ref_dir}
+1. (if static/ref/ has <5 PNGs) `/ui-capture {orig_url} '' {component}` — populates {ref_dir}
 2. Extract → spec → pre-generate → impl scaffold (Next.js)
-3. Asset transfer: `bash scripts/extract/extract-assets.sh realfood-bench {ref_dir} {impl_dir}/public`
+3. Asset transfer: `bash scripts/extract/extract-assets.sh {session} {ref_dir} {impl_dir}/public`
 4. Generate per-section components (target: page.tsx < 200 LOC, components/ > 3)
 5. Run section-compare → tree-diff → motion checks
 6. Iterate until all STRICT conditions pass
 
 Use `python -m ui_clone.goal {ref_dir}` to see the next bounded action.
 Use `python -m ui_clone.gate {ref_dir} <gate>` to verify any gate.
-Use `python -m ui_clone.measure section-compare {ref_dir} --orig-url {orig_url} --impl-url {impl_url} --session realfood-bench` to run measurement with LOCKED defaults.
+Use `python -m ui_clone.measure section-compare {ref_dir} --orig-url {orig_url} --impl-url {impl_url} --session {session}` to run measurement with LOCKED defaults.
 
 After your work, exit. The Python harness will re-invoke you with focused
 fix instructions for the next iter."""
@@ -255,11 +256,17 @@ def build_iter_prompt(
 ) -> str:
     """Build the per-iter focused prompt."""
     if iter_count == 1 and not (ref_dir / "pipeline-state.json").is_file():
+        # Derive component slug from ref_dir name; session name mirrors it
+        # so extract-assets / measure / agent-browser all key off the same id.
+        component = ref_dir.name
+        session = f"{component}-bench"
         return _INITIAL_PROMPT.format(
             orig_url=orig_url,
             impl_url=impl_url,
             ref_dir=ref_dir,
             impl_dir=impl_dir,
+            component=component,
+            session=session,
         )
 
     # Goal card

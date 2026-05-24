@@ -397,7 +397,7 @@ def find_impl_match(ref_el, impl_list):
             im_text = (im.get('text') or '').strip()
             if im_text and (ref_text == im_text or ref_text in im_text or im_text in ref_text):
                 return im
-    # CSS-module hash strip: dga_hero__AjMaf -> dga_hero
+    # CSS-module hash strip: prefix_hero__AjMaf -> prefix_hero
     # Only strip if the suffix looks like a hash (__ + 6+ alnum chars).
     import re as _re
     ref_root = _re.sub(r'__[A-Za-z0-9]{6,}$', '', ref_cls or '')

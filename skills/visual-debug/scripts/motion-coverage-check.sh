@@ -9,9 +9,9 @@
 # lottie, etc. No useScroll / useTransform / IntersectionObserver
 # code. The ref's runtime motion was simply not implemented, but
 # bundle-impl-coverage passed because it only checks package.json
-# vs detected libraries — and the bundle-map for realfood.gov
-# didn't detect GSAP/Framer either (the ref's motion is mostly
-# CSS scroll-driven). The gap: when ref bundle-map shows ANY motion
+# vs detected libraries — and if the ref's motion is mostly CSS
+# scroll-driven, bundle-map detection of GSAP/Framer also misses it.
+# The gap: when ref bundle-map shows ANY motion
 # signal AND impl source has near-zero motion code → fail.
 #
 # Detection:
@@ -152,6 +152,24 @@ if isinstance(es, dict):
             signal_strength += 1
             signals.append(f"external-sdk:{ds}")
 
+# Step H integration — categorical motion_signature from
+# transition-categorize.sh is a high-confidence single-hit signal.
+# A site declaring a real motion feel (springy / scrubbed / snappy /
+# gentle) demands impl coverage regardless of the accumulated
+# signal_strength score. Catches the codex-review gap where a site
+# has only external-sdk evidence (weight +1) below the >=3 threshold
+# but still has substantive motion the impl skipped.
+strong_feel = False
+strong_feel_label = ""
+if isinstance(ts, dict):
+    msig = ts.get("motion_signature") or {}
+    if isinstance(msig, dict):
+        dominant = str(msig.get("dominant_feel") or "")
+        if dominant in {"springy", "scrubbed", "snappy", "gentle"}:
+            strong_feel = True
+            strong_feel_label = dominant
+            signals.append(f"motion_signature.dominant_feel:{dominant}")
+
 
 # 2. Score impl-side motion strength.
 impl_strength = 0
@@ -286,6 +304,22 @@ elif signal_strength >= 5 and impl_strength < 2:
             "has < 2 motion-implementation signals — likely a "
             "tokenistic single transition without the rest of the "
             "ref's motion surface."
+        ),
+    })
+elif strong_feel and impl_strength == 0:
+    violations.append({
+        "kind": "ref-declares-feel-impl-has-none",
+        "refDominantFeel": strong_feel_label,
+        "refSignalStrength": signal_strength,
+        "implMotionStrength": impl_strength,
+        "refSignals": signals[:10],
+        "detail": (
+            f"Ref transition-spec.motion_signature.dominant_feel="
+            f"{strong_feel_label!r} declares real motion character, "
+            "but impl source has zero motion implementation. This is "
+            "a high-confidence single-hit signal that bypasses the "
+            "accumulator threshold for sites whose motion evidence "
+            "lives only in external-sdks / signature categorization."
         ),
     })
 

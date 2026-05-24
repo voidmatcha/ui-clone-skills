@@ -180,6 +180,13 @@ ffmpeg -y -i "$OUT_DIR/scroll-video/ref/full-scroll-raw.webm" -ss 0.3 -t <active
 
 **Phase 2:** `detection.md` → filter/deduplicate → `regions.json`
 
+`regions.json` is not complete until every entry with `triggerType` includes an
+`artifacts` object listing the concrete files captured for that region. The
+consumer contract is explicit: generation and verification read those paths;
+they do not infer filenames from `name` or `triggerType`. Run
+`bash skills/visual-debug/scripts/capture-artifact-inventory-check.sh "$OUT_DIR"`
+after Phase 2B-2E and fix any missing files before handing off.
+
 **Phase 2B–2E** (`capture-transitions.md`), per type:
 - **2B** scroll — exploration video → clip verification (before/mid/after)
 - **2C** interactive — `css-hover`/`js-class` → eval + clip (idle+active); `intersection` → classList + clip. **No video.**

@@ -21,7 +21,7 @@ Read this when you feel a temptation to shortcut. Find your thought in the table
 | "The reference has the same items as I implemented" | `agent-browser --session <s> eval "document.querySelectorAll('.card, .point-items, .item').length"` on ref. Items may be added post-launch. |
 | "I know what this section looks like" | `agent-browser --session <s> eval "document.querySelector('.section-class').outerHTML"` on ref BEFORE any impl. Then `section-compare.sh` after. No exceptions. |
 | "Header should hide on scroll-down — that's standard UX" | Scroll ref to a deep position (`window.scrollTo(0, 4000)` or via the custom scroll wrapper), wait 500ms, then check `getComputedStyle(headerEl).transform`. If `none`, do NOT add hide-on-scroll — ref doesn't have it. |
-| "em-conversion failed so I'll use 16px as 1em" | Measure font-size via screenshot ruler or ask. Typical values: `10px` or `62.5%` base. Document as `// TODO: verify em base`. |
+| "em-conversion failed so I'll use 16px as 1em" | Stop generation and recover the base from CSS (`html/body font-size`, root variables, or `sizing-expressions.json`). If CSS is unavailable, measure it with a browser/screenshot probe before writing code. Never commit a guessed base or a TODO marker. |
 | "The gate only checks file existence, so I'll assemble the JSON myself" | Stop. Add or fix `artifact-provenance.json` with real browser/script evidence paths. `manual`/`guess` provenance blocks `pre-generate`; rerun the extraction step instead. |
 
 ---

@@ -256,29 +256,31 @@ fi
 # ── 5. Gate-artifact timing ──
 section "Gate-artifact timing"
 
-# external-sdks.json must appear in gate_spec, not gate_bundle. Inspect each
-# method body via AST so the check stays correct as helper methods are added
-# between gate_bundle and gate_spec (string-slicing the file misclassified
-# the paid-features cross-validator that scans extraction artifacts).
+# external-sdks.json must appear in gate_spec, not gate_bundle. Post-Item-5
+# refactor: Gate methods live in ui_clone/gates/<area>.py (one module per
+# gate). Inspect each gate file's AST so the check stays correct as helper
+# methods are added near the gate function (string-slicing misclassified the
+# paid-features cross-validator that scans extraction artifacts).
 if uv run python -c "
-import ast, sys
-with open('ui_clone/gate.py') as f:
-    tree = ast.parse(f.read())
-gate_cls = next(
-    (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == 'Gate'),
-    None,
-)
-if gate_cls is None:
-    print('Gate class not found in ui_clone/gate.py', file=sys.stderr)
+import ast, pathlib, sys
+def gate_body(path: str, fn_name: str) -> str | None:
+    if not pathlib.Path(path).is_file():
+        return None
+    tree = ast.parse(open(path).read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == fn_name:
+            return ast.unparse(node)
+    return None
+
+bundle_body = gate_body('ui_clone/gates/bundle.py', 'gate_bundle')
+spec_body = gate_body('ui_clone/gates/spec.py', 'gate_spec')
+if bundle_body is None or spec_body is None:
+    print('gate_bundle / gate_spec missing from ui_clone/gates/', file=sys.stderr)
     sys.exit(1)
-methods = {n.name: ast.unparse(n) for n in gate_cls.body if isinstance(n, ast.FunctionDef)}
-if 'gate_bundle' not in methods or 'gate_spec' not in methods:
-    print('gate_bundle / gate_spec missing from Gate class', file=sys.stderr)
-    sys.exit(1)
-if 'external-sdks' in methods['gate_bundle']:
+if 'external-sdks' in bundle_body:
     print('external-sdks.json is in gate_bundle (should be in gate_spec)', file=sys.stderr)
     sys.exit(1)
-if 'external-sdks' not in methods['gate_spec']:
+if 'external-sdks' not in spec_body:
     print('external-sdks.json missing from gate_spec', file=sys.stderr)
     sys.exit(1)
 " 2>/dev/null; then

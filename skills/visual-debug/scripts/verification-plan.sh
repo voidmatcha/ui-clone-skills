@@ -145,6 +145,54 @@ TRANSITION_SPEC="$REF_DIR/transition-spec.json"
 CANVAS_DETECT="$REF_DIR/canvas-webgl-detection.json"
 PAID_FEATURES="$REF_DIR/paid-features.json"
 
+file_mtime_epoch() {
+  local path="$1"
+  stat -f %m "$path" 2>/dev/null \
+    || stat -c %Y "$path" 2>/dev/null \
+    || python3 -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$path"
+}
+
+plan_generated_epoch() {
+  python3 - "$1" <<'PY'
+import datetime
+import json
+import sys
+
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    value = data.get("generatedAt")
+    if not isinstance(value, str) or not value:
+        raise ValueError("missing generatedAt")
+    value = value.replace("Z", "+00:00")
+    print(int(datetime.datetime.fromisoformat(value).timestamp()))
+except Exception:
+    sys.exit(1)
+PY
+}
+
+PLAN_PATH="$REF_DIR/verification-plan.json"
+if [ -f "$PLAN_PATH" ]; then
+  NEWEST_EXTRACTION_MTIME=0
+  for EXTRACTION_ARTIFACT in \
+    "$REF_DIR/extracted.json" \
+    "$REF_DIR/structure.json" \
+    "$TRANSITION_SPEC"; do
+    if [ -f "$EXTRACTION_ARTIFACT" ]; then
+      ARTIFACT_MTIME=$(file_mtime_epoch "$EXTRACTION_ARTIFACT" || echo 0)
+      if [ "$ARTIFACT_MTIME" -gt "$NEWEST_EXTRACTION_MTIME" ]; then
+        NEWEST_EXTRACTION_MTIME="$ARTIFACT_MTIME"
+      fi
+    fi
+  done
+  if [ "$NEWEST_EXTRACTION_MTIME" -gt 0 ]; then
+    PLAN_GENERATED_AT=$(plan_generated_epoch "$PLAN_PATH" || echo 0)
+    if [ "$PLAN_GENERATED_AT" -lt "$NEWEST_EXTRACTION_MTIME" ]; then
+      echo "verification-plan.json is stale (generated before latest extraction); regenerating." >&2
+      rm -f "$PLAN_PATH"
+    fi
+  fi
+fi
+
 # ── Signal extraction ──
 # Each signal is OR of multiple proxy evidence. Conservatively true: if any
 # proxy hits, the signal is on. This makes the plan err on the side of
@@ -304,6 +352,21 @@ add_check() {
     }"
 }
 
+# Universal — runtime-env MUST be first in the dispatch order. Every
+# browser-probe gate downstream declares dependsOn:runtime-env, but
+# scripts/verify/run-required-checks.sh only cascades skips for deps
+# that have already failed (in array iteration order). So runtime-env
+# must run before its dependents — registering it here ensures it gets
+# dispatched first. Codex ecosystem review (2026-05-24 ultrathink)
+# identified the prior bottom-of-file placement as a silent no-op for
+# the dependsOn cascade.
+add_check "runtime-env" \
+          "skills/visual-debug/scripts/runtime-env-check.sh" \
+          "runtime-env.json" \
+          "Impl-url must serve current iteration's impl-root AND render without env traps (Vite preamble missing, hydration mismatch, port-routing mismatch)" \
+          "block" \
+          "standard"
+
 # Universal — always.
 # Tier=quick: hydration-check launches a single agent-browser session and
 # greps the console for known errors; runs in seconds and catches the most
@@ -313,7 +376,8 @@ add_check "hydration-check" \
           "hydration-check.json" \
           "Universal — every HTML page must hydrate cleanly" \
           "block" \
-          "quick"
+          "quick" \
+          "runtime-env"
 
 # Universal — Tailwind v3↔v4 transform conflict. Script writes `status: pass`
 # on hosts that don't use Tailwind (or use a single version) so this is safe
@@ -325,6 +389,70 @@ add_check "tailwind-transform-conflict" \
           "Universal — elements with both \`transform:\` and individual \`translate:\`/\`rotate:\`/\`scale:\` stack twice (v3↔v4 conflict)" \
           "block" \
           "quick"
+
+# Universal anti-cheat baseline — these are not signal-gated. They reject
+# direct HTML theft, screenshot-backed fake parity, and proxy/cache mirrors on
+# every site before advisory/static fidelity rows are considered.
+add_check "html-paste" \
+          "skills/visual-debug/scripts/html-paste-check.sh" \
+          "html-paste.json" \
+          "Impl entry HTML must not mirror ref dom-scaffold (>=70% similarity), load ref bundle scripts, or inline ref CSS bundles" \
+          "block" \
+          "quick"
+
+add_check "ref-screenshot-asset" \
+          "skills/visual-debug/scripts/ref-screenshot-asset-check.sh" \
+          "ref-screenshot-asset.json" \
+          "Impl must not reference or copy reference screenshot artifacts (sections/, static/, transitions/) — using them as backgrounds fakes pixel-diff parity" \
+          "block" \
+          "quick"
+
+add_check "proxy-mirror-check" \
+          "skills/visual-debug/scripts/proxy-mirror-check.sh" \
+          "proxy-mirror-check.json" \
+          "Universal — local impl must be generated source, not a proxy/cache of the original HTML, RSC payloads, or _next runtime" \
+          "block" \
+          "quick"
+
+# Universal — class-signature preservation. Catches "invented design" cheats
+# where the impl freehands utility classes / vanilla CSS and discards captured
+# CSS-Modules class signatures from <ref-dir>/html/*. Root-cause pattern:
+# zero captured class refs in impl vs 100+ in ref. Pure static analysis
+# (no browser), so tier=quick. Skips on sites without enough captured class
+# tokens (< 10).
+add_check "class-signature-preservation" \
+          "skills/visual-debug/scripts/class-signature-preservation-check.sh" \
+          "class-signature-preservation.json" \
+          "Universal — ref's CSS-Modules class signatures (componentName__hash / prefix_hash) must appear in impl source at >= 30% rate when ref total >= 10" \
+          "block" \
+          "quick"
+
+# Universal — bundle-paste anti-cheat. Catches the L41/L44 cheat shape where
+# impl bulk-pastes the ref's compiled CSS bundles into public/css/ (or any
+# hex-hash-filename dir), mirrors the ref's _next/static/ runtime, or imports
+# the ref's rendered HTML via Vite ?raw + dangerouslySetInnerHTML. Pure
+# filesystem + regex (no browser), so tier=quick.
+add_check "bundle-paste" \
+          "skills/visual-debug/scripts/bundle-paste-check.sh" \
+          "bundle-paste-check.json" \
+          "Universal — impl must not bulk-paste ref's compiled CSS bundles, _next runtime, or rendered HTML (?raw + dangerouslySetInnerHTML)" \
+          "block" \
+          "quick"
+
+# Universal — class-signature CSS coverage. Pairs with the
+# class-signature-preservation gate above: that one verifies NAME
+# preservation, this one verifies STYLE presence for those names.
+# Catches the L64 gap where impl preserved 95% of ref class signatures
+# but defined CSS rules for ~0% of the splash/animation set → visual
+# renders as a single solid color despite high signature-preservation
+# metric. Pure filesystem grep (no browser), so tier=quick.
+add_check "class-signature-css-coverage" \
+          "skills/visual-debug/scripts/class-signature-css-coverage-check.sh" \
+          "class-signature-css-coverage.json" \
+          "Universal — preserved class signatures must have matching CSS rules in impl (style coverage >= 30% over preserved set)" \
+          "block" \
+          "quick" \
+          "class-signature-preservation"
 
 # Universal — Fix 8 anti-fabrication gates. Both are pure static analysis
 # (no LLM, no browser) so they're tier=quick. They compare the generated
@@ -366,14 +494,8 @@ add_check "hero-composite-check" \
           "hero-composite.json" \
           "Impl hero region must contain every element kind present in ref hero (video, button, h1/h2, label span)" \
           "block" \
-          "quick"
-
-add_check "proxy-mirror-check" \
-          "skills/visual-debug/scripts/proxy-mirror-check.sh" \
-          "proxy-mirror-check.json" \
-          "Universal — local impl must be generated source, not a proxy/cache of the original HTML, RSC payloads, or _next runtime" \
-          "block" \
-          "quick"
+          "quick" \
+          "runtime-env"
 
 if [ "$HAS_LOTTIE" = "true" ]; then
   add_check "lottie-runtime" \
@@ -394,7 +516,8 @@ if [ "$HAS_SCROLL_SCRUB" = "true" ]; then
             "scroll-completion.json" \
             "signals.hasScrollScrub=true — scroll-scrub reveals must settle by maxScroll across all viewports" \
             "block" \
-            "standard"
+            "standard" \
+            "runtime-env"
 fi
 
 # Tier=standard: same browser-one-shot shape as scroll-end-completion.
@@ -456,13 +579,6 @@ add_check "ref-js-loader" \
           "block" \
           "quick"
 
-add_check "runtime-env" \
-          "skills/visual-debug/scripts/runtime-env-check.sh" \
-          "runtime-env.json" \
-          "Impl-url must serve current iteration's impl-root AND render without env traps (Vite preamble missing, hydration mismatch, port-routing mismatch)" \
-          "block" \
-          "standard"
-
 add_check "video-play-proof" \
           "skills/visual-debug/scripts/video-play-proof-check.sh" \
           "video-play-proof.json" \
@@ -474,7 +590,7 @@ add_check "video-play-proof" \
 add_check "impl-scope" \
           "skills/visual-debug/scripts/impl-scope-check.sh" \
           "impl-scope.json" \
-          "Impl iteration must only modify scratch/loop-N/impl/** files; editing plugin tooling (skills/, scripts/, ui_clone/, tests/) is the documented gate-cheat pattern" \
+          "Impl iteration must only modify files under the impl root; editing plugin tooling (skills/, scripts/, ui_clone/, tests/) is the documented gate-cheat pattern" \
           "block" \
           "quick"
 
@@ -549,7 +665,8 @@ if [ "$HAS_HOVER" = "true" ]; then
             "transitions/result.txt" \
             "signals.hasHover=true" \
             "block" \
-            "standard"
+            "standard" \
+            "runtime-env"
   # Motion-arc check for hover. transition-compare above verifies idle/hover
   # END-STATE diffs; hover-state-compare verifies the easing/duration ARC
   # between them. Same bug class as video-motion-compare for scroll motion —
@@ -578,6 +695,15 @@ if [ "$HAS_CLICK_STATE" = "true" ]; then
             "comprehensive"
 fi
 
+if contains_pattern "$REGIONS_JSON" '"triggerType":\s*"'; then
+  add_check "capture-artifact-inventory" \
+            "skills/visual-debug/scripts/capture-artifact-inventory-check.sh" \
+            "capture-artifact-inventory.json" \
+            "Every ui-capture regions.json triggerType entry must enumerate the concrete ref clip/video artifacts it produced" \
+            "block" \
+            "quick"
+fi
+
 # Every site with a transition-spec.json should verify each entry is wired
 # into the impl. Catches the "hover matched while intersection/scroll entries
 # were never wired" failure class that transition-compare.sh can't see.
@@ -589,7 +715,8 @@ if [ -f "$TRANSITION_SPEC" ]; then
               "transitions/result.txt" \
               "transition-spec.json present — runtime/end-state transition comparison must produce measurement rows, even when hover is not the detected trigger" \
               "block" \
-              "standard"
+              "standard" \
+              "runtime-env"
   fi
   add_check "transition-spec-coverage" \
             "skills/visual-debug/scripts/transition-spec-coverage.sh" \
@@ -680,6 +807,14 @@ if [ -f "$VISIBLE_IMAGES" ]; then
             "At least 60% of non-substituted visible-images.json entries must be referenced in impl/src/ source" \
             "block" \
             "quick"
+  if [ -f "$REF_DIR/section-map.json" ] && [ -f "$REF_DIR/component-map.json" ]; then
+    add_check "asset-placement" \
+              "skills/visual-debug/scripts/asset-placement-check.sh" \
+              "asset-placement.json" \
+              "Section-mappable visible assets must be referenced by the component mapped to that original section" \
+              "block" \
+              "quick"
+  fi
   add_check "runtime-image-validity" \
             "skills/visual-debug/scripts/runtime-image-validity-check.sh" \
             "runtime-image-validity.json" \
@@ -694,21 +829,6 @@ if [ -f "$VISIBLE_IMAGES" ]; then
             "block" \
             "quick"
 fi
-
-#
-# Failure pattern: agent placed captured ref section PNGs as
-# background-image on impl sections and hid every real DOM child
-# (opacity:0, visibility:hidden, display:none, pointer-events:none) so
-# pixel-diff collapsed to zero — the impl was literally rendering the
-# ref's captured artifacts instead of building UI. Static scan of impl
-# tree rejects path substrings of the ref's screenshot dirs and byte-
-# identical copies. tier=quick (filesystem + sha256, no browser).
-add_check "ref-screenshot-asset" \
-          "skills/visual-debug/scripts/ref-screenshot-asset-check.sh" \
-          "ref-screenshot-asset.json" \
-          "Impl must not reference or copy reference screenshot artifacts (sections/, static/, transitions/) — using them as backgrounds fakes pixel-diff parity" \
-          "block" \
-          "quick"
 
 # Common cheat pattern A2/A3 — entry coherence. Vite+React must render from
 # src/main.{jsx,tsx}; Next App from app/page.tsx. Coexisting entry
@@ -732,22 +852,6 @@ add_check "scaffold-residue" \
           "skills/visual-debug/scripts/scaffold-residue-check.sh" \
           "scaffold-residue.json" \
           "PascalCase components defined in impl/src/ must be referenced as JSX (<Name>) or createElement(Name) somewhere; ≥3 orphans = scaffold residue" \
-          "block" \
-          "quick"
-
-# Common cheat pattern A1 — HTML paste theft. Catches three orthogonal cheats
-# beyond what entry-coherence sees:
-#   1. impl entry HTML tag-multiset >= 70% similar to ref's
-#      dom-scaffold.json (likely paste of ref body)
-#   2. <script src=...> in impl entry HTML naming a ref bundle from
-#      bundle-map.json (hot-loading ref JS)
-#   3. inline <style> block byte-similar to a ref CSS bundle from
-#      <ref>/bundles/*.css (bulk-paste of compiled ref CSS)
-# tier=quick (filesystem + multiset + difflib quick_ratio, no browser).
-add_check "html-paste" \
-          "skills/visual-debug/scripts/html-paste-check.sh" \
-          "html-paste.json" \
-          "Impl entry HTML must not mirror ref dom-scaffold (>=70% similarity), load ref bundle scripts, or inline ref CSS bundles" \
           "block" \
           "quick"
 
@@ -838,7 +942,8 @@ add_check "motion-coverage" \
           "motion-coverage.json" \
           "Impl source must show motion implementation matching ref bundle/spec evidence (imports, hooks, IntersectionObserver, GSAP calls)" \
           "block" \
-          "quick"
+          "quick" \
+          "runtime-env"
 
 # Signal 1 — scaffold-warn placeholders. scaffold-to-jsx.sh emits
 # `<section data-scaffold-warn="subtree-not-found-for-<name>" />`

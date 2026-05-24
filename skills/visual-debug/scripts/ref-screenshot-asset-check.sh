@@ -62,11 +62,11 @@ JSON
 fi
 
 python3 - "$REF_DIR" "$IMPL_ROOT" "$OUT_PATH" <<'PY'
-# Loop-codex-14 finding: this embedded Python uses PEP 604 union syntax
-# (`X | Y`) which needs Python 3.10+. The dev environment ships 3.9.6 by
-# default; without this future-import the script raises SyntaxError before
-# writing ref-screenshot-asset.json, blocking the dispatcher. Future-import
-# defers annotation evaluation so 3.9 accepts the modern syntax as strings.
+# Compat note: this embedded Python uses PEP 604 union syntax (`X | Y`)
+# which needs Python 3.10+. macOS dev environments ship 3.9.6 by default;
+# without this future-import the script raises SyntaxError before writing
+# ref-screenshot-asset.json, blocking the dispatcher. Future-import defers
+# annotation evaluation so 3.9 accepts the modern syntax as strings.
 from __future__ import annotations
 
 import hashlib

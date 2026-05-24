@@ -15,8 +15,8 @@
 #      will diff against it.
 #
 # Allowed iteration scope (default):
-#   - scratch/loop-*/impl/**
-#   - tmp/ref/<component>/**  (artifact writes)
+#   - <impl-root>/**            (resolved by find-impl-root.sh)
+#   - tmp/ref/<component>/**    (artifact writes)
 #   - tmp/<component>-*.log
 #
 # Explicit exception list (override via env IMPL_SCOPE_ALLOWED):
@@ -73,7 +73,7 @@ payload = {
         "Subsequent invocations will diff HEAD against this SHA."
     ],
     "rule": (
-        "Impl iteration must only modify scratch/loop-<N>/impl/** files. "
+        "Impl iteration must only modify files under the impl root. "
         "Plugin tooling (skills/, scripts/verify/, ui_clone/, tests/, hooks/) "
         "MUST NOT be edited during a clone iteration — that's the cheat "
         "pattern of editing the gates themselves to make them pass."
@@ -171,7 +171,7 @@ payload = {
         if violations else "iteration scope clean"
     ),
     "rule": (
-        "Impl iteration must only modify scratch/loop-<N>/impl/** and "
+        "Impl iteration must only modify files under the impl root and "
         "tmp/** files. Plugin tooling (skills/, scripts/verify/, "
         "ui_clone/, tests/, hooks/) MUST NOT be edited during a clone "
         "iteration — editing the gates themselves to make them pass is "

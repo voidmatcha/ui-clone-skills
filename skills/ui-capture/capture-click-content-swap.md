@@ -70,10 +70,10 @@ Without this data, you will guess the pane architecture. Every guess leads to on
   "selector": "[class*=image_container]",
   "bounds": { "x": 0, "y": 0, "w": 1440, "h": 900 },
   "structure": "content-swap-search-structure.json",
-  "captures": {
+  "artifacts": {
     "video": "transitions/ref/content-swap-search.webm",
     "idle": "transitions/ref/content-swap-search-idle.png",
-    "mid-transition": "transitions/ref/content-swap-search-mid.png",
+    "mid": "transitions/ref/content-swap-search-mid.png",
     "active": "transitions/ref/content-swap-search-active.png"
   }
 }

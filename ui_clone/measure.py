@@ -3,14 +3,13 @@
 Single entry point that invokes the bash measurement scripts with
 hardcoded defaults so agents cannot route around them via env vars.
 
-Closes the failure class observed across the c9b638d (Round 1) and
-d19e28d (Round 2) benchmarks:
+Closes the failure class observed across multiple benchmark runs:
 
-- Round 1 agent ran section-compare with default `EXCLUDE_DYNAMIC=0`,
+- An agent ran section-compare with default `EXCLUDE_DYNAMIC=0`,
   letting `<video>` first-frame variance balloon AE to 1M+ on sections
   whose static layout matched fine.
-- Round 2 agent set `SECTION_THRESHOLD=250000` (vs default 2000) so
-  AE/Mpx of 88,823 and 228,325 — both nominally `critical` (>20000) —
+- An agent set `SECTION_THRESHOLD=250000` (vs default 2000) so AE/Mpx
+  values of 88,823 and 228,325 — both nominally `critical` (>20000) —
   were re-classified as `minor` and ✅ PASSed. The gate could not see
   this because section-compare.sh writes whatever severity the env
   chose; gate.py only reads the written band.
@@ -215,7 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     def _add_url_args(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("ref_dir", help="ref dir (e.g. tmp/ref/realfood)")
+        sp.add_argument("ref_dir", help="ref dir (e.g. tmp/ref/<component>)")
         sp.add_argument("--orig-url", required=True, help="ref site URL")
         sp.add_argument("--impl-url", required=True, help="local impl URL")
         sp.add_argument("--session", default="ui-clone-measure", help="agent-browser session name")

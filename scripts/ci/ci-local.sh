@@ -80,6 +80,16 @@ else
   bash scripts/ci/review.sh || fail "review.sh"
 fi
 
+# 5b. Universality gate — blocks maintainer-bias drift (loop-N attribution,
+# benchmark site names, brand leakage, personal paths, Hangul in production
+# source). See scripts/ci/check-universality.sh header for the full set.
+step "Universality (no maintainer-bias drift)"
+if [ "$QUIET" = "1" ]; then
+  bash scripts/ci/check-universality.sh >/dev/null 2>&1 || fail "check-universality.sh"
+else
+  bash scripts/ci/check-universality.sh || fail "check-universality.sh"
+fi
+
 # 6. Drift smoke test — verifies review.sh + pre-push-security.sh still catch
 # known-bad mutations. Prevents the guards rotting silently (regex breaking,
 # denylist entry getting dropped, language scanner no-opping on a platform).

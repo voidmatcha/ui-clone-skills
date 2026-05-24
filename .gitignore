@@ -32,3 +32,11 @@ scratch/
 
 # Internal scratch dir for maintainer-only experiments
 internal/
+
+# Private maintainer growth/marketing research notes — never committed to public repo
+research/
+
+# Driver-session bypass marker — local-only maintainer state. Stop hook
+# releases when this file's content matches the current
+# CLAUDE_CODE_SESSION_ID env. See section_gate._is_driver_session.
+.driver-session.id

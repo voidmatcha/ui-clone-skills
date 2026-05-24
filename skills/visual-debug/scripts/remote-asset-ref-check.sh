@@ -155,7 +155,7 @@ for path in impl_src.rglob("*"):
         continue
     # Strip block comments only. Skipping line-comment strip — the
     # naive `//[^\n]*` also eats URL substrings starting at `//` (e.g.
-    # "https://realfood.gov/..." → "https:" + "//realfood.gov/..."
+    # "https://example.com/..." → "https:" + "//example.com/..."
     # consumed as if it were a comment). False-positives in comment-
     # bodies are acceptable; missing URLs is not.
     text_no_comment = re.sub(r"/\*[\s\S]*?\*/", "", text)

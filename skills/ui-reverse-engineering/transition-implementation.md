@@ -8,11 +8,11 @@ When implementing scroll/page-load/interaction transitions extracted from JS bun
 > components (`SmoothScroll`, `IntroAnimation`, `ScrollListener`) before any
 > section component renders. Read `bundle-map.json` → identify these libraries →
 > create the matching infrastructure components FIRST, then wrap `<main>` with
-> them. Skipping this step is the #2 quality regression on the realfood.gov
-> benchmark — the successful prior clone has `SmoothScroll` + `IntroAnimation`
-> + `ScrollListener` wrappers; the failing one has none and falls back to a
-> single `useReveal` IntersectionObserver hook, losing all the scroll-coupled
-> motion the original site has.
+> them. Skipping this step is a top-2 quality regression on the benchmark —
+> a successful clone of a Lenis/GSAP site has `SmoothScroll` +
+> `IntroAnimation` + `ScrollListener` wrappers; a failing one has none and
+> falls back to a single `useReveal` IntersectionObserver hook, losing all
+> the scroll-coupled motion the original site has.
 
 ## Core principle
 

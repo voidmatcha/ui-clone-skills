@@ -18,7 +18,8 @@
 #      tolerance for impls that legitimately add a fallback icon or two).
 #
 # Catches:
-#   - codex-18 IconMark.tsx pattern (invent SVG path to satisfy count parity)
+#   - invented-icon pattern (e.g. a hand-written IconMark.tsx whose paths
+#     exist only to satisfy count parity)
 #   - LLM hand-rolling icons that look approximately like the ref but
 #     don't share any vertex data
 #   - copy-and-edit drift: ref path "M10 5 L20 15..." vs impl "M11 5 L20 16..."

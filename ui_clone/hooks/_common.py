@@ -49,17 +49,17 @@ _cached_project_root: Path | None = None
 def find_project_root() -> Path:
     """Discover project root (where pipeline state's tmp/ref/ lives).
 
-    Priority — designed so nested sessions running from scratch/loop-N/
-    resolve to the LOOP's state instead of the parent repo's stale state:
+    Priority — designed so nested sub-workspaces (any directory below the
+    Claude-Code-launched project that holds its own tmp/ref/) resolve to
+    the SUB-workspace's state instead of the parent repo's:
 
     1. If $CLAUDE_PROJECT_DIR is set AND cwd is INSIDE that env root,
        walk UP from cwd toward env_root looking for tmp/ref/ — the
-       CLOSEST ancestor wins. This is the scratch-loop fix: when the
-       Claude Code session is launched with `--plugin-dir <repo>` and
-       a sub-tool runs from `scratch/loop-N/impl/`, the walk finds
-       `scratch/loop-N/tmp/ref/` BEFORE `<repo>/tmp/ref/` and returns
-       the loop root, so hooks see the actual loop state, not the
-       repo's stale copy.
+       CLOSEST ancestor wins. When a sub-tool runs from a nested impl
+       workspace (e.g. <env_root>/<subdir>/impl/), the walk finds
+       <env_root>/<subdir>/tmp/ref/ BEFORE <env_root>/tmp/ref/ and
+       returns the sub-workspace, so hooks see the actual current
+       state, not the parent's stale copy.
        If no ancestor in that chain has tmp/ref/, fall back to env_root.
     2. If $CLAUDE_PROJECT_DIR is set AND cwd is OUTSIDE env_root,
        return env_root directly — preserves test fixtures that point
@@ -68,10 +68,9 @@ def find_project_root() -> Path:
     4. Free cwd walk — any ancestor with tmp/ref/.
     5. cwd fallback.
 
-    Without this ordering, external diagnoses of audit incident / audit incident /
-    audit incident traced "passed but actually broken" Stop-hook decisions
-    to env_root preempting the cwd walk: pipeline-state.json sat at
-    scratch/loop-N/tmp/ref/ but the Stop hook read repo-root state.
+    Without this ordering, env_root would preempt the cwd walk and
+    Stop-hook decisions would read parent-repo state while a sub-
+    workspace's pipeline-state.json holds the actual current state.
     """
     global _cached_project_root
 
@@ -92,7 +91,7 @@ def find_project_root() -> Path:
                 cwd_inside_env = False
             if cwd_inside_env:
                 # Walk cwd UP to (and including) env_path looking for tmp/ref/.
-                # Closest ancestor wins — picks scratch/loop-N over the parent repo.
+                # Closest ancestor with tmp/ref/ wins — sub-workspace beats parent repo.
                 cur = cwd
                 while True:
                     if (cur / "tmp" / "ref").is_dir():
@@ -341,8 +340,8 @@ def is_ad_hoc_ref_artifact(file_path: str) -> tuple[bool, str]:
 
     The allowlist intentionally matches every parent path that ends in
     `tmp/ref/<dirname>/` so it catches both project-local
-    (`./tmp/ref/realfood/sections.json`) and home-directory
-    (`~/tmp/ref/realfood-main/sections.json`) shortcut paths — both have
+    (`./tmp/ref/<component>/sections.json`) and home-directory
+    (`~/tmp/ref/<component>/sections.json`) shortcut paths — both have
     been observed in nested fresh-prompt runs.
     """
     if not file_path or not file_path.endswith(".json"):

@@ -151,9 +151,58 @@ ANALYSIS_JS='(() => {
   });
   let visibleTextNodes = 0;
   while (visTw.nextNode()) visibleTextNodes++;
-  // Codex universality audit: section count selector was too narrow
-  // (semantic-only). Add nav/aside/header/footer plus large container
-  // div fallback when semantic count < 3 (NAVER-style div layouts).
+  // Opaque-overlay detection (codex follow-up review 2026-05-24).
+  // L64 surfaced "splash class preserved + styled but rendering as opaque
+  // overlay covering everything" — class-signature gates pass, visual is
+  // a solid color. Find fixed/absolute elements with high z-index,
+  // covering >= 70% of viewport, opaque background, no media descendants.
+  // If present, the page is rendering through a visual blocker.
+  let opaqueOverlayCount = 0;
+  let opaqueOverlaySample = [];
+  const Z_FLOOR = 50;
+  const VIEWPORT_FRACTION_FLOOR = 0.7;
+  document.querySelectorAll("*").forEach((el) => {
+    const cs = getComputedStyle(el);
+    const pos = cs.position;
+    if (pos !== "fixed" && pos !== "absolute") return;
+    const z = parseInt(cs.zIndex || "0", 10);
+    if (!Number.isFinite(z) || z < Z_FLOOR) return;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return;
+    const area = r.width * r.height;
+    if (vw === 0 || area / vw < VIEWPORT_FRACTION_FLOOR) return;
+    // Check opacity: own opacity * computed alpha of background-color
+    const ownOpacity = parseFloat(cs.opacity || "1");
+    if (ownOpacity < 0.85) return;
+    const bgc = cs.backgroundColor || "";
+    // Reject transparent backgrounds (they do not occlude)
+    const rgbaMatch = bgc.match(/rgba?\(([^)]+)\)/i);
+    let alpha = 1;
+    if (rgbaMatch) {
+      const parts = rgbaMatch[1].split(",").map(s => s.trim());
+      if (parts.length === 4) alpha = parseFloat(parts[3]);
+    } else if (bgc === "" || bgc === "transparent" || bgc === "rgba(0, 0, 0, 0)") {
+      alpha = 0;
+    }
+    if (alpha < 0.85) return;
+    // Reject if it contains media (real content, not overlay)
+    if (el.querySelector("video, canvas, img, picture, iframe")) return;
+    opaqueOverlayCount++;
+    if (opaqueOverlaySample.length < 5) {
+      opaqueOverlaySample.push({
+        tag: el.tagName.toLowerCase(),
+        id: (el.id || "").slice(0, 40),
+        cls: String(el.className || "").slice(0, 80),
+        zIndex: z,
+        viewportFraction: Math.round((area / vw) * 1000) / 1000,
+        bgc: bgc.slice(0, 60),
+        opacity: ownOpacity,
+      });
+    }
+  });
+  // Universality fix: section count selector was too narrow (semantic-
+  // only). Add nav/aside/header/footer plus large container div fallback
+  // when semantic count < 3 (div-only layouts with no semantic tags).
   const semSecSel = "main,section,header,footer,article,nav,aside,[role=region],[role=banner],[role=contentinfo]";
   let semSec = [...document.querySelectorAll(semSecSel)];
   if (semSec.length < 3) {
@@ -177,6 +226,8 @@ ANALYSIS_JS='(() => {
     maxElementSrc: maxSrc.slice(0, 200),
     lottieMounted,
     sectionCount: semSec.length,
+    opaqueOverlayCount,
+    opaqueOverlaySample,
   });
 })()'
 
@@ -342,6 +393,61 @@ if "error" not in ref_data and "error" not in impl_data:
                 ),
             })
 
+    # Opaque-overlay occlusion (codex follow-up review 2026-05-24).
+    # L64 root cause: splash classes were preserved + styled (class-sig
+    # gates passed) but rendered as opaque div covering the viewport →
+    # visual = solid color despite metrics looking healthy. Pair the
+    # browser-eval count with a corroborator (impl text dropout vs ref)
+    # so we don't false-positive on intentional modals / cookie banners.
+    impl_overlay_count = int(impl_data.get("opaqueOverlayCount") or 0)
+    if impl_overlay_count > 0:
+        ref_overlay_count = int(ref_data.get("opaqueOverlayCount") or 0)
+        # Corroborate by checking whether impl text density is well
+        # below ref. An overlay is "blocking content" if ref has lots
+        # of visible text and impl has near-none.
+        ref_visible_text = int(
+            ref_data.get("visibleTextNodeCount")
+            or ref_data.get("textNodeCount")
+            or 0
+        )
+        impl_visible_text = int(
+            impl_data.get("visibleTextNodeCount")
+            or impl_data.get("textNodeCount")
+            or 0
+        )
+        text_dropout_severe = (
+            ref_visible_text >= 30
+            and impl_visible_text < ref_visible_text * 0.4
+        )
+        # Or: impl has overlay but ref has zero (asymmetric — impl
+        # invented a blocker the ref doesn't have)
+        asymmetric = impl_overlay_count > 0 and ref_overlay_count == 0
+        if text_dropout_severe or asymmetric:
+            violations.append({
+                "kind": "opaque-overlay-occludes-content",
+                "implOverlayCount": impl_overlay_count,
+                "refOverlayCount": ref_overlay_count,
+                "implVisibleText": impl_visible_text,
+                "refVisibleText": ref_visible_text,
+                "sample": impl_data.get("opaqueOverlaySample", []),
+                "corroboration": {
+                    "textDropoutSevere": text_dropout_severe,
+                    "asymmetricVsRef": asymmetric,
+                },
+                "detail": (
+                    f"impl renders {impl_overlay_count} opaque overlay(s) "
+                    f"(position:fixed/absolute, z-index>=50, >=70% of viewport, "
+                    f"opacity>=0.85, no media descendants). "
+                    + (
+                        f"Ref has none — impl invented a blocker. "
+                        if asymmetric
+                        else f"Ref visible text={ref_visible_text}, impl visible text={impl_visible_text} (<40% of ref). "
+                    )
+                    + "L64 pattern: class signatures preserved + styled but "
+                    "the splash/intro overlay covers content. Sample below."
+                ),
+            })
+
 
 status = "fail" if violations else "pass"
 result = {
@@ -354,11 +460,13 @@ result = {
     "implMetrics": impl_data,
     "violations": violations,
     "rule": (
-        "Impl runtime DOM must match ref runtime DOM along four axes: "
+        "Impl runtime DOM must match ref runtime DOM along five axes: "
         "(1) node count within ±30%, (2) >= max(10, sectionCount*2) "
         "visible text nodes, (3) no single image/video/background element "
         "covering >90% of viewport, (4) >= 1 Lottie container mounted when "
-        "ref shows Lottie evidence."
+        "ref shows Lottie evidence, (5) no opaque fixed/absolute overlay "
+        "(z-index>=50, >=70% viewport, opacity>=0.85, no media descendants) "
+        "occluding content (corroborated by impl-text-dropout or ref-has-none-impl-has-some)."
     ),
 }
 

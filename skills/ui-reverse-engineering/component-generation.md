@@ -20,11 +20,13 @@
 >
 > 9. **Never ship a whole-document static/proxy mirror.** Do not save `document.documentElement.outerHTML`, `document.body.innerHTML`, `live.html`, or `original.html` as `impl/index.html`, and do not make `server.js` proxy/cache the original upstream HTML, RSC payloads, or `_next` chunks. A mirrored runtime can look perfect while proving nothing about source implementation. If raw HTML is warranted, extract and render per-section HTML inside components, preserve the runtime data/libraries, and still run `pipeline ... verify`.
 >
-> 10. **Downloaded assets must be rendered by components.** `asset-transfer: PASS` only proves files exist. If `asset-utilization.json` is missing or reports a low referenced/downloaded ratio, fix the JSX/CSS to use the transferred images, posters, videos, and Lottie JSON. Do not count a populated `public/` folder as visual fidelity.
+> 10. **Downloaded assets must be rendered by the right components.** `asset-transfer: PASS` only proves files exist, and `asset-utilization: PASS` only proves source references exist somewhere. Section fidelity requires placement: for every `visible-images.json` entry with `top`/`y`, map it through `section-map.json` and `component-map.json`, then render that asset in the mapped section component. `asset-placement-check.sh` fails when a file is referenced globally or in the wrong section.
 >
 > 11. **Hidden manifests are not rendered usage.** Do not add a hidden `reference-manifest`, `asset-manifest`, offscreen span bank, or JSON blob just to make source-string checks see image URLs, text, or motion selectors. The visible component tree must render those assets/text/motion; the gates now ignore/fail manifest-only usage.
 >
 > 12. **Motion checks must prove behavior, not strings.** `transition-spec-coverage: PASS` can only prove selectors/keywords are present. `spec-implementation-coverage.json`, `transition-compare` rows, `scroll-end-completion`, `reveal-trigger`, and Lottie runtime checks are the evidence that triggers, easing, scroll pinning, and playback actually run. Missing artifacts mean the implementation is still incomplete.
+>
+> 13. **Fix static visual layout before transition fidelity.** If `sections/result.txt` has `0 PASS`, `transition-compare` output is not actionable because there is no stable rendered baseline to measure motion deltas against. Restore section structure, assets, typography, and layout until section-compare has at least one passing section, then debug transition timing/easing.
 
 ## DOM-scaffold rule (HARD BLOCK — Fix 8)
 
@@ -60,7 +62,7 @@ The scaffold contains:
 
    Self-check after writing each component:
    - For every `text` in this section's scaffold subtree, does the component contain that string verbatim in a JSX text position?
-   - For every asset path in `visible-images.json` whose `top` falls within this section's bbox, does the component reference that path?
+   - For every asset path in `visible-images.json` whose `top` falls within this section's bbox, does this section component reference that path? Confirm with `asset-placement-check.sh`; global references in another component do not count.
    - If both pass and the component file is still <400 bytes, scaffold subtree was probably misread — re-inspect.
 
 4. **Group subtrees into Section components** using `sections[]` metadata (`top`, `height`, `class`). Each section becomes one component under `impl/src/components/<Name>.tsx`. Component count MUST match `sections.length`.

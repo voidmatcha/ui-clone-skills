@@ -264,7 +264,7 @@ Apply in order:
   "capturedAt": "<ISO timestamp>",
   "page": { "totalHeight": 14886, "viewportWidth": 1440, "viewportHeight": 900 },
   "scroll": [
-    { "name": "hero-zoom", "from": 0, "to": 1800, "selector": ".sticky-el", "bounds": { "x": 0, "width": 1440 }, "changedProperties": ["transform"], "triggerType": "scroll-driven" }
+    { "name": "hero-zoom", "from": 0, "to": 1800, "selector": ".sticky-el", "bounds": { "x": 0, "width": 1440 }, "changedProperties": ["transform"], "triggerType": "scroll-driven", "artifacts": { "before": "clip/ref/hero-zoom-before.png", "mid": "clip/ref/hero-zoom-mid.png", "after": "clip/ref/hero-zoom-after.png" } }
   ],
   "hover": [
     {
@@ -273,7 +273,11 @@ Apply in order:
       "y": 0,
       "bounds": { "x": 32, "width": 120, "height": 40 },
       "transitionDuration": "300ms",
-      "triggerType": "css-hover"
+      "triggerType": "css-hover",
+      "artifacts": {
+        "idle": "clip/ref/nav-link-idle.png",
+        "active": "clip/ref/nav-link-active.png"
+      }
     },
     {
       "name": "passion-card",
@@ -281,7 +285,11 @@ Apply in order:
       "y": 5400,
       "bounds": { "x": 510, "width": 420, "height": 450 },
       "transitionDuration": "750ms",
-      "triggerType": "intersection"
+      "triggerType": "intersection",
+      "artifacts": {
+        "before": "clip/ref/passion-card-before.png",
+        "after": "clip/ref/passion-card-after.png"
+      }
     },
     {
       "name": "flip-card",
@@ -290,7 +298,11 @@ Apply in order:
       "bounds": { "x": 605, "width": 230, "height": 230 },
       "transitionDuration": "600ms",
       "triggerType": "js-class",
-      "triggerClass": "flipped"
+      "triggerClass": "flipped",
+      "artifacts": {
+        "idle": "clip/ref/flip-card-idle.png",
+        "active": "clip/ref/flip-card-active.png"
+      }
     }
   ],
   "mousemove": [
@@ -299,7 +311,10 @@ Apply in order:
       "selector": ".playground section",
       "y": 10400,
       "bounds": { "x": 32, "width": 1376, "height": 900 },
-      "triggerType": "mousemove"
+      "triggerType": "mousemove",
+      "artifacts": {
+        "video": "transitions/ref/mousemove-icon-playground.mp4"
+      }
     }
   ],
   "timer": [
@@ -309,8 +324,15 @@ Apply in order:
       "y": 0,
       "bounds": { "x": 0, "width": 1440, "height": 600 },
       "triggerType": "auto-timer",
-      "interval_ms": 4000
+      "interval_ms": 4000,
+      "artifacts": {
+        "video": "transitions/ref/timer-hero-carousel.webm"
+      }
     }
   ]
 }
 ```
+
+Every entry with `triggerType` MUST include `artifacts`. These paths are the
+contract consumed by generation and verification; do not rely on filename
+conventions or infer files from the region name.

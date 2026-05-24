@@ -5,11 +5,11 @@
 # Usage:
 #   runtime-env-check.sh <ref-dir> <impl-root> <impl-url>
 #
-#
-#   codex-18 hit port-conflict: an orphan vite server from loop-codex-6
-#   was still serving :5179, so verification ran against the wrong
-#   impl. dom-mirror / section-compare reported failures that didn't
-#   reflect the current iteration's code.
+# Why this exists:
+#   Observed port-conflict failure mode: an orphan Vite dev server from a
+#   previous iteration kept serving the same port, so verification ran
+#   against the wrong impl. dom-mirror / section-compare then reported
+#   failures that didn't reflect the current iteration's code.
 #
 # What this gate catches:
 #   1. NODE_ENV=production while Vite dev server is running
@@ -62,7 +62,7 @@ elif [ -n "$PORT" ] && [ "$PORT" != "0" ] && [ "$PORT" != "443" ] && [ "$PORT" !
   # Only check local listening ports (skip remote https/http).
   SERVING_PID=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $2}')
   if [ -n "$SERVING_PID" ]; then
-    SERVING_CWD=$(lsof -p "$SERVING_PID" -d cwd -Fn 2>/dev/null | awk '/^n/ {print substr($0, 2); exit}')
+    SERVING_CWD=$(lsof -a -p "$SERVING_PID" -d cwd -Fn 2>/dev/null | awk '/^n/ {print substr($0, 2); exit}')
     if [ -n "$SERVING_CWD" ]; then
       # Resolve canonical paths for both sides before comparing
       REAL_CWD=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$SERVING_CWD" 2>/dev/null || echo "$SERVING_CWD")
@@ -71,6 +71,19 @@ elif [ -n "$PORT" ] && [ "$PORT" != "0" ] && [ "$PORT" != "443" ] && [ "$PORT" !
         PORT_OWNER_MISMATCH="true"
       fi
     fi
+  fi
+fi
+
+# ── Reachability probe ────────────────────────────────────────────────
+# If the URL is not even reachable (no one listening, DNS fail, etc.) the
+# downstream agent-browser eval can land on a stale tab from a prior open()
+# call and silently produce a misleading "pass". Cheap curl check first.
+URL_REACHABLE="true"
+URL_REACHABLE_DETAIL=""
+if command -v curl >/dev/null 2>&1; then
+  if ! curl -o /dev/null -s --max-time 5 --connect-timeout 3 "$IMPL_URL" 2>/dev/null; then
+    URL_REACHABLE="false"
+    URL_REACHABLE_DETAIL="curl could not establish a connection within 3s"
   fi
 fi
 
@@ -101,7 +114,7 @@ agent-browser --session "$SESSION" eval '
 })()
 ' > "$PROBE_RAW" 2>/dev/null || true
 
-python3 - "$OUT" "$PROBE_RAW" "$IMPL_URL" "$IMPL_ROOT" "$PORT_OWNER_MISMATCH" "${SERVING_PID:-}" "${SERVING_CWD:-}" <<'PY'
+python3 - "$OUT" "$PROBE_RAW" "$IMPL_URL" "$IMPL_ROOT" "$PORT_OWNER_MISMATCH" "${SERVING_PID:-}" "${SERVING_CWD:-}" "$URL_REACHABLE" "$URL_REACHABLE_DETAIL" <<'PY'
 from __future__ import annotations
 
 import json
@@ -109,7 +122,8 @@ import sys
 from pathlib import Path
 
 (out_path, probe_raw, impl_url, impl_root,
- port_mismatch, serving_pid, serving_cwd) = sys.argv[1:8]
+ port_mismatch, serving_pid, serving_cwd,
+ url_reachable, url_reachable_detail) = sys.argv[1:10]
 
 def read_probe(path: str) -> dict:
     try:
@@ -118,7 +132,9 @@ def read_probe(path: str) -> dict:
         return {"error": "probe-missing"}
     for line in reversed(text.strip().splitlines()):
         s = line.strip()
-        if not s.startswith("{"):
+        # agent-browser wraps JSON.stringify return values in another JSON
+        # layer (string-quoted), so the probe output may start with `"`.
+        if not (s.startswith("{") or s.startswith('"')):
             continue
         try:
             value = json.loads(s)
@@ -148,6 +164,20 @@ if port_diag["mismatch"]:
         "Likely an orphan dev server from a previous loop. Kill it before "
         "running verification (`lsof -nP -iTCP:<port> -sTCP:LISTEN | "
         "awk 'NR>1 {print $2}' | xargs kill`)."
+    )
+
+# ── Reachability check ─────────────────────────────────────────────
+# If the URL didn't respond to a 3-second curl, the runtime probe is
+# unreliable (agent-browser may eval against a stale tab from a prior
+# open() call). Surface this as a hard failure — downstream gates that
+# depend on runtime-env will skip rather than run against garbage.
+if url_reachable != "true":
+    reasons.append(
+        f"impl-url {impl_url!r} is not reachable "
+        f"({url_reachable_detail or 'connection failed'}). "
+        "Start the dev server bound to the expected port before running "
+        "the runtime gate. Without a reachable URL the downstream runtime "
+        "probe is unreliable and may silently produce a misleading 'pass'."
     )
 
 # ── Runtime probe diagnosis ────────────────────────────────────────

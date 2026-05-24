@@ -24,7 +24,8 @@
 #        like 200ms, 300ms, 500ms when ref has no signal for that
 #        element).
 #   4. FAIL when impl uses non-allowlisted duration/easing not in
-#      ref data. The failing values are likely "뇌피셜" picks.
+#      ref data. The failing values are likely freehand/guessed picks
+#      ungrounded in the reference.
 #
 # Skips when:
 #   - ref has no transition-spec entries with timing

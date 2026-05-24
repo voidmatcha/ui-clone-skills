@@ -22,11 +22,11 @@ set -euo pipefail
 REF_DIR=""
 IMPL_DIR=""
 OUT_PATH=""
-# 17-iteration measurement (2026-05-22): every codex/claude clone of
-# realfood.gov produces 80%+ tag-multiset divergence because LLMs
-# abstract the ref's deeply-nested obfuscated div soup (15+ wrapper
-# levels of `dga_X__Y` classes, ~1063 DOM nodes) into clean React
-# components (~200 nodes). 30% was unreachable in practice. Raise to
+# Observed across multiple benchmark iterations: clones of sites with
+# deeply-nested obfuscated div-soup (15+ wrapper levels of opaque hashed
+# classes, ~1000+ DOM nodes) produce 80%+ tag-multiset divergence
+# because LLMs abstract that markup into clean React components
+# (~200 nodes). A 30% threshold was unreachable in practice. Raise to
 # 80% so the gate only fires on genuine evisceration (impl dropping
 # 90%+ of ref tags), and route hero composite structure check to a
 # dedicated hero-composite-check.sh instead. UI_CLONE_DOM_MIRROR_THRESHOLD
@@ -152,9 +152,9 @@ if not impl_components:
     sys.exit(0)
 
 
-# Common cheat pattern (loop-60 finding #1): React `.map()` /
-# `.forEach()` / `.flatMap()` over arrays of repeated data
-# (38 pyramid items, 8 FAQ rows, manifesto word-spans) renders
+# Common cheat pattern: React `.map()` / `.forEach()` / `.flatMap()`
+# over arrays of repeated data (e.g. many pyramid items, FAQ rows,
+# word-spans) renders
 # many runtime DOM tags from FEW static JSX tags. Static-grep
 # would say "ref has 38 <li>, impl has 1 <li>" → false fail.
 # Track which tags appear INSIDE iteration callbacks so the

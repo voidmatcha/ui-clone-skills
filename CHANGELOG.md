@@ -1,5 +1,127 @@
 # Changelog
 
+## [0.6.0] - 2026-05-24
+
+Section-staged convergence release: a separate closeout proof for plans that
+opt into structural section convergence (canonical verify-stamp.json untouched),
+plus a wave of "stop the loop from running forever" fixes — terminal state
+written to disk instead of inferred from a banner, abort cards no longer
+contradict themselves with a runnable "Next action", and concurrent driver
+sessions stop stomping each other's bypass marker. Net effect: previously
+human-driven termination decisions (record-unclonable, switch to next URL)
+now ride the same persisted state every consumer reads, and validation loops
+self-terminate at the hard cap instead of needing a typed `stop`.
+
+Bumped MINOR (not patch) because the release adds new public surface: a new
+importable / CLI module (`ui_clone.driver_session`), a new field on the
+`pipeline-state.json` wire format (`closeoutPolicy`), a new convergence
+detector with its own artifact type (`structural-convergence-stamp.json`),
+and new operator shell entry points. Pre-1.0 semver keeps the contract
+advisory, but each item individually justifies a minor signal to downstream
+consumers (Claude marketplace, codex plugin marketplace).
+
+### Added
+
+- **`scripts/verify/check-converged.sh`** — canonical section-convergence
+  detector (Stage 0). Reads `tmp/ref/<comp>/sections/result.txt`'s last
+  `**Result: ...**` line, exits `0` iff `0 FAIL` (STRUCTURAL_ONLY counted as
+  PASS, SKIP non-gating). Accepts both 4-field and 3-field Result formats so
+  Stage B early-exits (e.g. linear.app fingerprint extraction returning 0
+  matching sections) don't trip a setup-error exit. `--write-stamp` flag
+  emits `structural-convergence-stamp.json` with canonical fields the
+  Stop hook validates.
+- **`scripts/loop/{launch,finalize}-stage.sh`** — pure-function translators
+  between stage labels {A,B,C,D} and the shell commands an operator copy-pastes
+  to start / finalize one loop tab. Resolves plugin_root from
+  `PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` / `CODEX_PLUGIN_ROOT` with a
+  script-relative fallback (no hardcoded paths per
+  `scripts/ci/check-universality.sh`).
+- **`PipelineState.closeout_policy`** — `canonical` (default, existing
+  verify-stamp.json path) or `structural` (Stop satisfied by
+  `structural-convergence-stamp.json` instead). The two stamps are never
+  interchangeable; the policy decides which writer counts.
+  `_enforce_ref_dir()` routes to `_enforce_structural_convergence_stamp()`
+  when the policy is `structural`. Codex architectural review explicitly
+  rejected scope-reducing verify-stamp.json (option A, breaks 15+ consumers)
+  and a state-only graceful mode (option B, forgeable past Stop's freshness
+  + canonical-writer signatures) in favor of this separate-artifact route.
+- **`ui_clone.hooks.section_gate._enforce_structural_convergence_stamp`** —
+  Stop-hook enforcer for the new structural closeout path. Same anti-cheat
+  invariants as the canonical verify-stamp enforcer (fresh stamp, canonical
+  writer (`scripts/verify/check-converged.sh`), impl files no newer than the
+  stamp, sha256 of `sections/result.txt` matches what was stamped). The
+  result.txt rehash specifically blocks the "stamp while converged, then
+  edit result.txt to claim more PASS rows" cheat. `_enforce_ref_dir()`
+  routes between the canonical and structural enforcers based on
+  `closeout_policy`.
+- **`ui_clone.driver_session`** — append-if-missing writer for
+  `.driver-session.id`. `register(session_id, project_root)` and
+  `register_from_env(project_root)` hold `fcntl.flock(LOCK_EX)` on a sibling
+  `.lock` file for the entire read-modify-write so two concurrent driver
+  sessions don't stomp each other's IDs. Atomic rename alone (the manual
+  `echo > .driver-session.id` pattern) has a TOCTOU window the lock closes.
+  CLI: `python -m ui_clone.driver_session register <id>` and
+  `register-from-env`. Shell shim at `scripts/register-driver-session.sh`.
+
+### Changed
+
+- **`state.PipelineState.mark_failed`** — when the per-gate consecutive-fail
+  counter crosses `HARD_CAP_GATE_FAILS` (= 10), the state automatically
+  records a canonical `category="hard-cap-fail"` entry into
+  `unclonable_reasons`. Closes the gap that left `goal.py` rendering an
+  `abort_banner` while `pipeline-state.json` had no canonical reason: the
+  Stop hook re-enforced the failing gate forever because it only releases
+  on canonical unclonable reasons. Observed before the fix: a benchmark
+  target reached 97 consecutive `post-implement` failures and another hit 6
+  without any of them triggering Stop bypass — a human had to type `stop`
+  / `record unclonable` to terminate. Now: one persisted source of truth
+  (Stop hook, goal card, `--check-done` exit code, benchmark harness all
+  read the same state). `HARD_CAP_GATE_FAILS` re-exported from `goal.py` as
+  `_MAX_GATE_FAILS` for `benchmark_harness` back-compat.
+- **`goal.build_goal_card`** — when `abort_banner` is active, the rendered
+  text card suppresses the runnable block (Mission / Current goal /
+  Next action / Stop condition / Required evidence / No infinite loop) and
+  emits only the abort reason + an explicit "Terminal state" notice +
+  current_gate + manual_refresh. The driving LLM observed prioritizing
+  "Next action" over "ABORT" in the same card, producing the 97-fail / 6-fail
+  runaways even with the abort banner firing every cycle. JSON drivers
+  (`to_json`) unchanged — programmatic consumers still see the full
+  structured fields; the contradiction is removed from text rendering only.
+- **`skills/visual-debug/scripts/build-decode-receipt.sh`** — receipt now
+  surfaces the structural-convergence stamp alongside the canonical verify
+  artifact so the decode receipt accurately reflects either closeout mode.
+
+### Fixed
+
+- **`scripts/hooks/pre-push-guard.sh`** — the skills/-policy reject branch
+  was writing its block message to stdout while every other reject branch
+  used `>&2`. Claude Code's PreToolUse hook harness only surfaces stderr,
+  so this one branch produced an opaque "No stderr output" failure that
+  burned debug iterations. All `echo` calls in this branch now route to
+  stderr and explicitly tell the operator what to do (bump CHANGELOG +
+  3 manifests, or revert the incidental skills/ change).
+- **`tests/test_check_converged.py`** — `_read_stamp` was returning the raw
+  `json.loads` result against a `dict` annotation, producing
+  `[no-any-return]` from mypy. Cast through `dict[str, Any]` so the
+  function returns a concrete typed shape and `scripts/ci/ci-local.sh`
+  passes cleanly.
+
+### Operational notes
+
+- Stop-hook driver-session bypass marker is now multi-line by design (the
+  reader was already set-based as of `c98da29`; this release wires the
+  matching writer). If operators were manually managing `.driver-session.id`
+  via `echo >`, prefer the helper script going forward — concurrent driver
+  sessions starting roughly together would otherwise still race.
+- `closeout_policy` is omitted from `pipeline-state.json` when the value
+  equals the default (`canonical`) so legacy state files stay diff-clean.
+  Plans that opt in write `closeoutPolicy=structural` and reload preserves it.
+
+Version bumped 0.5.1 → 0.6.0 across `.claude-plugin/plugin.json`,
+`.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`,
+`pyproject.toml`, and `ui_clone/__init__.py` per the
+`scripts/hooks/pre-push-guard.sh` version-sync rule.
+
 ## [0.5.1] - 2026-05-22
 
 Baseline-clearing patch released ahead of the deferred-refactor sweep (HANDOVER.md items 1-6). Three blockers were flagged by `scripts/ci/ci-local.sh` against the v0.5.0 working tree and are cleared here so the refactor commits land on a green baseline:

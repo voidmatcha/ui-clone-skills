@@ -177,17 +177,17 @@ agent-browser --session <project-name> eval "
   const semanticRoles = new Set(['region', 'main', 'banner', 'contentinfo', 'navigation']);
   const containers = [];
 
-  // Codex universality audit FN + loop-59 root-cause: prior version
-  // stopped recursing when a div had no semantic children. NAVER-style
-  // sites where <main> contains nothing but <div class="dga_*"> sub-
-  // sections produced only 2 sections (main + footer) for a 21k-tall
-  // page. Two recursion triggers added:
+  // Universality fix: a prior version stopped recursing when a div had
+  // no semantic children. Sites where `<main>` contains nothing but
+  // `<div>`s with opaque hashed classes (no `<section>` / `<article>` /
+  // role="region") produced only 2 sections (main + footer) for a
+  // 21k-tall page. Two recursion triggers added:
   //   1. Semantic containers taller than 2× viewport are decomposed
   //      instead of being added wholesale — they're almost certainly
   //      wrapping the page-scrolled content.
   //   2. Div containers with >= 2 large div children (each >= 50% of
   //      viewport height) recurse even without semantic children —
-  //      catches the dga_* sibling pattern.
+  //      catches the opaque-hashed-class sibling pattern.
   const VIEWPORT_H = window.innerHeight || 800;
   const LARGE_DIV_H = Math.min(VIEWPORT_H * 0.5, 600);
   function collectSections(parent, depth = 0) {
@@ -216,7 +216,7 @@ agent-browser --session <project-name> eval "
         if (hasSemanticChildren) {
           collectSections(el, depth + 1);
         } else if (bigDivChildren.length >= 2) {
-          // Multi-sub-container div (NAVER dga_* pattern) — descend.
+          // Multi-sub-container div (opaque hashed-class section pattern) — descend.
           collectSections(el, depth + 1);
         } else if (h > Math.min(VIEWPORT_H * 0.25, 400)) {
           containers.push(el);

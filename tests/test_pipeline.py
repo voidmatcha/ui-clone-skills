@@ -653,10 +653,24 @@ class TestDagDepsCoverage:
         for targets in dag.DEPS.values():
             all_artifacts.update(targets)
 
-        # Read gate.py source and check each artifact appears somewhere
+        # Walk Gate's bound methods (post-Item-5 refactor: methods live in
+        # ui_clone/gates/*.py and are rebound onto Gate via __init__.py, so
+        # `inspect.getsource(Gate)` returns only the base class body —
+        # walking methods explicitly captures the per-module sources too).
         import inspect
 
-        source = inspect.getsource(Gate)
+        sources: list[str] = [inspect.getsource(Gate)]
+        for name in dir(Gate):
+            if not (name.startswith("gate_") or name.startswith("_check_")):
+                continue
+            attr = getattr(Gate, name, None)
+            if attr is None or not callable(attr):
+                continue
+            try:
+                sources.append(inspect.getsource(attr))
+            except (OSError, TypeError):
+                continue
+        source = "\n".join(sources)
 
         missing = []
         for artifact in all_artifacts:

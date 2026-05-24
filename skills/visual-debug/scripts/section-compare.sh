@@ -202,8 +202,8 @@ SUBSTITUTION_PATTERNS=""
 SUBSTITUTION_ALL=0
 SUBSTITUTION_AUTO=0    # 1 if structuralOnlySections was auto-defaulted
 if [ -f "$SUBSTITUTION_FILE" ]; then
-  # Observed failure mode (benchmark 4-run baseline, realfood.gov): the agent
-  # writes asset-substitution.json with only `fonts`/`images` declared and
+  # Observed failure mode across benchmark baselines: the agent writes
+  # asset-substitution.json with only `fonts`/`images` declared and
   # forgets the `structuralOnlySections` key — which is the actual toggle for
   # structural-only mode. Result: pixel diff still runs strict on every
   # section, AE explodes to 1M+, gate never clears. Forgiving fallback: when
@@ -827,12 +827,12 @@ ENUMERATE_SECTIONS='(() => {
 agent-browser --session "$SESSION_REF" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/ref-sections.json" 2>&1
 agent-browser --session "$SESSION_IMPL" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/impl-sections.json" 2>&1
 
-# section-map.json ground truth — d19e28d benchmark exposed this gap:
+# section-map.json ground truth — observed benchmark gap:
 # the runtime ENUMERATE_SECTIONS JS above descends `<main>` only when its
-# children include `<section>` or `<main>` (line 709-712). realfood.gov's
-# ref `<main>` contains `<div>` children → enumeration collapses 15 visible
-# sections into a single "section-0" container. result.txt then only carries
-# 2 rows (section-0 + footer) — 14 sections never compared at all.
+# children include `<section>` or `<main>` (line 709-712). When the ref's
+# `<main>` contains only `<div>` children, enumeration collapses many
+# visible sections into a single "section-0" container. result.txt then
+# only carries 2 rows (section-0 + footer) — the rest never compared at all.
 #
 # extraction-time section-map.json already records 16 sections with their
 # semantic tags + selectors (its tag-attribution is best-effort but its
@@ -1007,7 +1007,7 @@ _GENERIC_TAG_TOKENS = {'section', 'header', 'footer', 'article', 'aside', 'main'
 def norm_key(s):
     raw = ' '.join(str(s.get(k) or '') for k in ('id', 'tag', 'className'))
     tokens = [t for t in ''.join(c if c.isalnum() else ' ' for c in raw.lower()).split() if len(t) >= 4]
-    # validation run finding: generic HTML5 sectioning tags (section, footer,
+    # Observed pairing-collapse failure: generic HTML5 sectioning tags (section, footer,
     # main, header, ...) appear in BOTH the tag string and many className
     # strings (Tailwind utilities, BEM, CSS-Modules). When they are treated as
     # identity tokens, every section element overlaps with every section element

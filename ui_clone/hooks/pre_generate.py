@@ -115,21 +115,13 @@ def main() -> None:
     ref_dir = _find_ref_dir(search_root)
 
     # No ref dir → either (a) not a ui-re project (legitimate exit
-    # silently) or (b) the entry-bypass exposed by validation run:
-    # agent writes directly to scratch/loop-N/impl/src/ without ever
-    # running extraction, so no tmp/ref/<c> exists to gate against.
-    # Distinguish the two by inspecting the file path being edited.
+    # silently) or (b) the entry-bypass: agent writes directly to
+    # impl/src/ without ever running extraction, so no tmp/ref/<c>
+    # exists to gate against. Detect (b) by checking that the project
+    # carries the ui-reverse-engineering SKILL.md AND the file is in an
+    # impl/src or impl/app dir.
     if ref_dir is None:
         fp_str = str(Path(file_path).resolve()) if file_path else ""
-        # Heuristic markers of a ui-clone-skills validation run:
-        #   - file is under a scratch/loop-* path AND inside an impl/
-        #     subdirectory (validation loop convention)
-        #   - OR the project has the ui-reverse-engineering SKILL.md
-        #     AND the file is under any impl/src or impl/app dir
-        is_scratch_loop_impl = (
-            "/scratch/loop-" in fp_str
-            and "/impl/" in fp_str
-        )
         ui_re_skill = (
             project_root
             / "skills"
@@ -140,7 +132,7 @@ def main() -> None:
             ui_re_skill.is_file()
             and ("/impl/src/" in fp_str or "/impl/app/" in fp_str)
         )
-        if is_scratch_loop_impl or is_ui_re_impl:
+        if is_ui_re_impl:
             _emit_block(
                 "UI Reverse Engineering: impl-side write detected but "
                 "NO tmp/ref/<component> directory exists. The pipeline "

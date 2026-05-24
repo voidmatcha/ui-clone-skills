@@ -106,7 +106,7 @@ Never omit, downgrade, or coarsen a detected feature in the plan to avoid a down
 
 Detection artifacts (`stickyElements`, `scrollEngine`, `interactionsDetected`, `paid_features_detected`) define the verification surface. Omitting from spec/plan is treated as a gate failure equivalent to having no plan at all. If a detected feature genuinely doesn't need a verification (e.g. the sticky element is a footer copyright bar with no inner motion), document the reason in `notes[]` on the plan entry — do NOT silently drop it.
 
-## Asset substitution validation (loop-37 fix)
+## Asset substitution validation
 
 When the enrichment encounters an existing `asset-substitution.json` with `images[]` entries, validate them:
 

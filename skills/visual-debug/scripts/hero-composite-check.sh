@@ -159,8 +159,8 @@ def collect_hero_subtrees(node, hits=None):
     """Collect EVERY node whose class/id contains 'hero'. Critical:
     ref hero composites often split the visible section and its
     background-video container into SIBLING elements (e.g.
-    `<section class="dga_hero__X">` next to
-    `<div class="dga_hero_video__Y">` — the video is NOT a descendant
+    `<section class="prefix_hero__X">` next to
+    `<div class="prefix_hero_video__Y">` — the video is NOT a descendant
     of the section). A single-node hero-finder misses the video. We
     collect every hero-named subtree and treat the union as the
     composite for kind-presence checks.

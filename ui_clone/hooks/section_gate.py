@@ -27,6 +27,62 @@ from ui_clone.state import GATE_ORDER, PipelineState
 _DEFAULT_STALE_DAYS = 3
 
 
+def _is_driver_session(project_root: Path, session_id_from_payload: str = "") -> bool:
+    """Driver-session bypass — release Stop unconditionally when the current
+    Claude Code session is registered as a loop driver for this repo.
+
+    Why this exists:
+      A maintainer driver session in this repo monitors parallel
+      benchmark / sub-workspace sessions (each in their own tab with
+      their own session id). When a sub-workspace creates impl/ at
+      `<repo>/scratch/<dir>/impl/`, the Stop hook's search_root walk
+      finds that ref dir as "active" and fires on the driver's response.
+      The driver itself never claims to clone anything, so verify-stamp
+      enforcement is a category mismatch.
+
+    Activation:
+      1. Marker file <project_root>/.driver-session.id exists, AND
+      2. Its content matches the active session id. We check, in order:
+           (a) `session_id_from_payload` — the `session_id` field on the
+               Claude Code hook JSON stdin payload (canonical),
+           (b) `os.environ.get("CLAUDE_CODE_SESSION_ID")` — fallback for
+               hosts that propagate session-id via env instead of stdin
+               (e.g. direct CLI invocation in tests).
+
+    Production users never create the marker, so the gate works as before.
+    Child sessions spawned by the driver have their own session_id; even
+    if they could read the marker, no match → gate fires for them as
+    expected.
+
+    The marker is local-only state (gitignored). Register via
+    `bash scripts/register-driver-session.sh` or
+    `python -m ui_clone.driver_session register <id>` — both use the
+    append-if-missing writer in `ui_clone.driver_session` which holds
+    `fcntl.flock` across the read-modify-write so concurrent driver
+    sessions don't stomp each other. Manual `echo > .driver-session.id`
+    is single-writer and was the source of the 2026-05-24 multi-driver
+    stomping incident.
+    """
+    marker = project_root / ".driver-session.id"
+    if not marker.is_file():
+        return False
+    try:
+        recorded_ids = {
+            line.strip()
+            for line in marker.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+    except OSError:
+        return False
+    if not recorded_ids:
+        return False
+    candidates = [
+        session_id_from_payload.strip(),
+        os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip(),
+    ]
+    return any(c in recorded_ids for c in candidates if c)
+
+
 def _get_stale_seconds() -> float:
     """Return stale threshold in seconds. Overridable via UI_RE_STALE_DAYS env var."""
     try:
@@ -40,7 +96,7 @@ def _resolve_impl_dir(ref_dir: Path, fallback_root: Path | None = None) -> Path 
     """Resolve the impl/ directory for `ref_dir`, preferring the per-ref-dir
     `impl_root` recorded in pipeline-state.json.
 
-    Loop-61 architectural diagnosis (closure of the false-positive cascade):
+    False-positive cascade closure:
     `ref_dir.parent.parent.parent / "impl"` and `project_root / "impl"` both
     assume one canonical impl/ per project. When a stray `<repo>/impl`
     symlink lives at the repo root (rogue subagent state, a hand-symlink, a
@@ -50,7 +106,7 @@ def _resolve_impl_dir(ref_dir: Path, fallback_root: Path | None = None) -> Path 
     are written at Phase 1 start, the resolver can be precise per ref dir.
 
     Priority order:
-    1. UI_CLONE_IMPL_ROOT env (operator override / nested-loop testing)
+    1. UI_CLONE_IMPL_ROOT env (operator override / sub-workspace testing)
     2. `pipeline-state.json` → `impl_root` (set by Phase 1 of the pipeline)
     3. `<ref_dir>/.impl-root` marker file (set alongside the state field)
     4. Fallback to the convention path (`<fallback_root or repo>/impl`)
@@ -95,6 +151,20 @@ def _resolve_impl_dir(ref_dir: Path, fallback_root: Path | None = None) -> Path 
     # (tmp/ref/<c>/.. = tmp/ref/.. = tmp/.. = <project-root>).
     try:
         candidates.append(ref_dir.parent.parent.parent / "impl")
+    except (IndexError, OSError):
+        pass
+    # Sub-workspace fallback: an agent may write `<repo>/scratch/<name>/impl/`
+    # and `<repo>/tmp/ref/<name>/` as siblings but never set `.impl-root`
+    # or `pipeline-state.impl_root`. The legacy `<repo>/impl` fallback
+    # doesn't exist in that layout, so the resolver returns None and the
+    # Stop hook's verify-stamp gate silently skips this ref dir. The
+    # agent then declares success on build/render alone.
+    # Heuristic: when ref dir lives at `<repo>/tmp/ref/<name>/`, also
+    # try `<repo>/scratch/<name>/impl/`. This recovers the linkage
+    # without trusting the agent to write the marker.
+    try:
+        repo = ref_dir.parent.parent.parent  # tmp/ref/<c>/ → <repo>
+        candidates.append(repo / "scratch" / ref_dir.name / "impl")
     except (IndexError, OSError):
         pass
     for cand in candidates:
@@ -287,12 +357,11 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     Only fires when impl/ exists (post-generation). Pre-generation
     loops are governed by the regular current_gate enforcement.
     """
-    # impl/ is resolved via the per-ref-dir impl_root field (loop-61
-    # architectural fix). The legacy ref_dir.parent.parent.parent / "impl"
-    # walk is kept as a fallback inside _resolve_impl_dir for ref dirs that
-    # predate the field, but the prior single-impl-per-project assumption
-    # no longer false-positives every ref dir when a rogue <repo>/impl
-    # symlink exists.
+    # impl/ is resolved via the per-ref-dir impl_root field. The legacy
+    # ref_dir.parent.parent.parent / "impl" walk is kept as a fallback
+    # inside _resolve_impl_dir for ref dirs that predate the field, but
+    # the prior single-impl-per-project assumption no longer false-
+    # positives every ref dir when a rogue <repo>/impl symlink exists.
     impl_dir = _resolve_impl_dir(ref_dir)
     if impl_dir is None or not impl_dir.is_dir():
         return None  # pre-generation — no stamp required yet
@@ -369,6 +438,106 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     return None
 
 
+def _enforce_structural_convergence_stamp(ref_dir: Path) -> str | None:
+    """Block Stop unless check-converged.sh wrote a fresh structural stamp.
+
+    Parallel to _enforce_verify_stamp but for plans that opted into the
+    structural closeout policy (codex Task #11 review). The two stamps are
+    distinct artifacts with distinct writers — section-staged plans satisfy
+    Stop via structural-convergence-stamp.json from scripts/verify/check-
+    converged.sh; canonical plans satisfy Stop via verify-stamp.json from
+    pipeline.execute_verify. Mixing them is forbidden by closeoutPolicy
+    routing in _enforce_ref_dir.
+
+    Same anti-cheat invariants as canonical: fresh stamp, canonical writer,
+    impl files no newer than the stamp, AND the underlying sections/result.txt
+    must hash-match what was stamped (analogue of impl-freshness for the
+    convergence evidence itself).
+    """
+    impl_dir = _resolve_impl_dir(ref_dir)
+    if impl_dir is None or not impl_dir.is_dir():
+        return None  # pre-generation — no stamp required yet
+
+    stamp_path = ref_dir / "structural-convergence-stamp.json"
+    if not stamp_path.is_file():
+        return (
+            f"⛔ UI-RE Structural-stamp gate: BLOCKED for {ref_dir}\n\n"
+            f"closeoutPolicy=structural but no structural-convergence-stamp.json.\n"
+            f"This run satisfies Stop via the convergence detector's stamp; it\n"
+            f"is written on 0-FAIL by:\n\n"
+            f"  bash scripts/verify/check-converged.sh {ref_dir} --write-stamp [--stage <A|B|C|D>]\n\n"
+            f"Convergence definition: sections/result.txt's last `**Result: ...**` line\n"
+            f"shows 0 FAIL (STRUCTURAL_ONLY counted as PASS, SKIP doesn't gate).\n"
+        )
+
+    try:
+        stamp = json.loads(stamp_path.read_text())
+        import datetime
+        stamped_at = datetime.datetime.strptime(
+            stamp["verifiedAt"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.UTC)
+        age_s = (datetime.datetime.now(datetime.UTC) - stamped_at).total_seconds()
+    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        return (
+            f"⛔ UI-RE Structural-stamp gate: malformed stamp {stamp_path}\n\n"
+            f"{exc}\n\n"
+            f"Re-run `bash scripts/verify/check-converged.sh {ref_dir} --write-stamp`.\n"
+        )
+
+    stamped_by = stamp.get("stampedBy")
+    closeout_kind = stamp.get("closeoutKind")
+    if stamped_by != "scripts/verify/check-converged.sh" or closeout_kind != "structural":
+        return (
+            f"⛔ UI-RE Structural-stamp gate: non-canonical stamp for {ref_dir}\n\n"
+            f"structural-convergence-stamp.json must be written by\n"
+            f"scripts/verify/check-converged.sh with closeoutKind=structural.\n"
+            f"Current stampedBy={stamped_by!r}, closeoutKind={closeout_kind!r}.\n\n"
+            f"Build success, HTTP 200/title checks, and hand-written stamps are\n"
+            f"not completion evidence — only the convergence detector's stamp\n"
+            f"counts.\n\n"
+            f"Re-run:\n"
+            f"  bash scripts/verify/check-converged.sh {ref_dir} --write-stamp\n"
+        )
+
+    if age_s > _VERIFY_STAMP_MAX_AGE_S:
+        return (
+            f"⛔ UI-RE Structural-stamp gate: STALE stamp for {ref_dir}\n\n"
+            f"structural-convergence-stamp.json is {int(age_s)}s old "
+            f"(max {_VERIFY_STAMP_MAX_AGE_S}s).\n"
+            f"Re-run:\n\n"
+            f"  bash scripts/verify/check-converged.sh {ref_dir} --write-stamp\n"
+        )
+
+    # Re-validate the sections/result.txt hash — detects the cheat of stamping
+    # while converged then editing result.txt to claim more PASS rows.
+    result_file = ref_dir / "sections" / "result.txt"
+    stamped_sha = stamp.get("sectionsResultSha256")
+    if stamped_sha and result_file.is_file():
+        import hashlib
+        current_sha = hashlib.sha256(result_file.read_bytes()).hexdigest()
+        if current_sha != stamped_sha:
+            return (
+                f"⛔ UI-RE Structural-stamp gate: result.txt tampered after stamp for {ref_dir}\n\n"
+                f"sections/result.txt sha256 mismatch: stamp recorded {stamped_sha[:12]}…\n"
+                f"but the file now hashes to {current_sha[:12]}…\n\n"
+                f"The convergence evidence the stamp attests to has changed.\n"
+                f"Re-run the convergence detector:\n\n"
+                f"  bash scripts/verify/check-converged.sh {ref_dir} --write-stamp\n"
+            )
+
+    changed = _newer_impl_files(impl_dir, stamp_path)
+    if changed:
+        sample = "\n".join(f"  - {p}" for p in changed)
+        return (
+            f"⛔ UI-RE Structural-stamp gate: impl changed after stamp for {ref_dir}\n\n"
+            f"These implementation files are newer than structural-convergence-stamp.json:\n"
+            f"{sample}\n\n"
+            f"Re-converge after the last code/asset edit:\n\n"
+            f"  bash scripts/verify/check-converged.sh {ref_dir} --write-stamp\n"
+        )
+    return None
+
+
 def _enforce_ref_dir(ref_dir: Path) -> str | None:
     # Load current gate from pipeline-state.json.
     # If absent, treat as fresh start at "reference" gate (not legacy section-compare fallback).
@@ -385,11 +554,36 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     # halts loop spawning on --check-done exit 2; this hook stops firing
     # blocking-reason text symmetrically.
     if state.unclonable_reasons:
-        return None
+        # Loop-23 slip path: synthetic / forensic markers (any gate name
+        # NOT in GATE_ORDER) preserved from a prior loop must NOT
+        # release Stop on a fresh state (`completed_steps == []`).
+        # Codex-23 inherited such a marker (`gate="session-cleanup"`)
+        # and exited "done" without exercising a single gate. Real hard
+        # blockers (hard-cap fail-count, paid-font, DRM canvas,
+        # auth-gated) still release — they carry a canonical gate name
+        # produced by a gate that DID run. Filtering by `gate in
+        # GATE_ORDER` keeps this robust against codex renaming the
+        # synthetic marker (e.g. "session-cleanup" → "forensic-preserve").
+        canonical_reasons = [
+            r for r in state.unclonable_reasons
+            if r.get("gate") in GATE_ORDER
+        ]
+        if canonical_reasons or state.completed_steps:
+            return None
+
+    # Closeout policy routing (Task #11): structural plans (section-staged
+    # convergence loops) satisfy Stop via structural-convergence-stamp.json
+    # from check-converged.sh. Canonical plans (default) satisfy Stop via
+    # verify-stamp.json from pipeline.execute_verify. The two stamps are
+    # never interchangeable — the policy decides which writer counts.
+    if state.closeout_policy == "structural":
+        stamp_enforcer = _enforce_structural_convergence_stamp
+    else:
+        stamp_enforcer = _enforce_verify_stamp
 
     impl_dir = _resolve_impl_dir(ref_dir)
     if impl_dir is not None and impl_dir.is_dir():
-        return _enforce_verify_stamp(ref_dir)
+        return stamp_enforcer(ref_dir)
 
     if current_gate in {"section-compare", "done"}:
         gate_result = _run_gate(ref_dir, "section-compare")
@@ -397,7 +591,7 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
             return _section_compare_block_reason(ref_dir, gate_result)
         # Section-compare PASS but no stamp yet — point the agent at the
         # canonical entry instead of releasing silently.
-        return _enforce_verify_stamp(ref_dir)
+        return stamp_enforcer(ref_dir)
 
     if current_gate not in GATE_ORDER:
         return _unknown_gate_block_reason(current_gate, ref_dir)
@@ -407,12 +601,35 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
         return _block_reason_for_gate(current_gate, ref_dir, gate_result)
     # Per-gate PASS does NOT release the Stop hook on its own — verify
     # stamp is the canonical "agent finished cleanly" signal.
-    return _enforce_verify_stamp(ref_dir)
+    return stamp_enforcer(ref_dir)
 
 
 def main() -> None:
     project_root = _find_project_root()
     search_root = project_root / "tmp" / "ref"
+
+    # Claude Code Stop hooks receive a JSON payload on stdin with
+    # `session_id`, `hook_event_name`, etc. We read it (best-effort, never
+    # block on parse error) to extract the active session id for the
+    # driver-session bypass check.
+    session_id_from_payload = ""
+    if not sys.stdin.isatty():
+        try:
+            raw = sys.stdin.read()
+            if raw.strip():
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    sid = payload.get("session_id")
+                    if isinstance(sid, str):
+                        session_id_from_payload = sid
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Driver-session bypass — maintainer running parallel loops as an
+    # observer/orchestrator, not a clone agent. Production users never
+    # write the marker, so this is a no-op for them.
+    if _is_driver_session(project_root, session_id_from_payload):
+        sys.exit(0)
 
     active_dirs = _fresh_active_dirs(_find_active_markers(search_root))
     if not active_dirs:

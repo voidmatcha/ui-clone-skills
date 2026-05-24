@@ -97,9 +97,8 @@ if html_dir.is_dir():
         # html/<name>.json shape varies by producer:
         #   - dict with "media" key (most extract-section-html.sh outputs)
         #   - bare list of media entries (some producers emit the array
-        #     directly; loop-codex-8 surfaced this on realfood.gov's
-        #     html/div-0.json — codex hit AttributeError: 'list' object
-        #     has no attribute 'get' before this fallback existed)
+        #     directly; the dict-only path hit AttributeError: 'list'
+        #     object has no attribute 'get' before this fallback existed)
         # Accept both. Anything else (None, string, int) → skip the file.
         if isinstance(section_data, dict):
             media_arr = section_data.get("media") or []

@@ -247,11 +247,16 @@ Rules:
     Parent: onMouseMove → element-relative cursor coords
     Child: position: absolute, style.left/top from cursor
     Child: pointer-events: none (or parent hover breaks)
-- Images: downloaded assets/ if available; descriptive placeholder otherwise
+- Images: use the downloaded asset path from `visible-images.json` / `assets.json`
+    and render it in the component mapped to that asset's section. If the asset
+    is missing, stop and rerun extraction/download or declare a justified
+    `asset-substitution.json` entry; never render a descriptive placeholder.
 - Backend data → mock inline. Component must be self-contained.
 - SVG logos/icons: use outerHTML from inline-svgs.json VERBATIM,
     convert HTML→JSX attrs (stroke-width → strokeWidth, class → className,
     fill-rule → fillRule, clip-path → clipPath). "Looks similar" = wrong.
 ```
 
-Save to `src/components/<ComponentName>.tsx`. If any extracted value is missing, use placeholder: `{/* TODO: missing — check extraction */}`.
+Save to `src/components/<ComponentName>.tsx`. If any extracted value is missing,
+do not guess and do not add TODO placeholders. Return to the extraction step
+that owns the value, regenerate the artifact, then use the measured value.
