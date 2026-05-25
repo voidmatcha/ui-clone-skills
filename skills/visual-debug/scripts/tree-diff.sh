@@ -50,8 +50,14 @@ mkdir -p "$OUT_DIR"
 REF_SESS="${SESSION}-tree-ref"
 IMPL_SESS="${SESSION}-tree-impl"
 
-TMP_IMPL=$(mktemp /tmp/tree-diff-impl-XXXXXX.json)
-TMP_REF=$(mktemp /tmp/tree-diff-ref-XXXXXX.json)
+TMP_IMPL=$(mktemp "${TMPDIR:-/tmp}/tree-diff-impl.XXXXXX") || {
+  echo "ERROR: failed to create impl temp file"
+  exit 2
+}
+TMP_REF=$(mktemp "${TMPDIR:-/tmp}/tree-diff-ref.XXXXXX") || {
+  echo "ERROR: failed to create ref temp file"
+  exit 2
+}
 
 cleanup() {
   agent-browser --session "$REF_SESS" close >/dev/null 2>&1 || true

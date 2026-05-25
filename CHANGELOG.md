@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.14] - 2026-05-26
+
+Patch release for tree-diff verifier portability.
+
+### Fixed
+
+- **macOS tree-diff temp files.** `tree-diff.sh` now uses suffix-free
+  `mktemp` templates and explicit temp-file failure handling, preventing
+  BSD/macOS hosts from failing before writing `tree-diff-status.json`.
+
 ## [0.7.13] - 2026-05-26
 
 Patch release for state-coverage goal routing and extractor portability.
