@@ -73,6 +73,88 @@ fi
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Optional multi-viewport fan-out ─────────────────────────────────
+# VIEWPORTS is intentionally opt-in. Unset keeps the historical single
+# viewport path exactly as the inner runner. When set, the wrapper re-runs
+# this script once per WxH value with VIEW_W/VIEW_H exported, stores each
+# viewport's full artifact tree under sections/viewports/<WxH>/, then writes
+# a canonical aggregate sections/result.txt for gates and completion reports.
+if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
+  SECTION_COMPARE_INNER_CMD="${SECTION_COMPARE_INNER_CMD:-$0}"
+  mkdir -p "$DIR/sections/viewports"
+  RESULT_FILE="$DIR/sections/result.txt"
+  {
+    echo "# section-compare multi-viewport result"
+    echo "viewports: $VIEWPORTS"
+    echo ""
+  } > "$RESULT_FILE"
+
+  OVERALL=0
+  IFS=',' read -r -a VIEWPORT_LIST <<< "$VIEWPORTS"
+  for RAW_VIEWPORT in "${VIEWPORT_LIST[@]}"; do
+    VP="$(printf '%s' "$RAW_VIEWPORT" | tr -d '[:space:]')"
+    if [ -z "$VP" ]; then
+      continue
+    fi
+    if [[ ! "$VP" =~ ^[0-9]+x[0-9]+$ ]]; then
+      echo "ERROR: malformed VIEWPORTS entry '$RAW_VIEWPORT' (expected WIDTHxHEIGHT)" >&2
+      exit 2
+    fi
+    VP_W="${VP%x*}"
+    VP_H="${VP#*x}"
+    VP_DIR="$DIR/sections/viewports/$VP"
+    mkdir -p "$VP_DIR"
+
+    {
+      echo "viewport: $VP"
+      echo ""
+    } >> "$RESULT_FILE"
+
+    echo "▸ section-compare viewport $VP"
+    set +e
+    VIEW_W="$VP_W" VIEW_H="$VP_H" VIEWPORTS="" SECTION_COMPARE_INNER=1 \
+      bash "$SECTION_COMPARE_INNER_CMD" "$ORIG_URL" "$IMPL_URL" "${SESSION}-${VP}" "$VP_DIR" \
+      > "$VP_DIR/section-compare.log" 2>&1
+    CODE=$?
+    set -e
+
+    echo "[$VP] exit: $CODE" >> "$RESULT_FILE"
+    if [ -f "$VP_DIR/sections/result.txt" ]; then
+      python3 - "$VP" "$VP_DIR/sections/result.txt" >> "$RESULT_FILE" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+vp, result_path = sys.argv[1:3]
+for raw in Path(result_path).read_text(encoding="utf-8", errors="replace").splitlines():
+    line = raw.rstrip("\n")
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        cells = line.split("|")
+        first = cells[1].strip() if len(cells) > 1 else ""
+        if (
+            len(cells) > 2
+            and first.lower() != "section"
+            and not (first and set(first) <= {"-"})
+        ):
+            cells[1] = f" [{vp}] {cells[1].strip()} "
+            print("|".join(cells))
+            continue
+    print(f"[{vp}] {line}" if line else "")
+PY
+    else
+      echo "[$VP] sections/result.txt missing; see $VP_DIR/section-compare.log" >> "$RESULT_FILE"
+    fi
+    echo "" >> "$RESULT_FILE"
+
+    if [ "$CODE" -ne 0 ]; then
+      OVERALL=1
+    fi
+  done
+  exit "$OVERALL"
+fi
+
 # ── --only-if-changed short-circuit ──
 # When ONLY_IF_CHANGED=1 and IMPL_SRC_DIR points at the implementation source
 # tree, skip the full comparison if no impl source file has changed since the

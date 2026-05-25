@@ -104,17 +104,23 @@ if spec_p.exists():
     try:
         spec = json.loads(spec_p.read_text(encoding="utf-8"))
         entries = spec.get("transitions") or spec.get("entries") or []
+
+        def collect_spec_timing(obj: object) -> None:
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k in ("duration", "delay"):
+                        n = norm_duration_to_ms(v)
+                        if n is not None:
+                            ref_durations.add(n)
+                    if k in ("easing", "ease", "timingFunction") and isinstance(v, str):
+                        ref_easings.add(norm_easing(v))
+                    collect_spec_timing(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect_spec_timing(item)
+
         for e in entries:
-            for k in ("duration", "delay"):
-                v = e.get(k)
-                if v is not None:
-                    n = norm_duration_to_ms(v)
-                    if n is not None:
-                        ref_durations.add(n)
-            for k in ("easing", "ease", "timingFunction"):
-                v = e.get(k)
-                if isinstance(v, str):
-                    ref_easings.add(norm_easing(v))
+            collect_spec_timing(e)
     except Exception:
         pass
 

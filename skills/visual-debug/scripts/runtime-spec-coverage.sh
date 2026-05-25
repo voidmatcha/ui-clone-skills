@@ -76,6 +76,7 @@ const entries = Array.isArray(spec) ? spec
 const specText = JSON.stringify(spec);
 
 const missing = [];
+const warnings = [];
 
 const stCount = Array.isArray(dump.scrollTrigger) ? dump.scrollTrigger.length : 0;
 if (stCount > 0) {
@@ -119,11 +120,24 @@ const selectorCovered = (selector) => {
 };
 const uniqueTimelineTargets = [...new Set(timelineTargets)];
 const uncoveredTargets = uniqueTimelineTargets.filter(t => !selectorCovered(t));
+const coveredTargets = uniqueTimelineTargets.filter(t => selectorCovered(t));
 if (uniqueTimelineTargets.length > 0 && uncoveredTargets.length === uniqueTimelineTargets.length) {
   missing.push(
     timelines.length + " GSAP global timeline child(ren) detected at runtime but transition-spec mentions none of their targets: "
     + uncoveredTargets.slice(0, 5).join(", ")
     + " — see animation-runtime-dump.json gsapTimelines[]"
+  );
+}
+if (
+  uniqueTimelineTargets.length >= 3
+  && coveredTargets.length > 0
+  && coveredTargets.length / uniqueTimelineTargets.length < 0.5
+) {
+  warnings.push(
+    "GSAP timeline target coverage low: "
+    + coveredTargets.length + "/" + uniqueTimelineTargets.length
+    + " unique runtime target(s) mentioned in transition-spec. Uncovered examples: "
+    + uncoveredTargets.slice(0, 5).join(", ")
   );
 }
 
@@ -162,10 +176,13 @@ const out = {
   ix2TimelineCount: ixCount,
   gsapTimelineCount: timelines.length,
   gsapTimelineTargetCount: timelineTargets.length,
+  gsapTimelineUniqueTargetCount: uniqueTimelineTargets.length,
+  gsapTimelineTargetCoveredCount: coveredTargets.length,
   customEaseCount: customEaseKeys.length,
   customEaseUsedCount: usedCustomEaseKeys.length,
   specEntryCount: entries.length,
-  missing
+  missing,
+  warnings
 };
 fs.writeFileSync(process.argv[3], JSON.stringify(out, null, 2));
 console.log("Wrote " + process.argv[3]);

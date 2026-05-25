@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.7.3] - 2026-05-25
+
+Patch release for motion-fidelity follow-through after v0.7.2.
+
+### Added
+
+- **Section-compare viewport fan-out.** `section-compare.sh` now supports
+  opt-in `VIEWPORTS=<WxH>,<WxH>` fan-out. The default single-viewport path is
+  unchanged; fan-out runs each viewport into `sections/viewports/<WxH>/` and
+  writes an aggregate `sections/result.txt` that remains parseable by gates.
+- **Runtime GSAP target coverage advisories.** `runtime-spec-coverage.sh`
+  now records unique GSAP timeline target coverage and emits a warning when a
+  rich runtime timeline is only partially represented in `transition-spec.json`.
+
+### Fixed
+
+- **Nested duration/easing grounding.** `duration-easing-grounding-check.sh`
+  now reads nested `animation.duration`, `animation.ease`, and other timing
+  fields in `transition-spec.json`, so spec entries with structured animation
+  blocks are not skipped.
+- **Completion report structural-only visibility.** `completion-report.sh`
+  now parses section rows instead of the summary footer and surfaces broad
+  `STRUCTURAL_ONLY` coverage as a pixel-polish advisory.
+
 ## [0.7.2] - 2026-05-25
 
 Patch release for downstream wiring exposed by the v0.7.1 hardening pass.

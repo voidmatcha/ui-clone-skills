@@ -58,6 +58,29 @@ def status_line(name: str, art: dict | None, key: str = "status") -> str:
     marker = "✓" if s == "pass" else "○" if s == "skip" else "❌"
     return f"  - {name}: {marker} {s}"
 
+def section_compare_counts(text: str) -> dict[str, int]:
+    rows = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        first = cells[0] if cells else ""
+        if first.lower() == "section" or (first and set(first) <= {"-"}):
+            continue
+        rows.append(line)
+    structural_only = sum(1 for line in rows if "STRUCTURAL_ONLY" in line)
+    fail = sum(1 for line in rows if "❌" in line or "🌑" in line)
+    missing = sum(1 for line in rows if "MISSING impl" in line)
+    passed = sum(1 for line in rows if "✅" in line or "STRUCTURAL_ONLY" in line)
+    return {
+        "total": len(rows),
+        "pass": passed,
+        "fail": fail,
+        "missing": missing,
+        "structural_only": structural_only,
+    }
+
 print("━" * 70)
 print("Completion Report — SKILL.md 'Hard Done Criteria'")
 print("━" * 70)
@@ -79,13 +102,26 @@ sc_result = ref_p / "sections" / "result.txt"
 if sc_result.exists():
     try:
         text = sc_result.read_text(encoding="utf-8")
-        # Crude FAIL line count
-        fail_lines = sum(1 for line in text.splitlines() if "FAIL" in line.upper())
-        pass_lines = sum(1 for line in text.splitlines() if "PASS" in line.upper())
-        if fail_lines:
-            print(f"  - section-compare: ❌ {pass_lines} pass / {fail_lines} fail")
+        counts = section_compare_counts(text)
+        if counts["fail"] or counts["missing"]:
+            print(
+                f"  - section-compare: ❌ {counts['pass']} pass / "
+                f"{counts['fail']} fail / {counts['missing']} missing"
+            )
         else:
-            print(f"  - section-compare: ✓ {pass_lines} pass")
+            print(f"  - section-compare: ✓ {counts['pass']} pass / 0 fail")
+        if (
+            counts["total"] > 0
+            and counts["structural_only"] >= 3
+            and counts["structural_only"] / counts["total"] >= 0.30
+        ):
+            pct = round(100 * counts["structural_only"] / counts["total"])
+            print(
+                f"      ⚠ STRUCTURAL_ONLY coverage broad: "
+                f"{counts['structural_only']}/{counts['total']} sections ({pct}%). "
+                "pixel AE polishing skipped for those rows; narrow "
+                "asset-substitution.json before claiming pixel fidelity."
+            )
     except Exception:
         print("  - section-compare: ❌ INCOMPLETE (result unreadable)")
 else:

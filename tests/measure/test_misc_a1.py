@@ -631,6 +631,43 @@ def test_duration_easing_grounding_fails_on_invented_duration(tmp_path: Path) ->
         ), f"4200ms should appear in invented list: {artifact}"
 
 
+def test_duration_easing_grounding_reads_nested_animation_fields(tmp_path: Path) -> None:
+    """transition-spec entries commonly store timing under animation.*.
+
+    The grounding gate must treat animation.duration/ease as ref-measured
+    evidence, not skip the check because top-level duration/easing are absent.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {
+                "id": "hero-load",
+                "selector": ".hero-title",
+                "animation": {"duration": 1.2, "ease": "heroEase"},
+            },
+        ],
+    }))
+    (impl / "src" / "Hero.css").write_text(
+        ".hero-title { transition-duration: 1200ms; transition-timing-function: heroEase; }\n"
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "duration-easing-grounding-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "duration-easing-grounding.json").read_text())
+    assert artifact["status"] == "pass"
+    assert 1200 in artifact["refDurations"]
+    assert "heroease" in artifact["refEasings"]
+    assert "heroease" in artifact["matchedEasings"]
+
+
 
 def test_duration_easing_grounding_allows_spring_family_easing(tmp_path: Path) -> None:
     """Impl uses Framer Motion spring with elastic.out easing — must

@@ -153,3 +153,61 @@ def test_section_compare_descends_main_wrappers_with_section_descendants() -> No
         "ordinary one-section mains are not over-split"
     )
 
+
+def test_section_compare_script_has_viewport_fanout_wrapper() -> None:
+    """Static guard for the opt-in multi-viewport wrapper.
+
+    VIEWPORTS must be additive; the single-viewport body remains the inner
+    runner, while the wrapper calls it once per viewport and aggregates into
+    the canonical sections/result.txt.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "SECTION_COMPARE_INNER_CMD" in text
+    assert "SECTION_COMPARE_INNER" in text
+    assert "sections/viewports" in text
+
+
+def test_section_compare_fans_out_per_viewport_with_stub_inner(tmp_path: Path) -> None:
+    """VIEWPORTS runs section-compare once per viewport and aggregates result.txt."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    stub = tmp_path / "stub-section-compare.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "out=\"${4:?out}\"\n"
+        "mkdir -p \"$out/sections/ref\" \"$out/sections/impl\" \"$out/sections/diff\"\n"
+        "printf '%sx%s\\n' \"$VIEW_W\" \"$VIEW_H\" > \"$out/viewport.txt\"\n"
+        "cat > \"$out/sections/result.txt\" <<'EOF'\n"
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| Hero Section | 0 | 0 | ok | ✅ |\n"
+        "\n"
+        "**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    env = {
+        **os.environ,
+        "VIEWPORTS": "375x812,1280x800",
+        "SECTION_COMPARE_INNER_CMD": str(stub),
+    }
+    proc = subprocess.run(
+        ["bash", str(script), "https://ref.example", "https://impl.example", "mv-session", str(ref)],
+        capture_output=True, text=True, timeout=20, env=env,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result = (ref / "sections" / "result.txt").read_text(encoding="utf-8")
+    assert "viewports: 375x812,1280x800" in result
+    assert "viewport: 375x812" in result
+    assert "viewport: 1280x800" in result
+    assert "| [375x812] Hero Section |" in result
+    assert "| [1280x800] Hero Section |" in result
+    assert (ref / "sections" / "viewports" / "375x812" / "viewport.txt").read_text().strip() == "375x812"
+    assert (ref / "sections" / "viewports" / "1280x800" / "viewport.txt").read_text().strip() == "1280x800"

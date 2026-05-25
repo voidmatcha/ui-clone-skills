@@ -71,6 +71,46 @@ def test_completion_report_marks_incomplete_without_proofs(tmp_path: Path) -> No
     )
 
 
+def test_completion_report_surfaces_broad_structural_only_advisory(tmp_path: Path) -> None:
+    """A clean section summary can still hide skipped pixel AE rows.
+
+    The report should make broad STRUCTURAL_ONLY coverage visible instead of
+    summarizing it as an unqualified static visual pass.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (ref / "sections").mkdir(parents=True)
+    impl.mkdir()
+    (ref / "sections" / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| section-0 | 0 | 0 | ok | ✅ |\n"
+        "| section-1 | 0 | 0 | ok | ✅ |\n"
+        "| section-2 | 0 | 0 | ok | ✅ |\n"
+        "| section-3 | 0 | 0 | ok | ✅ |\n"
+        "| section-4 | 0 | 0 | ok | ✅ |\n"
+        "| section-5 | 0 | 0 | ok | ✅ |\n"
+        "| section-6 | 0 | 0 | ok | ✅ |\n"
+        "| section-7 | 0 | 0 | structural | 🔁 STRUCTURAL_ONLY |\n"
+        "| section-8 | 0 | 0 | structural | 🔁 STRUCTURAL_ONLY |\n"
+        "| section-9 | 0 | 0 | structural | 🔁 STRUCTURAL_ONLY |\n"
+        "\n"
+        "**Result: 7 PASS, 0 FAIL, 0 SKIP, 3 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "scripts" / "verify" / "completion-report.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15,
+    )
+
+    assert proc.returncode == 0
+    assert "section-compare: ✓ 10 pass / 0 fail" in proc.stdout
+    assert "STRUCTURAL_ONLY coverage broad" in proc.stdout
+    assert "pixel AE polishing skipped" in proc.stdout
+
+
 
 def test_phase2_preflight_script_present() -> None:
     """codex-rescue Rank 1 (af0da280): phase 2 preflight must exist."""
@@ -561,4 +601,3 @@ def test_fix13_skill_md_phase_2_8() -> None:
     text = skill.read_text(encoding="utf-8")
     assert "Phase 2.8" in text, "benchmark/SKILL.md must document Phase 2.8 (Fix 13)"
     assert "scaffold-to-jsx" in text, "benchmark/SKILL.md must reference the transpiler"
-

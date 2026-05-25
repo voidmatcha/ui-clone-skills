@@ -358,6 +358,44 @@ def test_runtime_spec_coverage_passes_when_gsap_target_and_custom_ease_are_speci
     assert artifact["customEaseUsedCount"] == 1
 
 
+def test_runtime_spec_coverage_warns_on_low_gsap_target_coverage(tmp_path: Path) -> None:
+    """Mentioning one runtime GSAP target is not enough coverage for a rich timeline."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "animation-runtime-dump.json").write_text(json.dumps({
+        "gsapTimelines": [
+            {
+                "kind": "Tween",
+                "duration": 1.2,
+                "easeName": "power2.out",
+                "targets": [".hero-title", ".hero-card", ".stats-grid", ".footer-cta"],
+            }
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {
+                "id": "hero-load",
+                "trigger": "page-load",
+                "selector": ".hero-title",
+                "animation": {"duration": 1.2, "ease": "power2.out"},
+            }
+        ],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-spec-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "runtime-spec-coverage.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["gsapTimelineTargetCount"] == 4
+    assert artifact["gsapTimelineTargetCoveredCount"] == 1
+    assert any("GSAP timeline target coverage low" in w for w in artifact["warnings"])
+
+
 
 def test_transition_proof_rollup_dispatcher_wired() -> None:
     import re
