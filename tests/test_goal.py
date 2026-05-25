@@ -21,6 +21,7 @@ def _write_state(ref_dir: Path, current_gate: str) -> None:
             "paid-features",
             "spec",
             "pre-generate",
+            "state-coverage",
             "post-implement",
             "boundary",
             "font-parity",
@@ -32,6 +33,7 @@ def _write_state(ref_dir: Path, current_gate: str) -> None:
             "paid-features",
             "spec",
             "pre-generate",
+            "state-coverage",
             "post-implement",
             "boundary",
             "font-parity",
@@ -635,6 +637,89 @@ def test_goal_card_done_requires_clean_section_compare(tmp_path: Path) -> None:
     assert "Required evidence: sections/result.txt" in card
 
 
+def test_goal_card_done_with_missing_prerequisites_points_to_earliest_gap(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "hero"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": "hero",
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": [
+                    "reference",
+                    "bundle",
+                    "paid-features",
+                    "spec",
+                    "pre-generate",
+                    "boundary",
+                    "post-implement",
+                    "font-parity",
+                    "section-compare",
+                ],
+                "current_gate": "done",
+                "last_updated": "2026-01-01T01:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = ref_dir / "sections" / "result.txt"
+    result.parent.mkdir(parents=True)
+    result.write_text("| hero | PASS | ok |\n", encoding="utf-8")
+
+    card = build_goal_card(ref_dir)
+
+    assert "Current gate: done" in card
+    assert "Current goal: Resolve out-of-order pipeline state" in card
+    assert "Next action: Run python -m ui_clone.gate" in card
+    assert " extraction" in card
+    assert "Stop evidence status: not satisfied: pipeline-state.json missing" in card
+
+
+def test_goal_check_done_exits_one_when_done_but_prerequisites_missing(
+    tmp_path: Path,
+) -> None:
+    ref_dir = tmp_path / "tmp" / "ref" / "hero"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": "hero",
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": [
+                    "reference",
+                    "bundle",
+                    "paid-features",
+                    "spec",
+                    "pre-generate",
+                    "boundary",
+                    "post-implement",
+                    "font-parity",
+                    "section-compare",
+                ],
+                "current_gate": "done",
+                "last_updated": "2026-01-01T01:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_file = ref_dir / "sections" / "result.txt"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text("| hero | PASS | ok |\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ui_clone.goal", str(ref_dir), "--check-done"],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+    assert result.returncode == 1
+
+
 def test_goal_card_unknown_gate_does_not_suggest_invalid_gate_command(tmp_path: Path) -> None:
     from ui_clone.goal import build_goal_card
 
@@ -699,7 +784,8 @@ def test_goal_card_cli_prints_json(tmp_path: Path) -> None:
     assert data["current_goal"] == "Stop"
     assert data["next_action"].startswith("Do not continue automatically")
     assert data["stop_condition"] == (
-        'current_gate == "done" and section comparison has no FAIL / MISSING impl lines.'
+        'current_gate == "done", all pipeline prerequisites completed, '
+        "and section comparison has no FAIL / MISSING impl lines."
     )
     assert data["required_evidence"] == 'sections/result.txt and current_gate == "done"'
     assert data["manual_refresh"] == f"python -m ui_clone.goal {ref_dir}"

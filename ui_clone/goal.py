@@ -57,7 +57,10 @@ class GoalCard:
         return data
 
 
-_STOP_CONDITION = 'current_gate == "done" and section comparison has no FAIL / MISSING impl lines.'
+_STOP_CONDITION = (
+    'current_gate == "done", all pipeline prerequisites completed, '
+    "and section comparison has no FAIL / MISSING impl lines."
+)
 _NO_INFINITE_LOOP = (
     "this card describes one bounded next action; "
     "host continuation must stop at the stop condition."
@@ -156,6 +159,16 @@ def _section_compare_status(ref_dir: Path) -> str:
     if fail_count == 0 and missing_count == 0:
         return "satisfied: sections/result.txt has 0 FAIL lines and 0 MISSING impl lines"
     return f"not satisfied: sections/result.txt has {fail_count} FAIL line(s) and {missing_count} MISSING impl line(s)"
+
+
+def _done_stop_evidence_status(ref_dir: Path, state: PipelineState) -> str:
+    missing = state.missing_prerequisites("done")
+    if missing:
+        return (
+            "not satisfied: pipeline-state.json missing completed "
+            f"prerequisite gate(s): {', '.join(missing)}"
+        )
+    return _section_compare_status(ref_dir)
 
 
 def _failing_sections_by_ae(ref_dir: Path, limit: int = 3) -> list[tuple[str, int]]:
@@ -409,6 +422,25 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     next_action = step.next_action.replace("<ref-dir>", command_ref)
     evidence = step.required_evidence.replace("<ref-dir>", command_ref)
 
+    if gate == "done":
+        missing = state.missing_prerequisites("done")
+        if missing:
+            earliest = missing[0]
+            missing_s = ", ".join(missing)
+            step = GoalStep(
+                current_goal="Resolve out-of-order pipeline state",
+                next_action=(
+                    f"Run python -m ui_clone.gate <ref-dir> {earliest}, "
+                    "then refresh the goal card"
+                ),
+                required_evidence=(
+                    "pipeline-state.json completed_steps includes missing "
+                    f"prerequisite gate(s): {missing_s}"
+                ),
+            )
+            next_action = step.next_action.replace("<ref-dir>", command_ref)
+            evidence = step.required_evidence.replace("<ref-dir>", command_ref)
+
     # Visual-judge routing: when sections/result.txt has FAIL rows, AE alone
     # is a dead gradient signal. Override the generic next-action with a
     # concrete multimodal-LLM diff invocation targeting the worst-AE sections.
@@ -485,7 +517,9 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
         required_evidence=evidence,
         manual_refresh=f"python -m ui_clone.goal {command_ref}",
         no_infinite_loop=_NO_INFINITE_LOOP,
-        stop_evidence_status=_section_compare_status(ref_dir) if gate == "done" else None,
+        stop_evidence_status=(
+            _done_stop_evidence_status(ref_dir, state) if gate == "done" else None
+        ),
         stuck_banner=stuck_banner,
         abort_banner=abort_banner,
     )
@@ -551,9 +585,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         dest="check_done",
         help=(
-            "exit 0 if current_gate == 'done' AND section-compare evidence is "
-            "satisfied; exit 2 if pipeline-state.json has unclonable_reasons "
-            "(abort — site cannot be cloned as-is); exit 1 otherwise. "
+            "exit 0 if current_gate == 'done', pipeline prerequisites are "
+            "complete, and section-compare evidence is satisfied; exit 2 if "
+            "pipeline-state.json has unclonable_reasons (abort — site cannot "
+            "be cloned as-is); exit 1 otherwise. "
             "Suppresses normal output. Use as the loop-exit signal for "
             "external drivers (codex /goal, codex exec, headless `claude -p`)."
         ),

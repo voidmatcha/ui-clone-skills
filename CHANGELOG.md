@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.10] - 2026-05-26
+
+Patch release for goal-card closeout consistency.
+
+### Fixed
+
+- **Goal-card done prerequisite guard.** `ui_clone.goal` now treats
+  `current_gate == "done"` as incomplete when `pipeline-state.json` is
+  missing earlier completed gates, routes the worker to the earliest missing
+  gate, and makes `--check-done` exit non-zero instead of stopping on clean
+  `sections/result.txt` alone.
+
 ## [0.7.9] - 2026-05-26
 
 Patch release for section-compare failure status stability.
