@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.7] - 2026-05-26
+
+Patch release for unattended onpixel showcase loop automation.
+
+### Added
+
+- **Codex onpixel showcase runner.** Added
+  `python -m ui_clone.onpixel_showcase_loop` to enumerate the local onpixel
+  showcase catalogue, generate per-site handovers under `tmp/`, run an
+  unattended Codex clone pass into `tmp/onpixel-codex-loop/<slug>/impl`, and
+  optionally run a separate skill-fix Codex pass from the clone evidence.
+  Clone work and plugin repair are deliberately separated so legitimate skill
+  fixes do not happen inside an impl iteration. Each Codex pass also writes a
+  polled `codex-*-status.json` heartbeat next to the JSONL transcript so a
+  sleeping/remote operator can check progress without a visible terminal tab.
+
 ## [0.7.6] - 2026-05-26
 
 Patch release for transition roll-up artifact-name parity.
