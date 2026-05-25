@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.9] - 2026-05-26
+
+Patch release for section-compare failure status stability.
+
+### Fixed
+
+- **Section-compare failure guidance exit codes.** `section-compare.sh` no
+  longer pipes long markdown guidance excerpts through `head` while
+  `pipefail` is enabled, preventing SIGPIPE-derived `141` exits after
+  artifacts are written. Visual mismatches now return the documented normal
+  failure status.
+
 ## [0.7.8] - 2026-05-26
 
 Patch release for earlier transition-spec grounding.

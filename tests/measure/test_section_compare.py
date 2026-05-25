@@ -211,3 +211,20 @@ def test_section_compare_fans_out_per_viewport_with_stub_inner(tmp_path: Path) -
     assert "| [1280x800] Hero Section |" in result
     assert (ref / "sections" / "viewports" / "375x812" / "viewport.txt").read_text().strip() == "375x812"
     assert (ref / "sections" / "viewports" / "1280x800" / "viewport.txt").read_text().strip() == "1280x800"
+
+
+def test_section_compare_failure_guidance_avoids_sigpipe_prone_head_pipelines() -> None:
+    """Regression: the failure-report path runs with `set -o pipefail`.
+
+    Piping long markdown excerpts through `head` makes the upstream `awk`
+    receive SIGPIPE once `head` has enough lines, so section-compare exits 141
+    instead of its documented visual-failure status.
+    """
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+
+    failure_block = text.split('if [ "$FAIL_COUNT" -gt 0 ]; then', 1)[1].split(
+        "exit 1", 1,
+    )[0]
+
+    assert "| head -" not in failure_block

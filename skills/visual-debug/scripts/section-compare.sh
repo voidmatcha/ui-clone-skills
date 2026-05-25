@@ -1653,12 +1653,12 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
   echo ""
   if [ -f "$SKIP_ZONES" ]; then
     echo "▶ ZONE 5 VERIFICATION RULES (what was skipped):"
-    awk '/^## ZONE 5:/,/^---/' "$SKIP_ZONES" | head -25
+    awk '/^## ZONE 5:/,/^---/' "$SKIP_ZONES" | sed -n '1,25p'
     echo ""
   fi
   if [ -f "$DIAGNOSIS" ]; then
     echo "▶ ROOT CAUSE DIAGNOSIS COMMANDS:"
-    awk '/^## Root Cause/,/^---/' "$DIAGNOSIS" | head -50
+    awk '/^## Root Cause/,/^---/' "$DIAGNOSIS" | sed -n '1,50p'
   fi
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
