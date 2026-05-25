@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from ._helpers import (
     _project_root,
@@ -293,6 +296,103 @@ def test_runtime_proof_rollup_all_skip_when_truly_absent(tmp_path: Path) -> None
         capture_output=True, text=True, timeout=10,
     )
     assert proc.returncode == 0, f"all-skip with hero-pass must compose to pass/skip: {proc.stdout}"
+
+
+def test_runtime_proof_rollup_accepts_hero_kinds_absent_from_ref_and_impl(tmp_path: Path) -> None:
+    """Hero rollup must compare ref-vs-impl kinds, not require all
+    possible hero kinds. A ref without video/button should not pressure
+    impls into adding invisible stub elements.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "no-signals-justified.txt").write_text("test fixture")
+    for name in [
+        "lottie-runtime.json", "runtime-image-validity.json",
+        "runtime-dom-parity.json", "motion-coverage.json",
+        "runtime-spec-coverage.json", "scroll-completion.json",
+        "reveal-trigger.json", "hidden-children.json", "svg-provenance.json",
+    ]:
+        (ref / name).write_text(json.dumps({"schemaVersion": 1, "status": "skip"}))
+    (ref / "hero-composite.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "pass",
+        "ref": {"video": False, "button": False, "h1OrH2": True, "label": True},
+        "impl": {"video": False, "button": False, "h1OrH2": True, "label": True},
+        "missingInImpl": [],
+    }))
+    (ref / "header-state-runtime.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "skip", "ref": {"mutates": False},
+        "impl": {"mutates": False},
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0, (
+        "hero kinds absent from both ref and impl must not fail rollup: "
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    artifact = json.loads((ref / "runtime-proof.json").read_text())
+    hero = next(c for c in artifact["components"] if c["artifact"] == "hero-composite.json")
+    assert hero["valid"] is True
+
+
+def test_runtime_dom_parity_ignores_bundle_lottie_when_ref_mounts_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Generic Webflow bundles can contain Lottie plugin code even when
+    the live page mounts no Lottie container. That should not force
+    clone impls to add fake Lottie nodes.
+    """
+    ref = tmp_path / "ref"
+    bundles = ref / "bundles"
+    bundles.mkdir(parents=True)
+    (bundles / "webflow.js").write_text("function lottiePlugin() {}", encoding="utf-8")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_agent = fake_bin / "agent-browser"
+    metrics = {
+        "nodeCount": 100,
+        "textNodeCount": 30,
+        "visibleTextNodeCount": 30,
+        "viewportArea": 800000,
+        "maxElementArea": 120000,
+        "maxElementRatio": 0.15,
+        "maxElementTag": "img",
+        "maxElementSrc": "",
+        "lottieMounted": 0,
+        "sectionCount": 8,
+        "opaqueOverlayCount": 0,
+        "opaqueOverlaySample": [],
+    }
+    fake_agent.write_text(
+        "#!/usr/bin/env bash\n"
+        "session=''\n"
+        "if [ \"${1:-}\" = '--session' ]; then session=\"$2\"; shift 2; fi\n"
+        "cmd=\"${1:-}\"\n"
+        "if [ \"$cmd\" = 'eval' ]; then\n"
+        f"  printf '%s\\n' '{json.dumps(metrics)}'\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_agent.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-dom-parity-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), "lottie-fp", "https://example.test", "http://localhost:5173", str(ref)],
+        capture_output=True, text=True, timeout=10, cwd=_project_root(),
+    )
+    assert proc.returncode == 0, (
+        "bundle-only Lottie evidence with ref lottieMounted=0 must not fail: "
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    artifact = json.loads((ref / "runtime-dom-parity.json").read_text())
+    assert artifact["status"] == "pass"
 
 
 
@@ -606,4 +706,3 @@ def test_runtime_frame_proof_script_present() -> None:
     assert "readPixels" in body, "must sample WebGL via readPixels"
     assert "currentFrame" in body, "must read Lottie instance.currentFrame"
     assert "runtime-frame-proof.json" in body
-

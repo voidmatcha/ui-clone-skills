@@ -81,6 +81,13 @@ def _post_implement_baseline(ref: Path) -> None:
             "reference_frames": ["frame_00.png"],
         }]
     }))
+    # Seed fixture.js into bundles/ so _check_spec_bundle_grounding (F from
+    # docs/claude-fidelity-analysis.md) passes for baseline runs. Tests that
+    # exercise the grounding check itself overwrite transition-spec.json
+    # after this baseline.
+    bundles = ref / "bundles"
+    bundles.mkdir(parents=True, exist_ok=True)
+    (bundles / "fixture.js").write_text("// fixture bundle for baseline", encoding="utf-8")
     screenshots = ref / "static" / "ref"
     screenshots.mkdir(parents=True, exist_ok=True)
     for i in range(5):

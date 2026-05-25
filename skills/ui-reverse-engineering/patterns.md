@@ -157,7 +157,7 @@ grep -oE 'repeat\s*:\s*-1\|repeatDelay\s*:\s*[0-9.]+' tmp/ref/<c>/bundles/*.js |
 | Webflow centered container | `width: 97vw; margin: 0 auto` (NOT a fixed `margin-left/right` in rem). Replicate the rule, not the computed px value |
 | Two-line nav border | `display: flex; flex-direction: column; gap: 0.5rem` containing two `<div>` elements with `height: 1px`. NOT a `border-bottom` — the gap scales with viewport (rem) where `border-bottom` would be a single fixed line |
 | Decoration image inside wider button | `<img>` has `position: absolute; height: 100%; width: auto` centered via `left/right` insets — wrapper anchor is wider than the visual decoration to enlarge the click target. Do NOT use `inset-0 w-full h-full` |
-| Webflow fluid root font-size | `html { font-size: calc(<base>rem + <coef>vw) }` where coef = (font_to − font_from)/(vw_to − vw_from). At 1440 viewport for ordrhealth pattern, 1rem ≈ 12.03px (NOT 16px). All rem-based measurements must scale linearly between the two breakpoints. Expect non-integer computed-px values |
+| Webflow fluid root font-size | `html { font-size: calc(<base>rem + <coef>vw) }` where coef = (font_to − font_from)/(vw_to − vw_from). On a typical Webflow ref at 1440 viewport, 1rem ≈ 12.03px (NOT 16px). All rem-based measurements must scale linearly between the two breakpoints. Expect non-integer computed-px values |
 
 ## Canvas/WebGL Patterns
 

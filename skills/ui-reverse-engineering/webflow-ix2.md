@@ -47,7 +47,7 @@ agent-browser --session <s> eval "(() => {
 
 `isWebflow: true` → run the full Step W pipeline. `false` → skip this file.
 
-`hideRuleLength` typically exceeds 5,000 characters on IX2-heavy pages (juanmora.co was ~12,000). Every element selector listed in this rule is hidden until IX2 reveals it. Treat this rule as the **inventory of scroll-revealed elements**.
+`hideRuleLength` typically exceeds 5,000 characters on IX2-heavy pages (observed ~12,000 on portfolio refs in the field). Every element selector listed in this rule is hidden until IX2 reveals it. Treat this rule as the **inventory of scroll-revealed elements**.
 
 ## Step W-2: Extract the hide-rule selector list
 
@@ -236,7 +236,7 @@ Common missed actions:
 - `actionTypeId: "TRANSFORM_MOVE"` on `* within .grid-cell` — `*` selector targets every descendant; easy to miss when scanning by class name.
 - Any action whose `config.target.selector` is `*` or contains `within` — these are wildcard/scope selectors, not single elements.
 
-## Common Webflow IX2 misses (real failures from juanmora.co)
+## Common Webflow IX2 misses (real failures observed across portfolio refs)
 
 | Class | What was missed | Why |
 |---|---|---|

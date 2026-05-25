@@ -241,3 +241,23 @@ After completing all analysis, produce two documents per `transition-spec-rules.
 2. `transition-spec.json` — complete transition specification (DRAFT, to be verified)
 
 Then proceed to **Step 5e: Capture Verification** (in `transition-spec-rules.md`).
+
+## Fix-iteration helper: bundle-grep
+
+When post-implement or transition-compare fails and you need to inspect the
+ref's actual source (downloaded bundles, captured HTML/CSS) before writing a
+fix, use:
+
+```bash
+bash $PLUGIN_ROOT/scripts/extract/bundle-grep.sh tmp/ref/<c> '<pattern>'
+```
+
+Searches `tmp/ref/<c>/{bundles,html,css}/` recursively and prints each match
+as `file:line:snippet`. Use this to:
+- Find the ref's actual GSAP/ScrollTrigger/IO/IX2 call for a failing selector
+- Confirm a `transition-spec.json` `source_chunk` claim is accurate (the
+  `spec-bundle-grounding` post-implement check also validates this)
+- Find ref CSS rules for a class your impl renders differently
+
+Empty output means the pattern is not in the captured ref — re-check the
+selector spelling or whether capture missed a chunk.

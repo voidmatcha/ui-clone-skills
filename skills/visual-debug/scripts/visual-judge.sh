@@ -13,6 +13,15 @@
 # direction early when AE is uniformly catastrophic.
 set -euo pipefail
 
+# Codex review (2026-05-24/25): wrap `claude --print` in a Python timeout
+# (subprocess.Popen + start_new_session + killpg). Multimodal LLM calls can
+# hang indefinitely (network stall, model wedged); the unbounded version
+# burned vision budget on stuck calls. Default 5 min covers normal latency
+# (30s–2min); override via VISUAL_JUDGE_TIMEOUT_SEC.
+: "${VISUAL_JUDGE_TIMEOUT_SEC:=300}"
+_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+_RUN_WITH_TIMEOUT="${_SCRIPT_DIR}/../../../scripts/lib/run_with_timeout.py"
+
 REF_PNG=""
 IMPL_PNG=""
 OUT_PATH=""
@@ -89,7 +98,18 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 3
 fi
 
-RESPONSE="$(claude --print --permission-mode auto "$PROMPT")"
+# Codex review: `if ! VAR=$(...)` flips the exit code via `!`, swallowing
+# 124 (the timeout signal). Use `|| { ... }` so the actual exit code lands
+# in $? cleanly.
+RESPONSE="$(python3 "$_RUN_WITH_TIMEOUT" "$VISUAL_JUDGE_TIMEOUT_SEC" claude --print --permission-mode auto "$PROMPT")" || {
+  rc=$?
+  if [[ $rc -eq 124 ]]; then
+    echo "visual-judge: 'claude --print' exceeded VISUAL_JUDGE_TIMEOUT_SEC=${VISUAL_JUDGE_TIMEOUT_SEC}s and was process-group-killed" >&2
+  else
+    echo "visual-judge: 'claude --print' failed with exit code $rc" >&2
+  fi
+  exit "$rc"
+}
 
 # Extract first balanced JSON object from response. The sub-agent SHOULD emit
 # only JSON, but defensively strip any prose around it.

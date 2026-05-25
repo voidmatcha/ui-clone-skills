@@ -35,6 +35,31 @@ def test_valid_gates_matches_dispatch() -> None:
 
 
 
+def test_gate_all_records_per_gate_fail_counts(tmp_path: Path) -> None:
+    """Codex review (2026-05-24): `gate=all` previously dispatched every gate
+    but skipped state recording entirely (the `if gate != "all":` guard wrapping
+    mark_passed/mark_failed in dispatch.run). That meant composite runs never
+    incremented gate_fail_counts, so the v0.6.0 hard-cap auto-unclonable
+    guard in state.mark_failed never fired under composite dispatch — a silent
+    saturation channel.
+
+    A composite run against a fresh empty ref dir must increment the active
+    sub-gate's fail counter so hard-cap accounting still applies.
+    """
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    # current_gate defaults to "reference"; the empty ref_dir guarantees the
+    # reference sub-gate FAILS during the composite run.
+    gate = Gate(ref_dir)
+    gate.run("all")
+
+    state = _state.PipelineState.load(ref_dir)
+    assert state.gate_fail_counts.get("reference", 0) >= 1, (
+        f"composite gate=all must record reference fail; "
+        f"got gate_fail_counts={state.gate_fail_counts}"
+    )
+
+
 def test_gate_method_patch_target() -> None:
     """Regression: patching `Gate.gate_*` on the class affects instances; patching
     the per-area module-level function does NOT (Codex Item-5 review).

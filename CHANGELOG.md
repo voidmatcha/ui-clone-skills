@@ -1,5 +1,105 @@
 # Changelog
 
+## [0.7.0] - 2026-05-25
+
+Multi-snapshot capture + claude-fidelity release. Closes the largest
+capture-side architectural gap revealed by the 26-site loop: a single
+"settled" DOM snapshot misses splash transitions, scroll-driven state,
+and hover state — and impl agents had to guess at the bridge between
+no-render and final-render. This release captures all three phases and
+adds a new gate that fails post-implement when impl source has none of
+the hooks the multi-snapshot artifacts reveal.
+
+Also folds in the claude-fidelity anti-cheat + escape-hatch battery
+(F1 stub-element detector, F+E1 spec-bundle grounding + bundle-grep
+context inject, D visual-judge-dispatcher) that landed during the
+26-site loop diagnosis.
+
+Bumped MINOR (not patch) because the release adds new public surface:
+a new gate (`state-coverage`) in GATE_ORDER between `pre-generate` and
+`post-implement`, three new shell entry points
+(`scripts/extract/capture-{states,scroll,hover}.sh`), and a new
+`ui_clone.visual_judge_dispatcher` module. Old ref dirs without
+`states/` continue passing the new gate silently (backward-compat skip).
+
+### New: multi-snapshot capture (Phase A + B + C)
+
+**Phase A — splash transitions** (`scripts/extract/capture-states.sh`,
+245 LOC, commit e2e5657). Single in-page Promise loop polls a composite
+state hash (html/body class + scroll lock + full-screen overlay
+presence + DOM length + computed-style fingerprint of top-3
+above-the-fold elements) at 100ms intervals with a 5s wall cap and 2s
+stability break. Compact deltas in `states/splash/trajectory.json`,
+full outerHTML only for `0ms.json` / `settled.json` bookends and
+structural mutations above 20% DOM delta. Six-item codex architectural
+review applied before merge.
+
+**Phase B — scroll snapshots** (`scripts/extract/capture-scroll.sh`,
+290 LOC, commit 509a498). DOM state captured at 7 scroll percentages
+[0, 10, 25, 50, 75, 90, 100]. Codex review applied: Lenis/Locomotive
+scroll-engine detection with API delegation, 500ms floor +
+hash-stability polling per stop, `scrollHeightDeltaPct` numeric exposed
+instead of crude infinite-scroll boolean threshold. Output: per-pct
+outerHTML + visibleSections in `states/scroll/<pct>pct.json`, compact
+`trajectory.json`, `summary.json` with scrollEngine + static flags.
+
+**Phase C — hover snapshots** (`scripts/extract/capture-hover.sh`, 310 LOC,
+commit abc5328). Single in-page eval captures BOTH CSS `:hover` rule
+signal (static CSSOM extraction — codex review item 1 surfaced that
+synthetic dispatchEvent does NOT activate CSS :hover, so the rule body
+IS the signal) AND JS-handler hover signal (synthetic
+mouseover/mouseenter/mousemove dispatch + computed-style diff against
+rest-state). Selector parser splits `.card:hover .title` into
+activation=".card" + affected=".card .title". Per-elem files in
+`states/hover/elem-<id>.json`, stable-id manifest with
+`{id, kind, file, selector, activation, changedCount, schemaVersion}`.
+C1 grid sweep dropped — agent-browser has no pixel-coord cursor primitive;
+deferred to a future C3 mode driven by CDP `Input.dispatchMouseEvent`.
+
+### New gate: `state-coverage`
+
+Inserted into `GATE_ORDER` between `pre-generate` and `post-implement`.
+Reads the three Phase A/B/C summaries + trajectories + manifest, then
+grep-checks `impl/src/**/*.{tsx,ts,jsx,js,css,scss,vue,svelte,html}`
+for matching hooks:
+
+- **splash**: if `polls > 1`, impl must reference at least one captured
+  body/html class string (`is-loading`, `is-loaded`, ...).
+- **scroll**: if `static: false`, impl must use a scroll-state primitive
+  (IntersectionObserver, ScrollTrigger, useScroll, useInView,
+  scroll-snap, data-scroll, data-aos, framer-motion useScroll).
+- **hover**: if `manifest.entries` non-empty, impl must have at least
+  one hover handler (`:hover`, Tailwind `hover:`, `group-hover:`,
+  `onMouseEnter`, `whileHover`, raw `mouseenter`/`mouseover` listeners).
+
+Backward-compat: when `<ref_dir>/states/` is absent → single pass with
+"no states/ directory — multi-snapshot capture not run (skip)". Partial
+captures (e.g., splash but no hover) check only the present phases.
+
+### Claude-fidelity battery (folded from 26-site loop diagnosis)
+
+- **F1 — stub-element detector** (commit 837aa74): post-implement
+  anti-cheat that catches impls with `<div>section</div>`-style stub
+  elements masquerading as real content.
+- **F + E1 — spec-bundle grounding + bundle-grep helper** (commits
+  0a29a7c, 9eb7c3e): when post-implement fail count climbs, the gate
+  emits a context injection with `bundle-grep <selector>` output
+  showing the actual ref-bundle code for the worst-AE selectors.
+- **D — visual-judge-dispatcher** (`ui_clone.visual_judge_dispatcher`,
+  commit 84aaa5e): escape-hatch dispatcher that launches the LLM
+  vision review (Phase E) when AE/SSIM + auto-diagnose loops are stuck
+  >5 iterations. Cache-read integration into goal card rendering and
+  operator escape-hatch script (`scripts/visual-judge-escape.sh`).
+
+### Tests
+
+- `tests/test_capture_states.py` — 6 tests, fake-`agent-browser`-on-PATH
+  pattern.
+- `tests/test_capture_scroll.py` — 10 tests.
+- `tests/test_capture_hover.py` — 11 tests.
+- `tests/gates/test_state_coverage.py` — 12 tests, pass/fail/skip
+  scenarios for each phase + GATE_ORDER positioning check.
+
 ## [0.6.0] - 2026-05-24
 
 Section-staged convergence release: a separate closeout proof for plans that

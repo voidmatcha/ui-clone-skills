@@ -41,6 +41,17 @@
 
 set -uo pipefail
 
+# Codex review (2026-05-24/25): per-check timeout via Python wrapper.
+# The first attempt used bash timeout-shim.sh's pure-bash fallback, which
+# only SIGTERM's the immediate child PID and leaves the spawned tree
+# (bash → node → chromium) alive inside the `if cmd | tail | sed; then`
+# pipeline. run_with_timeout.py uses subprocess.Popen(start_new_session=True)
+# + os.killpg() so the whole process group is terminated on timeout.
+# Default 3 min; override via RUN_REQUIRED_CHECK_TIMEOUT_SEC.
+: "${RUN_REQUIRED_CHECK_TIMEOUT_SEC:=180}"
+_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+_RUN_WITH_TIMEOUT="python3 ${_SCRIPT_DIR}/../lib/run_with_timeout.py"
+
 SESSION="${1:-}"
 REF_URL="${2:-}"
 IMPL_URL="${3:-}"
@@ -426,17 +437,20 @@ except Exception:
   # shellcheck disable=SC2086 # intentional word-split on positional
   if [ -n "$env_vars" ]; then
     # shellcheck disable=SC2086 # intentional word-split on env_vars
-    if env $env_vars bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+    if $_RUN_WITH_TIMEOUT "$RUN_REQUIRED_CHECK_TIMEOUT_SEC" env $env_vars bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
     fi
   else
-    if bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+    if $_RUN_WITH_TIMEOUT "$RUN_REQUIRED_CHECK_TIMEOUT_SEC" bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
     fi
+  fi
+  if [ "$rc" -eq 124 ]; then
+    echo "  → check timed out after ${RUN_REQUIRED_CHECK_TIMEOUT_SEC}s (RUN_REQUIRED_CHECK_TIMEOUT_SEC)" >&2
   fi
   if [ "$rc" -eq 0 ]; then
     PASS=$((PASS + 1))

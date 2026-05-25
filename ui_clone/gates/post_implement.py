@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ui_clone import state as _state_mod
+
 from .base import CheckResult
 
 if TYPE_CHECKING:
@@ -522,6 +524,385 @@ def _check_html_paste_required(self: Gate) -> CheckResult | None:
     return None
 
 
+# Spec-bundle grounding — F from docs/claude-fidelity-analysis.md (Q-A
+# pair on improving ref-data utilization). Forces transition-spec.json
+# entries to reference real bundle/css/html artifacts so the spec cannot
+# be hand-waved without grounding in actual ref source.
+
+# Sentinels that mark "no bundle file expected" (legit absence).
+_SPEC_CHUNK_SENTINELS = ("inline init", "inline", "n/a", "none")
+
+
+def _parse_source_chunk(raw: str) -> list[str]:
+    """Parse a free-form source_chunk into candidate file basenames.
+
+    Real schemas observed in production transition-spec.json files:
+      - "gsap.min.js"
+      - "ScrollTrigger.min.js + gsap.min.js"
+      - "webflow.js (IX2 actions) + gsap.min.js + ScrollTrigger.min.js"
+      - "webflow.js (custom code) or inline init"
+      - "bundles/main.js"
+      - "css/<component>.webflow.css"
+
+    Returns the basename for each non-sentinel chunk. Sentinels
+    ("inline init", etc.) produce no candidates — they're legit absences.
+    """
+    if not raw:
+        return []
+    # Split on `+` and case-insensitive ` or `.
+    pieces = re.split(r"\s*\+\s*|\s+or\s+", raw, flags=re.IGNORECASE)
+    out: list[str] = []
+    for piece in pieces:
+        # Strip `(...)` annotations.
+        piece = re.sub(r"\s*\([^)]*\)", "", piece).strip()
+        if not piece or piece.lower() in _SPEC_CHUNK_SENTINELS:
+            continue
+        # Accept path-prefixed forms by taking the basename.
+        out.append(piece.split("/")[-1])
+    return out
+
+
+def _check_spec_bundle_grounding(self: Gate) -> CheckResult | None:
+    """Fail when transition-spec.json declares source_chunk files that are
+    not present anywhere in the ref artifacts (bundles/, css/, html/).
+
+    Forces spec extraction to be grounded in real ref source. Hand-waved
+    spec entries (e.g. "I think this is in webflow-fake.js") fail the
+    grounding check and force re-extraction.
+
+    Skips silently when transition-spec.json is missing or malformed —
+    other checks (`_check_transitions_result_health`) handle those.
+    """
+    spec_path = self.ref_dir / "transition-spec.json"
+    if not spec_path.is_file():
+        return None
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    entries = spec.get("transitions") or spec.get("entries") or []
+    if not isinstance(entries, list) or not entries:
+        return None
+
+    # Pre-collect available basenames across the three artifact dirs.
+    available: set[str] = set()
+    for sub in ("bundles", "css", "html"):
+        d = self.ref_dir / sub
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if f.is_file():
+                available.add(f.name)
+
+    missing: list[tuple[str, str]] = []  # (entry_id, missing_basename)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("source_chunk")
+        if not isinstance(raw, str):
+            continue
+        for basename in _parse_source_chunk(raw):
+            if basename not in available:
+                missing.append((str(entry.get("id", "?")), basename))
+
+    if not missing:
+        return None
+    sample = "\n".join(f"    - entry {eid}: source_chunk references {f!r}" for eid, f in missing[:5])
+    extra = f"\n    ... and {len(missing) - 5} more" if len(missing) > 5 else ""
+    return CheckResult(
+        label="spec-bundle-grounding",
+        status="fail",
+        message=(
+            f"{len(missing)} transition-spec entry(s) reference files not "
+            f"present in ref artifacts (bundles/, css/, html/):\n"
+            f"{sample}{extra}"
+        ),
+        fix=(
+            "Each source_chunk in transition-spec.json must point at a real "
+            "file captured into tmp/ref/<c>/bundles/, css/, or html/. "
+            "If a chunk is genuinely inline init, use the sentinel "
+            "\"inline init\" instead. Re-run capture to refresh bundle "
+            "downloads if a referenced file was renamed by the ref."
+        ),
+    )
+
+
+# E1: bundle-grep context inject — claude fidelity analysis 2026-05-25,
+# codex review of D+E1 staged design.
+# When fix iterations stall (any active gate has failed 2+ times) AND
+# sections/result.txt has failing rows, auto-inject ref-source snippets
+# for the worst-AE selectors so the next fix iteration is grounded in
+# the ref's actual code instead of guessed. Cost: 0 (greps captured ref
+# artifacts, no LLM call).
+
+# Codex review item (a): mark_failed bumps the counter AFTER the gate
+# runs, so an in-gate check reads the previous count. "fail 2-3" target
+# becomes effective threshold >= 2.
+_E1_FAIL_THRESHOLD = 2
+_E1_WORST_N = 3
+_E1_LINES_PER_SELECTOR = 5
+_E1_BUNDLE_GREP_TIMEOUT_S = 15
+
+
+def _parse_failing_section_rows(text: str) -> list[tuple[str, int]]:
+    """Return [(label, ae_per_mpx)] for rows marked ❌ or 🌑.
+
+    Codex review item (c): saturated rows use 🌑 not ❌ but still count
+    as fail and must be included for worst-N selection.
+    """
+    out: list[tuple[str, int]] = []
+    for line in text.splitlines():
+        if "❌" not in line and "🌑" not in line:
+            continue
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if len(cells) < 4:
+            continue
+        label = cells[0]
+        if not label or label.lower() == "section":
+            continue  # header row
+        try:
+            ae_per_mpx = int(cells[2])
+        except ValueError:
+            continue
+        out.append((label, ae_per_mpx))
+    return out
+
+
+def _resolve_repo_root_for_bundle_grep() -> Path | None:
+    """Locate the plugin root so we can call scripts/extract/bundle-grep.sh.
+
+    Mirrors _find_impl_root's resolution: env vars first, then walk up
+    from this file.
+    """
+    env_root = os.environ.get("PLUGIN_ROOT") or os.environ.get(
+        "CLAUDE_PLUGIN_ROOT"
+    )
+    if env_root:
+        cand = Path(env_root) / "scripts" / "extract" / "bundle-grep.sh"
+        if cand.is_file():
+            return Path(env_root)
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "scripts" / "extract" / "bundle-grep.sh").is_file():
+            return parent
+    return None
+
+
+def _check_bundle_grep_context_inject(self: Gate) -> CheckResult | None:
+    """E1 sub-check: when fix-loop is stuck, inject ref-source context for
+    the worst-AE failing sections.
+
+    Decision: this is `status="warn"`, not "fail". The intent is to enrich
+    the goal-card with ref-source hits — the existing post-implement
+    failures already block. A warn surfaces the snippets without adding
+    another fail count.
+
+    Codex review item (f): post_implement.py must not auto-DISPATCH expensive
+    LLM calls (visual-judge auto-run = D). bundle-grep is cheap text grep,
+    so consuming/injecting it here is in scope. The D dispatcher belongs
+    in driver/goal-card territory, not in the gate.
+    """
+    # Active-gate counter — codex review item (d): use max() across
+    # post-implement and section-compare because mark_failed only bumps the
+    # current_gate counter, and visual fails accruing under post-implement
+    # leave the section-compare counter stale.
+    try:
+        state = _state_mod.PipelineState.load(self.ref_dir)
+    except (OSError, json.JSONDecodeError):
+        return None
+    counter = max(
+        state.gate_fail_counts.get("post-implement", 0),
+        state.gate_fail_counts.get("section-compare", 0),
+    )
+    if counter < _E1_FAIL_THRESHOLD:
+        return None
+
+    result_path = self.ref_dir / "sections" / "result.txt"
+    if not result_path.is_file():
+        return None
+    try:
+        text = result_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    failing = _parse_failing_section_rows(text)
+    if not failing:
+        return None
+
+    # Worst-N by AE/Mpx (descending).
+    failing.sort(key=lambda row: row[1], reverse=True)
+    worst = failing[:_E1_WORST_N]
+
+    repo_root = _resolve_repo_root_for_bundle_grep()
+    if repo_root is None:
+        return None
+    grep_script = repo_root / "scripts" / "extract" / "bundle-grep.sh"
+
+    snippets: list[str] = []
+    for label, ae in worst:
+        try:
+            proc = subprocess.run(
+                ["bash", str(grep_script), str(self.ref_dir), label],
+                capture_output=True,
+                text=True,
+                timeout=_E1_BUNDLE_GREP_TIMEOUT_S,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        output = (proc.stdout or "").strip()
+        if not output:
+            snippets.append(
+                f"  • {label} (AE/Mpx={ae}): no ref-source matches for selector"
+            )
+            continue
+        top_lines = output.splitlines()[:_E1_LINES_PER_SELECTOR]
+        snippets.append(f"  • {label} (AE/Mpx={ae}):")
+        for line in top_lines:
+            snippets.append(f"      {line[:180]}")
+
+    if not snippets:
+        return None
+    body = "\n".join(snippets)
+    return CheckResult(
+        label="bundle-grep-context-inject",
+        status="warn",
+        message=(
+            f"Fix-loop stuck (active-gate fail_count={counter}). Worst-AE "
+            f"section ref-source for next fix iteration:\n{body}"
+        ),
+        fix=(
+            "Use these ref-source hits as the ground truth for your next "
+            "implementation pass. Match the ref's animation params (duration, "
+            "ease, transform) — don't invent. If bundle-grep returned no hits, "
+            "the selector spelling may be wrong or the ref's animation is in "
+            "a chunk that capture missed (re-extract bundles)."
+        ),
+    )
+
+
+# Anti-cheat pattern detection — F1 from docs/claude-fidelity-analysis.md.
+# Patterns observed in the 26-site loop (2026-05-24/25): claude under
+# auto mode generates hidden stub elements (1px×1px, display:none, empty
+# containers with check-required attributes) to satisfy static gate
+# selectors without rendering the actual component. These pass the
+# selector check but fail the user's visual fidelity expectation.
+
+# Pattern 1: className with -stub / -shim / -placeholder suffix on the
+# element carrying the check-required selector. High-signal: ui-clone-skills
+# generated impl has no legitimate use for these suffixes.
+_ANTI_CHEAT_NAME_RE = re.compile(
+    r"className\s*=\s*[\"'][^\"']*-(?:stub|shim|placeholder)\b",
+    re.IGNORECASE,
+)
+
+# Pattern 2: zero-visible-area markers. Any single marker is suspicious in
+# combination with a check-required attribute on the same element.
+_ZERO_AREA_MARKERS = (
+    "width: 0", "width:0",
+    "height: 0", "height:0",
+    'width: "1px"', "width: '1px'",
+    'height: "1px"', "height: '1px'",
+    "width: 1, ", "height: 1, ",  # bare integer 1 in JSX style
+    "display: 'none'", 'display: "none"', "display:'none'", 'display:"none"',
+    "clipPath: 'inset(50%)'", 'clipPath: "inset(50%)"',
+    "clip-path: inset(50%)",
+    "clip: rect(0",
+)
+
+# Attributes used by ui-clone-skills static checks. An element carrying any
+# of these MUST be a real rendered component, not a hidden stub. List grows
+# as new static checks add selector requirements.
+_CHECK_REQUIRED_ATTRS = (
+    "data-lottie",
+    "data-hero-composite",
+    "data-transition",
+    "data-motion",
+    "data-reveal",
+    "data-scroll-trigger",
+    "data-parallax",
+)
+
+
+def _find_all_offsets(haystack: str, needle: str) -> list[int]:
+    """All start offsets of needle in haystack (non-overlapping fine for keywords)."""
+    out: list[int] = []
+    start = 0
+    while True:
+        idx = haystack.find(needle, start)
+        if idx == -1:
+            break
+        out.append(idx)
+        start = idx + 1
+    return out
+
+
+def _check_anti_cheat_patterns(self: Gate) -> CheckResult | None:
+    """Fail when impl source contains stub elements that satisfy a static
+    check's selector requirement but render to zero visible area.
+
+    See docs/claude-fidelity-analysis.md for the 4-site evidence behind
+    these patterns. Skips silently when impl_root is unresolvable
+    (capture-phase runs) or impl/src is absent.
+    """
+    impl_root = self._find_impl_root()
+    if impl_root is None or not impl_root.is_dir():
+        return None
+    src = impl_root / "src"
+    if not src.is_dir():
+        return None
+
+    hits: list[tuple[str, str]] = []
+    for path in src.rglob("*"):
+        if path.suffix.lower() not in (".tsx", ".jsx", ".ts", ".js"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rel = str(path.relative_to(impl_root))
+
+        # Pattern 1: stub/shim/placeholder className
+        for m in _ANTI_CHEAT_NAME_RE.finditer(text):
+            hits.append((rel, f"stub-className: {m.group(0)[:60]}"))
+
+        # Pattern 2: check-required attr within 200 chars of a zero-area marker.
+        # Bidirectional window catches both "attr then style" and "style then attr".
+        for attr in _CHECK_REQUIRED_ATTRS:
+            for attr_pos in _find_all_offsets(text, attr):
+                window_lo = max(0, attr_pos - 200)
+                window_hi = min(len(text), attr_pos + 200)
+                window = text[window_lo:window_hi]
+                for marker in _ZERO_AREA_MARKERS:
+                    if marker in window:
+                        hits.append((rel, f"{attr} + zero-area ({marker})"))
+                        break
+                else:
+                    continue
+                break  # one hit per attr occurrence is enough
+
+    if not hits:
+        return None
+    sample = "\n".join(f"    - {p}: {pat}" for p, pat in hits[:5])
+    extra = f"\n    ... and {len(hits) - 5} more" if len(hits) > 5 else ""
+    return CheckResult(
+        label="anti-cheat-pattern-detection",
+        status="fail",
+        message=(
+            f"Detected {len(hits)} anti-cheat shim(s) in impl/src — elements "
+            f"that satisfy a static check's selector requirement but render "
+            f"to zero visible area:\n{sample}{extra}"
+        ),
+        fix=(
+            "Replace stub/shim/placeholder elements with the actual rendered "
+            "component from the ref. A static check satisfied by a hidden "
+            "1px×1px element is not a real fix — the rendered UI must "
+            "contain the real component. "
+            "See docs/claude-fidelity-analysis.md for the patterns and rationale."
+        ),
+    )
+
+
 def gate_post_implement(self: Gate) -> list[CheckResult]:
     results = []
     results.append(self.check_file(self.ref_dir / "extracted.json", "extracted.json"))
@@ -549,4 +930,13 @@ def gate_post_implement(self: Gate) -> list[CheckResult]:
     phase_e = _check_phase_e_result(self)
     if phase_e is not None:
         results.append(phase_e)
+    anti_cheat = _check_anti_cheat_patterns(self)
+    if anti_cheat is not None:
+        results.append(anti_cheat)
+    spec_grounding = _check_spec_bundle_grounding(self)
+    if spec_grounding is not None:
+        results.append(spec_grounding)
+    bundle_inject = _check_bundle_grep_context_inject(self)
+    if bundle_inject is not None:
+        results.append(bundle_inject)
     return results

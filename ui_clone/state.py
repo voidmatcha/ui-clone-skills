@@ -7,8 +7,12 @@ Single source of truth for which gate the pipeline is currently at.
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +24,7 @@ GATE_ORDER: list[str] = [
     "paid-features",
     "spec",
     "pre-generate",
+    "state-coverage",
     "post-implement",
     "boundary",
     "font-parity",
@@ -103,6 +108,37 @@ def suggest_fallbacks(gate: str, category: str) -> list[str]:
     return list(_FALLBACK_SUGGESTIONS.get((gate, category), []))
 
 
+@contextmanager
+def _pipeline_state_lock(ref_dir: Path) -> Iterator[None]:
+    """Cross-process advisory exclusive lock on pipeline-state.json.lock.
+
+    Serializes the read-modify-write of pipeline-state.json so concurrent
+    writers (gate runs, hook invocations, sub-workspace drivers) don't
+    lose increments to gate_fail_counts or duplicate unclonable_reasons
+    entries. Lifted pattern from ui_clone.driver_session.register —
+    `os.replace` alone has a TOCTOU race because both writers can load
+    the same gate_fail_counts={"post-implement": 5}, both compute +1,
+    both rename — only one rename survives, the other increment is lost.
+
+    fcntl.flock per-fd semantics (Linux/macOS): a process holding LOCK_EX
+    on fd1 will *block* if the same process opens a NEW fd to the same
+    lock file and tries LOCK_EX. So mark_failed cannot call the public
+    record_unclonable while holding the lock — record_unclonable would
+    open a fresh fd and deadlock. The `_record_unclonable_unlocked`
+    private variant exists for this nested case.
+    """
+    ref_dir = Path(ref_dir)
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = ref_dir / "pipeline-state.json.lock"
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        # Releasing via close — flock(LOCK_UN) is implicit on fd close.
+        os.close(lock_fd)
+
+
 @dataclass
 class PipelineState:
     component: str = ""
@@ -171,72 +207,115 @@ class PipelineState:
                     or "canonical"
                 ),
             )
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            # Codex review (2026-05-24): silently returning defaults on a
+            # corrupt pipeline-state.json erases terminal/abort state
+            # (unclonable_reasons, completed_steps) so the loop restarts at
+            # "reference" with no audit trail. Quarantine the corrupt bytes
+            # under a timestamped name so operators can recover them, then
+            # warn loudly on stderr.
+            ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            quarantine = path.with_suffix(f".json.corrupt.{ts}")
+            try:
+                path.rename(quarantine)
+            except OSError:
+                pass
+            print(
+                f"ui-clone-skills: pipeline-state.json at {path} is corrupt "
+                f"({exc}). Quarantined to {quarantine.name}. Falling back to "
+                f"defaults — recover unclonable_reasons / completed_steps from "
+                f"the quarantine file if needed.",
+                file=sys.stderr,
+            )
             return cls(component=ref_dir.name)
         except OSError as exc:
             print(f"ui-clone-skills: Cannot read {path}: {exc}", file=sys.stderr)
             return cls(component=ref_dir.name)
+
+    def _to_disk_payload(self) -> dict:
+        """Single source of truth for the on-disk JSON schema.
+
+        Encapsulates the implRoot/closeoutPolicy emit-when-set rules so
+        every write path produces identical bytes for identical state.
+        """
+        payload: dict = {
+            "component": self.component,
+            "started_at": self.started_at,
+            "completed_steps": self.completed_steps,
+            "current_gate": self.current_gate,
+            "last_updated": self.last_updated,
+            "gate_fail_counts": self.gate_fail_counts,
+            "unclonable_reasons": self.unclonable_reasons,
+        }
+        # Emit both keys so find-impl-root.sh (camelCase `implRoot`) and any
+        # internal reader (snake_case `impl_root`) both work. Omit when empty
+        # to keep legacy state files compact.
+        if self.impl_root:
+            payload["implRoot"] = self.impl_root
+            payload["impl_root"] = self.impl_root
+        # closeout_policy persists only when non-default to avoid diff churn
+        # on every save on legacy canonical runs.
+        if self.closeout_policy != "canonical":
+            payload["closeoutPolicy"] = self.closeout_policy
+        return payload
+
+    def _save_unlocked(self, ref_dir: Path) -> None:
+        """Atomic JSON write WITHOUT acquiring the lock.
+
+        Caller MUST already hold `_pipeline_state_lock(ref_dir)`. Used by
+        the public write methods (save / mark_* / record_unclonable /
+        demote_to) and by `_record_unclonable_unlocked` when chained from
+        mark_failed under the same critical section.
+        """
+        path = ref_dir / "pipeline-state.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(self._to_disk_payload(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+
+    def _mirror_from(self, other: PipelineState) -> None:
+        """Copy mutable fields from `other` into `self`.
+
+        Used after lock-protected RMW (mark_* / record_unclonable) so the
+        caller's in-memory PipelineState instance reflects the disk truth
+        that was actually written under the lock — even when a parallel
+        writer's earlier mutation was absorbed during the reload.
+        """
+        self.component = other.component
+        self.started_at = other.started_at
+        self.completed_steps = list(other.completed_steps)
+        self.current_gate = other.current_gate
+        self.last_updated = other.last_updated
+        self.gate_fail_counts = dict(other.gate_fail_counts)
+        self.unclonable_reasons = [dict(r) for r in other.unclonable_reasons]
+        self.impl_root = other.impl_root
+        self.closeout_policy = other.closeout_policy
 
     def save(self, ref_dir: Path) -> None:
         """Write the current in-memory state to pipeline-state.json atomically.
 
         Used by callers that mutate fields outside of `mark_passed` /
         `mark_failed` / `record_unclonable` (e.g. `impl_root` write at
-        Phase 1 start in `pipeline.execute_phases`).
+        Phase 1 start in `pipeline.execute_phases`). Holds the cross-
+        process write lock so concurrent gate runs / hook invocations
+        don't interleave half-written JSON.
         """
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         if not self.started_at:
             self.started_at = now
         self.last_updated = now
+        with _pipeline_state_lock(ref_dir):
+            self._save_unlocked(ref_dir)
 
-        path = ref_dir / "pipeline-state.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "component": self.component,
-                    "started_at": self.started_at,
-                    "completed_steps": self.completed_steps,
-                    "current_gate": self.current_gate,
-                    "last_updated": self.last_updated,
-                    "gate_fail_counts": self.gate_fail_counts,
-                    "unclonable_reasons": self.unclonable_reasons,
-                    # Emit both keys so find-impl-root.sh (camelCase
-                    # `implRoot`) and any internal reader (snake_case
-                    # `impl_root`) both work. Omit when empty to keep
-                    # legacy state files compact.
-                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
-                       if self.impl_root else {}),
-                    # closeout_policy persists only when non-default to avoid
-                    # diff churn on every save on legacy canonical runs.
-                    **({"closeoutPolicy": self.closeout_policy}
-                       if self.closeout_policy != "canonical" else {}),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
-
-    def demote_to(self, gate: str, ref_dir: Path) -> None:
-        """Reset current_gate back to `gate` and remove it (and later gates) from completed.
-
-        Used when downstream artifacts are invalidated (e.g., a component file was
-        edited after section-compare passed — the visual verification is now stale).
-        Writes file atomically.
-        """
-        if gate not in GATE_ORDER:
-            return
+    def _demote_to_unlocked(self, gate: str) -> None:
+        """Demotion logic without lock/write. Caller holds the lock and saves."""
         target_idx = GATE_ORDER.index(gate)
-
-        # Remove `gate` and any later gates from completed_steps
         self.completed_steps = [
             g for g in self.completed_steps
             if g not in GATE_ORDER or GATE_ORDER.index(g) < target_idx
         ]
-
-        # Only retreat — never set current_gate forward via this method
         if self.current_gate == "done":
             self.current_gate = gate
         elif self.current_gate in GATE_ORDER:
@@ -245,41 +324,31 @@ class PipelineState:
                 self.current_gate = gate
         else:
             self.current_gate = gate
-
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         if not self.started_at:
             self.started_at = now
         self.last_updated = now
 
-        path = ref_dir / "pipeline-state.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "component": self.component,
-                    "started_at": self.started_at,
-                    "completed_steps": self.completed_steps,
-                    "current_gate": self.current_gate,
-                    "last_updated": self.last_updated,
-                    "gate_fail_counts": self.gate_fail_counts,
-                    "unclonable_reasons": self.unclonable_reasons,
-                    # Emit both keys so find-impl-root.sh (camelCase
-                    # `implRoot`) and any internal reader (snake_case
-                    # `impl_root`) both work. Omit when empty to keep
-                    # legacy state files compact.
-                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
-                       if self.impl_root else {}),
-                    # closeout_policy persists only when non-default to avoid
-                    # diff churn on every save on legacy canonical runs.
-                    **({"closeoutPolicy": self.closeout_policy}
-                       if self.closeout_policy != "canonical" else {}),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+    def demote_to(self, gate: str, ref_dir: Path) -> None:
+        """Reset current_gate back to `gate` and remove it (and later gates) from completed.
+
+        Used when downstream artifacts are invalidated (e.g., a component file was
+        edited after section-compare passed — the visual verification is now stale).
+        Writes file atomically under the cross-process write lock. The disk is
+        re-read inside the lock so a concurrent mark_passed/mark_failed/
+        record_unclonable from another process doesn't get clobbered.
+        """
+        if gate not in GATE_ORDER:
+            return
+        with _pipeline_state_lock(ref_dir):
+            state_path = ref_dir / "pipeline-state.json"
+            authoritative = (
+                PipelineState.load(ref_dir) if state_path.is_file() else self
+            )
+            authoritative._demote_to_unlocked(gate)
+            authoritative._save_unlocked(ref_dir)
+            if authoritative is not self:
+                self._mirror_from(authoritative)
 
     def missing_prerequisites(self, gate: str) -> list[str]:
         """Return prerequisite gates absent from completed_steps."""
@@ -293,36 +362,29 @@ class PipelineState:
         extras = [g for g in self.completed_steps if g not in GATE_ORDER]
         self.completed_steps = ordered + extras
 
-    def mark_passed(self, gate: str, ref_dir: Path) -> None:
-        """Record gate as passed and advance current_gate. Writes file atomically.
+    def _mark_passed_unlocked(self, gate: str) -> bool:
+        """Apply mark_passed mutation. Returns True if anything changed.
 
-        Skips the write when the gate was already recorded and current_gate
-        would not advance — avoids unnecessary filesystem churn on re-runs.
-        """
-        if gate not in GATE_ORDER:
-            return
+        Caller holds the lock and is responsible for the save. Returning
+        False signals "no on-disk change required" so the cross-process
+        lock-load-write critical section can short-circuit the write."""
         if self.missing_prerequisites(gate):
-            return
+            return False
 
         already_recorded = gate in self.completed_steps
         if not already_recorded:
             self.completed_steps.append(gate)
             self._normalize_completed_steps()
 
-        # Reset the consecutive-fail counter for this gate now that it passed.
         fail_reset = self.gate_fail_counts.pop(gate, 0) > 0
 
-        # Compute next gate — only advance, never retreat.
-        # If current_gate is already ahead of `gate` (e.g. re-running an earlier
-        # step), preserve the current position instead of regressing.
         next_gate = self.current_gate
         if self.current_gate == "done":
-            pass  # Terminal state — never regress
+            pass
         elif gate in GATE_ORDER:
             idx = GATE_ORDER.index(gate)
             next_idx = idx + 1
             candidate = GATE_ORDER[next_idx] if next_idx < len(GATE_ORDER) else "done"
-            # Only advance if candidate is strictly later than current_gate
             current_idx = (
                 GATE_ORDER.index(self.current_gate) if self.current_gate in GATE_ORDER else -1
             )
@@ -332,9 +394,8 @@ class PipelineState:
             if candidate_idx > current_idx:
                 next_gate = candidate
 
-        # Skip write if nothing would change
         if already_recorded and next_gate == self.current_gate and not fail_reset:
-            return
+            return False
 
         self.current_gate = next_gate
 
@@ -342,143 +403,45 @@ class PipelineState:
         if not self.started_at:
             self.started_at = now
         self.last_updated = now
+        return True
 
-        path = ref_dir / "pipeline-state.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "component": self.component,
-                    "started_at": self.started_at,
-                    "completed_steps": self.completed_steps,
-                    "current_gate": self.current_gate,
-                    "last_updated": self.last_updated,
-                    "gate_fail_counts": self.gate_fail_counts,
-                    "unclonable_reasons": self.unclonable_reasons,
-                    # Emit both keys so find-impl-root.sh (camelCase
-                    # `implRoot`) and any internal reader (snake_case
-                    # `impl_root`) both work. Omit when empty to keep
-                    # legacy state files compact.
-                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
-                       if self.impl_root else {}),
-                    # closeout_policy persists only when non-default to avoid
-                    # diff churn on every save on legacy canonical runs.
-                    **({"closeoutPolicy": self.closeout_policy}
-                       if self.closeout_policy != "canonical" else {}),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+    def mark_passed(self, gate: str, ref_dir: Path) -> None:
+        """Record gate as passed and advance current_gate. Writes file atomically
+        under the cross-process write lock.
 
-    def mark_failed(self, gate: str, ref_dir: Path) -> None:
-        """Increment the consecutive-fail counter for `gate`.
-
-        Only bumps when `gate` is the current_gate — failing a gate earlier
-        than the cursor (e.g. re-running `reference` after pipeline is at
-        `extraction`) does not count as "stuck on the active gate".
-
-        Hard-cap auto-termination: when the bumped counter is at or past
-        HARD_CAP_GATE_FAILS, also writes a canonical `category="hard-cap-fail"`
-        entry into unclonable_reasons (via record_unclonable, which handles
-        dedup + on-disk persistence). This makes terminalization a property
-        of the persisted state instead of a banner that hooks/banners/harness
-        each interpret separately. Observed before this fix: linear-app hit
-        97 consecutive post-implement failures and realfood-gov hit 6 without
-        any of them triggering the Stop-hook bypass — abort_banner fired in
-        goal.py but pipeline-state.json had no canonical reason, so the Stop
-        hook re-enforced the gate forever.
+        Skips the write when the gate was already recorded and current_gate
+        would not advance — avoids unnecessary filesystem churn on re-runs.
+        The disk is re-read inside the lock so a concurrent mark_failed /
+        record_unclonable from another process is absorbed rather than
+        clobbered (codex review 2026-05-24).
         """
         if gate not in GATE_ORDER:
             return
-        if self.current_gate != gate:
-            return
-
-        self.gate_fail_counts[gate] = self.gate_fail_counts.get(gate, 0) + 1
-        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if not self.started_at:
-            self.started_at = now
-        self.last_updated = now
-
-        path = ref_dir / "pipeline-state.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "component": self.component,
-                    "started_at": self.started_at,
-                    "completed_steps": self.completed_steps,
-                    "current_gate": self.current_gate,
-                    "last_updated": self.last_updated,
-                    "gate_fail_counts": self.gate_fail_counts,
-                    "unclonable_reasons": self.unclonable_reasons,
-                    # Emit both keys so find-impl-root.sh (camelCase
-                    # `implRoot`) and any internal reader (snake_case
-                    # `impl_root`) both work. Omit when empty to keep
-                    # legacy state files compact.
-                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
-                       if self.impl_root else {}),
-                    # closeout_policy persists only when non-default to avoid
-                    # diff churn on every save on legacy canonical runs.
-                    **({"closeoutPolicy": self.closeout_policy}
-                       if self.closeout_policy != "canonical" else {}),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
-
-        # Hard-cap terminalization. record_unclonable() dedups by (gate,
-        # reason) — the reason string deliberately omits the live count
-        # (uses the cap only) so subsequent bumps after the cap don't
-        # produce N-duplicate entries. The exact count at the moment of
-        # termination is still reconstructable from gate_fail_counts on
-        # disk; detected_at is auto-added by record_unclonable.
-        if self.gate_fail_counts[gate] >= HARD_CAP_GATE_FAILS:
-            self.record_unclonable(
-                gate=gate,
-                reason=(
-                    f"hard cap reached: gate '{gate}' failed "
-                    f"{HARD_CAP_GATE_FAILS} consecutive times "
-                    f"(auto-terminated by state.mark_failed)"
-                ),
-                ref_dir=ref_dir,
-                category="hard-cap-fail",
+        with _pipeline_state_lock(ref_dir):
+            state_path = ref_dir / "pipeline-state.json"
+            authoritative = (
+                PipelineState.load(ref_dir) if state_path.is_file() else self
             )
+            changed = authoritative._mark_passed_unlocked(gate)
+            if changed:
+                authoritative._save_unlocked(ref_dir)
+            if authoritative is not self:
+                self._mirror_from(authoritative)
 
-    def record_unclonable(
+    def _record_unclonable_unlocked(
         self,
         gate: str,
         reason: str,
-        ref_dir: Path,
         detail: dict | None = None,
         category: str | None = None,
         fallback_suggestions: list[str] | None = None,
-    ) -> None:
-        """Record a hard-blocker that the pipeline cannot work past.
-
-        Deduplicates by (gate, reason). Triggers goal.py --check-done exit
-        code 2 (distinct from 1 = not-yet-done) so external loop drivers can
-        stop on an unwinnable target instead of burning iterations.
-
-        category (Step G): short machine-readable kind name (e.g.,
-            "drm-canvas", "commercial-font", "auth-gated", "hard-cap-fail",
-            "class-signature-preservation-mismatch"). Used by the receipt
-            HTML to look up downstream documentation.
-
-        fallback_suggestions (Step G): ordered list of human-readable
-            remediation suggestions. Callers pass either an explicit list
-            OR pass `category` alone and we look up canonical defaults
-            from suggest_fallbacks(). Empty / None → field omitted from
-            the persisted entry for compat with pre-G readers.
-        """
+    ) -> bool:
+        """Append an unclonable reason in memory. Caller holds the lock and
+        is responsible for the save. Returns True if a new entry was added,
+        False on dedup hit (existing (gate, reason) pair)."""
         for existing in self.unclonable_reasons:
             if existing.get("gate") == gate and existing.get("reason") == reason:
-                return
+                return False
 
         # Suggestion resolution: explicit > category-default > none.
         if fallback_suggestions is None and category:
@@ -501,33 +464,110 @@ class PipelineState:
         if not self.started_at:
             self.started_at = now
         self.last_updated = now
+        return True
 
-        path = ref_dir / "pipeline-state.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "component": self.component,
-                    "started_at": self.started_at,
-                    "completed_steps": self.completed_steps,
-                    "current_gate": self.current_gate,
-                    "last_updated": self.last_updated,
-                    "gate_fail_counts": self.gate_fail_counts,
-                    "unclonable_reasons": self.unclonable_reasons,
-                    # Emit both keys so find-impl-root.sh (camelCase
-                    # `implRoot`) and any internal reader (snake_case
-                    # `impl_root`) both work. Omit when empty to keep
-                    # legacy state files compact.
-                    **({"implRoot": self.impl_root, "impl_root": self.impl_root}
-                       if self.impl_root else {}),
-                    # closeout_policy persists only when non-default to avoid
-                    # diff churn on every save on legacy canonical runs.
-                    **({"closeoutPolicy": self.closeout_policy}
-                       if self.closeout_policy != "canonical" else {}),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+    def mark_failed(self, gate: str, ref_dir: Path) -> None:
+        """Increment the consecutive-fail counter for `gate`.
+
+        Only bumps when `gate` is the current_gate — failing a gate earlier
+        than the cursor (e.g. re-running `reference` after pipeline is at
+        `extraction`) does not count as "stuck on the active gate".
+
+        Hard-cap auto-termination: when the bumped counter is at or past
+        HARD_CAP_GATE_FAILS, also writes a canonical `category="hard-cap-fail"`
+        entry into unclonable_reasons. Both the bump and the auto-record
+        happen inside one cross-process write lock so two parallel
+        mark_failed callers can't lose increments (codex review 2026-05-24).
+        """
+        if gate not in GATE_ORDER:
+            return
+        if self.current_gate != gate:
+            return  # fast-path; preserves test_mark_failed_ignores_non_active_gate
+
+        with _pipeline_state_lock(ref_dir):
+            state_path = ref_dir / "pipeline-state.json"
+            authoritative = (
+                PipelineState.load(ref_dir) if state_path.is_file() else self
+            )
+            # Re-check inside the lock against the freshly-loaded snapshot.
+            if authoritative.current_gate != gate:
+                if authoritative is not self:
+                    self._mirror_from(authoritative)
+                return
+
+            authoritative.gate_fail_counts[gate] = (
+                authoritative.gate_fail_counts.get(gate, 0) + 1
+            )
+            now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if not authoritative.started_at:
+                authoritative.started_at = now
+            authoritative.last_updated = now
+
+            # Hard-cap terminalization: append the canonical hard-cap-fail
+            # reason while still under the same lock so a single save
+            # captures both the bumped counter and the new reason.
+            # _record_unclonable_unlocked dedups by (gate, reason) — the
+            # reason string deliberately uses the cap (not the live count)
+            # so subsequent bumps don't produce N-duplicate entries.
+            if authoritative.gate_fail_counts[gate] >= HARD_CAP_GATE_FAILS:
+                authoritative._record_unclonable_unlocked(
+                    gate=gate,
+                    reason=(
+                        f"hard cap reached: gate '{gate}' failed "
+                        f"{HARD_CAP_GATE_FAILS} consecutive times "
+                        f"(auto-terminated by state.mark_failed)"
+                    ),
+                    category="hard-cap-fail",
+                )
+
+            authoritative._save_unlocked(ref_dir)
+            if authoritative is not self:
+                self._mirror_from(authoritative)
+
+    def record_unclonable(
+        self,
+        gate: str,
+        reason: str,
+        ref_dir: Path,
+        detail: dict | None = None,
+        category: str | None = None,
+        fallback_suggestions: list[str] | None = None,
+    ) -> None:
+        """Record a hard-blocker that the pipeline cannot work past.
+
+        Deduplicates by (gate, reason). Triggers goal.py --check-done exit
+        code 2 (distinct from 1 = not-yet-done) so external loop drivers can
+        stop on an unwinnable target instead of burning iterations.
+
+        Lock-protected RMW: the disk is re-read inside the lock so a
+        concurrent record_unclonable / mark_failed from another process
+        contributes to the dedup decision instead of being clobbered
+        (codex review 2026-05-24).
+
+        category (Step G): short machine-readable kind name (e.g.,
+            "drm-canvas", "commercial-font", "auth-gated", "hard-cap-fail",
+            "class-signature-preservation-mismatch"). Used by the receipt
+            HTML to look up downstream documentation.
+
+        fallback_suggestions (Step G): ordered list of human-readable
+            remediation suggestions. Callers pass either an explicit list
+            OR pass `category` alone and we look up canonical defaults
+            from suggest_fallbacks(). Empty / None → field omitted from
+            the persisted entry for compat with pre-G readers.
+        """
+        with _pipeline_state_lock(ref_dir):
+            state_path = ref_dir / "pipeline-state.json"
+            authoritative = (
+                PipelineState.load(ref_dir) if state_path.is_file() else self
+            )
+            added = authoritative._record_unclonable_unlocked(
+                gate=gate,
+                reason=reason,
+                detail=detail,
+                category=category,
+                fallback_suggestions=fallback_suggestions,
+            )
+            if added:
+                authoritative._save_unlocked(ref_dir)
+            if authoritative is not self:
+                self._mirror_from(authoritative)

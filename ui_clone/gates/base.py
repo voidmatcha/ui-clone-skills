@@ -411,6 +411,8 @@ class Gate:
 
     def gate_pre_generate(self) -> list[CheckResult]: ...  # type: ignore[empty-body]
 
+    def gate_state_coverage(self) -> list[CheckResult]: ...  # type: ignore[empty-body]
+
     def gate_post_implement(self) -> list[CheckResult]: ...  # type: ignore[empty-body]
 
     def gate_boundary(self) -> list[CheckResult]: ...  # type: ignore[empty-body]

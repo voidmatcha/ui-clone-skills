@@ -301,6 +301,39 @@ def _visual_judge_next_action(ref_dir: Path) -> str | None:
         return None
     commands = " && ".join(examples)
     worst_list = ", ".join(f"{name}(AE/Mpx={ae})" for name, ae in failing)
+
+    # D dispatcher cache-only read: if a prior escape-hatch run cached
+    # visual-judge findings for any of the worst sections, inline the
+    # priority_fix so the agent sees the LLM verdict immediately instead
+    # of having to re-run visual-judge. This is read-only — no dispatch
+    # happens here per codex review (item c, RISKY).
+    cached_findings: list[str] = []
+    try:
+        from ui_clone import visual_judge_dispatcher as _vjd
+        for name, ae in failing:
+            ref_png = ref_pngs / f"{name}.png"
+            impl_png = impl_pngs / f"{name}.png"
+            if not ref_png.is_file() or not impl_png.is_file():
+                continue
+            cached = _vjd.load_cached(ref_dir, name, ref_png, impl_png)
+            if cached:
+                priority = cached.get("priority_fix") or cached.get("summary") or "?"
+                cached_findings.append(
+                    f"  • {name} (AE/Mpx={ae}): {str(priority)[:200]}"
+                )
+    except Exception:
+        # Cache-only read must never break goal-card rendering.
+        cached_findings = []
+
+    cache_block = ""
+    if cached_findings:
+        cache_block = (
+            "\n\nCACHED visual-judge findings (no re-dispatch needed):\n"
+            + "\n".join(cached_findings)
+            + "\nApply these directly; for sections WITHOUT a cached line, "
+            "the dispatch command above will populate the cache on first run."
+        )
+
     return (
         "section-compare has failing rows with high AE — AE is uniformly "
         "catastrophic and offers no gradient. Run visual-judge (multimodal "
@@ -311,7 +344,7 @@ def _visual_judge_next_action(ref_dir: Path) -> str | None:
         "the matching impl/src/components/<Name>.tsx, re-run section-compare "
         "via skills/visual-debug/scripts/section-compare.sh, and re-route via "
         f"python -m ui_clone.goal {command_ref}. Repeat until AE/Mpx drops "
-        "below the section-compare critical threshold."
+        f"below the section-compare critical threshold.{cache_block}"
     )
 
 

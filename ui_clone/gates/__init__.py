@@ -29,6 +29,7 @@ from . import (
     reference,
     section_compare,
     spec,
+    state_coverage,
     verification_plan,
 )
 from . import (
@@ -95,6 +96,7 @@ Gate._check_scroll_spec_coverage = (  # type: ignore[method-assign]
     pre_generate._check_scroll_spec_coverage
 )
 Gate.gate_pre_generate = pre_generate.gate_pre_generate  # type: ignore[method-assign]
+Gate.gate_state_coverage = state_coverage.gate_state_coverage  # type: ignore[method-assign]
 Gate._check_generation_completeness = (  # type: ignore[method-assign]
     post_implement._check_generation_completeness
 )

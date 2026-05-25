@@ -1,7 +1,11 @@
 """Tests for ui_clone.state — pipeline-state.json read/write."""
 
 import json
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from ui_clone.state import GATE_ORDER, PipelineState
 
@@ -16,6 +20,7 @@ def test_gate_order_contains_all_gates() -> None:
         "paid-features",
         "spec",
         "pre-generate",
+        "state-coverage",
         "post-implement",
         "boundary",
         "font-parity",
@@ -56,6 +61,34 @@ def test_load_corrupted_json_returns_defaults(tmp_path: Path) -> None:
     ref_dir.mkdir()
     (ref_dir / "pipeline-state.json").write_text("not json{{{")
     state = PipelineState.load(ref_dir)
+    assert state.current_gate == "reference"
+
+
+def test_load_corrupted_json_quarantines_file(
+    tmp_path: Path, capsys: "pytest.CaptureFixture[str]"
+) -> None:
+    """Codex review (2026-05-24): corrupt pipeline-state.json must not silently
+    erase terminal/abort state (unclonable_reasons, completed_steps). Quarantine
+    the corrupt bytes under a timestamped name so audit can recover them; warn
+    on stderr so operators don't lose the signal."""
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    state_file = ref_dir / "pipeline-state.json"
+    state_file.write_text("not json{{{")
+
+    state = PipelineState.load(ref_dir)
+
+    # Original file is moved aside, not overwritten or silently kept-and-ignored.
+    assert not state_file.exists(), "corrupt file should be renamed to quarantine"
+    quarantined = sorted(ref_dir.glob("pipeline-state.json.corrupt.*"))
+    assert len(quarantined) == 1, f"expected exactly one quarantine file, got {quarantined}"
+    assert quarantined[0].read_text() == "not json{{{", "quarantine preserves original bytes"
+
+    captured = capsys.readouterr()
+    assert "corrupt" in captured.err.lower(), "stderr should warn about corruption"
+    assert "quarantine" in captured.err.lower(), "stderr should name the quarantine action"
+
+    # Existing behavior preserved: state falls back to safe defaults.
     assert state.current_gate == "reference"
 
 
@@ -521,3 +554,102 @@ def test_suggest_fallbacks_known_categories() -> None:
         suggestions = suggest_fallbacks(gate, category)
         assert suggestions, f"empty suggestions for ({gate}, {category})"
         assert all(isinstance(s, str) and len(s) > 10 for s in suggestions)
+
+
+# ── PipelineState write serialization (codex review 2026-05-24) ──
+
+
+def test_pipeline_state_lock_helper_exists() -> None:
+    """The lock context-manager backing mark_*/record_unclonable serialization
+    must be importable from ui_clone.state. Lifted pattern from
+    ui_clone.driver_session — same fcntl.flock semantics."""
+    from ui_clone.state import _pipeline_state_lock
+    assert callable(_pipeline_state_lock)
+
+
+def test_concurrent_mark_failed_does_not_lose_updates(tmp_path: Path) -> None:
+    """Two subprocesses each call mark_failed once. Without the RMW lock,
+    both processes load the same gate_fail_counts, both compute +1, both
+    write — one rename wins, the other increment is lost. With the lock,
+    the second writer reloads under the lock and sees the first writer's
+    +1, ending at 2.
+
+    Codex review (2026-05-24): "All write pipeline-state.json via the same
+    temp path without locking, so concurrent gate processes can lose
+    completed_steps, fail counts, or abort reasons."
+    """
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    # Seed state so current_gate matches what we will bump.
+    seed = {
+        "component": "comp",
+        "current_gate": "reference",
+        "completed_steps": [],
+        "gate_fail_counts": {},
+        "unclonable_reasons": [],
+    }
+    (ref_dir / "pipeline-state.json").write_text(json.dumps(seed))
+
+    code = (
+        "from pathlib import Path; "
+        "from ui_clone.state import PipelineState; "
+        f"d = Path({str(ref_dir)!r}); "
+        "ps = PipelineState.load(d); "
+        "ps.mark_failed('reference', d)"
+    )
+    procs = [
+        subprocess.Popen([sys.executable, "-c", code])
+        for _ in range(2)
+    ]
+    for p in procs:
+        p.wait(timeout=15)
+        assert p.returncode == 0
+
+    final = PipelineState.load(ref_dir)
+    assert final.gate_fail_counts.get("reference") == 2, (
+        f"lost update: expected counter=2 after two concurrent mark_failed "
+        f"calls; got {final.gate_fail_counts!r}"
+    )
+
+
+def test_concurrent_record_unclonable_dedupes_across_processes(tmp_path: Path) -> None:
+    """record_unclonable's (gate, reason) dedup must survive concurrent
+    writers. Without the lock, both processes load empty unclonable_reasons,
+    both append their entry, and the file ends with 2 identical entries
+    (dedup runs in-memory pre-write, so it's blind to the parallel writer).
+    """
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    seed = {
+        "component": "comp",
+        "current_gate": "reference",
+        "completed_steps": [],
+        "gate_fail_counts": {},
+        "unclonable_reasons": [],
+    }
+    (ref_dir / "pipeline-state.json").write_text(json.dumps(seed))
+
+    code = (
+        "from pathlib import Path; "
+        "from ui_clone.state import PipelineState; "
+        f"d = Path({str(ref_dir)!r}); "
+        "ps = PipelineState.load(d); "
+        "ps.record_unclonable("
+        "gate='reference', reason='duplicate-test', ref_dir=d)"
+    )
+    procs = [
+        subprocess.Popen([sys.executable, "-c", code])
+        for _ in range(2)
+    ]
+    for p in procs:
+        p.wait(timeout=15)
+        assert p.returncode == 0
+
+    final = PipelineState.load(ref_dir)
+    reasons = [
+        (r.get("gate"), r.get("reason"))
+        for r in final.unclonable_reasons
+    ]
+    assert reasons.count(("reference", "duplicate-test")) == 1, (
+        f"dedup failed under concurrency: got {reasons!r}"
+    )
