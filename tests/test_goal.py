@@ -142,6 +142,42 @@ def test_section_compare_with_failing_rows_routes_to_visual_judge(tmp_path: Path
     assert "priority_fix" in card or "selector_hint" in card
 
 
+def test_multi_viewport_section_compare_routes_visual_judge_to_viewport_pngs(
+    tmp_path: Path,
+) -> None:
+    """Multi-viewport section-compare stores per-viewport PNGs below
+    sections/viewports/<WxH>/; goal routing must find those files.
+    """
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "responsive"
+    _write_state(ref_dir, "section-compare")
+    sections_dir = ref_dir / "sections"
+    viewport_dir = sections_dir / "viewports" / "375x812" / "sections"
+    (viewport_dir / "ref").mkdir(parents=True)
+    (viewport_dir / "impl").mkdir(parents=True)
+    (viewport_dir / "ref" / "Hero Section.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (viewport_dir / "impl" / "Hero Section.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (sections_dir / "result.txt").write_text(
+        "# section-compare multi-viewport result\n"
+        "viewports: 375x812,1280x800\n\n"
+        "viewport: 375x812\n\n"
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| [375x812] Hero Section | 900000 | 950000 | critical | ❌ |\n"
+        "\n"
+        "**Result: 0 PASS, 1 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+
+    assert "visual-judge.sh" in card
+    assert "sections/viewports/375x812/sections/ref/Hero Section.png" in card
+    assert "sections/viewports/375x812/sections/impl/Hero Section.png" in card
+    assert "--label '[375x812] Hero Section'" in card
+
+
 def test_done_goal_card_surfaces_broad_structural_only_warning(tmp_path: Path) -> None:
     """Broad STRUCTURAL_ONLY coverage is non-blocking, but it must be visible
     in the next-action surface so agents do not report clean pixel polish.

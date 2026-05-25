@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -264,6 +266,33 @@ def _section_compare_stop_guard(ref_dir: Path) -> str | None:
     )
 
 
+def _section_png_pair(ref_dir: Path, section_label: str) -> tuple[Path, Path] | None:
+    """Resolve ref/impl PNGs for flat and multi-viewport section-compare rows."""
+    sections_dir = ref_dir / "sections"
+    candidates: list[tuple[Path, Path]] = []
+    m = re.match(r"^\[([0-9]+x[0-9]+)\]\s+(.+)$", section_label)
+    if m:
+        viewport, plain_label = m.group(1), m.group(2)
+        viewport_sections = sections_dir / "viewports" / viewport / "sections"
+        candidates.append((
+            viewport_sections / "ref" / f"{plain_label}.png",
+            viewport_sections / "impl" / f"{plain_label}.png",
+        ))
+    candidates.append((
+        sections_dir / "ref" / f"{section_label}.png",
+        sections_dir / "impl" / f"{section_label}.png",
+    ))
+    for ref_png, impl_png in candidates:
+        if ref_png.is_file() and impl_png.is_file():
+            return ref_png, impl_png
+    return None
+
+
+def _visual_judge_artifact_name(section_label: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", section_label).strip("-")
+    return f"visual-judge-{safe or 'section'}.json"
+
+
 def _visual_judge_next_action(ref_dir: Path) -> str | None:
     """If section-compare has failing rows AND ref/impl section PNGs exist,
     emit a concrete visual-judge next-action with the worst-AE sections
@@ -279,23 +308,19 @@ def _visual_judge_next_action(ref_dir: Path) -> str | None:
     failing = _failing_sections_by_ae(ref_dir, limit=3)
     if not failing:
         return None
-    ref_pngs = ref_dir / "sections" / "ref"
-    impl_pngs = ref_dir / "sections" / "impl"
-    if not ref_pngs.is_dir() or not impl_pngs.is_dir():
-        return None
     command_ref = str(ref_dir)
     examples: list[str] = []
     for name, _ae in failing:
-        ref_png = ref_pngs / f"{name}.png"
-        impl_png = impl_pngs / f"{name}.png"
-        if not ref_png.is_file() or not impl_png.is_file():
+        pair = _section_png_pair(ref_dir, name)
+        if pair is None:
             continue
-        out_json = f"{command_ref}/sections/visual-judge-{name}.json"
+        ref_png, impl_png = pair
+        out_json = ref_dir / "sections" / _visual_judge_artifact_name(name)
         examples.append(
             f"bash skills/visual-debug/scripts/visual-judge.sh "
-            f"{command_ref}/sections/ref/{name}.png "
-            f"{command_ref}/sections/impl/{name}.png "
-            f"--label {name} --out {out_json}"
+            f"{shlex.quote(str(ref_png))} "
+            f"{shlex.quote(str(impl_png))} "
+            f"--label {shlex.quote(name)} --out {shlex.quote(str(out_json))}"
         )
     if not examples:
         return None
@@ -311,10 +336,10 @@ def _visual_judge_next_action(ref_dir: Path) -> str | None:
     try:
         from ui_clone import visual_judge_dispatcher as _vjd
         for name, ae in failing:
-            ref_png = ref_pngs / f"{name}.png"
-            impl_png = impl_pngs / f"{name}.png"
-            if not ref_png.is_file() or not impl_png.is_file():
+            pair = _section_png_pair(ref_dir, name)
+            if pair is None:
                 continue
+            ref_png, impl_png = pair
             cached = _vjd.load_cached(ref_dir, name, ref_png, impl_png)
             if cached:
                 priority = cached.get("priority_fix") or cached.get("summary") or "?"

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.4] - 2026-05-26
+
+Patch release for multi-viewport closeout routing and transition proof
+strictness.
+
+### Fixed
+
+- **Viewport-aware visual-judge routing.** `ui_clone.goal` now resolves
+  multi-viewport `section-compare` rows like `[375x812] Hero Section` to
+  `sections/viewports/<WxH>/sections/{ref,impl}/...` PNGs, so goal cards can
+  still emit concrete `visual-judge.sh` commands after viewport fan-out.
+- **Phase 6d transition proof strictness.** `transition-proof-rollup.sh` no
+  longer accepts declaration-only `transition-coverage.json` as runtime proof
+  unless a real runtime proof artifact passed (`reveal-trigger`,
+  `scroll-end-completion`, or `video-motion`).
+
 ## [0.7.3] - 2026-05-25
 
 Patch release for motion-fidelity follow-through after v0.7.2.

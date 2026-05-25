@@ -225,6 +225,36 @@ def test_transition_proof_accepts_phase6d_declarations_with_video_motion(tmp_pat
     assert artifact["status"] == "pass"
 
 
+def test_transition_proof_rejects_phase6d_declarations_without_runtime_proof(
+    tmp_path: Path,
+) -> None:
+    """Phase 6d declarations are static ref evidence, not runtime proof alone."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "patch-scroll-parallax"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [{"selector": ".patch", "transition": "patch-scroll-parallax"}],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "fail"
+    assert any("runtime proof" in r for r in artifact["reasons"])
+
+
 def test_transition_trajectory_supports_structural_motion_mode() -> None:
     """Structural-only section comparison needs selector-level motion proof."""
     script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-trajectory-compare.sh"
