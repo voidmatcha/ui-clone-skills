@@ -25,6 +25,7 @@ from ui_clone.hooks._common import run_gate as _run_gate
 from ui_clone.state import GATE_ORDER, PipelineState
 
 _DEFAULT_STALE_DAYS = 3
+_DEFAULT_ACTIVE_MAX = 2
 
 
 def _is_driver_session(project_root: Path, session_id_from_payload: str = "") -> bool:
@@ -90,6 +91,15 @@ def _get_stale_seconds() -> float:
     except (ValueError, TypeError):
         days = _DEFAULT_STALE_DAYS
     return days * 24 * 3600
+
+
+def _get_active_max() -> int:
+    """Return max active refs kept by the Stop hook. 0 disables LRU pruning."""
+    try:
+        value = int(os.environ.get("UI_RE_ACTIVE_MAX", _DEFAULT_ACTIVE_MAX))
+    except (ValueError, TypeError):
+        return _DEFAULT_ACTIVE_MAX
+    return value if value >= 0 else _DEFAULT_ACTIVE_MAX
 
 
 def _resolve_impl_dir(ref_dir: Path, fallback_root: Path | None = None) -> Path | None:
@@ -212,20 +222,48 @@ def _find_active_markers(search_root: Path) -> list[Path]:
     return dirs
 
 
+def _active_ref_mtime(ref_dir: Path) -> float | None:
+    """Best-effort activity timestamp for implicit active refs without markers."""
+    mtimes: list[float] = []
+    try:
+        mtimes.append(ref_dir.stat().st_mtime)
+    except OSError:
+        return None
+    try:
+        for child in ref_dir.iterdir():
+            try:
+                mtimes.append(child.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return max(mtimes) if mtimes else None
+
+
 def _fresh_active_dirs(active_dirs: list[Path]) -> list[Path]:
-    fresh_dirs = []
+    now = time.time()
+    fresh_dirs: list[tuple[Path, float, bool]] = []
     for ref_dir in active_dirs:
         marker = ref_dir / ".ui-re-active"
         if not marker.is_file():
-            # Implicit activation (impl/ present, no marker) — never goes
-            # stale because there's nothing to age. The verify-stamp check
-            # owns its own freshness window.
-            fresh_dirs.append(ref_dir)
+            activity_mtime = _active_ref_mtime(ref_dir)
+            if activity_mtime is None:
+                continue
+            age = now - activity_mtime
+            if age >= _get_stale_seconds():
+                age_days = int(age // 86400)
+                print(
+                    f"ui-clone-skills: Stale implicit WIP ref ({age_days}d) at {ref_dir} — skipping.",
+                    file=sys.stderr,
+                )
+                continue
+            fresh_dirs.append((ref_dir, activity_mtime, False))
             continue
         try:
-            age = time.time() - marker.stat().st_mtime
+            marker_mtime = marker.stat().st_mtime
         except OSError:
             continue
+        age = now - marker_mtime
         if age >= _get_stale_seconds():
             age_days = int(age // 86400)
             print(
@@ -237,8 +275,36 @@ def _fresh_active_dirs(active_dirs: list[Path]) -> list[Path]:
             except OSError:
                 pass
             continue
-        fresh_dirs.append(ref_dir)
-    return fresh_dirs
+        fresh_dirs.append((ref_dir, marker_mtime, True))
+
+    active_max = _get_active_max()
+    if active_max > 0 and len(fresh_dirs) > active_max:
+        newest = sorted(fresh_dirs, key=lambda item: (item[1], str(item[0])), reverse=True)[
+            :active_max
+        ]
+        keep = {ref_dir for ref_dir, _, _ in newest}
+        for ref_dir, _, has_marker in fresh_dirs:
+            if ref_dir in keep:
+                continue
+            marker = ref_dir / ".ui-re-active"
+            if has_marker:
+                print(
+                    f"ui-clone-skills: LRU-pruned WIP marker at {marker} — removing.",
+                    file=sys.stderr,
+                )
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
+            else:
+                print(
+                    f"ui-clone-skills: LRU-pruned implicit WIP ref at {ref_dir} — skipping.",
+                    file=sys.stderr,
+                )
+    else:
+        keep = {ref_dir for ref_dir, _, _ in fresh_dirs}
+
+    return [ref_dir for ref_dir, _, _ in fresh_dirs if ref_dir in keep]
 
 
 def _emit_block(reason: str) -> None:

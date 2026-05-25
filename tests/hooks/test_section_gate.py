@@ -233,6 +233,42 @@ class TestSectionGate:
         assert data.get("decision") == "block"
         assert marker.exists(), "Marker must not be removed when within custom threshold"
 
+    def test_fresh_active_dirs_prunes_to_two_newest_markers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bound concurrent active refs so abandoned markers do not stack forever."""
+        from ui_clone.hooks import section_gate
+
+        search_root = make_search_root(tmp_path)
+        old = make_ref_dir(search_root, "old")
+        mid = make_ref_dir(search_root, "mid")
+        new = make_ref_dir(search_root, "new")
+        old_marker = set_active_marker(old, age_seconds=300)
+        set_active_marker(mid, age_seconds=200)
+        set_active_marker(new, age_seconds=100)
+        monkeypatch.delenv("UI_RE_ACTIVE_MAX", raising=False)
+
+        fresh = section_gate._fresh_active_dirs([old, mid, new])
+
+        assert [p.name for p in fresh] == ["mid", "new"]
+        assert not old_marker.exists(), "LRU-pruned explicit marker should be removed"
+
+    def test_implicit_active_dir_goes_stale_by_ref_activity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Implicit activation has no marker mtime, so use ref activity TTL."""
+        from ui_clone.hooks import section_gate
+
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "implicit-old")
+        (ref_dir / "extracted.json").write_text("{}", encoding="utf-8")
+        old_time = time.time() - (4 * 24 * 3600)
+        os.utime(ref_dir / "extracted.json", (old_time, old_time))
+        os.utime(ref_dir, (old_time, old_time))
+        monkeypatch.delenv("UI_RE_STALE_DAYS", raising=False)
+
+        assert section_gate._fresh_active_dirs([ref_dir]) == []
+
     def test_multiple_active_sessions_enforces_later_refs(self, tmp_path: Path) -> None:
         """Multiple WIP markers → later dirty refs still block Stop."""
         search_root = make_search_root(tmp_path)

@@ -235,6 +235,129 @@ def test_transition_trajectory_supports_structural_motion_mode() -> None:
     assert 'exit 1' in body, "full-frame trajectory failures must propagate nonzero"
 
 
+def test_runtime_spec_coverage_fails_when_gsap_timeline_target_missing(tmp_path: Path) -> None:
+    """Runtime GSAP timelines are motion signal even without ScrollTrigger.
+
+    A spec with unrelated hover entries must not satisfy a runtime timeline
+    whose captured target is absent from transition-spec.json.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "animation-runtime-dump.json").write_text(json.dumps({
+        "scrollTrigger": [],
+        "ix2": None,
+        "gsapTimelines": [
+            {
+                "kind": "Tween",
+                "duration": 1.2,
+                "easeName": "power2.out",
+                "targets": [".hero-title", ".hero-title"],
+            }
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "button-hover", "trigger": "hover", "selector": ".button"}
+        ],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-spec-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "runtime-spec-coverage.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["gsapTimelineCount"] == 1
+    assert any(".hero-title" in m for m in artifact["missing"])
+
+
+def test_runtime_spec_coverage_requires_custom_ease_when_used_by_timeline(tmp_path: Path) -> None:
+    """If runtime uses a named CustomEase, the spec must carry that exact key
+    or curve data. Otherwise downstream implementation falls back to guessed
+    cubic-bezier motion.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "animation-runtime-dump.json").write_text(json.dumps({
+        "customEaseRegistry": {
+            "heroEase": "M0,0 C0.126,0.382 0.243,1 1,1",
+        },
+        "gsapTimelines": [
+            {
+                "kind": "Tween",
+                "duration": 1.2,
+                "easeName": "heroEase",
+                "targets": [".hero-title"],
+            }
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {
+                "id": "hero-load",
+                "trigger": "page-load",
+                "selector": ".hero-title",
+                "animation": {"duration": 1.2, "ease": "power2.out"},
+            }
+        ],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-spec-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "runtime-spec-coverage.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["customEaseCount"] == 1
+    assert artifact["customEaseUsedCount"] == 1
+    assert any("heroEase" in m for m in artifact["missing"])
+
+
+def test_runtime_spec_coverage_passes_when_gsap_target_and_custom_ease_are_specified(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "animation-runtime-dump.json").write_text(json.dumps({
+        "customEaseRegistry": {
+            "heroEase": "M0,0 C0.126,0.382 0.243,1 1,1",
+        },
+        "gsapTimelines": [
+            {
+                "kind": "Tween",
+                "duration": 1.2,
+                "easeName": "heroEase",
+                "targets": [".hero-title"],
+            }
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {
+                "id": "hero-load",
+                "trigger": "page-load",
+                "selector": ".hero-title",
+                "animation": {"duration": 1.2, "ease": "heroEase"},
+            }
+        ],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-spec-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "runtime-spec-coverage.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["gsapTimelineCount"] == 1
+    assert artifact["customEaseUsedCount"] == 1
+
+
 
 def test_transition_proof_rollup_dispatcher_wired() -> None:
     import re

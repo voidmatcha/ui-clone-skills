@@ -348,6 +348,26 @@ def _visual_judge_next_action(ref_dir: Path) -> str | None:
     )
 
 
+def _section_compare_next_action_advisories(ref_dir: Path) -> list[str]:
+    """Return non-blocking section-compare warnings that still need operator action."""
+    result = ref_dir / "sections" / "result.txt"
+    if not result.is_file():
+        return []
+    try:
+        from ui_clone.gate import Gate
+
+        checks = Gate(ref_dir).gate_section_compare()
+    except Exception:
+        return []
+    advisories: list[str] = []
+    for check in checks:
+        if check.status != "warn" or check.label != "structural-only broad coverage":
+            continue
+        fix = f" Fix: {check.fix}" if check.fix else ""
+        advisories.append(f"{check.label}: {check.message}.{fix}")
+    return advisories
+
+
 def build_goal_card_data(ref_dir: Path) -> GoalCard:
     """Return deterministic, host-neutral goal card data for a ref directory."""
     state = PipelineState.load(ref_dir)
@@ -383,6 +403,11 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
             next_action = vj_action
         if stop_guard is not None:
             next_action = f"{next_action} {stop_guard}"
+
+    if gate in ("section-compare", "post-implement", "done"):
+        advisories = _section_compare_next_action_advisories(ref_dir)
+        if advisories:
+            next_action = f"{next_action} Advisory: {' '.join(advisories)}"
 
     # Stuck banner: bumped by gate.py CLI on consecutive BLOCKED runs of the
     # active gate. Once we cross the threshold, the worker is grinding the same

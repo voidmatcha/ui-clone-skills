@@ -142,6 +142,50 @@ def test_section_compare_with_failing_rows_routes_to_visual_judge(tmp_path: Path
     assert "priority_fix" in card or "selector_hint" in card
 
 
+def test_done_goal_card_surfaces_broad_structural_only_warning(tmp_path: Path) -> None:
+    """Broad STRUCTURAL_ONLY coverage is non-blocking, but it must be visible
+    in the next-action surface so agents do not report clean pixel polish.
+    """
+    from ui_clone.goal import build_goal_card_data
+
+    ref_dir = tmp_path / "tmp" / "ref" / "ordrhealth"
+    _write_state(ref_dir, "done")
+    sections_dir = ref_dir / "sections"
+    sections_dir.mkdir(parents=True)
+    (sections_dir / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| section-0 | 0 | 0 | ok | ✅ |\n"
+        "| section-1 | 0 | 0 | ok | ✅ |\n"
+        "| section-2 | 0 | 0 | ok | ✅ |\n"
+        "| section-3 | 0 | 0 | ok | ✅ |\n"
+        "| section-4 | 0 | 0 | ok | ✅ |\n"
+        "| section-5 | 0 | 0 | ok | ✅ |\n"
+        "| section-6 | 0 | 0 | ok | ✅ |\n"
+        "| section-7 | 0 | 0 | structural | STRUCTURAL_ONLY |\n"
+        "| section-8 | 0 | 0 | structural | STRUCTURAL_ONLY |\n"
+        "| section-9 | 0 | 0 | structural | STRUCTURAL_ONLY |\n"
+        "\n"
+        "**Result: 7 PASS, 0 FAIL, 0 SKIP, 3 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+
+    card = build_goal_card_data(ref_dir)
+
+    assert card.stop_evidence_status is not None
+    assert card.stop_evidence_status.startswith("satisfied:")
+    assert "structural-only broad coverage" in card.next_action
+    assert "Narrow asset-substitution.json" in card.next_action
+    assert "pixel AE polishing skipped" in card.next_action
+    proc = subprocess.run(
+        [sys.executable, "-m", "ui_clone.goal", str(ref_dir), "--check-done"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0
+
+
 def test_section_compare_failure_guard_blocks_false_converged_stop(tmp_path: Path) -> None:
     """Loop-55 regression: a run with 0 PASS rows and saturated failures is
     not converged just because transition/tree gates passed. The goal card

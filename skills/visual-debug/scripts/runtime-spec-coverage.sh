@@ -18,6 +18,10 @@
 #     whose type begins with scroll/reveal/intersection.
 #   - dump.ix2.timelineCount > 0 → spec must have ≥1 entry (Webflow IX2 sites
 #     drive everything off named timelines; an empty spec is a hard miss).
+#   - dump.gsapTimelines targets → spec must mention at least one captured
+#     target selector/class/id, so non-ScrollTrigger GSAP motion is not lost.
+#   - dump.customEaseRegistry keys used by runtime timelines → spec must carry
+#     the exact ease key or curve data, not a guessed generic ease.
 #
 #   Bijective matching (every runtime tween → spec entry) is intentionally NOT
 #   required. The spec is the impl plan, not a mirror — it may model ref's GSAP
@@ -29,7 +33,8 @@
 #
 # Output: <component-dir>/runtime-spec-coverage.json
 #   { schemaVersion: 1, status: "pass" | "fail",
-#     scrollTriggerCount, ix2TimelineCount, specEntryCount, missing: [...] }
+#     scrollTriggerCount, ix2TimelineCount, gsapTimelineCount,
+#     customEaseCount, customEaseUsedCount, specEntryCount, missing: [...] }
 #
 # Exit: 0 = pass, 1 = coverage gap, 2 = setup error.
 
@@ -68,6 +73,7 @@ catch (e) { console.error("transition-spec.json parse error: " + e.message); pro
 const entries = Array.isArray(spec) ? spec
   : (Array.isArray(spec.transitions) ? spec.transitions
     : (Array.isArray(spec.entries) ? spec.entries : []));
+const specText = JSON.stringify(spec);
 
 const missing = [];
 
@@ -89,19 +95,82 @@ if (ixCount > 0 && entries.length === 0) {
   missing.push(ixCount + " Webflow IX2 timeline(s) detected at runtime but transition-spec is empty — see animation-runtime-dump.json ix2");
 }
 
+const timelines = Array.isArray(dump.gsapTimelines) ? dump.gsapTimelines : [];
+const timelineTargets = [];
+const timelineEaseNames = [];
+for (const tl of timelines) {
+  if (!tl || typeof tl !== "object") continue;
+  if (Array.isArray(tl.targets)) {
+    for (const target of tl.targets) {
+      if (typeof target === "string" && target.trim()) {
+        timelineTargets.push(target.trim());
+      }
+    }
+  }
+  if (typeof tl.easeName === "string" && tl.easeName.trim()) {
+    timelineEaseNames.push(tl.easeName.trim());
+  }
+}
+
+const selectorCovered = (selector) => {
+  if (specText.includes(selector)) return true;
+  const tokens = selector.match(/[#.][A-Za-z0-9_-]+/g) || [];
+  return tokens.some(token => specText.includes(token) || specText.includes(token.slice(1)));
+};
+const uniqueTimelineTargets = [...new Set(timelineTargets)];
+const uncoveredTargets = uniqueTimelineTargets.filter(t => !selectorCovered(t));
+if (uniqueTimelineTargets.length > 0 && uncoveredTargets.length === uniqueTimelineTargets.length) {
+  missing.push(
+    timelines.length + " GSAP global timeline child(ren) detected at runtime but transition-spec mentions none of their targets: "
+    + uncoveredTargets.slice(0, 5).join(", ")
+    + " — see animation-runtime-dump.json gsapTimelines[]"
+  );
+}
+
+const customEaseRegistry = dump.customEaseRegistry && typeof dump.customEaseRegistry === "object"
+  ? dump.customEaseRegistry : {};
+const customEaseKeys = Object.keys(customEaseRegistry);
+const scrollEaseNames = Array.isArray(dump.scrollTrigger)
+  ? dump.scrollTrigger.flatMap(st => {
+      const tween = st && typeof st === "object" ? st.tween : null;
+      if (!tween || typeof tween !== "object") return [];
+      return [tween.easeName, tween.ease].filter(v => typeof v === "string" && v.trim());
+    })
+  : [];
+const usedCustomEaseKeys = customEaseKeys.filter(key => {
+  return [...timelineEaseNames, ...scrollEaseNames].some(name => name === key || name.includes(key));
+});
+const missingEaseKeys = usedCustomEaseKeys.filter(key => {
+  if (specText.includes(key)) return false;
+  const data = customEaseRegistry[key];
+  if (typeof data !== "string" || !data) return true;
+  return !specText.includes(data) && !specText.includes(data.slice(0, Math.min(40, data.length)));
+});
+if (missingEaseKeys.length > 0) {
+  missing.push(
+    missingEaseKeys.length + " GSAP CustomEase key(s) used at runtime but absent from transition-spec: "
+    + missingEaseKeys.slice(0, 5).join(", ")
+    + " — copy the exact key or curve data from animation-runtime-dump.json customEaseRegistry"
+  );
+}
+
 const status = missing.length === 0 ? "pass" : "fail";
 const out = {
   schemaVersion: 1,
   status,
   scrollTriggerCount: stCount,
   ix2TimelineCount: ixCount,
+  gsapTimelineCount: timelines.length,
+  gsapTimelineTargetCount: timelineTargets.length,
+  customEaseCount: customEaseKeys.length,
+  customEaseUsedCount: usedCustomEaseKeys.length,
   specEntryCount: entries.length,
   missing
 };
 fs.writeFileSync(process.argv[3], JSON.stringify(out, null, 2));
 console.log("Wrote " + process.argv[3]);
 if (missing.length === 0) {
-  console.log("✅ runtime-spec coverage clean (scrollTrigger=" + stCount + " ix2=" + ixCount + " spec=" + entries.length + ")");
+  console.log("✅ runtime-spec coverage clean (scrollTrigger=" + stCount + " ix2=" + ixCount + " gsapTimelines=" + timelines.length + " customEaseUsed=" + usedCustomEaseKeys.length + " spec=" + entries.length + ")");
 } else {
   console.log("❌ runtime-spec coverage gaps:");
   for (const m of missing) console.log("  - " + m);

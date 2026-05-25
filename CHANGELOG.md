@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.2] - 2026-05-25
+
+Patch release for downstream wiring exposed by the v0.7.1 hardening pass.
+
+### Fixed
+
+- **Runtime spec coverage for GSAP metadata.** `runtime-spec-coverage.sh`
+  now validates captured `gsapTimelines` targets and `customEaseRegistry`
+  keys, so runtime animation extraction fields added in v0.7.1 are consumed
+  by downstream coverage instead of sitting unused.
+- **Stop-hook active ref cleanup.** Active WIP refs now expire implicit
+  activation by ref activity TTL and LRU-prune to the newest two sessions by
+  default, removing stale explicit markers instead of letting old sessions
+  stack indefinitely.
+- **Goal-card structural-only advisories.** Broad-but-below-cap
+  `STRUCTURAL_ONLY` coverage now appears in the goal card next action even
+  when section-compare is otherwise clean, making skipped pixel AE polishing
+  visible before an agent reports completion.
+
 ## [0.7.1] - 2026-05-25
 
 Patch release for the post-0.7.0 verification hardening pass. The theme is
