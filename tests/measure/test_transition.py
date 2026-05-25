@@ -345,6 +345,55 @@ def test_transition_proof_fails_when_expected_video_motion_missing(
     assert any("video-motion expected" in r for r in artifact["reasons"])
 
 
+def test_transition_proof_reads_scroll_completion_artifact(tmp_path: Path) -> None:
+    """The rollup must consume the artifact name produced by the scroll gate."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "requiredChecks": [
+            {
+                "id": "scroll-end-completion",
+                "produces": "scroll-completion.json",
+            }
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-scroll"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [
+            {
+                "selector": ".hero",
+                "samples": [
+                    {"scrollY": 0, "opacity": "0"},
+                    {"scrollY": 800, "opacity": "1"},
+                ],
+            },
+        ],
+    }))
+    (ref / "scroll-completion.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "fail",
+        "viewports": [{"w": 375, "h": 812, "stuck": [{"selector": ".hero"}]}],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "fail"
+    assert any("scroll-completion.json" in r for r in artifact["reasons"])
+
+
 def test_transition_trajectory_supports_structural_motion_mode() -> None:
     """Structural-only section comparison needs selector-level motion proof."""
     script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-trajectory-compare.sh"

@@ -14,7 +14,7 @@
 #   spec-implementation-coverage.json — every covered entry has motion declaration
 #   transition-coverage.json          — runtime per-element scroll samples
 #   reveal-trigger.json               — IO-driven reveals advance after IO fires
-#   scroll-end-completion.json        — scroll-scrub reveals settle by maxScroll
+#   scroll-completion.json            — scroll-scrub reveals settle by maxScroll
 #   keyframes-diff.json               — @keyframes match between ref and impl
 #   transitions/result.txt            — hover/click compare verdicts (if present)
 #   transitions/video-motion-result.txt — 60fps SSIM verdict (if present)
@@ -216,7 +216,7 @@ def runtime_proof_sources() -> list[str]:
     reveal = read_json_safe(ref_dir / "reveal-trigger.json")
     if reveal and reveal.get("status") == "pass":
         sources.append("reveal-trigger")
-    scroll_end = read_json_safe(ref_dir / "scroll-end-completion.json")
+    scroll_end = read_json_safe(ref_dir / "scroll-completion.json")
     if scroll_end and scroll_end.get("status") == "pass":
         sources.append("scroll-end-completion")
     vm_path = ref_dir / "transitions" / "video-motion-result.txt"
@@ -237,7 +237,7 @@ specs = [
     ("spec-implementation-coverage.json", "Tier 3 static", measure_spec_impl),
     ("transition-coverage.json", "Tier 3 runtime", measure_transition_coverage),
     ("reveal-trigger.json", "Tier 3 runtime", measure_reveal),
-    ("scroll-end-completion.json", "Tier 3 runtime", measure_scroll_end),
+    ("scroll-completion.json", "Tier 3 runtime", measure_scroll_end),
     ("keyframes-diff.json", "Tier 3 keyframes", measure_keyframes),
 ]
 

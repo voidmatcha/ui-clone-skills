@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.6] - 2026-05-26
+
+Patch release for transition roll-up artifact-name parity.
+
+### Fixed
+
+- **Scroll completion roll-up wiring.** `transition-proof-rollup.sh` now reads
+  the canonical `scroll-completion.json` artifact produced by
+  `scroll-end-completion-check.sh` and declared by `verification-plan.json`,
+  so stuck scroll-scrub failures are included in `transition-proof.json`
+  instead of being skipped as not applicable.
+
 ## [0.7.5] - 2026-05-26
 
 Patch release for transition-proof strictness and historical changelog context cleanup.
