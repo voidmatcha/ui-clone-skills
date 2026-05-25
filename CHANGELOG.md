@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.8] - 2026-05-26
+
+Patch release for earlier transition-spec grounding.
+
+### Fixed
+
+- **Spec-time `source_chunk` grounding.** The `spec` gate now rejects
+  `transition-spec.json` entries whose `source_chunk` points outside captured
+  bundle/CSS/HTML artifacts, using the same `inline init` sentinel accepted by
+  `post-implement`. This catches canvas/runtime evidence references before
+  generation instead of forcing a late `post-implement` repair.
+
 ## [0.7.7] - 2026-05-26
 
 Patch release for unattended onpixel showcase loop automation.

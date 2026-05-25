@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .base import CheckResult
+from .post_implement import _check_spec_bundle_grounding
 
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
@@ -183,6 +184,9 @@ def gate_spec(self: Gate) -> list[CheckResult]:
                         f"transitions[{index}] has required keys ({len(transitions)} total)",
                     )
                 )
+        source_chunk_grounding = _check_spec_bundle_grounding(self)
+        if source_chunk_grounding is not None:
+            results.append(source_chunk_grounding)
 
     # Cross-validate against paid-features decisions: any font marked
     # decision='substitute' at 5c-c MUST be declared in asset-substitution.json

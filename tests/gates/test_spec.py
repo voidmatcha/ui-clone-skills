@@ -113,6 +113,9 @@ def test_gate_spec_passes_with_required_files(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
+    bundles = ref / "bundles"
+    bundles.mkdir()
+    (bundles / "fixture.js").write_text("// fixture bundle")
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
             "id": "fixture-reveal-on-scroll",
@@ -137,6 +140,46 @@ def test_gate_spec_passes_with_required_files(tmp_path: Path) -> None:
     results = gate.gate_spec()
     failures = [r for r in results if r.status == "fail"]
     assert not failures, f"gate_spec must pass with required files present: {failures}"
+
+
+def test_gate_spec_fails_when_source_chunk_is_not_grounded(tmp_path: Path) -> None:
+    """Spec must reject source_chunk values that post-implement will reject later."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
+    (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1, "requiredChecks": []
+    }))
+    (ref / "canvas-webgl-detection.json").write_text(json.dumps({
+        "primaryRenderType": "canvas",
+        "canvasCount": 1,
+        "hasWebGL": False,
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "hero-canvas-runtime",
+            "trigger": "page load",
+            "source_chunk": "canvas-webgl-detection.json",
+            "bundle_branch": "canvas-webgl-detection.json: canvasCount=1",
+            "target": "canvas",
+            "animation": {"engine": "canvas-2d", "dynamic": True},
+            "reference_frames": "verify/page-scroll/f000.png",
+        }]
+    }))
+    verify = ref / "verify"
+    verify.mkdir()
+    for i in range(5):
+        (verify / f"frame_{i:02d}.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
+
+    failures = [
+        r
+        for r in Gate(ref).gate_spec()
+        if r.status == "fail" and r.label == "spec-bundle-grounding"
+    ]
+
+    assert failures, "spec gate must catch ungrounded source_chunk before generation"
+    assert "canvas-webgl-detection.json" in failures[0].message
 
 
 
