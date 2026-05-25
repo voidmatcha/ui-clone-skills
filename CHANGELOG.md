@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.13] - 2026-05-26
+
+Patch release for state-coverage goal routing and extractor portability.
+
+### Fixed
+
+- **State-coverage goal cards.** `ui_clone.goal` now maps the documented
+  `state-coverage` gate to a concrete goal and gate command instead of
+  reporting it as an invalid pipeline state.
+- **Transition categorizer host Python compatibility.** `transition-categorize.sh`
+  now defers inline Python annotation evaluation so hosts whose `python3`
+  resolves to Python 3.9 can still enrich `transition-spec.json`.
+
 ## [0.7.12] - 2026-05-26
 
 Patch release for portable extraction script durations.

@@ -39,6 +39,8 @@ if [ ! -f "$SPEC" ]; then
 fi
 
 python3 - "$SPEC" "$REBUILD" <<'PY'
+from __future__ import annotations
+
 import json
 import re
 import sys

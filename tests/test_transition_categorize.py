@@ -8,7 +8,9 @@ and adds top-level `motion_signature` aggregate. Idempotent unless
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +31,51 @@ def _run(ref: Path, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=30,
     )
+
+
+def test_runs_with_python39_annotation_semantics(tmp_path: Path) -> None:
+    """The script calls host python3, so inline Python must not require 3.10+."""
+    ref = _make_ref(tmp_path, {
+        "transitions": [{
+            "id": "section-reveal",
+            "trigger": "scroll",
+            "animation": {
+                "property": "opacity",
+                "from": {"opacity": 0},
+                "to": {"opacity": 1},
+                "duration": "scroll-tied",
+                "easing": "linear",
+            },
+        }],
+    })
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "python3"
+    shim.write_text(
+        "#!" + sys.executable + "\n"
+        "import subprocess\n"
+        "import sys\n"
+        "source = sys.stdin.read()\n"
+        "future_lines = source.splitlines()[:10]\n"
+        "if '| None' in source and 'from __future__ import annotations' not in future_lines:\n"
+        "    sys.stderr.write(\"TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'\\n\")\n"
+        "    raise SystemExit(1)\n"
+        f"proc = subprocess.run([{sys.executable!r}, *sys.argv[1:]], input=source, text=True)\n"
+        "raise SystemExit(proc.returncode)\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    env = {**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), "--rebuild"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
 
 
 def test_scroll_fade_up_recognized(tmp_path: Path) -> None:

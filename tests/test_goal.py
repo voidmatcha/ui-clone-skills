@@ -14,6 +14,14 @@ def _write_state(ref_dir: Path, current_gate: str) -> None:
         "reference": [],
         "spec": ["reference", "extraction", "bundle", "paid-features"],
         "pre-generate": ["reference", "extraction", "bundle", "paid-features", "spec"],
+        "state-coverage": [
+            "reference",
+            "extraction",
+            "bundle",
+            "paid-features",
+            "spec",
+            "pre-generate",
+        ],
         "section-compare": [
             "reference",
             "extraction",
@@ -82,6 +90,21 @@ def test_goal_card_maps_spec_gate(tmp_path: Path) -> None:
     assert "python -m ui_clone.gate" in card
     assert "transition-spec.json" in card
     assert "verification-plan.json" in card
+
+
+def test_goal_card_maps_state_coverage_gate(tmp_path: Path) -> None:
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "hero"
+    _write_state(ref_dir, "state-coverage")
+
+    card = build_goal_card(ref_dir)
+
+    assert "Current gate: state-coverage" in card
+    assert "Current goal: Verify multi-snapshot state coverage" in card
+    assert "python -m ui_clone.gate" in card
+    assert "state-coverage" in card
+    assert "states/splash/trajectory.json" in card
 
 
 def test_goal_card_maps_section_compare_gate(tmp_path: Path) -> None:

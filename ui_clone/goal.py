@@ -112,6 +112,11 @@ _GOAL_BY_GATE: dict[str, GoalStep] = {
         next_action="Finish required audit artifacts, then run python -m ui_clone.gate <ref-dir> pre-generate",
         required_evidence="extracted.json, transition-coverage.json, section-map.json, hover timing, dom-state-diff.json when needed, component-map",
     ),
+    "state-coverage": GoalStep(
+        current_goal="Verify multi-snapshot state coverage",
+        next_action="Run python -m ui_clone.gate <ref-dir> state-coverage before implementation verification",
+        required_evidence="states/splash/trajectory.json, states/scroll/summary.json, states/hover/manifest.json, and matching impl state hooks when present",
+    ),
     "post-implement": GoalStep(
         current_goal="Verify the implemented component against required artifacts",
         next_action="Run python -m ui_clone.gate <ref-dir> post-implement before visual comparison",
