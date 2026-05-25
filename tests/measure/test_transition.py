@@ -606,6 +606,8 @@ def test_required_media_pass_when_artifact_absent(tmp_path: Path) -> None:
     ref.mkdir()
     impl = tmp_path / "impl"
     (impl / "src").mkdir(parents=True)
+    (impl / "public").mkdir()
+    (impl / "package.json").write_text(json.dumps({"dependencies": {}}))
     proc = _run_script(
         "skills/visual-debug/scripts/required-media-coverage-check.sh",
         str(ref), str(impl),
@@ -613,6 +615,58 @@ def test_required_media_pass_when_artifact_absent(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     art = json.loads((ref / "required-media-coverage.json").read_text())
     assert art["status"] == "pass"
+    assert art["implRoot"] == str(impl)
+    assert art["implDir"] == str(impl)
+    assert art["implSrcDir"] == str(impl / "src")
+    assert art["implPublicDir"] == str(impl / "public")
+    assert art["implPkgJson"] == str(impl / "package.json")
+
+
+def test_transition_compare_no_ref_transitions_writes_result_artifact(tmp_path: Path) -> None:
+    """A no-transition skip still needs transitions/result.txt for the gate."""
+    root = _project_root()
+    out_dir = tmp_path / "ref"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    agent_browser = shim_dir / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = \"--session\" ]; then shift 2; fi\n"
+        "case \"${1:-}\" in\n"
+        "  open) echo opened ;;\n"
+        "  eval) echo '[]' ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    agent_browser.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "WAIT_REF": "0",
+        "WAIT_IMPL": "0",
+    }
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "skills" / "visual-debug" / "scripts" / "transition-compare.sh"),
+            "https://example.test",
+            "http://127.0.0.1:1",
+            "transition-skip-test",
+            str(out_dir),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result = out_dir / "transitions" / "result.txt"
+    assert result.is_file(), proc.stdout + proc.stderr
+    assert "0 PASS, 0 FAIL" in result.read_text(encoding="utf-8")
 
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,3 +96,57 @@ def test_asset_placement_passes_when_section_component_references_asset(tmp_path
     artifact = json.loads((ref / "asset-placement.json").read_text())
     assert artifact["status"] == "pass"
     assert artifact["checked"] == 1
+
+
+def test_asset_placement_runs_with_python39_annotation_semantics(tmp_path: Path) -> None:
+    """The script calls host python3, so inline Python must not require 3.10+."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src" / "components").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "visible-images.json").write_text(json.dumps([
+        {"tag": "img", "src": "https://cdn.example.com/images/pyramid.webp", "top": 1250}
+    ]))
+    (ref / "section-map.json").write_text(json.dumps({
+        "sections": [
+            {"i": 1, "top": 1000, "height": 800},
+        ]
+    }))
+    (ref / "component-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 1, "file": "src/components/Pyramid.tsx"},
+        ]
+    }))
+    (impl / "src" / "components" / "Pyramid.tsx").write_text(
+        'export function Pyramid(){return <img src="/images/pyramid.webp" />}\n',
+        encoding="utf-8",
+    )
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "python3"
+    shim.write_text(
+        "#!" + sys.executable + "\n"
+        "import subprocess\n"
+        "import sys\n"
+        "source = sys.stdin.read()\n"
+        "future_lines = source.splitlines()[:10]\n"
+        "if '| None' in source and 'from __future__ import annotations' not in future_lines:\n"
+        "    sys.stderr.write(\"TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'\\n\")\n"
+        "    raise SystemExit(1)\n"
+        f"proc = subprocess.run([{sys.executable!r}, *sys.argv[1:]], input=source, text=True)\n"
+        "raise SystemExit(proc.returncode)\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    env = {**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    script = ROOT / "skills" / "visual-debug" / "scripts" / "asset-placement-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"

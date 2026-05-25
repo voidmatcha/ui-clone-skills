@@ -73,6 +73,7 @@ SESSION="${SESSION}-${RUN_UUID}"
 DERIVED_SESSIONS=()
 
 cleanup_browser_sessions() {
+  [ "${#DERIVED_SESSIONS[@]}" -eq 0 ] && return 0
   for s in "${DERIVED_SESSIONS[@]}"; do
     agent-browser --session "$s" close >/dev/null 2>&1 || true
     # Also close the -ref / -impl child variants spawned by scripts
@@ -290,8 +291,10 @@ SIGNATURES = {
     "tree-diff.sh": "{session}-td {ref_url} {impl_url} {ref_dir}",
     "keyframes-diff.sh": "{session}-kf {ref_url} {impl_url} {ref_dir}",
     # ── static text/dom fidelity ──
-    "text-fidelity-check.sh": "{ref_dir} {impl_root}",
-    "dom-mirror-check.sh": "{ref_dir} {impl_root}",
+    "text-fidelity-check.sh":
+        "{ref_dir} {impl_root} --out {ref_dir}/text-fidelity-check.json",
+    "dom-mirror-check.sh":
+        "{ref_dir} {impl_root} --out {ref_dir}/dom-mirror-check.json",
     # 2026-05-22: hero-composite-check pairs with the dom-mirror advisory
     # downgrade — same {ref_dir} {impl_root} contract; default artifact path
     # is $REF_DIR/hero-composite.json (matches verification-plan row).

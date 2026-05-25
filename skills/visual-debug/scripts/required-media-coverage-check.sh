@@ -23,20 +23,6 @@ fi
 
 OUT_PATH="$REF_DIR/required-media-coverage.json"
 
-REQUIRED="$REF_DIR/required-media.json"
-if [ ! -f "$REQUIRED" ]; then
-  cat > "$OUT_PATH" <<JSON
-{
-  "schemaVersion": 1,
-  "status": "pass",
-  "reason": "required-media.json absent — extractor (Step 6b-bis) has not run; nothing to enforce at this gate",
-  "missing": {"video": [], "lottie": [], "svg": []}
-}
-JSON
-  echo "required-media-coverage: pass (no required-media.json — extractor not run)"
-  exit 0
-fi
-
 if [ -z "$IMPL_ROOT" ]; then
   PLUGIN_ROOT_CAND="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}"
   for cand_root in "$PLUGIN_ROOT_CAND" "$(cd "$(dirname "$0")/../../.." && pwd)"; do
@@ -49,12 +35,61 @@ if [ -z "$IMPL_ROOT" ]; then
   done
 fi
 
+IMPL_DIR_FIELD=""
+IMPL_SRC_DIR_FIELD=""
+IMPL_PUBLIC_DIR_FIELD=""
+IMPL_PKG_JSON_FIELD=""
+if [ -n "$IMPL_ROOT" ] && [ -d "$IMPL_ROOT" ]; then
+  IMPL_DIR_FIELD="$IMPL_ROOT"
+  if [ -d "$IMPL_ROOT/src" ]; then
+    IMPL_SRC_DIR_FIELD="$IMPL_ROOT/src"
+  elif [ -d "$IMPL_ROOT/app" ]; then
+    IMPL_SRC_DIR_FIELD="$IMPL_ROOT/app"
+  elif [ -d "$IMPL_ROOT/pages" ]; then
+    IMPL_SRC_DIR_FIELD="$IMPL_ROOT/pages"
+  else
+    IMPL_SRC_DIR_FIELD="$IMPL_ROOT/src"
+  fi
+  IMPL_PUBLIC_DIR_FIELD="$IMPL_ROOT/public"
+  IMPL_PKG_JSON_FIELD="$IMPL_ROOT/package.json"
+fi
+
+REQUIRED="$REF_DIR/required-media.json"
+if [ ! -f "$REQUIRED" ]; then
+  python3 - "$OUT_PATH" "${IMPL_ROOT:-}" "$IMPL_DIR_FIELD" "$IMPL_SRC_DIR_FIELD" "$IMPL_PUBLIC_DIR_FIELD" "$IMPL_PKG_JSON_FIELD" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+payload = {
+    "schemaVersion": 1,
+    "status": "pass",
+    "reason": "required-media.json absent — extractor (Step 6b-bis) has not run; nothing to enforce at this gate",
+    "implRoot": sys.argv[2],
+    "implDir": sys.argv[3],
+    "implSrcDir": sys.argv[4],
+    "implPublicDir": sys.argv[5],
+    "implPkgJson": sys.argv[6],
+    "missing": {"video": [], "lottie": [], "svg": []},
+}
+out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+  echo "required-media-coverage: pass (no required-media.json — extractor not run)"
+  exit 0
+fi
+
 if [ -z "$IMPL_ROOT" ] || [ ! -d "$IMPL_ROOT" ]; then
   cat > "$OUT_PATH" <<JSON
 {
   "schemaVersion": 1,
   "status": "skip",
   "reason": "impl_root not found",
+  "implRoot": "",
+  "implDir": "",
+  "implSrcDir": "",
+  "implPublicDir": "",
+  "implPkgJson": "",
   "missing": {"video": [], "lottie": []}
 }
 JSON
@@ -80,6 +115,18 @@ out_path = Path(sys.argv[3])
 required_path = ref_dir / "required-media.json"
 required = json.loads(required_path.read_text(encoding="utf-8"))
 
+impl_src_dir = next(
+    (impl_root / name for name in ("src", "app", "pages") if (impl_root / name).is_dir()),
+    impl_root / "src",
+)
+path_fields = {
+    "implRoot": str(impl_root),
+    "implDir": str(impl_root),
+    "implSrcDir": str(impl_src_dir),
+    "implPublicDir": str(impl_root / "public"),
+    "implPkgJson": str(impl_root / "package.json"),
+}
+
 def _as_list(v) -> list:
     return v if isinstance(v, list) else []
 
@@ -93,7 +140,7 @@ if not videos and not lottie_urls and not svg_urls:
     out_path.write_text(json.dumps({
         "schemaVersion": 1,
         "status": "pass",
-        "implRoot": str(impl_root),
+        **path_fields,
         "reason": "ref has no required video, Lottie, or SVG media",
         "totals": {"video": 0, "lottie": 0, "svg": 0},
         "missing": {"video": [], "lottie": [], "svg": []},
@@ -274,7 +321,7 @@ status = "fail" if (total_missing or runtime_missing) else "pass"
 result = {
     "schemaVersion": 1,
     "status": status,
-    "implRoot": str(impl_root),
+    **path_fields,
     "totals": {
         "videoRequired": len(videos),
         "lottieRequired": len(lottie_urls),

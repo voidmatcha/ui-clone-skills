@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.7.15] - 2026-05-26
+
+Patch release for one-shot verifier artifact stability.
+
+### Fixed
+
+- **Required media coverage path audit fields.**
+  `required-media-coverage-check.sh` now emits `implRoot`, `implDir`,
+  `implSrcDir`, `implPublicDir`, and `implPkgJson` even when
+  `required-media.json` is absent, so the `post-implement` gate can validate
+  the artifact provenance instead of failing a valid no-op result.
+- **Required-check dispatcher text/dom outputs.**
+  `run-required-checks.sh` now passes `--out` to `text-fidelity-check.sh` and
+  `dom-mirror-check.sh`, materializing the artifacts declared in
+  `verification-plan.json` during one-shot dispatch.
+- **Transition compare no-transition skip artifact.**
+  `transition-compare.sh` now writes `transitions/result.txt` and
+  `transitions/report.json` when no CSS transition elements are detected on
+  the reference, and its cleanup trap preserves the intended zero exit status.
+- **Asset placement host Python compatibility.**
+  `asset-placement-check.sh` now defers inline Python annotation evaluation,
+  matching the portability guard used by other shell-embedded Python scripts
+  when host `python3` resolves to Python 3.9.
+
 ## [0.7.14] - 2026-05-26
 
 Patch release for tree-diff verifier portability.

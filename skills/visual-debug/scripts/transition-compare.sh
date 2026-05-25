@@ -50,6 +50,7 @@ cleanup_all() {
   agent-browser --session "$SESSION_REF" close 2>/dev/null || true
   agent-browser --session "$SESSION_IMPL" close 2>/dev/null || true
   [ -n "$_TC_PY" ] && rm -f "$_TC_PY"
+  return 0
 }
 trap cleanup_all EXIT
 
@@ -221,8 +222,16 @@ if [ "$REF_TRANS" -eq 0 ]; then
   echo "    3. Transitions only exist on hover (GSAP mouseenter), not in base CSS"
   echo "  If transitions exist, add custom selectors: bash transition-compare.sh ... then edit DETECT_TRANSITIONS"
   echo ""
+  cat > "$DIR/transitions/report.json" <<JSON
+[]
+JSON
+  cat > "$DIR/transitions/result.txt" <<TXT
+Transition compare: 0 PASS, 0 FAIL
+SKIP no transition elements detected on the original site.
+TXT
   echo "═══ Transition Compare Complete ═══"
   echo "  0 elements — skipped"
+  echo "  Summary: $DIR/transitions/result.txt"
   exit 0
 fi
 

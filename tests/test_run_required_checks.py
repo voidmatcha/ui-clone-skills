@@ -54,6 +54,70 @@ def test_run_required_checks_passes_package_json_to_bundle_impl_coverage(tmp_pat
     assert artifact["implPkgJson"] == str(impl / "package.json")
 
 
+def test_run_required_checks_materializes_text_and_dom_artifacts(tmp_path: Path) -> None:
+    """Dispatcher must pass --out for stdout-capable text/dom scripts."""
+    root = _project_root()
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (impl / "package.json").write_text(json.dumps({"dependencies": {}}))
+    (impl / "src" / "App.tsx").write_text(
+        "export default function App(){return <main>Real Studio Work</main>}\n",
+        encoding="utf-8",
+    )
+    (ref / ".impl-root").write_text(str(impl) + "\n")
+    (ref / "dom-scaffold.json").write_text(json.dumps({
+        "tree": {
+            "tag": "main",
+            "text": "Real Studio Work",
+            "children": [],
+        },
+    }))
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "requiredChecks": [
+            {
+                "id": "text-fidelity-check",
+                "script": "skills/visual-debug/scripts/text-fidelity-check.sh",
+                "produces": "text-fidelity-check.json",
+                "reason": "test",
+                "severity": "block",
+            },
+            {
+                "id": "dom-mirror-check",
+                "script": "skills/visual-debug/scripts/dom-mirror-check.sh",
+                "produces": "dom-mirror-check.json",
+                "reason": "test",
+                "severity": "warn",
+            },
+        ],
+    }))
+
+    env = os.environ.copy()
+    env["PLUGIN_ROOT"] = str(root)
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "scripts" / "verify" / "run-required-checks.sh"),
+            "text-dom-dispatch-test",
+            "https://example.test",
+            "http://127.0.0.1:1",
+            str(ref),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "unbound variable" not in proc.stderr
+    assert (ref / "text-fidelity-check.json").is_file(), proc.stdout + proc.stderr
+    assert (ref / "dom-mirror-check.json").is_file(), proc.stdout + proc.stderr
+
+
 def test_run_required_checks_has_hero_composite_signature() -> None:
     """codex-18 (2026-05-22) discovered hero-composite-check.sh was added to
     verification-plan.sh as a required row but never wired into the dispatcher

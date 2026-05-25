@@ -40,6 +40,8 @@ fi
 OUT="$REF_DIR/asset-placement.json"
 
 python3 - "$REF_DIR" "$IMPL_ARG" "$OUT" <<'PY'
+from __future__ import annotations
+
 import json
 import os
 import sys
