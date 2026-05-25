@@ -22,7 +22,10 @@
 
 set -euo pipefail
 
-START_TIME=$(date +%s%3N 2>/dev/null || python3 -c "import time; print(int(time.time()*1000))")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/../lib/time-ms.sh"
+
+START_TIME=$(ui_clone_now_ms)
 
 SESSION="${1:?Usage: extract-section-html.sh <session> <output-dir>}"
 trap 'agent-browser --session "$SESSION" close 2>/dev/null || true' EXIT
@@ -210,7 +213,7 @@ echo "Per-section files: $DIR/html/<section-name>.json" >&2
 echo "Each file contains: HTML structure, computed CSS, media elements" >&2
 
 # ── JSON output ──
-END_TIME=$(date +%s%3N 2>/dev/null || python3 -c "import time; print(int(time.time()*1000))")
+END_TIME=$(ui_clone_now_ms)
 SECTION_FILES=$(find "$DIR/html" -name "*.json" 2>/dev/null | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))" 2>/dev/null || echo "[]")
 SECTION_N=$(find "$DIR/html" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
 cat <<ENDJSON

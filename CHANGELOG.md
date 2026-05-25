@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.12] - 2026-05-26
+
+Patch release for portable extraction script durations.
+
+### Fixed
+
+- **macOS extraction duration reporting.** `download-chunks.sh` and related
+  extraction scripts now use a shared Python monotonic millisecond helper
+  instead of GNU-specific `date +%s%3N`, preventing successful artifact writes
+  from ending with a duration arithmetic failure on macOS.
+
 ## [0.7.11] - 2026-05-26
 
 Patch release for section-map-backed section matching.

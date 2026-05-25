@@ -12,7 +12,10 @@
 
 set -euo pipefail
 
-START_TIME=$(date +%s%3N 2>/dev/null || python3 -c "import time; print(int(time.time()*1000))")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/../lib/time-ms.sh"
+
+START_TIME=$(ui_clone_now_ms)
 
 DIR="${1:?Usage: download-chunks.sh <component-dir> <url-list-file>}"
 INPUT="${2:--}"
@@ -155,7 +158,7 @@ echo "" >&2
 echo "Next: Review bundle-map.json and create transition-spec.json" >&2
 
 # ── JSON output ──
-END_TIME=$(date +%s%3N 2>/dev/null || python3 -c "import time; print(int(time.time()*1000))")
+END_TIME=$(ui_clone_now_ms)
 DOWNLOADED=$(find "$DIR/bundles" -name "*.js" 2>/dev/null | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))" 2>/dev/null || echo "[]")
 LIBS=$(python3 -c "import json; d=json.load(open('$DIR/bundle-analysis.json')); libs=set(); [libs.update(e.get('libraries',[])) for e in d]; print(json.dumps(list(libs)))" 2>/dev/null || echo "[]")
 cat <<ENDJSON

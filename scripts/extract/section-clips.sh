@@ -24,7 +24,10 @@
 
 set -euo pipefail
 
-START_TIME=$(date +%s%3N 2>/dev/null || python3 -c "import time; print(int(time.time()*1000))")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/../lib/time-ms.sh"
+
+START_TIME=$(ui_clone_now_ms)
 
 SESSION="${1:?Usage: section-clips.sh <session> <output-dir> <side>}"
 trap 'agent-browser --session "$SESSION" close 2>/dev/null || true' EXIT
@@ -267,7 +270,7 @@ echo "Elements: $ELEMENT_DIR/" >&2
 echo "Metadata: $CLIP_DIR/sections.json, $CLIP_DIR/elements.json" >&2
 
 # ── JSON output ──
-END_TIME=$(date +%s%3N 2>/dev/null || python3 -c "import time; print(int(time.time()*1000))")
+END_TIME=$(ui_clone_now_ms)
 CLIPS=$(find "$SECTION_DIR" -name "*.png" 2>/dev/null | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))" 2>/dev/null || echo "[]")
 cat <<ENDJSON
 {

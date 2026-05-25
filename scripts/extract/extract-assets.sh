@@ -17,7 +17,10 @@
 
 set -euo pipefail
 
-START_TIME=$(date +%s%3N 2>/dev/null || python3 -c "import time; print(int(time.time()*1000))")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/../lib/time-ms.sh"
+
+START_TIME=$(ui_clone_now_ms)
 
 SESSION="${1:?Usage: extract-assets.sh <session> <output-dir> <public-dir>}"
 trap 'agent-browser --session "$SESSION" close 2>/dev/null || true' EXIT
@@ -235,7 +238,7 @@ echo "Fonts:  $PUBLIC/fonts/" >&2
 echo "CSS:    $DIR/assets/font-faces.css" >&2
 
 # ── JSON output ──
-END_TIME=$(date +%s%3N 2>/dev/null || python3 -c "import time; print(int(time.time()*1000))")
+END_TIME=$(ui_clone_now_ms)
 ASSETS=$(python3 -c "
 import json, os, sys
 assets = []
