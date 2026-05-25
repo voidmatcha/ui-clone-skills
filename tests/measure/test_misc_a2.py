@@ -241,6 +241,161 @@ def test_ref_js_loader_passes_clean_impl(tmp_path: Path) -> None:
 
 
 
+# ── Canvas-replay allowlist for ref-js-loader (v0.7.0) ──────────────────
+# When closeoutPolicy=canvas-replay AND canvas-replay-attestation.json is
+# signed, URLs listed in attestation.ref_canvas_sources[] are exact-string
+# allowlisted. Other ref-bundle imports still FAIL. Allowlist is gated on
+# both policy field AND attestation file (codex Q3: avoid origin/glob —
+# exact URL equality keeps the gate effective for un-attested URLs).
+
+
+def _write_canvas_replay_attestation(
+    ref: Path,
+    sources: list[str],
+    policy: str = "canvas-replay",
+) -> None:
+    (ref / "pipeline-state.json").write_text(
+        json.dumps({"component": ref.name, "closeoutPolicy": policy}),
+        encoding="utf-8",
+    )
+    (ref / "canvas-replay-attestation.json").write_text(
+        json.dumps({
+            "license": "MIT — test fixture",
+            "disclaimer": "test",
+            "attestedBy": "operator",
+            "attestedAt": "2026-05-25T08:00:00Z",
+            "ref_canvas_sources": sources,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_ref_js_loader_allows_attested_canvas_source(tmp_path: Path) -> None:
+    """v0.7.0 — impl loading the attested canvas-driver URL passes."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "head.json").write_text(json.dumps({
+        "url": "https://canvas.example.org/",
+    }))
+    _write_canvas_replay_attestation(ref, sources=[
+        "https://canvas.example.org/_canvas/driver.js",
+    ])
+    (impl / "src" / "CanvasLoader.tsx").write_text(
+        "// Canvas-replay: attested ref bundle is required for visual fidelity\n"
+        "import driver from 'https://canvas.example.org/_canvas/driver.js';\n"
+        "export default function Canvas() { return driver.mount(); }\n"
+    )
+    (impl / "package.json").write_text(json.dumps({"name": "impl"}))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "ref-js-loader-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert proc.returncode == 0, (
+        f"attested canvas source must pass: {proc.stdout}\n{proc.stderr}"
+    )
+    artifact = json.loads((ref / "ref-js-loader.json").read_text())
+    assert artifact["status"] == "pass"
+
+
+def test_ref_js_loader_fails_on_non_attested_url_same_host(tmp_path: Path) -> None:
+    """v0.7.0 boundary — attestation only allows the URLs it explicitly lists.
+    Loading a DIFFERENT bundle from the same host still fails. This is the
+    "exact URL equality, not origin" guarantee codex called out (Q3)."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "head.json").write_text(json.dumps({
+        "url": "https://canvas.example.org/",
+    }))
+    _write_canvas_replay_attestation(ref, sources=[
+        "https://canvas.example.org/_canvas/driver.js",
+    ])
+    # Same host, DIFFERENT URL — vendor bundle, not the attested canvas driver.
+    (impl / "src" / "BadVendor.tsx").write_text(
+        "// CHEAT: load a non-attested ref bundle, hide behind same host\n"
+        "import vendor from 'https://canvas.example.org/_next/static/chunks/vendor.js';\n"
+        "export default function Bad() { return vendor.run(); }\n"
+    )
+    (impl / "package.json").write_text(json.dumps({"name": "impl"}))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "ref-js-loader-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert proc.returncode == 1, (
+        f"non-attested URL on same host must STILL fail: {proc.stdout}\n{proc.stderr}"
+    )
+    artifact = json.loads((ref / "ref-js-loader.json").read_text())
+    assert artifact["status"] == "fail"
+
+
+def test_ref_js_loader_no_allowlist_without_attestation(tmp_path: Path) -> None:
+    """Policy field set but operator forgot attestation → no allowlist."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "head.json").write_text(json.dumps({
+        "url": "https://canvas.example.org/",
+    }))
+    # closeoutPolicy=canvas-replay BUT no canvas-replay-attestation.json
+    (ref / "pipeline-state.json").write_text(
+        json.dumps({"component": ref.name, "closeoutPolicy": "canvas-replay"}),
+        encoding="utf-8",
+    )
+    (impl / "src" / "Canvas.tsx").write_text(
+        "import driver from 'https://canvas.example.org/_canvas/driver.js';\n"
+        "export default function Canvas() { return driver.mount(); }\n"
+    )
+    (impl / "package.json").write_text(json.dumps({"name": "impl"}))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "ref-js-loader-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert proc.returncode == 1, (
+        f"missing attestation must NOT activate allowlist: {proc.stdout}\n{proc.stderr}"
+    )
+
+
+def test_ref_js_loader_no_allowlist_when_policy_canonical(tmp_path: Path) -> None:
+    """Default canonical policy: attestation file is ignored even if present."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "head.json").write_text(json.dumps({
+        "url": "https://canvas.example.org/",
+    }))
+    # closeoutPolicy=canonical with attestation present — must not allowlist
+    _write_canvas_replay_attestation(
+        ref,
+        sources=["https://canvas.example.org/_canvas/driver.js"],
+        policy="canonical",
+    )
+    (impl / "src" / "Canvas.tsx").write_text(
+        "import driver from 'https://canvas.example.org/_canvas/driver.js';\n"
+        "export default function Canvas() { return driver.mount(); }\n"
+    )
+    (impl / "package.json").write_text(json.dumps({"name": "impl"}))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "ref-js-loader-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert proc.returncode == 1, (
+        f"canonical policy must NOT activate allowlist: {proc.stdout}\n{proc.stderr}"
+    )
+
+
 def test_ref_js_loader_dispatcher_wired() -> None:
     import re
     dispatcher = _project_root() / "scripts" / "verify" / "run-required-checks.sh"

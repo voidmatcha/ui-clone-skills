@@ -48,15 +48,70 @@ PROBE_RAW=$(mktemp -t vpp.XXXX.json)
 trap 'rm -f "$PROBE_RAW"; agent-browser --session "$PROBE_SESSION" close >/dev/null 2>&1 || true' EXIT
 
 # ── Detect whether ref needs video ────────────────────────────────────
-REF_HAS_VIDEO="false"
-for name in required-media.json required-media-coverage.json transition-spec.json animations-detected.json; do
-  path="$REF_DIR/$name"
-  [ -f "$path" ] || continue
-  if grep -Eiq '\.mp4|\.webm|\.mov|\.m3u8|\.mpd|"video"|"hero-video"|videoMime' "$path" 2>/dev/null; then
-    REF_HAS_VIDEO="true"
-    break
-  fi
-done
+REF_HAS_VIDEO=$(python3 - "$REF_DIR" <<'PY'
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ref_dir = Path(sys.argv[1])
+video_ext = re.compile(r"\.(mp4|webm|mov|m3u8|mpd)(?:$|[?#\"'])", re.I)
+
+def load_json(name: str):
+    path = ref_dir / name
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+def contains_video_url(value) -> bool:
+    if isinstance(value, str):
+        return bool(video_ext.search(value))
+    if isinstance(value, list):
+        return any(contains_video_url(v) for v in value)
+    if isinstance(value, dict):
+        return any(contains_video_url(v) for v in value.values())
+    return False
+
+required = load_json("required-media.json")
+if isinstance(required, dict):
+    for key in ("videos", "videoUrls", "videoURLs", "video", "requiredVideos"):
+        value = required.get(key)
+        if isinstance(value, list) and any(contains_video_url(v) for v in value):
+            print("true")
+            raise SystemExit(0)
+    totals = required.get("totals")
+    if isinstance(totals, dict) and int(totals.get("video", 0) or 0) > 0:
+        print("true")
+        raise SystemExit(0)
+    if contains_video_url(required):
+        print("true")
+        raise SystemExit(0)
+
+coverage = load_json("required-media-coverage.json")
+if isinstance(coverage, dict) and contains_video_url(coverage.get("videos")):
+    print("true")
+    raise SystemExit(0)
+
+for name in ("transition-spec.json", "animations-detected.json"):
+    data = load_json(name)
+    if not isinstance(data, dict):
+        continue
+    if contains_video_url(data):
+        print("true")
+        raise SystemExit(0)
+    text = json.dumps(data).lower()
+    if "hero-video" in text or "videoMime".lower() in text:
+        print("true")
+        raise SystemExit(0)
+
+print("false")
+PY
+)
 
 if [ "$REF_HAS_VIDEO" != "true" ]; then
   python3 - "$OUT" <<'PY'
@@ -151,7 +206,9 @@ def read_probe(path: str) -> dict:
         return {"error": "probe-missing"}
     for line in reversed(text.strip().splitlines()):
         s = line.strip()
-        if not s.startswith("{"):
+        # agent-browser may wrap the eval result in outer quotes
+        # ("{...}") or emit a bare object ({...}). Accept both forms.
+        if not (s.startswith("{") or s.startswith('"{')):
             continue
         try:
             value = json.loads(s)

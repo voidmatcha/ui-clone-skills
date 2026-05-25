@@ -87,12 +87,20 @@ def _write_hover(ref_dir: Path, manifest: dict, summary: dict) -> None:
     )
 
 
+def _write_bundle_map(ref_dir: Path, content: dict) -> None:
+    """Plant a `bundle-map.json` for the motion-rich detector."""
+    (ref_dir / "bundle-map.json").write_text(
+        json.dumps(content), encoding="utf-8",
+    )
+
+
 # ── tests ────────────────────────────────────────────────────────────
 
 
 def test_no_states_dir_emits_single_skip(ref_dir: Path) -> None:
-    """Legacy ref dir without states/ — gate must not block. Emits ONE
-    pass with `skip` semantics so existing pipelines stay green."""
+    """Legacy ref dir without states/ and NO bundle-map (or non-motion-rich) —
+    gate stays lenient (pass with skip semantics) so existing pipelines
+    stay green."""
     results = Gate(ref_dir).gate_state_coverage()
     assert len(results) == 1
     assert results[0].status == "pass"
@@ -336,6 +344,108 @@ def test_partial_states_dir_emits_only_present_checks(
     assert "hover-coverage" not in labels and "hover coverage" not in labels
 
 
+def test_hover_handler_vue_at_mouseenter_pass(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Vue `@mouseenter="..."` template syntax must satisfy the hover
+    check (word-boundary regex catches `mouseenter` regardless of @ prefix)."""
+    _write_hover(
+        ref_dir,
+        manifest={"entries": [{
+            "id": "v1", "kind": "js", "file": "elem-v1.json",
+            "selector": "button", "activation": "button", "changedCount": 1,
+            "schemaVersion": 1,
+        }]},
+        summary={"checked": True, "candidatesFound": 1, "candidatesProcessed": 1,
+                 "candidatesWithCssRule": 0, "candidatesWithJsDiff": 1,
+                 "candidatesWithAnySignal": 1},
+    )
+    _write_impl_src(impl_root, {
+        "Btn.vue": (
+            "<template>\n"
+            "  <button @mouseenter=\"onHover\" :class=\"{ active }\">Hover</button>\n"
+            "</template>\n"
+        ),
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    hover_results = [r for r in results if "hover" in r.label.lower()]
+    assert any(r.status == "pass" for r in hover_results), (
+        f"Vue @mouseenter should match hover handler regex; got: "
+        f"{[(r.label, r.status) for r in results]}"
+    )
+
+
+def test_hover_handler_svelte_on_mouseenter_pass(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Svelte `on:mouseenter="..."` must satisfy the hover check."""
+    _write_hover(
+        ref_dir,
+        manifest={"entries": [{
+            "id": "s1", "kind": "js", "file": "elem-s1.json",
+            "selector": "button", "activation": "button", "changedCount": 1,
+            "schemaVersion": 1,
+        }]},
+        summary={"checked": True, "candidatesFound": 1, "candidatesProcessed": 1,
+                 "candidatesWithCssRule": 0, "candidatesWithJsDiff": 1,
+                 "candidatesWithAnySignal": 1},
+    )
+    _write_impl_src(impl_root, {
+        "Btn.svelte": (
+            "<script>let active = false;</script>\n"
+            "<button on:mouseenter={() => active = true}>Hover</button>\n"
+        ),
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    hover_results = [r for r in results if "hover" in r.label.lower()]
+    assert any(r.status == "pass" for r in hover_results)
+
+
+def test_scroll_svelte_use_inview_pass(ref_dir: Path, impl_root: Path) -> None:
+    """Svelte `use:inView` action must satisfy the scroll-state check."""
+    _write_scroll(
+        ref_dir,
+        trajectory=[{"pct": pct} for pct in (0, 50, 100)],
+        summary={"checked": True, "static": False, "scrollHeight": 8000,
+                 "viewportHeight": 1080, "scrollHeightGrew": False},
+    )
+    _write_impl_src(impl_root, {
+        "Section.svelte": (
+            "<script>\n"
+            "  import { inView } from '$lib/actions';\n"
+            "  let visible = false;\n"
+            "</script>\n"
+            "<section use:inView={() => visible = true}>Content</section>\n"
+        ),
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    scroll_results = [r for r in results if "scroll" in r.label.lower()]
+    assert any(r.status == "pass" for r in scroll_results)
+
+
+def test_scroll_vue_useintersectionobserver_pass(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """vueuse `useIntersectionObserver` must satisfy scroll-state check."""
+    _write_scroll(
+        ref_dir,
+        trajectory=[{"pct": pct} for pct in (0, 50, 100)],
+        summary={"checked": True, "static": False, "scrollHeight": 8000,
+                 "viewportHeight": 1080, "scrollHeightGrew": False},
+    )
+    _write_impl_src(impl_root, {
+        "Section.vue": (
+            "<script setup>\n"
+            "import { useIntersectionObserver } from '@vueuse/core';\n"
+            "useIntersectionObserver(target, ([{ isIntersecting }]) => visible.value = isIntersecting);\n"
+            "</script>\n"
+        ),
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    scroll_results = [r for r in results if "scroll" in r.label.lower()]
+    assert any(r.status == "pass" for r in scroll_results)
+
+
 def test_state_coverage_in_gate_order_between_pre_generate_and_post_implement(
     ref_dir: Path,
 ) -> None:
@@ -345,3 +455,167 @@ def test_state_coverage_in_gate_order_between_pre_generate_and_post_implement(
     assert "state-coverage" in order
     assert order.index("state-coverage") == order.index("pre-generate") + 1
     assert order.index("state-coverage") == order.index("post-implement") - 1
+
+
+# ── codex juanmora review fixes (2026-05-25) ─────────────────────────
+
+
+def test_motion_rich_no_states_fails(ref_dir: Path) -> None:
+    """Codex finding #1: bundle-map declares GSAP/ScrollTrigger but states/
+    is absent → fail-closed. Those sites REQUIRE Phase A/B/C capture for
+    transition ground truth — silent skip lets juanmora-style gaps through."""
+    _write_bundle_map(ref_dir, {
+        "libraries": ["gsap", "ScrollTrigger", "SplitText"],
+        "transitions": [],
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    assert any(
+        r.status == "fail" and "motion-rich" in r.message.lower()
+        for r in results
+    ), f"motion-rich + no states/ must fail; got: {[(r.label, r.status, r.message[:60]) for r in results]}"
+
+
+def test_lenis_in_bundle_map_triggers_motion_rich(ref_dir: Path) -> None:
+    """Lenis smooth-scroll alone is enough to mark motion-rich."""
+    _write_bundle_map(ref_dir, {"libraries": ["lenis"]})
+    results = Gate(ref_dir).gate_state_coverage()
+    assert any(r.status == "fail" for r in results), (
+        "Lenis alone should trigger motion-rich fail when states/ absent"
+    )
+
+
+def test_webflow_ix_in_bundle_map_triggers_motion_rich(ref_dir: Path) -> None:
+    """Webflow IX2 (data-w-id / w-mod-ix) marks motion-rich."""
+    _write_bundle_map(ref_dir, {"frameworks": ["webflow"], "attrs": ["data-w-id"]})
+    results = Gate(ref_dir).gate_state_coverage()
+    assert any(r.status == "fail" for r in results)
+
+
+def test_non_motion_rich_bundle_keeps_legacy_skip(ref_dir: Path) -> None:
+    """bundle-map without motion markers → states/ absent still pass-skip.
+    Backward-compat: non-motion sites don't need Phase A/B/C."""
+    _write_bundle_map(ref_dir, {"libraries": ["react", "tailwind"]})
+    results = Gate(ref_dir).gate_state_coverage()
+    assert all(r.status == "pass" for r in results)
+    assert any("not motion-rich" in r.message.lower() or "skip" in r.message.lower()
+               for r in results)
+
+
+def test_motion_rich_states_exist_no_impl_root_fails(
+    ref_dir: Path, tmp_path: Path,
+) -> None:
+    """Codex finding: motion-rich + states/ exist + impl_root unresolved →
+    fail (cannot verify the class hooks reached impl). Non-motion case
+    keeps the deferred-pass behavior (handled by separate test)."""
+    _write_bundle_map(ref_dir, {"libraries": ["gsap"]})
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "bodyClass": "is-loading", "htmlClass": ""},
+            {"ts_ms": 800, "bodyClass": "is-loaded", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2},
+    )
+    # NOTE: no .impl-root marker, no UI_CLONE_IMPL_ROOT env, no fallback impl dir.
+    # _find_impl_root should return None.
+    results = Gate(ref_dir).gate_state_coverage()
+    assert any(
+        r.status == "fail" and "impl_root" in r.message.lower()
+        for r in results
+    )
+
+
+def test_generic_lenis_class_filtered_from_splash_check(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Codex juanmora review: `lenis` class showed in trajectory and impl
+    had Lenis library; gate falsely passed. With _GENERIC_NOISE_CLASSES
+    filtering, `lenis` alone in trajectory contributes 0 effective class
+    hooks → splash check N/A (no hooks to verify)."""
+    _write_bundle_map(ref_dir, {"libraries": ["lenis"]})  # motion-rich but lenis-only
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "bodyClass": "lenis", "htmlClass": ""},
+            {"ts_ms": 1000, "bodyClass": "lenis lenis-scrolling", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2},
+    )
+    _write_impl_src(impl_root, {
+        "App.tsx": "import Lenis from 'lenis'; const lenis = new Lenis();",
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    splash_results = [r for r in results if "splash" in r.label.lower()]
+    # With lenis filtered out, classes is empty → splash check returns None
+    # (N/A — transitions exist but no observable hooks). No splash result.
+    assert not splash_results, (
+        f"lenis-only trajectory should produce N/A (no splash result); "
+        f"got: {[(r.label, r.status) for r in splash_results]}"
+    )
+
+
+def test_class_only_in_comment_not_matched(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Codex juanmora review: class names mentioned only in `/* … */` or
+    `// …` comments should NOT count as legitimate impl references."""
+    _write_bundle_map(ref_dir, {"libraries": ["gsap"]})
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "bodyClass": "is-loading", "htmlClass": ""},
+            {"ts_ms": 800, "bodyClass": "is-loaded", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2},
+    )
+    # Impl mentions `is-loading` only in a block comment + a line comment.
+    _write_impl_src(impl_root, {
+        "App.tsx": (
+            "export function App() {\n"
+            "  /* The ref uses is-loading / is-loaded classes. */\n"
+            "  // is-loaded marks the post-splash state.\n"
+            "  return <div className='loaded'>App</div>;\n"
+            "}\n"
+        ),
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    splash_fails = [
+        r for r in results
+        if r.status == "fail" and "splash" in r.label.lower()
+    ]
+    assert splash_fails, (
+        f"comment-only class mention must NOT pass splash check; "
+        f"got: {[(r.label, r.status) for r in results]}"
+    )
+
+
+def test_url_double_slash_not_stripped_as_comment(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Edge case for _strip_js_comments: `https://...` URLs contain `//`
+    but must NOT be treated as line comments."""
+    _write_bundle_map(ref_dir, {"libraries": ["gsap"]})
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "bodyClass": "is-loading", "htmlClass": ""},
+            {"ts_ms": 800, "bodyClass": "is-loaded", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2},
+    )
+    # `is-loading` appears AFTER `https://` on the same line — must still match.
+    _write_impl_src(impl_root, {
+        "App.tsx": (
+            "const ref = 'https://example.test'; // see ref\n"
+            "const cls = loaded ? 'is-loaded' : 'is-loading';\n"
+        ),
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    splash_passes = [
+        r for r in results
+        if r.status == "pass" and "splash" in r.label.lower()
+    ]
+    assert splash_passes, (
+        "URL with `//` must not be stripped; active is-loaded/is-loading "
+        f"must be detected; got: {[(r.label, r.status) for r in results]}"
+    )

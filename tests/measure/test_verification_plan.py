@@ -114,10 +114,8 @@ def test_verification_plan_regenerates_when_extraction_is_newer(tmp_path: Path) 
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert (
-        "verification-plan.json is stale (generated before latest extraction); regenerating."
-        in proc.stderr
-    )
+    assert "verification-plan.json is stale" in proc.stderr
+    assert "regenerating." in proc.stderr
     plan = json.loads((ref / "verification-plan.json").read_text())
     assert plan["generatedAt"] != "2000-01-01T00:00:00Z"
 

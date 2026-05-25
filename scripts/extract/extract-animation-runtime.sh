@@ -60,6 +60,38 @@ RESULT=$(agent-browser --session "$SESSION" eval "$(cat <<'JS'
   const safe = (fn) => { try { return fn(); } catch (_e) { return null; } };
 
   // ── Helpers: capture at current scroll position ──
+  //
+  // Codex juanmora review (2026-05-25): the original tween capture
+  // reported `ease: function () { ... }` (toString of the GSAP ease wrapper)
+  // and empty `targets`. CustomEase / SteppedEase / Back / Power eases all
+  // collapse to opaque function source; the agent receiving this data
+  // could not reproduce eases. Fix: capture (a) the ease NAME via
+  // `ease.id || ease.toString()`, (b) the CustomEase data string via
+  // `window.CustomEase._map[name].data`, (c) richer target selectors
+  // including class fragments, (d) `delay` and full `vars` snapshot.
+  const elSelector = (el) => {
+    if (!el || !el.tagName) return null;
+    const id = el.id ? "#" + el.id : "";
+    const cls = (typeof el.className === "string" && el.className)
+      ? "." + el.className.trim().split(/\s+/).slice(0, 3).join(".")
+      : "";
+    return el.tagName.toLowerCase() + id + cls;
+  };
+
+  const captureEaseName = (ease) => {
+    if (!ease) return null;
+    // GSAP CustomEase instances expose .getRatio + .id.
+    if (typeof ease.getRatio === "function" && ease.id) return String(ease.id);
+    // Built-in eases (Power2.out, Back.inOut etc.) expose .name OR are functions
+    // whose toString contains a recognizable pattern.
+    if (ease.name) return String(ease.name);
+    if (typeof ease === "string") return ease;
+    const s = String(ease);
+    // Try to extract a GSAP ease key from the function source.
+    const m = s.match(/(?:Power[0-4]|Back|Bounce|Circ|Cubic|Elastic|Expo|Linear|Quad|Quart|Quint|Sine|Stepped|SlowMo|RoughEase|CustomEase|none)\.?(?:in|out|inOut)?/);
+    return m ? m[0] : (s.length > 80 ? s.slice(0, 80) + "…" : s);
+  };
+
   const captureScrollTrigger = () => {
     const ST = window.ScrollTrigger || window.gsap?.core?.globals?.()?.ScrollTrigger;
     if (!ST || !ST.getAll) return null;
@@ -78,12 +110,29 @@ RESULT=$(agent-browser --session "$SESSION" eval "$(cat <<'JS'
       tween: safe(() => {
         const a = t.animation;
         if (!a) return null;
+        const vars = a.vars || {};
+        const easeRef = vars.ease;
+        const easeName = captureEaseName(easeRef);
+        // Snapshot vars MINUS function/non-serializable members.
+        const varsSnap = {};
+        for (const k of Object.keys(vars)) {
+          const v = vars[k];
+          if (typeof v === "function") continue;
+          if (k === "ease") continue;  // captured separately as easeName
+          if (k === "scrollTrigger") continue;  // captured at the parent level
+          if (k === "onUpdate" || k === "onComplete" || k === "onStart") continue;
+          // Skip objects with circular refs by attempting json round-trip.
+          try { JSON.stringify(v); varsSnap[k] = v; } catch { /* skip */ }
+        }
         return {
           duration: a.duration?.() ?? null,
-          ease: a.vars?.ease?.toString?.() ?? null,
-          targets: (a.targets?.() || []).slice(0, 5).map(el =>
-            el?.tagName?.toLowerCase() + (el?.id ? "#" + el.id : "")
-          ),
+          delay: typeof vars.delay === "number" ? vars.delay : null,
+          // Legacy ease field stays for backward-compat — downstream
+          // consumers (runtime-spec-coverage.sh) read either ease or easeName.
+          ease: easeName,
+          easeName,
+          targets: (a.targets?.() || []).slice(0, 5).map(elSelector).filter(Boolean),
+          vars: varsSnap,
         };
       }),
     }));
@@ -180,12 +229,64 @@ RESULT=$(agent-browser --session "$SESSION" eval "$(cat <<'JS'
     };
   });
 
+  // Codex juanmora review (2026-05-25): when GSAP CustomEase is loaded,
+  // dump the registry data strings (SVG path snippets) so downstream
+  // ease replication can use the exact curve instead of cubic-bezier
+  // approximation. Without this, juanmora GSAP `CustomEase` declarations
+  // could only be reproduced via guessed `cubic-bezier()` — losing the
+  // specific motion character of each named curve.
+  const customEaseRegistry = safe(() => {
+    const CE = window.CustomEase || window.gsap?.core?.globals?.()?.CustomEase;
+    if (!CE) return null;
+    // GSAP exposes the registry on CustomEase._map (modern) or .registry (older).
+    const reg = CE._map || CE.registry || null;
+    if (!reg) return null;
+    const entries = {};
+    let count = 0;
+    for (const [key, val] of Object.entries(reg)) {
+      if (count >= 50) break;
+      const data = val?.data ?? val?._data ?? null;
+      if (data) {
+        entries[key] = typeof data === "string"
+          ? (data.length > 400 ? data.slice(0, 400) + "…" : data)
+          : null;
+        count++;
+      }
+    }
+    return Object.keys(entries).length > 0 ? entries : null;
+  });
+
+  // Capture global timeline children — surfaces tweens that are NOT
+  // tied to ScrollTrigger and that document.getAnimations() can miss
+  // (GSAP runs its own ticker, not Web Animations API).
+  const gsapTimelines = safe(() => {
+    const g = window.gsap || window.GSAP;
+    if (!g?.globalTimeline?.getChildren) return null;
+    const children = g.globalTimeline.getChildren(true, true, true);
+    if (!Array.isArray(children) || !children.length) return null;
+    return children.slice(0, 100).map(child => {
+      const vars = child.vars || {};
+      const easeName = captureEaseName(vars.ease);
+      return {
+        kind: child.constructor?.name || "Animation",
+        duration: child.duration?.() ?? null,
+        delay: typeof vars.delay === "number" ? vars.delay : null,
+        progress: typeof child.progress === "function"
+          ? Math.round(child.progress() * 1000) / 1000 : null,
+        easeName,
+        targets: (child.targets?.() || []).slice(0, 3).map(elSelector).filter(Boolean),
+      };
+    });
+  });
+
   return JSON.stringify({
     gsap,
     scrollTrigger,
     webAnimations,
     lenis,
     ix2,
+    customEaseRegistry,
+    gsapTimelines,
     scrolledPositions: positions,
     generatedAt: new Date().toISOString(),
   });

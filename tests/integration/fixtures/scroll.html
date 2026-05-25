@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>scroll fixture — capture-scroll integration test</title>
+  <style>
+    html, body { margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+    body { background: #0a0a0a; color: #eee; }
+    /* Five tall sections — total 8000px so scroll-progress sweep has real travel. */
+    section {
+      height: 1600px;
+      width: 100%;
+      padding: 4rem 2rem;
+      box-sizing: border-box;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 4rem;
+    }
+    #s1 { background: #1a237e; }
+    #s2 { background: #4a148c; }
+    #s3 { background: #b71c1c; }
+    #s4 { background: #1b5e20; }
+    #s5 { background: #e65100; }
+  </style>
+</head>
+<body>
+  <section id="s1" data-section="intro">Section 1 — intro</section>
+  <section id="s2" data-section="features">Section 2 — features</section>
+  <section id="s3" data-section="gallery">Section 3 — gallery</section>
+  <section id="s4" data-section="testimonials">Section 4 — testimonials</section>
+  <section id="s5" data-section="cta">Section 5 — cta</section>
+</body>
+</html>

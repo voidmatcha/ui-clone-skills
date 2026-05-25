@@ -115,6 +115,16 @@ def measure_transition_coverage(d: dict | None) -> tuple[bool, str]:
     elements = d.get("animatedElements") or []
     if not elements:
         return False, "probe ran but found 0 animated elements (URL or hydration issue)"
+    # transition-coverage.json may be produced by Phase 6d as ref-side
+    # static extraction (no samples per element) OR by a post-implement
+    # runtime probe (samples array per element). If no element has a
+    # samples array, treat the artifact as ref-side extraction evidence
+    # and let reveal-trigger / video-motion-result carry the runtime
+    # proof instead — failing here on a schema mismatch the producer
+    # never emits would block every clone.
+    has_any_samples = any(el.get("samples") for el in elements)
+    if not has_any_samples:
+        return True, f"{len(elements)} ref-side animated element(s) declared (Phase 6d schema, no runtime samples — runtime proof carried by reveal-trigger + video-motion)"
     # Each element should have ≥2 samples and at least one non-default value
     settled = 0
     for el in elements:

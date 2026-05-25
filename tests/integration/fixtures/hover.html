@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>hover fixture — capture-hover integration test</title>
+  <style>
+    html, body { margin: 0; padding: 0; font-family: system-ui, sans-serif; background: #fafafa; }
+    .grid { display: grid; gap: 2rem; padding: 4rem; }
+    .btn {
+      display: inline-block;
+      padding: 1rem 2rem;
+      background: #2563eb;
+      color: white;
+      text-decoration: none;
+      border-radius: 8px;
+      transition: transform 200ms ease, background-color 200ms ease;
+      will-change: transform;
+    }
+    /* CSS-hover signal — capture-hover should pick this up via CSSOM walk. */
+    a.btn:hover {
+      transform: scale(1.1);
+      background-color: #1e40af;
+    }
+    .card {
+      padding: 2rem;
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      cursor: pointer;
+    }
+    .card .card-title {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #111;
+    }
+    /*
+     * #js-card:hover exists ONLY to make `#js-card` a CSSOM-walk candidate
+     * for capture-hover.sh — the script's design (codex item [3]) is that
+     * the CSSOM `:hover` walk is the entry point for ALL probing, including
+     * the JS-handler path. Without this rule the script never dispatches
+     * synthetic events on #js-card and the JS-signal half of the test would
+     * be dead code.
+     */
+    #js-card:hover { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <a href="#" class="btn">Hover me (CSS)</a>
+    <div class="card" id="js-card">
+      <div class="card-title">Hover me (JS)</div>
+      <p>Mouseenter triggers JS-only style change — no CSS :hover rule on this element.</p>
+    </div>
+  </div>
+  <script>
+    // JS-handler hover signal. capture-hover dispatches mouseover/mouseenter
+    // synthetically, then diffs computed style against the tracked-prop set.
+    const card = document.getElementById('js-card');
+    card.addEventListener('mouseenter', () => {
+      card.style.transform = 'translateY(-4px)';
+      card.style.boxShadow = '0 12px 24px rgba(0, 0, 0, 0.15)';
+    });
+    card.addEventListener('mouseleave', () => {
+      card.style.transform = '';
+      card.style.boxShadow = '';
+    });
+  </script>
+</body>
+</html>

@@ -380,7 +380,7 @@ if "error" not in ref_data and "error" not in impl_data:
                 ),
             })
 
-    if has_lottie:
+    if has_lottie and int(ref_data.get("lottieMounted") or 0) > 0:
         impl_lottie = int(impl_data.get("lottieMounted") or 0)
         if impl_lottie < 1:
             violations.append({
@@ -464,7 +464,7 @@ result = {
         "(1) node count within ±30%, (2) >= max(10, sectionCount*2) "
         "visible text nodes, (3) no single image/video/background element "
         "covering >90% of viewport, (4) >= 1 Lottie container mounted when "
-        "ref shows Lottie evidence, (5) no opaque fixed/absolute overlay "
+        "ref mounts a Lottie container at runtime, (5) no opaque fixed/absolute overlay "
         "(z-index>=50, >=70% viewport, opacity>=0.85, no media descendants) "
         "occluding content (corroborated by impl-text-dropout or ref-has-none-impl-has-some)."
     ),

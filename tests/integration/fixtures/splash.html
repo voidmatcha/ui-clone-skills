@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <title>splash fixture — capture-states integration test</title>
+  <style>
+    html, body { margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+    body { min-height: 100vh; background: #111; color: #eee; }
+    body.is-loading .splash-overlay {
+      position: fixed; inset: 0; z-index: 9999;
+      background: #000; color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 3rem;
+    }
+    body.is-loading .app-content { display: none; }
+    body.is-loaded .splash-overlay { display: none; }
+    body.is-loaded .app-content {
+      display: block; padding: 4rem 2rem;
+    }
+    .app-content h1 { font-size: 2.5rem; margin: 0 0 1rem; }
+    .app-content p { line-height: 1.6; }
+  </style>
+</head>
+<body class="is-loading">
+  <div class="splash-overlay">loading…</div>
+  <main class="app-content">
+    <h1>Splash fixture loaded</h1>
+    <p>This page boots with <code>body.is-loading</code> and a fixed full-screen overlay, then
+    flips to <code>body.is-loaded</code> after 500&nbsp;ms — modelling the splash → app transition
+    that <code>capture-states.sh</code> is designed to detect.</p>
+    <p>The DOM grows when the overlay is hidden and the app content becomes visible, which
+    should trigger a structural-delta full snapshot in addition to the bookend snapshots.</p>
+  </main>
+  <script>
+    // Phase A transition trigger. 500ms is well inside the 5s wall-clock cap.
+    setTimeout(() => {
+      document.body.classList.remove('is-loading');
+      document.body.classList.add('is-loaded');
+    }, 500);
+  </script>
+</body>
+</html>

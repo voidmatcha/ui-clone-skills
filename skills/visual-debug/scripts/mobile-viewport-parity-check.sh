@@ -114,7 +114,9 @@ def read_probe(path: str) -> dict:
         return {"ok": False, "error": "probe-missing"}
     for line in reversed(text.strip().splitlines()):
         s = line.strip()
-        if not s.startswith("{"):
+        # agent-browser may wrap the eval result in outer quotes
+        # ("{...}") or emit a bare object ({...}). Accept both forms.
+        if not (s.startswith("{") or s.startswith('"{')):
             continue
         try:
             value = json.loads(s)

@@ -42,16 +42,21 @@ if TYPE_CHECKING:
 # of which APIs impls actually use across React + Next.js + plain Vite
 # stacks.
 _SCROLL_PRIMITIVES: tuple[str, ...] = (
-    "IntersectionObserver",
-    "ScrollTrigger",
-    "useScroll",
-    "useInView",
-    "scroll-snap",
-    "data-scroll",
-    "useScrollPosition",
-    "framer-motion.*useScroll",
-    "data-aos",
-    "useElementOnScreen",
+    "IntersectionObserver",         # vanilla / React / Vue / Svelte / Solid
+    "ScrollTrigger",                # GSAP
+    "useScroll",                    # framer-motion, vueuse
+    "useInView",                    # framer-motion, react-intersection-observer
+    "scroll-snap",                  # CSS scroll snap
+    "data-scroll",                  # Locomotive Scroll attribute
+    "useScrollPosition",            # react-use-scroll-position
+    "framer-motion.*useScroll",     # explicit framer-motion useScroll path
+    "data-aos",                     # AOS library
+    "useElementOnScreen",           # custom hook idiom
+    r"\buse:inView\b",              # Svelte action — colon prevents \buseInView\b match
+    r"\buse:intersect\b",           # Svelte svelte-inview action variant
+    "v-intersection-observer",      # Vue3 directive (vue-intersection-observer pkg)
+    "useIntersectionObserver",      # @vueuse/core hook
+    r"sveltekit-view",              # SvelteKit view directive
 )
 
 
@@ -75,6 +80,39 @@ _SRC_GLOB_EXTS: tuple[str, ...] = (
 )
 
 
+# Motion library/feature markers in bundle-map.json. Presence of ANY of
+# these signals the ref has motion-rich behavior that REQUIRES Phase A/B/C
+# capture — states/ absence becomes a fail-closed condition for these
+# sites (codex juanmora review item #1, 2026-05-25).
+_MOTION_RICH_MARKERS: tuple[str, ...] = (
+    "gsap",          # GSAP timeline library
+    "scrolltrigger", # GSAP ScrollTrigger plugin
+    "splittext",     # GSAP SplitText (text reveal)
+    "customease",    # GSAP CustomEase (motion-defined easing)
+    "lenis",         # Lenis smooth scroll
+    "locomotive",    # Locomotive Scroll
+    "framer",        # framer-motion
+    "w-mod-ix",      # Webflow IX2 interactions runtime class
+    "data-w-id",     # Webflow IX2 element binding attribute
+    "barba",         # Barba.js page transitions
+    "highway",       # Highway.js page transitions
+)
+
+
+# Generic / framework-noise classes that ANY site running the corresponding
+# library shows, regardless of whether the impl actually replicates the
+# splash mechanism. Filtering these prevents false-pass on `lenis` or
+# `w-mod-ix` matched as splash class hooks (codex juanmora review).
+_GENERIC_NOISE_CLASSES: frozenset[str] = frozenset({
+    "body", "html", "no-js",       # base markup attributes
+    "w-mod-js", "w-mod-ix",        # Webflow runtime modifiers
+    "w-mod-ix2", "w-mod-ix3",      # Webflow IX2/IX3 variants
+    "lenis", "lenis-scrolling",    # Lenis smooth-scroll state
+    "lenis-smooth", "lenis-stopped",
+    "has-scroll-init", "has-scroll-smooth",  # Locomotive
+})
+
+
 def _read_src_text(impl_root: Path) -> str:
     """Concatenate impl/src/** file contents (limited by extension) into
     one searchable blob. Returns empty string when src/ is missing. Keeps
@@ -92,9 +130,52 @@ def _read_src_text(impl_root: Path) -> str:
     return "\n".join(pieces)
 
 
+def _strip_js_comments(src: str) -> str:
+    """Remove block (`/* … */`) and line (`// …`) comments so class names
+    mentioned only in commented-out code don't count as legitimate impl
+    references. Avoids matching `https://` URLs (preceded by `:`) and the
+    `*/` end-of-block (preceded by `/`).
+    """
+    # Block comments first — non-greedy across newlines.
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    # Line comments — `//` NOT preceded by `/` (so `///` block-end stays
+    # already-handled) OR `:` (so `https://` URLs stay).
+    src = re.sub(r"(?<![/:])//[^\n]*", "", src)
+    return src
+
+
+def _is_motion_rich_ref(ref_dir: Path) -> bool:
+    """True iff bundle-map.json mentions any motion library marker.
+
+    Codex juanmora review (2026-05-25) finding #1: state-coverage gave
+    false-pass for GSAP/ScrollTrigger/Lenis/Webflow IX sites when states/
+    was absent. Those sites depend on Phase A/B/C capture for transition
+    ground truth; absence ≠ legitimate skip.
+
+    Conservative default: if bundle-map.json is absent or unreadable,
+    return False (lenient) — better to under-fail than to break legacy
+    pipelines that haven't run bundle analysis.
+    """
+    bundle_map = ref_dir / "bundle-map.json"
+    if not bundle_map.is_file():
+        return False
+    try:
+        data = json.loads(bundle_map.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    text = json.dumps(data, ensure_ascii=False).lower()
+    return any(marker in text for marker in _MOTION_RICH_MARKERS)
+
+
 def _extract_class_strings(trajectory: list[dict]) -> list[str]:
     """From a splash trajectory, return the unique non-empty body/html
-    class strings — these are the hooks impl must reference."""
+    class strings — these are the hooks impl must reference.
+
+    Filters _GENERIC_NOISE_CLASSES (Webflow IX modifiers, Lenis state
+    classes, base body/html/no-js) — those appear regardless of whether
+    the impl actually replicates the splash mechanism, so matching them
+    in impl src would false-pass (codex juanmora review).
+    """
     classes: set[str] = set()
     for entry in trajectory:
         for key in ("bodyClass", "htmlClass"):
@@ -103,8 +184,7 @@ def _extract_class_strings(trajectory: list[dict]) -> list[str]:
                 continue
             for token in raw.split():
                 token = token.strip()
-                # Skip generic Webflow + framework noise that any site has.
-                if not token or token in {"body", "html", "no-js"}:
+                if not token or token in _GENERIC_NOISE_CLASSES:
                     continue
                 classes.add(token)
     return sorted(classes)
@@ -275,32 +355,72 @@ def gate_state_coverage(self: Gate) -> list[CheckResult]:
     """Verify multi-snapshot capture artifacts have corresponding impl hooks.
 
     Reads <ref_dir>/states/{splash,scroll,hover}/ and grep-checks impl/src/**.
-    Skips silently when states/ is absent (legacy ref dirs). When the dir
-    exists, runs only the checks whose summary.json is present — partial
-    captures don't penalize for missing phases.
+    For motion-rich refs (GSAP/ScrollTrigger/Lenis/Webflow IX detected in
+    bundle-map.json), states/ absence is fail-closed — those sites
+    REQUIRE Phase A/B/C capture for transition ground truth (codex
+    juanmora review finding #1, 2026-05-25). Legacy non-motion-rich refs
+    keep the original lenient skip semantics.
     """
     states_root = self.ref_dir / "states"
+    motion_rich = _is_motion_rich_ref(self.ref_dir)
+
     if not states_root.is_dir():
+        if motion_rich:
+            return [
+                CheckResult(
+                    "state-coverage",
+                    "fail",
+                    (
+                        "states/ absent but bundle-map.json marks this ref as "
+                        "motion-rich (GSAP / ScrollTrigger / Lenis / Webflow IX / "
+                        "framer-motion). Phase A/B/C capture is required for "
+                        "these sites — transition fidelity ground truth cannot "
+                        "be inferred from a single settled snapshot."
+                    ),
+                    fix=(
+                        "bash scripts/extract/capture-states.sh <url> <session> <ref_dir> && "
+                        "bash scripts/extract/capture-scroll.sh <url> <session> <ref_dir> && "
+                        "bash scripts/extract/capture-hover.sh <url> <session> <ref_dir>"
+                    ),
+                )
+            ]
         return [
             CheckResult(
                 "state-coverage",
                 "pass",
-                "no states/ directory — multi-snapshot capture not run (skip)",
+                "no states/ directory — multi-snapshot capture not run (skip; ref is not motion-rich)",
             )
         ]
 
     impl_root = self._find_impl_root()
     if impl_root is None:
-        # No impl yet — gate runs before post-implement; legitimate to skip.
+        if motion_rich:
+            return [
+                CheckResult(
+                    "state-coverage",
+                    "fail",
+                    (
+                        "motion-rich ref but no impl_root resolved — cannot "
+                        "verify Phase A/B/C state class hooks reach impl source. "
+                        "set .impl-root marker or UI_CLONE_IMPL_ROOT env."
+                    ),
+                    fix=(
+                        "echo '<absolute path to impl root>' > "
+                        f"{self.ref_dir}/.impl-root  # or: "
+                        "export UI_CLONE_IMPL_ROOT=<path>"
+                    ),
+                )
+            ]
+        # Pre-impl path on non-motion-rich refs stays lenient.
         return [
             CheckResult(
                 "state-coverage",
                 "pass",
-                "no impl/ root resolved — state-coverage check deferred until impl exists",
+                "no impl/ root resolved — state-coverage deferred (ref not motion-rich)",
             )
         ]
 
-    src_text = _read_src_text(impl_root)
+    src_text = _strip_js_comments(_read_src_text(impl_root))
     if not src_text:
         return [
             CheckResult(

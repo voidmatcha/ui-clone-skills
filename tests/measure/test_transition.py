@@ -93,6 +93,45 @@ def test_video_play_proof_script_present() -> None:
     assert "skip" in body, "must skip when ref has no video signal"
 
 
+def test_video_play_proof_skips_zero_video_totals(tmp_path: Path) -> None:
+    """A `video: 0` count field is not a video signal.
+
+    Regression for ORDR: required-media.json legitimately records zero
+    videos, and the gate must parse that structurally instead of grepping
+    for the literal key name "video".
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "required-media.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "videos": [],
+        "lottie": [],
+        "svgs": [],
+        "totals": {"video": 0, "lottie": 0, "svg": 0},
+    }))
+    (ref / "required-media-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "pass",
+        "summary": "ref has no required video, Lottie, or SVG media",
+    }))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_agent = bin_dir / "agent-browser"
+    fake_agent.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+    fake_agent.chmod(0o755)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "video-play-proof-check.sh"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    proc = subprocess.run(
+        ["bash", str(script), "vpp-test", "http://127.0.0.1:1/", str(ref)],
+        capture_output=True, text=True, timeout=10, env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "video-play-proof.json").read_text())
+    assert artifact["status"] == "skip"
+
+
 
 def test_video_play_proof_dispatcher_wired() -> None:
     import re
@@ -148,6 +187,52 @@ def test_transition_proof_rollup_fails_partial_coverage(tmp_path: Path) -> None:
     assert "partial coverage" in msg or "4/7" in msg, (
         f"reasons must name the partial-coverage issue: {msg}"
     )
+
+
+def test_transition_proof_accepts_phase6d_declarations_with_video_motion(tmp_path: Path) -> None:
+    """Phase 6d transition-coverage may be ref-side declarations only.
+
+    Runtime proof is then carried by reveal/video artifacts, so the rollup
+    must not fail solely because animatedElements lack samples arrays.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "patch-scroll-parallax"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [{"selector": ".patch", "transition": "patch-scroll-parallax"}],
+    }))
+    transitions = ref / "transitions"
+    transitions.mkdir()
+    (transitions / "video-motion-result.txt").write_text(
+        "✓ trajectory pre-filter passed\n✅ structural motion trajectory passed\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "pass"
+
+
+def test_transition_trajectory_supports_structural_motion_mode() -> None:
+    """Structural-only section comparison needs selector-level motion proof."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-trajectory-compare.sh"
+    body = script.read_text(encoding="utf-8")
+    assert "# mode: structural-motion" in body
+    assert "STRUCTURAL_ONLY" in body
+    assert "structural motion target" in body
+    assert 'exit 1' in body, "full-frame trajectory failures must propagate nonzero"
 
 
 
@@ -294,4 +379,3 @@ def test_required_media_skips_unknown_shapes(tmp_path: Path) -> None:
         capture_output=True, text=True, timeout=15, check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-

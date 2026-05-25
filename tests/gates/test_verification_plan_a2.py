@@ -482,3 +482,80 @@ def test_verification_plan_emits_lottie_runtime_when_lottie_detected(tmp_path: P
     assert rows["lottie-runtime"]["severity"] == "block"
     assert rows["lottie-runtime"]["tier"] == "quick"
     assert rows["lottie-runtime"]["produces"] == "lottie-runtime.json"
+
+
+# ── codex juanmora review fixes (2026-05-25) ─────────────────────────
+
+
+def test_verification_plan_derives_hasSplash_from_states_summary(tmp_path: Path) -> None:
+    """Codex juanmora review: Phase A `states/splash/summary.json` polls > 1
+    must set HAS_SPLASH=true even when upstream interactions/dom-state-diff
+    didn't flag it. Prevents juanmora-style false-negative where capture-
+    states.sh found 2+ transitions but plan still had hasSplash:false."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "summary.json").write_text(json.dumps({
+        "checked": True,
+        "polls": 4,
+        "reason": "stable-2s",
+    }))
+    (splash / "trajectory.json").write_text(json.dumps([
+        {"ts_ms": 0, "bodyClass": "is-loading"},
+        {"ts_ms": 800, "bodyClass": "is-loaded"},
+    ]))
+    plan = _run_verification_plan(ref)
+    # hasSplash=true forces splash-driven checks (lottie-runtime / runtime-proof
+    # / scroll-end-completion / reveal-trigger). At minimum the plan should
+    # report the signal as set.
+    signals = plan.get("signals", {})
+    assert signals.get("hasSplash") is True, (
+        f"states/splash/summary.json polls=4 must set hasSplash=true; "
+        f"got signals: {signals}"
+    )
+
+
+def test_verification_plan_derives_hasHover_from_states_manifest(tmp_path: Path) -> None:
+    """Codex juanmora review: Phase C `states/hover/manifest.json` with
+    entries must set HAS_HOVER=true. Capture-hover.sh finds 13 candidates
+    but plan stays hasHover:false → silent miss of hover transition checks."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    hover = ref / "states" / "hover"
+    hover.mkdir(parents=True)
+    (hover / "manifest.json").write_text(json.dumps({
+        "entries": [
+            {"id": "abc123", "kind": "css", "file": "elem-abc123.json",
+             "selector": ".btn", "activation": ".btn", "changedCount": 0},
+            {"id": "def456", "kind": "js", "file": "elem-def456.json",
+             "selector": "a.cta", "activation": "a.cta", "changedCount": 2},
+        ],
+    }))
+    plan = _run_verification_plan(ref)
+    signals = plan.get("signals", {})
+    assert signals.get("hasHover") is True, (
+        f"states/hover/manifest.json with entries must set hasHover=true; "
+        f"got signals: {signals}"
+    )
+
+
+def test_verification_plan_emits_runtime_spec_coverage_when_anim_dump_alone(tmp_path: Path) -> None:
+    """Codex juanmora review: drop the `&& transition-spec.json` guard.
+    runtime-spec-coverage must register when animation-runtime-dump.json
+    exists EVEN IF transition-spec.json absent — that's the gap the gate
+    is supposed to surface (runtime motion but no spec)."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "animation-runtime-dump.json").write_text(json.dumps({
+        "scrollTrigger": [{"id": "st1", "start": "top 80%", "end": "bottom"}],
+        "tweens": [{"duration": 0.8}],
+    }))
+    # NOTE: no transition-spec.json planted.
+    plan = _run_verification_plan(ref)
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+    assert "runtime-spec-coverage" in rows, (
+        "animation-runtime-dump.json alone must register runtime-spec-coverage; "
+        f"got rows: {list(rows.keys())}"
+    )
+    assert rows["runtime-spec-coverage"]["severity"] == "block"

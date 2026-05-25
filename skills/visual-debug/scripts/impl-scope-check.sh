@@ -104,14 +104,22 @@ UNCOMMITTED=$(git diff --name-only HEAD 2>/dev/null | sort -u)
 UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null | sort -u)
 ALL_CHANGES=$(printf '%s\n%s\n%s\n' "$COMMITTED" "$UNCOMMITTED" "$UNTRACKED" | grep -v '^$' | sort -u)
 
-python3 - "$OUT" "$BASELINE" "$IMPL_REL" <<PY
+# Quoted heredoc (`<<'PY'`) — backticks/dollar signs inside the Python body
+# (e.g. `git checkout <baseline> -- <violating-path>` in the nextAction
+# message) would otherwise be parsed by bash as command substitution and
+# blow up with "syntax error near unexpected token `newline'" the moment a
+# multi-token backtick pair appears in the docstring. Pass ALL_CHANGES via
+# env var so the Python block still sees the shell-computed list without
+# requiring variable interpolation inside the body.
+export ALL_CHANGES
+python3 - "$OUT" "$BASELINE" "$IMPL_REL" <<'PY'
 import json
 import os
 import sys
 from pathlib import Path
 
 out_path, baseline, impl_rel = sys.argv[1:4]
-all_changes = """$ALL_CHANGES""".strip().splitlines()
+all_changes = os.environ.get("ALL_CHANGES", "").strip().splitlines()
 all_changes = [p for p in all_changes if p]
 
 allowed_prefixes = (impl_rel + "/", "tmp/")

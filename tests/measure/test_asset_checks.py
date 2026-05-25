@@ -378,6 +378,148 @@ def test_ref_screenshot_asset_pass_on_clean_impl(tmp_path: Path) -> None:
 
 
 
+# ── Canvas-replay allowlist for ref-screenshot-asset (v0.7.0) ───────────
+# When closeoutPolicy=="canvas-replay" AND attestation is present AND a
+# byte-identical-copy violation involves a screenshot whose source PNG
+# belongs to a section tagged kind="canvas" in section-map.json, the
+# violation is allowed. Non-canvas-section copies still FAIL.
+#
+# Scope is byte-identical-copy specifically — ref-path-reference (generic
+# "tmp/ref/" substring leaks in impl source) stays strict because the
+# substring doesn't pinpoint which section the leak is for, and the
+# canvas-replay opt-in escape is not for generic path-string laundering.
+
+
+def _wire_canvas_replay_screenshot(
+    ref: Path,
+    *,
+    canvas_section_name: str,
+    policy: str = "canvas-replay",
+    with_attestation: bool = True,
+) -> None:
+    (ref / "pipeline-state.json").write_text(
+        json.dumps({"component": ref.name, "closeoutPolicy": policy}),
+        encoding="utf-8",
+    )
+    if with_attestation:
+        (ref / "canvas-replay-attestation.json").write_text(
+            json.dumps({
+                "license": "MIT",
+                "disclaimer": "test",
+                "attestedBy": "operator",
+                "attestedAt": "2026-05-25T08:00:00Z",
+                "ref_canvas_sources": ["https://canvas.example.org/driver.js"],
+            }),
+            encoding="utf-8",
+        )
+    (ref / "section-map.json").write_text(
+        json.dumps({
+            "sections": [
+                {"index": 0, "kind": "canvas", "name": canvas_section_name},
+                {"index": 1, "name": "text-block"},  # non-canvas control
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_ref_screenshot_asset_allows_canvas_section_byte_copy(tmp_path: Path) -> None:
+    """v0.7.0 — byte-identical copy of a canvas-section ref screenshot is
+    allowed when the policy is fully active. Operator may use the canvas
+    section's captured PNG as a fallback under the attestation umbrella."""
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    impl = tmp_path / "impl"
+    (impl / "public").mkdir(parents=True)
+    (impl / "src").mkdir()
+    payload = b"\x89PNG\r\n\x1a\n" + b"canvas-fallback-bytes"
+    # The ref PNG basename matches a kind=canvas section in section-map.json.
+    (ref / "sections" / "ref" / "music-sphere.png").write_bytes(payload)
+    (impl / "public" / "canvas-fallback.png").write_bytes(payload)
+    (impl / "src" / "App.tsx").write_text("export default function A(){return null}\n")
+    _wire_canvas_replay_screenshot(ref, canvas_section_name="music-sphere")
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 0, (
+        f"canvas-section byte-copy must PASS under canvas-replay: "
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    art = json.loads((ref / "ref-screenshot-asset.json").read_text())
+    assert art["status"] == "pass"
+
+
+def test_ref_screenshot_asset_still_fails_non_canvas_byte_copy(tmp_path: Path) -> None:
+    """v0.7.0 boundary — non-canvas section byte-copy still FAILs even when
+    the canvas-replay policy is active. The relief is per-section, not blanket."""
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    impl = tmp_path / "impl"
+    (impl / "public").mkdir(parents=True)
+    (impl / "src").mkdir()
+    payload = b"\x89PNG\r\n\x1a\n" + b"non-canvas-bytes"
+    # The ref PNG basename is "text-block" — non-canvas in section-map.
+    (ref / "sections" / "ref" / "text-block.png").write_bytes(payload)
+    (impl / "public" / "stolen.png").write_bytes(payload)
+    (impl / "src" / "App.tsx").write_text("export default function A(){return null}\n")
+    _wire_canvas_replay_screenshot(ref, canvas_section_name="music-sphere")
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 1, (
+        f"non-canvas byte-copy must STILL fail under canvas-replay: {proc.stdout}"
+    )
+
+
+def test_ref_screenshot_asset_no_allowlist_without_attestation(tmp_path: Path) -> None:
+    """Policy set but attestation missing → no allowlist."""
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    impl = tmp_path / "impl"
+    (impl / "public").mkdir(parents=True)
+    (impl / "src").mkdir()
+    payload = b"\x89PNG\r\n\x1a\n" + b"canvas-fallback-bytes"
+    (ref / "sections" / "ref" / "music-sphere.png").write_bytes(payload)
+    (impl / "public" / "fallback.png").write_bytes(payload)
+    (impl / "src" / "App.tsx").write_text("export default function A(){return null}\n")
+    _wire_canvas_replay_screenshot(
+        ref, canvas_section_name="music-sphere", with_attestation=False,
+    )
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 1, (
+        f"missing attestation must NOT activate allowlist: {proc.stdout}"
+    )
+
+
+def test_ref_screenshot_asset_ref_path_reference_stays_strict(tmp_path: Path) -> None:
+    """Canvas-replay does NOT relax ref-path-reference detection — generic
+    'tmp/ref/' substring leaks in impl source stay strict. The substring
+    doesn't pinpoint a section, so we can't safely scope relief to canvas."""
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    (impl / "src" / "App.tsx").write_text(
+        'export const REF = "/sections/ref/music-sphere.png";\n'
+    )
+    _wire_canvas_replay_screenshot(ref, canvas_section_name="music-sphere")
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 1, (
+        f"ref-path-reference must stay strict under canvas-replay: {proc.stdout}"
+    )
+    art = json.loads((ref / "ref-screenshot-asset.json").read_text())
+    kinds = {v["kind"] for v in art["violations"]}
+    assert "ref-path-reference" in kinds
+
+
 def test_gate_svg_dom_parity_status_pass_passes(tmp_path: Path) -> None:
     """Clean SVG parity artifact → gate passes."""
     from ui_clone.gate import Gate

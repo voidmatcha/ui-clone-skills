@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.7.1] - 2026-05-25
+
+Patch release for the post-0.7.0 verification hardening pass. The theme is
+making fidelity gates harder to bypass while keeping legitimate canvas,
+asset-substitution, and runtime-schema escape hatches explicit.
+
+### Added
+
+- **Canvas-replay closeout path.** Added `closeoutPolicy="canvas-replay"`
+  routing, attestation files, stamp enforcement, and AE relief for
+  sections tagged `kind="canvas"` in `section-map.json`. Relief widens the
+  canvas AE/Mpx band; it does not bypass structural integrity, text
+  fidelity, or non-canvas failures.
+- **Reference asset allowlists for canvas replay.** Added attested
+  ref-screenshot and ref-JS-loader allowlists so procedural canvas replay
+  can use documented source material without tripping screenshot/proxy
+  anti-cheat gates.
+- **Runtime animation extraction depth.** `extract-animation-runtime.sh`
+  now captures GSAP `CustomEase` registry data, tween targets, and timeline
+  children so downstream coverage can reason about named ease curves and
+  timeline structure.
+- **Browser integration coverage for capture scripts.** Added opt-in
+  browser tests around capture helpers and fixed the bugs those tests
+  exposed.
+
+### Fixed
+
+- **Section-compare structural-only overreach.** The section gate now warns
+  when 30%+ of rows are `STRUCTURAL_ONLY` even below the hard 50% bypass
+  cap, with an explicit note that pixel AE polishing was skipped for those
+  sections and instructions to narrow `asset-substitution.json`.
+- **Verification-plan freshness.** Staleness detection now includes
+  `states/*`, `animation-runtime-dump.json`, and derived splash/hover
+  signals, so a plan generated before Phase A/B/C or runtime extraction
+  gets regenerated instead of silently skipping motion checks.
+- **State coverage strictness.** Motion-rich refs now fail closed when impl
+  source lacks matching hooks, while generic class noise and comments are
+  filtered to reduce false evidence.
+- **Runtime and verification false positives.** Fixed structural-only
+  auto-verify handling, Phase 6d ref-side transition-coverage schema
+  tolerance, self-declared skip classification, quoted `agent-browser`
+  eval output, Lottie false positives, and hero-composite absent-kind
+  handling.
+- **Hook and scope robustness.** `impl-scope-check.sh` now quotes its
+  heredoc and passes `ALL_CHANGES` through the environment; closeout
+  policy attestations and stamps are allowlisted in canonical ref
+  artifacts; `ci-local.sh` self-heals stale drift-test markers.
+
+### Changed
+
+- **CI and metadata sync.** Deduplicated pytest/security work across the
+  push pipeline and synchronized package/plugin versions at 0.7.1,
+  including the previously stale `ui_clone.__version__`.
+- **Plugin-fix escalation policy.** Documented how iteration agents escalate
+  legitimate plugin bugs without bypassing `impl-scope-check.sh`, including
+  regression-test expectations and baseline reset rules.
+
 ## [0.7.0] - 2026-05-25
 
 Multi-snapshot capture + claude-fidelity release. Closes the largest
@@ -99,6 +156,50 @@ captures (e.g., splash but no hover) check only the present phases.
 - `tests/test_capture_hover.py` — 11 tests.
 - `tests/gates/test_state_coverage.py` — 12 tests, pass/fail/skip
   scenarios for each phase + GATE_ORDER positioning check.
+
+### Canvas-replay closeout policy (opt-in)
+
+Operator-signed escape hatch for refs whose visual identity is
+imperative-canvas-driven (WebGL UnicornStudio scenes, generative
+scroll-driven plates, music sphere / `.bg-canvas` arc renderers). The
+30-min canvas CSS replication cap remains the default — canvas-replay
+is opt-in and requires explicit license attestation.
+
+**Foundation** (commit e903334):
+- New `PipelineState.closeout_policy = "canvas-replay"` (third value
+  alongside `canonical` and `structural`).
+- New Stop-hook enforcer `_enforce_canvas_replay_stamp` in
+  `ui_clone/hooks/section_gate.py` — stamp freshness, sha256 tamper
+  detection, impl-newer-than-stamp guard.
+- New stamp writer `scripts/verify/check-canvas-replay.sh --write-stamp`
+  validates `canvas-replay-attestation.json` shape + records sha256.
+- Operator doc `skills/ui-reverse-engineering/canvas-replay-mode.md`.
+
+**Gate-side relief** (three follow-up commits):
+- New `ui_clone/policies/canvas_replay.py` helper resolves the 3-condition
+  gate (closeoutPolicy + attestation file + section.kind=="canvas") into
+  a single set lookup. Fail-closed on every missing condition.
+- **`section-compare`**: critical AE/Mpx ceiling widens from >20000 to
+  >40000 for canvas-tagged sections. Rows within the widened band
+  downgrade FAIL → PASS; rows above stay critical (relief widens the
+  band, it does not bypass). STRUCTURAL_ONLY critical-override,
+  threshold-gaming, and missing-impl checks remain strict.
+- **`ref-js-loader`**: URLs declared in `attestation.ref_canvas_sources[]`
+  are exact-string allowlisted (both static scan and runtime probe).
+  Other ref bundles from the same host still fail — exact URL equality,
+  not origin allowlist (codex review Q3).
+- **`ref-screenshot-asset`**: byte-identical-copy violations whose source
+  PNG belongs to a kind="canvas" section are allowed. `ref-path-reference`
+  (generic substring leaks) stays strict because the substring doesn't
+  pinpoint a section.
+
+**Boundary** (codex review applied to foundation): canvas pixels ONLY.
+Text fidelity, font parity, runtime-DOM parity, transition-compare
+remain unaffected by all four relief points.
+
+**Tests**: 12 unit tests for the policy helper (all fail-closed paths +
+alias resolution), 7 section-compare boundary tests, 4 ref-js-loader
+integration tests, 4 ref-screenshot-asset integration tests.
 
 ## [0.6.0] - 2026-05-24
 
@@ -735,4 +836,3 @@ Added: `__pycache__/`, `*.pyc`, `.venv/`, `*.egg-info/`, `.mypy_cache/`, `.ruff_
 - [v0.2.x](CHANGELOG_archive/v0.2.md)
 - [v0.1.x](CHANGELOG_archive/v0.1.md)
 - [v0.0.x](CHANGELOG_archive/v0.0.md)
-

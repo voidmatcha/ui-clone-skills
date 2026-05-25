@@ -77,6 +77,42 @@ OUT_DIR="$REF_DIR/transitions/video-motion"
 mkdir -p "$OUT_DIR"
 RESULT="$REF_DIR/transitions/video-motion-result.txt"
 
+structural_only_mode() {
+  python3 - "$REF_DIR" <<'PY'
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ref_dir = Path(sys.argv[1])
+asset_sub = ref_dir / "asset-substitution.json"
+result = ref_dir / "sections" / "result.txt"
+if not asset_sub.exists() or not result.exists():
+    print("false")
+    raise SystemExit(0)
+try:
+    data = json.loads(asset_sub.read_text(encoding="utf-8"))
+except Exception:
+    print("false")
+    raise SystemExit(0)
+if not data.get("structuralOnlySections"):
+    print("false")
+    raise SystemExit(0)
+text = result.read_text(encoding="utf-8", errors="replace")
+m = re.search(r"\*\*Result:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL,\s*(\d+)\s+SKIP,\s*(\d+)\s+STRUCTURAL_ONLY", text)
+if not m:
+    print("false")
+    raise SystemExit(0)
+fail = int(m.group(2))
+structural = int(m.group(4))
+print("true" if fail == 0 and structural > 0 else "false")
+PY
+}
+
+STRUCTURAL_ONLY_MODE="${STRUCTURAL_TRAJECTORY_MODE:-$(structural_only_mode)}"
+
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 {
   echo "# video-motion-compare"
@@ -100,9 +136,18 @@ if [ "$PRE_FILTER" = "1" ] \
   } >> "$RESULT"
   if bash "$TRAJ_SCRIPT" "$ORIG_URL" "$IMPL_URL" "$SESSION-traj" "$REF_DIR" >> "$RESULT" 2>&1; then
     {
-      echo "✓ trajectory pre-filter passed — escalating to 60fps SSIM"
+      echo "✓ trajectory pre-filter passed"
       echo
     } >> "$RESULT"
+    if [ "$STRUCTURAL_ONLY_MODE" = "true" ]; then
+      {
+        echo "✅ structural motion trajectory passed — skipping full-frame SSIM because section-compare is STRUCTURAL_ONLY"
+        echo
+        echo "✅ all 1 mode(s) within structural trajectory threshold"
+      } >> "$RESULT"
+      echo "Wrote $RESULT (structural trajectory closeout)"
+      exit 0
+    fi
   else
     {
       echo

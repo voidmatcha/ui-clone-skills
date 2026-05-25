@@ -1,6 +1,6 @@
 # Animation Detection — Step 6
 
-Detect ALL motion on the page: splash/intro, auto-timers, scroll-driven, parallax. Uses **high-framerate video** + **per-element tracking**.
+Detect ALL motion on the page: splash/intro, auto-timers, scroll-driven, parallax. Uses **high-framerate video** + **per-element tracking** + **multi-snapshot DOM state**.
 
 > Runs AFTER `interaction-detection.md` (Step 5) and supplements it.
 > Step 5 catches hover/click/intersection transitions. Step 6 catches everything that MOVES — with or without input.
@@ -16,6 +16,46 @@ Detect ALL motion on the page: splash/intro, auto-timers, scroll-driven, paralla
 | **C — Per-element tracking** | Targeted video per section/element from A or B. | Exact transform/opacity/scale at each scroll % |
 
 All 4 phases are MANDATORY. Phase 0 is cheap (one eval) and recovers runtime-only params that bundle-grep (Step 4) and video phases never see — `"top 80%"` → resolved pixel start, custom cubic-bezier arrow-function ease, IX2 timeline keys.
+
+## Multi-snapshot DOM state inputs (v0.7.0+)
+
+Phases 0/A/B/C above capture **motion** (pixels over time). The
+multi-snapshot capture pipeline (`scripts/extract/capture-{states,scroll,hover}.sh`,
+v0.7.0) captures **DOM state** (HTML + computed style at distinct moments)
+which complements the video signal: video shows WHAT moves, multi-snapshot
+shows WHICH class hooks / scroll positions / hover targets gate the
+movement. The two together give the impl enough signal to replicate state
+*and* motion.
+
+| Artifact | Produced by | Consumes |
+|---|---|---|
+| `tmp/ref/<c>/states/splash/trajectory.json` + `0ms.json`, `settled.json`, `<NNN>ms.json` | `capture-states.sh` (Phase A — splash transitions) | Splash class transitions (`is-loading` → `is-loaded`, body-class flips) and the DOM bookends at t=0 and end-of-splash so the impl can replicate the reveal sequence. The intermediate `<NNN>ms.json` files capture structural mutations >20% DOM delta. |
+| `tmp/ref/<c>/states/scroll/<pct>pct.json` + `trajectory.json` + `summary.json` | `capture-scroll.sh` (Phase B — scroll-progress snapshots) | DOM at 7 scroll percentages [0, 10, 25, 50, 75, 90, 100] plus `visibleSections` index per stop. `summary.json.scrollEngine` records native/lenis/locomotive (so the impl uses the right scroll API), `scrollHeightDeltaPct` exposes growth during the sweep for downstream infinite-scroll detection. |
+| `tmp/ref/<c>/states/hover/elem-<id>.json` + `manifest.json` + `summary.json` | `capture-hover.sh` (Phase C — hover-state snapshots) | Per-candidate hover signal split into `kind: "css"` (declared properties from CSSOM `:hover` rules), `kind: "js"` (synthetic dispatchEvent + computed-style diff for JS-attached handlers), `kind: "css+js"` (both). Manifest entries carry a stable `id` (SHA-256[:8] of activation\|affected\|kind) so downstream consumers can cross-reference. |
+
+**Relationship to existing phases**:
+- Phase 0 catches *runtime parameter values* — multi-snapshot does NOT
+  duplicate this (it captures DOM state, not animation params).
+- Phase A (idle capture) records *pixels during splash*; `capture-states.sh`
+  records *DOM state at splash bookends + structural-delta moments*.
+  Both signals feed `splash-extraction.md`.
+- Phase B (scroll capture) records *pixels during a full scroll sweep*;
+  `capture-scroll.sh` records *DOM state at 7 fixed scroll percentages*.
+  Pixel sweep catches mid-scroll scrub; DOM-state snapshots catch which
+  sections appear / disappear / restyle at each percentage.
+- Phase C (per-element tracking) targets one section's pixel trajectory;
+  `capture-hover.sh` enumerates all `:hover`-rule + JS-handler targets
+  across the page. Different axes (position vs. interaction).
+
+**State-coverage gate** (`gate_state_coverage`, inserted into GATE_ORDER
+between `pre-generate` and `post-implement` in v0.7.0) consumes the
+three multi-snapshot artifacts and fails when impl source lacks
+corresponding hooks: class strings from splash trajectory, scroll-state
+primitives (IntersectionObserver / ScrollTrigger / useScroll /
+`use:inView` / `v-intersection-observer` / ...), and hover handlers
+(`:hover` / Tailwind `hover:` / `onMouseEnter` / `whileHover` /
+`@mouseenter` / `on:mouseenter`). Backward-compat: legacy ref dirs
+without `states/` pass the gate as skip.
 
 ## Phase 0 — Runtime instrumentation (zero-video)
 

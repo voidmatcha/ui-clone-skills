@@ -10,6 +10,7 @@ import json
 import re
 from typing import TYPE_CHECKING
 
+from ..policies import canvas_replay as _canvas_replay
 from .base import (
     CheckResult,
     _parse_failed_sections,
@@ -139,8 +140,53 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
                         )
 
     downgraded_names = {name for name, _ in downgraded}
+
+    # Canvas-replay AE relief (v0.7.0 closeoutPolicy="canvas-replay").
+    # When the operator has opted into the policy AND signed the attestation
+    # AND a failing section is tagged kind="canvas" in section-map.json, the
+    # critical AE/Mpx ceiling widens from 20000 to 40000. Rows whose AE/Mpx
+    # is within the widened band downgrade to PASS; rows above it stay
+    # critical (relief widens the band — it does NOT bypass). Scope is
+    # strictly the FAIL → PASS reclassification; STRUCTURAL_ONLY guards,
+    # threshold-gaming detection, and missing-impl checks are unaffected.
+    relief_section_names = _canvas_replay.relief_active_sections(self.ref_dir)
+    canvas_relieved: list[tuple[str, int]] = []  # (name, ae_per_mpx)
+    if relief_section_names and failed_sections:
+        # Build {name: ae_per_mpx} from FAIL rows so we can re-check the
+        # widened band. result.txt cell order: name | ae | ae/mpx | sev | status.
+        ae_per_mpx_by_name: dict[str, int] = {}
+        for ln in lines:
+            if not ln.startswith("|"):
+                continue
+            if "❌" not in ln and "🌑" not in ln:
+                continue
+            cells = [c.strip() for c in ln.strip("|").split("|")]
+            if len(cells) < 3:
+                continue
+            row_name = cells[0]
+            if not row_name or row_name.lower() == "section" or "---" in row_name:
+                continue
+            try:
+                ae_per_mpx_by_name[row_name] = int(cells[2])
+            except (ValueError, IndexError):
+                continue
+        ceiling = _canvas_replay.critical_ae_ceiling()
+        for fail_name, _fail_ae in failed_sections:
+            if fail_name in downgraded_names:
+                continue
+            if fail_name not in relief_section_names:
+                continue
+            row_mpx = ae_per_mpx_by_name.get(fail_name)
+            if row_mpx is None:
+                continue
+            if row_mpx <= ceiling:
+                canvas_relieved.append((fail_name, row_mpx))
+
+    canvas_relieved_names = {name for name, _ in canvas_relieved}
     effective_fails = [
-        (name, ae) for name, ae in failed_sections if name not in downgraded_names
+        (name, ae)
+        for name, ae in failed_sections
+        if name not in downgraded_names and name not in canvas_relieved_names
     ]
     effective_fail_count = len(effective_fails)
 
@@ -205,11 +251,10 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
                     critical_structural.append(row_name)
 
     # STRUCTURAL_ONLY ratio cap — `asset-substitution.json` is a legitimate
-    # escape hatch for one or two sections that use commercial fonts /
-    # licensed imagery. The 5199dd9 benchmark exposed a gaming pattern
-    # where the agent marked ALL 9 sections as substituted, getting a
-    # "9 PASS, 9 STRUCTURAL_ONLY" verdict with zero pixel measurement.
-    # Treat substitution above 50% of sections as an obvious bypass.
+    # escape hatch for isolated sections that use commercial fonts / licensed
+    # imagery. Broad coverage explains a common operator symptom: "pixel
+    # polishing isn't running" because those rows skip AE entirely. Warn at
+    # 30%+ so the cause is visible before it crosses the hard 50% bypass cap.
     structural_only_count = sum(
         1 for ln in lines
         if ln.startswith("|") and "STRUCTURAL_ONLY" in ln
@@ -226,6 +271,12 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
         and structural_only_count >= 3
         and (structural_only_count / total_section_rows) > 0.5
     )
+    structural_only_broad = (
+        total_section_rows > 0
+        and structural_only_count >= 3
+        and not structural_only_excess
+        and (structural_only_count / total_section_rows) >= 0.30
+    )
 
     if (
         effective_fail_count == 0
@@ -234,8 +285,13 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
         and not critical_structural
         and not structural_only_excess
     ):
+        parts: list[str] = []
         if downgraded:
-            msg = f"All sections PASS ({len(downgraded)} known artifact(s) downgraded)"
+            parts.append(f"{len(downgraded)} known artifact(s) downgraded")
+        if canvas_relieved:
+            parts.append(f"{len(canvas_relieved)} canvas-replay relief")
+        if parts:
+            msg = f"All sections PASS ({', '.join(parts)})"
         else:
             msg = "All sections PASS"
         results.append(CheckResult("sections/result.txt", "pass", msg))
@@ -350,6 +406,37 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
                     + ", ".join(name for name, _ in downgraded),
                 )
             )
+        if canvas_relieved:
+            results.append(
+                CheckResult(
+                    "canvas-replay AE relief",
+                    "pass",
+                    f"{len(canvas_relieved)} section(s) relieved by canvas-replay "
+                    f"policy (AE/Mpx ≤ {int(_canvas_replay.critical_ae_ceiling())}): "
+                    + ", ".join(
+                        f"{name} (AE/Mpx={mpx})" for name, mpx in canvas_relieved
+                    ),
+                )
+            )
+
+    if structural_only_broad:
+        pct = round(100 * structural_only_count / total_section_rows)
+        results.append(
+            CheckResult(
+                "structural-only broad coverage",
+                "warn",
+                f"{structural_only_count}/{total_section_rows} sections ({pct}%) "
+                "are STRUCTURAL_ONLY — pixel AE polishing skipped for those "
+                "sections. This is below the hard 50% cap, but broad "
+                "substitution makes visual polish low-signal.",
+                fix=(
+                    "Narrow asset-substitution.json structuralOnlySections to "
+                    "only sections with documented font/image/video "
+                    "substitutions, then re-run section-compare so the rest "
+                    "produce real AE measurements."
+                ),
+            )
+        )
 
     for name, reason in rejected:
         results.append(
@@ -364,4 +451,3 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
         results.append(CheckResult("known-artifacts coverage", "warn", coverage_warning))
 
     return results
-

@@ -31,7 +31,7 @@ Each gate checks artifacts produced BEFORE that gate fires. Dispatch keys live i
 - `post-implement` (after each transition impl): `extracted.json`, `transition-spec.json`, `static/ref` ≥5
 - `boundary` (after 8-pre-bound): `responsive/boundary-collisions.json` — must be `[]`. Produced by `skills/visual-debug/scripts/breakpoint-collision-check.sh` (REF_DIR env required to write the artifact). Catches Tailwind ↔ project @media inclusive-boundary collisions (Root Cause J in diagnosis.md). The script tracks three signals; only signal 2 (isolated overflow spike) and signal 3 (rootFontSize jitter) become gate-blocking findings. Signal 1 (matchMedia overlap at the boundary) is W3C-spec inevitable — reported on stdout as advisory only and never written to the JSON artifact.
 - `font-parity` (after 8b-pre): `font-parity.json` — `parity:"match"` PASSes (with silent-fallback guard via `document.fonts.check()`); `parity:"mismatch"` requires `asset-substitution.json` with at least one `fonts[]` entry. Produced by `skills/visual-debug/scripts/font-parity-check.sh`.
-- `section-compare` (Stop hook): `tmp/ref/<c>/sections/result.txt` — 0 ❌ FAIL lines and 0 "⚠️ MISSING impl" lines
+- `section-compare` (Stop hook): `tmp/ref/<c>/sections/result.txt` — 0 ❌ FAIL lines and 0 "⚠️ MISSING impl" lines. `STRUCTURAL_ONLY` rows are allowed only as scoped substitution evidence: broad coverage warns at 30%+ and fails above 50%, because those rows skip pixel AE polishing.
 
 If you add an artifact check to a gate, ensure the sub-doc that produces it runs BEFORE that gate.
 

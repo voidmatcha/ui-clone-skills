@@ -538,6 +538,132 @@ def _enforce_structural_convergence_stamp(ref_dir: Path) -> str | None:
     return None
 
 
+def _enforce_canvas_replay_stamp(ref_dir: Path) -> str | None:
+    """Block Stop unless scripts/verify/check-canvas-replay.sh wrote a fresh
+    canvas-replay stamp AND the attestation it attests to still hashes
+    identically.
+
+    Parallel to _enforce_structural_convergence_stamp but for plans that
+    opted into the canvas-replay closeout policy (v0.7.0). Canvas-replay
+    is the opt-in escape from the 30-min canvas CSS replication cap for
+    refs whose visual identity is canvas-driven (WebGL UnicornStudio
+    scenes, generative scroll-driven plates). Codex review applied
+    (2026-05-25):
+
+      [1] No new GATE_ORDER entry — modifier inside post-implement.
+      [2] Attestation file is operator's explicit license confirmation.
+      [5] Stamp records sha256(attestation) so tampering is detected.
+      [7] Schema: design doc says `kind: "canvas"` for section-compare relief.
+
+    Invariants enforced here:
+      - canvas-replay-stamp.json exists, is fresh (< _VERIFY_STAMP_MAX_AGE_S),
+        was written by scripts/verify/check-canvas-replay.sh with
+        closeoutKind=canvas-replay.
+      - canvas-replay-attestation.json exists (the operator's license proof)
+        and its sha256 matches what the stamp recorded.
+      - impl files are not newer than the stamp (anti-tamper, mirrors
+        canonical + structural).
+    """
+    impl_dir = _resolve_impl_dir(ref_dir)
+    if impl_dir is None or not impl_dir.is_dir():
+        return None  # pre-generation — no stamp required yet
+
+    stamp_path = ref_dir / "canvas-replay-stamp.json"
+    attestation_path = ref_dir / "canvas-replay-attestation.json"
+
+    if not stamp_path.is_file():
+        return (
+            f"⛔ UI-RE Canvas-replay gate: BLOCKED for {ref_dir}\n\n"
+            f"closeoutPolicy=canvas-replay but no canvas-replay-stamp.json.\n"
+            f"This run satisfies Stop via the canvas-replay attestation stamp; it\n"
+            f"is written by:\n\n"
+            f"  bash scripts/verify/check-canvas-replay.sh {ref_dir} --write-stamp\n\n"
+            f"Prerequisites:\n"
+            f"  - {ref_dir}/canvas-replay-attestation.json must exist with\n"
+            f"    license, disclaimer, attestedBy, attestedAt, ref_canvas_sources.\n"
+            f"  - See skills/ui-reverse-engineering/canvas-replay-mode.md for\n"
+            f"    the operator-facing opt-in workflow + scope boundary.\n"
+        )
+
+    try:
+        stamp = json.loads(stamp_path.read_text())
+        import datetime
+        stamped_at = datetime.datetime.strptime(
+            stamp["verifiedAt"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.UTC)
+        age_s = (datetime.datetime.now(datetime.UTC) - stamped_at).total_seconds()
+    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        return (
+            f"⛔ UI-RE Canvas-replay gate: malformed stamp {stamp_path}\n\n"
+            f"{exc}\n\n"
+            f"Re-run `bash scripts/verify/check-canvas-replay.sh {ref_dir} --write-stamp`.\n"
+        )
+
+    stamped_by = stamp.get("stampedBy")
+    closeout_kind = stamp.get("closeoutKind")
+    if (
+        stamped_by != "scripts/verify/check-canvas-replay.sh"
+        or closeout_kind != "canvas-replay"
+    ):
+        return (
+            f"⛔ UI-RE Canvas-replay gate: non-canonical stamp for {ref_dir}\n\n"
+            f"canvas-replay-stamp.json must be written by\n"
+            f"scripts/verify/check-canvas-replay.sh with closeoutKind=canvas-replay.\n"
+            f"Current stampedBy={stamped_by!r}, closeoutKind={closeout_kind!r}.\n\n"
+            f"Hand-written stamps and stamps from other writers are not accepted.\n"
+            f"Re-run:\n"
+            f"  bash scripts/verify/check-canvas-replay.sh {ref_dir} --write-stamp\n"
+        )
+
+    if age_s > _VERIFY_STAMP_MAX_AGE_S:
+        return (
+            f"⛔ UI-RE Canvas-replay gate: STALE stamp for {ref_dir}\n\n"
+            f"canvas-replay-stamp.json is {int(age_s)}s old "
+            f"(max {_VERIFY_STAMP_MAX_AGE_S}s).\n"
+            f"Re-run:\n\n"
+            f"  bash scripts/verify/check-canvas-replay.sh {ref_dir} --write-stamp\n"
+        )
+
+    # Attestation file must exist + still hash to the same value the stamp
+    # recorded. Codex [2] / [5]: tamper detection on the operator's license
+    # confirmation (adding ref_canvas_sources URLs after stamping would
+    # silently expand which JS bundles the gate allows).
+    if not attestation_path.is_file():
+        return (
+            f"⛔ UI-RE Canvas-replay gate: attestation missing for {ref_dir}\n\n"
+            f"canvas-replay-stamp.json present but canvas-replay-attestation.json\n"
+            f"is gone. The attestation is the operator's license confirmation;\n"
+            f"the stamp attests to its content and cannot stand alone.\n\n"
+            f"Restore the attestation file or re-run:\n"
+            f"  bash scripts/verify/check-canvas-replay.sh {ref_dir} --write-stamp\n"
+        )
+
+    import hashlib
+    stamped_sha = stamp.get("attestationSha256")
+    current_sha = hashlib.sha256(attestation_path.read_bytes()).hexdigest()
+    if stamped_sha and current_sha != stamped_sha:
+        return (
+            f"⛔ UI-RE Canvas-replay gate: attestation tampered after stamp for {ref_dir}\n\n"
+            f"canvas-replay-attestation.json sha256 mismatch: stamp recorded "
+            f"{stamped_sha[:12]}…\nbut the file now hashes to {current_sha[:12]}….\n\n"
+            f"The license/disclaimer/ref_canvas_sources the stamp attests to\n"
+            f"has changed. Re-attest:\n\n"
+            f"  bash scripts/verify/check-canvas-replay.sh {ref_dir} --write-stamp\n"
+        )
+
+    changed = _newer_impl_files(impl_dir, stamp_path)
+    if changed:
+        sample = "\n".join(f"  - {p}" for p in changed)
+        return (
+            f"⛔ UI-RE Canvas-replay gate: impl changed after stamp for {ref_dir}\n\n"
+            f"These implementation files are newer than canvas-replay-stamp.json:\n"
+            f"{sample}\n\n"
+            f"Re-stamp after the last code/asset edit:\n\n"
+            f"  bash scripts/verify/check-canvas-replay.sh {ref_dir} --write-stamp\n"
+        )
+    return None
+
+
 def _enforce_ref_dir(ref_dir: Path) -> str | None:
     # Load current gate from pipeline-state.json.
     # If absent, treat as fresh start at "reference" gate (not legacy section-compare fallback).
@@ -578,6 +704,14 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     # never interchangeable — the policy decides which writer counts.
     if state.closeout_policy == "structural":
         stamp_enforcer = _enforce_structural_convergence_stamp
+    elif state.closeout_policy == "canvas-replay":
+        # v0.7.0: canvas-replay opt-in escape from the 30-min canvas CSS
+        # replication cap for refs whose visual identity is canvas-driven.
+        # The stamp from check-canvas-replay.sh attests to an operator-
+        # written canvas-replay-attestation.json (license + disclaimer +
+        # ref_canvas_sources). See skills/ui-reverse-engineering/canvas-
+        # replay-mode.md for the operator workflow.
+        stamp_enforcer = _enforce_canvas_replay_stamp
     else:
         stamp_enforcer = _enforce_verify_stamp
 

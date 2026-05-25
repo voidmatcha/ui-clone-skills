@@ -315,6 +315,18 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "impl-elements.json",
         "impl-layout.json",
         "impl-samples.json",
+        # v0.7.0 closeout-policy stamps + attestation (canvas-replay).
+        # Attestation is operator-written (the whole point — opt-in
+        # license proof). Stamps are written by the canonical writer
+        # scripts (`scripts/verify/check-converged.sh` for structural,
+        # `scripts/verify/check-canvas-replay.sh` for canvas-replay,
+        # `pipeline.execute_verify` for canonical). Listed here so the
+        # ad-hoc-artifact hook doesn't false-positive on legitimate
+        # operator opt-in workflows.
+        "canvas-replay-attestation.json",
+        "canvas-replay-stamp.json",
+        "structural-convergence-stamp.json",
+        "verify-stamp.json",
     }
 )
 

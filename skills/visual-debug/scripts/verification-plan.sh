@@ -173,10 +173,20 @@ PY
 PLAN_PATH="$REF_DIR/verification-plan.json"
 if [ -f "$PLAN_PATH" ]; then
   NEWEST_EXTRACTION_MTIME=0
+  # Codex juanmora review (2026-05-25): expand staleness inputs to include
+  # the v0.7.0 multi-snapshot capture artifacts AND the Phase 0 runtime
+  # dump. Without these, juanmora-style runs regenerated states/*/ AND
+  # animation-runtime-dump.json post-plan but the plan stayed stale →
+  # hasSplash/hasHover false-negatives + runtime-spec-coverage never
+  # added. Listing them here forces re-derivation whenever they refresh.
   for EXTRACTION_ARTIFACT in \
     "$REF_DIR/extracted.json" \
     "$REF_DIR/structure.json" \
-    "$TRANSITION_SPEC"; do
+    "$TRANSITION_SPEC" \
+    "$REF_DIR/animation-runtime-dump.json" \
+    "$REF_DIR/states/splash/summary.json" \
+    "$REF_DIR/states/scroll/summary.json" \
+    "$REF_DIR/states/hover/summary.json"; do
     if [ -f "$EXTRACTION_ARTIFACT" ]; then
       ARTIFACT_MTIME=$(file_mtime_epoch "$EXTRACTION_ARTIFACT" || echo 0)
       if [ "$ARTIFACT_MTIME" -gt "$NEWEST_EXTRACTION_MTIME" ]; then
@@ -187,7 +197,7 @@ if [ -f "$PLAN_PATH" ]; then
   if [ "$NEWEST_EXTRACTION_MTIME" -gt 0 ]; then
     PLAN_GENERATED_AT=$(plan_generated_epoch "$PLAN_PATH" || echo 0)
     if [ "$PLAN_GENERATED_AT" -lt "$NEWEST_EXTRACTION_MTIME" ]; then
-      echo "verification-plan.json is stale (generated before latest extraction); regenerating." >&2
+      echo "verification-plan.json is stale (generated before latest extraction OR Phase A/B/C/0 capture); regenerating." >&2
       rm -f "$PLAN_PATH"
     fi
   fi
@@ -223,12 +233,33 @@ fi
 # variants: "hover", "css-hover", "css :hover", "scale-on-hover-target",
 # "whileHover", etc.). interaction-detection.md / transition-spec-rules.md
 # do not pin a single canonical string, so the regex must be lenient.
+#
+# Codex juanmora review (2026-05-25): also derive from Phase C capture
+# (states/hover/manifest.json) — that artifact records actual hover
+# candidates discovered at runtime. Without this, hover plan flag stayed
+# false even when capture-hover.sh found 13 candidates.
 HAS_HOVER="false"
+HOVER_MANIFEST="$REF_DIR/states/hover/manifest.json"
 if contains_pattern "$INTERACTIONS" '"trigger":\s*"[^"]*[Hh]over[^"]*"' \
    || contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"[^"]*[Hh]over[^"]*"' \
    || contains_pattern "$INTERACTIONS" '"whileHover"\s*:' \
    || contains_pattern "$INTERACTIONS" '"hoverDelta"\s*:'; then
   HAS_HOVER="true"
+elif [ -f "$HOVER_MANIFEST" ]; then
+  # entries length > 0 means capture-hover.sh found at least one hover
+  # target — set HAS_HOVER even if upstream extraction missed it.
+  HOVER_ENTRIES=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(open('$HOVER_MANIFEST').read())
+    entries = data.get('entries', []) if isinstance(data, dict) else []
+    print(len(entries))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+  if [ "$HOVER_ENTRIES" -gt 0 ]; then
+    HAS_HOVER="true"
+  fi
 fi
 
 # hasSplash — interactions-detected.json carries `hasPreloader` per the
@@ -236,11 +267,34 @@ fi
 # splash-extraction artifacts in case the agent set hasPreloader=false but
 # splash-extraction.md still produced output.
 #
+# Codex juanmora review (2026-05-25): also derive from Phase A capture
+# (states/splash/summary.json polls > 1). Without this, splash plan flag
+# stayed false even when capture-states.sh found 2+ transitions —
+# juanmora's GSAP splash never reached hasSplash:true → no splash check
+# was scheduled. Fall-through to transition-spec entries with page-load
+# trigger keeps a third signal path.
 DOM_STATE_DIFF="$REF_DIR/dom-state-diff.json"
+SPLASH_SUMMARY="$REF_DIR/states/splash/summary.json"
 HAS_SPLASH="false"
 if contains_pattern "$INTERACTIONS" '"hasPreloader":\s*true' \
    || contains_pattern "$INTERACTIONS" '"hasSplash":\s*true' \
    || contains_pattern "$DOM_STATE_DIFF" '"(dom_changes|splashElements|changes|preloaderRemoved)":\s*\[?[^][}{]'; then
+  HAS_SPLASH="true"
+elif [ -f "$SPLASH_SUMMARY" ]; then
+  # polls > 1 = capture-states.sh recorded at least one class transition
+  # during the splash window (loading → loaded). Treat as splash present.
+  SPLASH_POLLS=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(open('$SPLASH_SUMMARY').read())
+    print(int(data.get('polls') or 0) if isinstance(data, dict) else 0)
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+  if [ "$SPLASH_POLLS" -gt 1 ]; then
+    HAS_SPLASH="true"
+  fi
+elif contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(page-?load|onLoad|load)"'; then
   HAS_SPLASH="true"
 fi
 
@@ -743,9 +797,18 @@ fi
 # could author a spec with zero scroll entries while the live page is running
 # 30 ScrollTrigger animations. With this row wired, that mismatch fails the
 # post-implement gate.
+#
+# Codex juanmora review (2026-05-25): drop the `&& -f TRANSITION_SPEC`
+# guard. juanmora's transition-spec was stale (6 entries) while the runtime
+# dump captured 35 ScrollTrigger entries — both files existed, but more
+# critically the gap is REAL when runtime-dump exists but transition-spec
+# is empty/missing. The check script handles both branches; gating its
+# REGISTRATION on transition-spec presence let agents silence the gap by
+# deleting transition-spec.json. Now: presence of animation-runtime-dump
+# alone forces the row, and the script itself reports spec absent/empty.
 # Tier=quick: pure JSON-vs-JSON comparison — instant.
 ANIM_DUMP="$REF_DIR/animation-runtime-dump.json"
-if [ -f "$ANIM_DUMP" ] && [ -f "$TRANSITION_SPEC" ]; then
+if [ -f "$ANIM_DUMP" ]; then
   add_check "runtime-spec-coverage" \
             "skills/visual-debug/scripts/runtime-spec-coverage.sh" \
             "runtime-spec-coverage.json" \

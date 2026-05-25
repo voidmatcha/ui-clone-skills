@@ -438,6 +438,16 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
                 out.append(CheckResult(label, "fail", msg, fix=fix))
                 continue
             out.append(CheckResult(label, "pass", f"{check_id} (artifact present, no status field)"))
+        elif str(status).lower() == "skip":
+            # A check reports skip when its prerequisites aren't met
+            # (no signal in ref, below floor, gate does not apply).
+            # That's a no-op verdict, not a block — treat as pass with
+            # the skip reason preserved so it's visible in the gate
+            # output. Setup-error skips ("impl_root not found",
+            # "agent-browser missing") would otherwise have already
+            # failed earlier in run-required-checks.sh.
+            skip_msg = f"{check_id} (skipped: {reason})" if reason else f"{check_id} (skipped)"
+            out.append(CheckResult(label, "pass", skip_msg))
         else:
             count = (data.get("errorCount") or data.get("failureCount") or
                      data.get("totalStuck") or "?") if isinstance(data, dict) else "?"

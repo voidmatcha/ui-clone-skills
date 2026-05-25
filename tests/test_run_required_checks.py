@@ -68,3 +68,18 @@ def test_run_required_checks_has_hero_composite_signature() -> None:
         "hero-composite-check.sh missing from dispatcher SIGNATURES — "
         "dispatcher will NOSIG-skip and the gate won't run automatically."
     )
+
+
+def test_run_required_checks_has_anti_cheat_signatures() -> None:
+    """Every required anti-cheat row emitted by verification-plan.sh must
+    have a dispatcher signature. Missing signatures make the one-shot
+    verifier stop before producing the artifacts gate.py expects.
+    """
+    root = _project_root()
+    text = (root / "scripts" / "verify" / "run-required-checks.sh").read_text()
+    for script in (
+        "class-signature-preservation-check.sh",
+        "bundle-paste-check.sh",
+        "class-signature-css-coverage-check.sh",
+    ):
+        assert f'"{script}"' in text, f"{script} missing from dispatcher SIGNATURES"

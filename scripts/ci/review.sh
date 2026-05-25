@@ -37,8 +37,14 @@ ok() { [ "$QUIET" = "1" ] || echo "  ✓ $*"; PASSED=$((PASSED + 1)); }
 section() { [ "$QUIET" = "1" ] || echo ""; [ "$QUIET" = "1" ] || echo "── $* ──"; }
 
 # ── 1. Tests ──
+# UI_CLONE_REVIEW_SKIP_TESTS=1 — caller (e.g. ci-local.sh) already ran pytest
+# and doesn't want this nested invocation to repeat it. Eliminates the
+# duplicate ~1.5–3 min pytest sweep during `git push` (pre-push-guard runs
+# ci-local; ci-local ran pytest in step 1 then called review.sh).
 section "Tests"
-if command -v uv >/dev/null 2>&1; then
+if [ "${UI_CLONE_REVIEW_SKIP_TESTS:-}" = "1" ]; then
+  ok "pytest: skipped (caller already ran)"
+elif command -v uv >/dev/null 2>&1; then
   TEST_OUT=$(uv run python -m pytest tests/ -q 2>&1)
   if echo "$TEST_OUT" | grep -q "passed"; then
     PASS_COUNT=$(echo "$TEST_OUT" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
@@ -52,8 +58,13 @@ else
 fi
 
 # ── 2. Security gate ──
+# UI_CLONE_REVIEW_SKIP_SECURITY=1 — caller already ran pre-push-security.sh
+# (pre-push-guard.sh runs it directly before ci-local). Avoids the
+# duplicate scan when chained through ci-local → review.sh.
 section "Security"
-if bash scripts/ci/pre-push-security.sh --quiet 2>/dev/null; then
+if [ "${UI_CLONE_REVIEW_SKIP_SECURITY:-}" = "1" ]; then
+  ok "pre-push-security: skipped (caller already ran)"
+elif bash scripts/ci/pre-push-security.sh --quiet 2>/dev/null; then
   ok "pre-push-security: clean"
 else
   err "pre-push-security: blockers found"

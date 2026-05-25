@@ -49,6 +49,11 @@ In the Codex REPL, run a one-line `/goal` invocation (the `ui-reverse-engineerin
 
 The stop condition is bounded: stop when `current_gate == "done"` and `sections/result.txt` has no `FAIL` or `MISSING impl` lines. SessionStart/PostCompact hooks inject the active goal card, and the Stop gate includes the same card when blocking so the next action is explicit.
 
+When an iteration exposes a plugin bug, do not let the iterator edit gate
+code inline. Escalate via [Plugin Code Edits During Clone Iteration](./plugin-code-edits-during-iteration.md):
+land the plugin fix separately, verify it, reset the iteration baseline, then
+resume the clone.
+
 ## Gate system (Python)
 
 The `ui_clone/` package (Python 3.11+, managed by `uv`) provides pipeline gates, dependency tracking (DAG-based staleness detection), multiscale SSIM comparison, and viewport-relative CSS severity scoring.

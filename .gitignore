@@ -40,3 +40,13 @@ research/
 # releases when this file's content matches the current
 # CLAUDE_CODE_SESSION_ID env. See section_gate._is_driver_session.
 .driver-session.id
+
+# Vite local dependency cache — written by the dev server in any working dir
+.vite/
+
+# Outbox / handoff drops — per-session outbound artifacts
+outbox/
+
+# Convenience symlinks to scratch impl roots — created so pipeline.verify
+# (which expects <repo>/impl) can locate a non-canonical impl path.
+/impl

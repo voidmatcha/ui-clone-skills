@@ -92,6 +92,33 @@ ref_dir_p = Path(ref_dir)
 impl_root_p = Path(impl_root)
 out_p = Path(out_path)
 
+# ── Canvas-replay allowlist (v0.7.0) ──────────────────────────────────
+# When closeoutPolicy=="canvas-replay" AND canvas-replay-attestation.json
+# is present, URLs in attestation.ref_canvas_sources[] are exempt from
+# the cheat-detection rule — operator has signed proof that the impl is
+# allowed to load these specific bundles for canvas fidelity. Other
+# imports from the same ref host still fail (exact URL equality, not
+# origin allowlist — codex review Q3). Allowlist disabled if either the
+# policy field is absent/canonical OR the attestation file is missing.
+canvas_replay_allowlist: set[str] = set()
+state_p = ref_dir_p / "pipeline-state.json"
+attestation_p = ref_dir_p / "canvas-replay-attestation.json"
+if state_p.is_file() and attestation_p.is_file():
+    try:
+        _state = json.loads(state_p.read_text(encoding="utf-8"))
+        if isinstance(_state, dict):
+            _policy = _state.get("closeoutPolicy") or _state.get("closeout_policy")
+            if _policy == "canvas-replay":
+                _att = json.loads(attestation_p.read_text(encoding="utf-8"))
+                if isinstance(_att, dict):
+                    _sources = _att.get("ref_canvas_sources") or []
+                    if isinstance(_sources, list):
+                        for _u in _sources:
+                            if isinstance(_u, str) and _u.strip():
+                                canvas_replay_allowlist.add(_u.strip())
+    except (json.JSONDecodeError, OSError):
+        pass
+
 # ── Collect candidate ref hosts ───────────────────────────────────────
 ref_hosts: set[str] = set()
 
@@ -272,6 +299,14 @@ for d in SCAN_DIRS:
                 is_cheat, reason = classify_line(snippet)
                 if not is_cheat:
                     continue  # allowed asset reference, not a cheat
+                # Canvas-replay allowlist: skip if the snippet contains
+                # an exact-string match of an attested URL. Substring match
+                # against the line is safe because the URL itself is the
+                # signal — same host with a different path won't match.
+                if canvas_replay_allowlist and any(
+                    u in snippet for u in canvas_replay_allowlist
+                ):
+                    continue
                 violations.append({
                     "host": host,
                     "file": str(path.relative_to(impl_root_p)),
@@ -289,7 +324,8 @@ if runtime_raw:
             text = rt.read_text(encoding="utf-8")
             for line in reversed(text.strip().splitlines()):
                 s = line.strip()
-                if not s.startswith("{"):
+                # agent-browser may wrap eval result in outer quotes.
+                if not (s.startswith("{") or s.startswith('"{')):
                     continue
                 try:
                     val = json.loads(s)
@@ -313,6 +349,13 @@ for entry in runtime_resources:
         continue
     url_lower = url.lower()
     if any(url_lower.endswith(ext) or (ext + "?") in url_lower for ext in ALLOWED_ASSET_EXT):
+        continue
+    # Canvas-replay runtime allowlist — exact URL equality against the
+    # attested ref_canvas_sources[]. Trailing-slash / query-string drift
+    # is intentionally NOT smoothed: the attestation is operator-signed
+    # text; a mismatch is a reviewable attestation update, not a silent
+    # bypass (codex Q3).
+    if canvas_replay_allowlist and url in canvas_replay_allowlist:
         continue
     runtime_violations.append({"host": rhost, "url": url[:200]})
 

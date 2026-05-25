@@ -18,6 +18,35 @@ QUIET=0
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)" || { echo "ci-local.sh: cannot resolve repo root" >&2; exit 1; }
 cd "$REPO_ROOT" || { echo "ci-local.sh: cannot cd to $REPO_ROOT" >&2; exit 1; }
 
+# ci-local owns the pytest invocation in step 1 below. Any nested review.sh
+# call (step 5 directly, step 6 transitively via test-parity.sh → review.sh)
+# would re-run the same pytest sweep. Export the SKIP flag globally so every
+# review.sh in this process tree honors it. ci-local's own step 1 pytest is
+# unaffected — the flag only gates review.sh's pytest section.
+export UI_CLONE_REVIEW_SKIP_TESTS=1
+
+# ── Stale-mutation recovery ──
+# test-parity.sh (step 6 below) mutates AGENTS.md + plugin manifests as
+# part of its drift smoke test, then restores from a temp backup. If a
+# prior ci-local run was interrupted between mutation and restore, the
+# working tree ends up with stale drift-test markers. test-parity.sh's
+# own entry-recovery only fires when step 6 actually runs — but if those
+# markers cause an EARLIER check (review.sh's Hangul gate at step 5,
+# manifest-JSON gate, etc.) to fail, ci-local exits at step 5 and step 6
+# never gets to clean up. Result: every subsequent ci-local run blocks
+# at the same step, requiring manual `git checkout AGENTS.md`. Detecting
+# and resetting markers BEFORE any check eliminates this trap.
+if grep -qE 'drift-test' AGENTS.md 2>/dev/null; then
+  [ "$QUIET" = "1" ] || echo "  ⚠️  resetting AGENTS.md (stale drift-test marker from interrupted run)" >&2
+  git checkout -- AGENTS.md 2>/dev/null || true
+fi
+for _p in ".codex-plugin/plugin.json" ".claude-plugin/plugin.json"; do
+  if [ -f "$_p" ] && ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$_p" 2>/dev/null; then
+    [ "$QUIET" = "1" ] || echo "  ⚠️  resetting $_p (invalid JSON from interrupted run)" >&2
+    git checkout -- "$_p" 2>/dev/null || true
+  fi
+done
+
 if [ "${UI_RE_SKIP_CI_LOCAL:-}" = "1" ]; then
   echo "⚠️  ci-local skipped via UI_RE_SKIP_CI_LOCAL=1" >&2
   exit 0
@@ -73,6 +102,12 @@ done
 [ "$QUIET" = "1" ] || echo "  ✓ all shell scripts parse (bash $BASH_MAJOR.x at $BASH_BIN)"
 
 # 5. Review checks
+# UI_CLONE_REVIEW_SKIP_TESTS=1 is exported globally at the top of this file,
+# so review.sh here AND review.sh inside test-parity.sh (step 6) both skip
+# the duplicate pytest sweep. Security is NOT skipped here because ci-local
+# doesn't run pre-push-security directly; pre-push-guard.sh exports
+# UI_CLONE_REVIEW_SKIP_SECURITY=1 when IT already ran pre-push-security
+# ahead of calling ci-local.
 step "Review checks"
 if [ "$QUIET" = "1" ]; then
   bash scripts/ci/review.sh --quiet >/dev/null 2>&1 || fail "review.sh"

@@ -99,3 +99,4 @@ Reference tables moved to `docs/gates.md` to keep `AGENTS.md` thin (re-injected 
 ## Review checklist
 
 Full checklist lives in `scripts/ci/review.sh` header (automated). Run `bash scripts/ci/review.sh` before push.
+

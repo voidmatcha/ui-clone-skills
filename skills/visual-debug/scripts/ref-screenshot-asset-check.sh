@@ -79,6 +79,46 @@ ref_dir = Path(sys.argv[1])
 impl_root = Path(sys.argv[2])
 out_path = Path(sys.argv[3])
 
+# ── Canvas-replay allowlist (v0.7.0) ──────────────────────────────────
+# When closeoutPolicy=="canvas-replay" AND canvas-replay-attestation.json
+# is present, byte-identical-copy violations whose refSource basename
+# (e.g. "sections/ref/music-sphere.png") matches a section tagged
+# kind="canvas" in section-map.json are allowed. Operator may use a
+# captured canvas-section frame as a fallback under the attestation
+# umbrella. Scope is byte-identical-copy ONLY — ref-path-reference
+# (generic "tmp/ref/" substring leaks) stays strict because the
+# substring doesn't pinpoint a section. Fail-closed: any missing
+# condition (no policy, no attestation, no kind=canvas section)
+# disables the allowlist.
+canvas_replay_section_names: set[str] = set()
+_state_p = ref_dir / "pipeline-state.json"
+_att_p = ref_dir / "canvas-replay-attestation.json"
+_map_p = ref_dir / "section-map.json"
+if _state_p.is_file() and _att_p.is_file() and _map_p.is_file():
+    try:
+        _state = json.loads(_state_p.read_text(encoding="utf-8"))
+        _policy = (
+            isinstance(_state, dict)
+            and (_state.get("closeoutPolicy") or _state.get("closeout_policy"))
+        )
+        if _policy == "canvas-replay":
+            _map = json.loads(_map_p.read_text(encoding="utf-8"))
+            if isinstance(_map, dict) and isinstance(_map.get("sections"), list):
+                for _s in _map["sections"]:
+                    if not isinstance(_s, dict):
+                        continue
+                    if _s.get("kind") != "canvas":
+                        continue
+                    for _key in ("name", "id", "className", "cls"):
+                        _v = _s.get(_key)
+                        if isinstance(_v, str) and _v.strip():
+                            canvas_replay_section_names.add(_v.strip())
+                    _idx = _s.get("index")
+                    if isinstance(_idx, int):
+                        canvas_replay_section_names.add(f"section-{_idx}")
+    except (json.JSONDecodeError, OSError):
+        pass
+
 # 1. Build the forbidden-path set from ref's captured artifacts.
 # These are paths the impl must never reference.
 forbidden_substrings: set[str] = set()
@@ -171,10 +211,25 @@ for p in impl_root.rglob("*"):
         scanned_binary += 1
         h = sha256_of(p)
         if h and h in ref_screenshot_files:
+            ref_src = ref_screenshot_files[h]
+            # Canvas-replay allowlist: skip when the ref source PNG belongs
+            # to a section tagged kind="canvas" in section-map.json. Match
+            # on basename stem (sections/ref/music-sphere.png → music-sphere)
+            # against the canvas-section name aliases.
+            if canvas_replay_section_names:
+                ref_stem = Path(ref_src).stem
+                # Disambiguation suffix (-2, -3, ...) added by capture script
+                # for repeated className — strip to compare the base name.
+                ref_stem_base = re.sub(r"-\d+$", "", ref_stem)
+                if (
+                    ref_stem in canvas_replay_section_names
+                    or ref_stem_base in canvas_replay_section_names
+                ):
+                    continue
             violations.append({
                 "file": str(p.relative_to(impl_root)),
                 "kind": "byte-identical-copy",
-                "refSource": ref_screenshot_files[h],
+                "refSource": ref_src,
                 "sha256": h[:12],
             })
 

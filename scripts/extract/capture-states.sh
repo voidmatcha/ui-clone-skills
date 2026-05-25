@@ -200,10 +200,16 @@ EVAL_JS='(async () => {
     fullHTML: final.fullHTML,  // always full for settled bookend
     bookend: "settled",
   };
-  // If settled state hash matches the last recorded state, mark it bookend
-  // but still write the dedicated settled.json snapshot.
+  // If settled state hash matches the last recorded state, tag it as the
+  // settled bookend AND ensure fullHTML is present so the python writer
+  // emits settled.json. The earlier transition pass may have pruned
+  // fullHTML when structuralDelta was <= 20% — without this backfill the
+  // settled snapshot would silently go missing for CSS-only transitions
+  // (display:none swap, opacity fade, class flip without DOM growth).
   if (states[states.length - 1] && states[states.length - 1].hash === final.hash) {
-    states[states.length - 1].bookend = states[states.length - 1].bookend || "settled-same";
+    const last = states[states.length - 1];
+    last.bookend = last.bookend || "settled-same";
+    if (!last.fullHTML) last.fullHTML = final.fullHTML;
   } else {
     states.push(finalEntry);
   }
@@ -245,10 +251,22 @@ raw = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
 try:
     parsed = json.loads(raw)
 except json.JSONDecodeError as e:
-    print(f"capture-states: invalid JSON from eval ({e}):\n{raw[:300]}", file=sys.stderr)
+    print(f"capture-states: invalid JSON from agent-browser eval ({e}):\n{raw[:300]}", file=sys.stderr)
     sys.exit(3)
 
-# The eval may return either the raw result or be wrapped. Drill in if wrapped.
+# Peel agent-browser eval envelope: {success, data: {origin, result: <inner>}}.
+# Real `agent-browser eval --json` always wraps. Unit-test fake-browser emits
+# the inner JSON bare, so this peel is a no-op there.
+if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict) and "result" in parsed["data"]:
+    parsed = parsed["data"]["result"]
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except json.JSONDecodeError:
+            pass
+
+# Legacy single-key wrapper {"result": <inner>}. Kept so a future shim that
+# pre-strips the envelope on the caller side keeps working without script edits.
 if isinstance(parsed, dict) and "result" in parsed and isinstance(parsed["result"], (dict, str)):
     inner = parsed["result"]
     if isinstance(inner, str):

@@ -95,8 +95,14 @@ fi
 # CI mirror — pytest + mypy + ruff + shell syntax + review.sh.
 # Mirrors .github/workflows/ci.yml `test` job so we don't push code that
 # GitHub will reject. Slow (~30-60s) so it runs after the fast checks above.
+#
+# Export UI_CLONE_REVIEW_SKIP_SECURITY=1 — pre-push-security.sh already ran
+# above (line ~88), and ci-local's nested review.sh call would otherwise
+# re-run it. Eliminates duplicate ~5s scan during `git push`. ci-local
+# additionally sets UI_CLONE_REVIEW_SKIP_TESTS=1 inline so pytest runs
+# exactly once (in ci-local step 1, not again inside review.sh).
 if [ -f scripts/ci/ci-local.sh ]; then
-  if ! bash scripts/ci/ci-local.sh --quiet; then
+  if ! UI_CLONE_REVIEW_SKIP_SECURITY=1 bash scripts/ci/ci-local.sh --quiet; then
     echo "⚠️ CI mirror failed — run 'bash scripts/ci/ci-local.sh' to see details." >&2
     echo "Bypass (emergency only): UI_RE_SKIP_CI_LOCAL=1 git push" >&2
     echo "decision: block" >&2

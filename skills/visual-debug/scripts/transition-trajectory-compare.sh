@@ -79,6 +79,40 @@ trap cleanup EXIT
 OUT_DIR="$DIR/transitions/trajectory"
 mkdir -p "$OUT_DIR/ref" "$OUT_DIR/impl" "$OUT_DIR/diff"
 
+structural_only_mode() {
+  python3 - "$DIR" <<'PY'
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ref_dir = Path(sys.argv[1])
+asset_sub = ref_dir / "asset-substitution.json"
+result = ref_dir / "sections" / "result.txt"
+if not asset_sub.exists() or not result.exists():
+    print("false")
+    raise SystemExit(0)
+try:
+    data = json.loads(asset_sub.read_text(encoding="utf-8"))
+except Exception:
+    print("false")
+    raise SystemExit(0)
+if not data.get("structuralOnlySections"):
+    print("false")
+    raise SystemExit(0)
+text = result.read_text(encoding="utf-8", errors="replace")
+m = re.search(r"\*\*Result:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL,\s*(\d+)\s+SKIP,\s*(\d+)\s+STRUCTURAL_ONLY", text)
+if not m:
+    print("false")
+    raise SystemExit(0)
+fail = int(m.group(2))
+structural = int(m.group(4))
+print("true" if fail == 0 and structural > 0 else "false")
+PY
+}
+
 # Open both sites once; reuse the session for every scroll-sample point so
 # scroll-scrub timelines stay continuous instead of re-initializing per probe.
 agent-browser --session "$SESSION_REF"  open "$ORIG_URL" --viewport "${VIEW_W}x${VIEW_H}" --wait "$WAIT_REF"  >/dev/null
@@ -108,6 +142,127 @@ if [ "$REF_HEIGHT" -le 0 ] && [ "$IMPL_HEIGHT" -le 0 ]; then
 fi
 
 REPORT="$DIR/transitions/trajectory-result.txt"
+
+STRUCTURAL_ONLY_MODE="${STRUCTURAL_TRAJECTORY_MODE:-$(structural_only_mode)}"
+if [ "$STRUCTURAL_ONLY_MODE" = "true" ]; then
+  SIG_DIR="$OUT_DIR/structural"
+  mkdir -p "$SIG_DIR"
+  SIGNATURE_JS='(() => JSON.stringify([...document.querySelectorAll(".patch[parallax=\"patch\"]")].map((el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el); const key = [...el.classList].filter((c) => c !== "patch").sort().join(".") || el.className; const matrix = st.transform && st.transform !== "none" ? st.transform.match(/matrix.*\(([^)]+)\)/) : null; const parts = matrix ? matrix[1].split(",").map((v) => Number.parseFloat(v.trim())) : []; const ty = parts.length >= 6 ? parts[5] : 0; return { key, className: el.className, top: r.top, left: r.left, width: r.width, height: r.height, bottom: r.bottom, right: r.right, transform: st.transform, ty, visible: r.width > 1 && r.height > 1 && r.bottom >= -200 && r.top <= window.innerHeight + 200 }; }), null, 2))()'
+  {
+    echo "# transition-trajectory-compare"
+    echo "# mode: structural-motion"
+    echo "# sampled points: $TRAJECTORY_POINTS"
+    echo "# ref scroll-range: ${REF_HEIGHT}px  impl scroll-range: ${IMPL_HEIGHT}px"
+    echo
+  } > "$REPORT"
+
+  for pct in $TRAJECTORY_POINTS; do
+    REF_Y=$(awk -v h="$REF_HEIGHT"  -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
+    IMPL_Y=$(awk -v h="$IMPL_HEIGHT" -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
+    agent-browser --session "$SESSION_REF"  eval "(() => { window.scrollTo({top: $REF_Y,  behavior: 'instant'}); return window.scrollY; })()" >/dev/null
+    agent-browser --session "$SESSION_IMPL" eval "(() => { window.scrollTo({top: $IMPL_Y, behavior: 'instant'}); return window.scrollY; })()" >/dev/null
+    sleep "$(awk -v ms="$WAIT_SCROLL_SETTLE_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
+    agent-browser --session "$SESSION_REF"  eval "$SIGNATURE_JS" > "$SIG_DIR/ref-$pct.json"
+    agent-browser --session "$SESSION_IMPL" eval "$SIGNATURE_JS" > "$SIG_DIR/impl-$pct.json"
+  done
+
+  python3 - "$SIG_DIR" "$REPORT" $TRAJECTORY_POINTS <<'PY'
+from __future__ import annotations
+
+import json
+import math
+import sys
+from pathlib import Path
+
+sig_dir = Path(sys.argv[1])
+report = Path(sys.argv[2])
+points = sys.argv[3:]
+
+MAX_TOP_DELTA = 90
+MAX_LEFT_DELTA = 80
+MAX_SIZE_RATIO = 0.40
+MAX_TY_DELTA = 130
+
+def load(path: Path) -> list[dict]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return []
+
+def visible_map(items: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for item in items:
+        key = str(item.get("key") or "")
+        if key and item.get("visible"):
+            out[key] = item
+    return out
+
+rows: list[str] = [
+    "| point | target | topΔ | leftΔ | sizeΔ | tyΔ | status |",
+    "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+]
+fail = 0
+passed = 0
+compared = 0
+
+for point in points:
+    ref = visible_map(load(sig_dir / f"ref-{point}.json"))
+    impl = visible_map(load(sig_dir / f"impl-{point}.json"))
+    keys = sorted(set(ref) | set(impl))
+    if not keys:
+        rows.append(f"| {point}% | — | — | — | — | — | ⚠️ no visible motion targets |")
+        continue
+    for key in keys:
+        r = ref.get(key)
+        i = impl.get(key)
+        compared += 1
+        if not r or not i:
+            fail += 1
+            rows.append(f"| {point}% | `{key}` | — | — | — | — | ❌ missing target |")
+            continue
+        top_delta = abs(float(r.get("top", 0)) - float(i.get("top", 0)))
+        left_delta = abs(float(r.get("left", 0)) - float(i.get("left", 0)))
+        width_ref = max(abs(float(r.get("width", 0))), 1.0)
+        height_ref = max(abs(float(r.get("height", 0))), 1.0)
+        size_delta = max(
+            abs(float(r.get("width", 0)) - float(i.get("width", 0))) / width_ref,
+            abs(float(r.get("height", 0)) - float(i.get("height", 0))) / height_ref,
+        )
+        ty_delta = abs(float(r.get("ty", 0)) - float(i.get("ty", 0)))
+        ok = (
+            top_delta <= MAX_TOP_DELTA
+            and left_delta <= MAX_LEFT_DELTA
+            and size_delta <= MAX_SIZE_RATIO
+            and ty_delta <= MAX_TY_DELTA
+        )
+        if ok:
+            passed += 1
+            status = "✅"
+        else:
+            fail += 1
+            status = "❌"
+        rows.append(
+            f"| {point}% | `{key}` | {top_delta:.0f} | {left_delta:.0f} | "
+            f"{size_delta:.2f} | {ty_delta:.0f} | {status} |"
+        )
+
+with report.open("a", encoding="utf-8") as fh:
+    fh.write("\n".join(rows))
+    fh.write("\n\n")
+    if compared == 0:
+        fh.write("❌ no visible motion targets sampled — structural trajectory probe is vacuous\n")
+        raise SystemExit(1)
+    if fail:
+        fh.write(f"❌ {fail}/{compared} structural motion target sample(s) exceeded trajectory thresholds\n")
+        raise SystemExit(1)
+    fh.write(f"✅ all {passed}/{compared} visible structural motion target samples within trajectory thresholds\n")
+PY
+  STATUS=$?
+  echo "Wrote $REPORT"
+  exit "$STATUS"
+fi
+
 {
   echo "# transition-trajectory-compare"
   echo "# sampled points: $TRAJECTORY_POINTS"
@@ -193,4 +348,7 @@ done
 } >> "$REPORT"
 
 echo "Wrote $REPORT"
-exit 0
+if [ "$FAIL_COUNT" -eq 0 ]; then
+  exit 0
+fi
+exit 1

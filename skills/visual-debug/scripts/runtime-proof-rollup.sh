@@ -93,11 +93,21 @@ def hero_composite_measure(d: dict) -> tuple[bool, str]:
         return True, "skipped"
     if d.get("status") != "pass":
         return False, f"status={d.get('status')}"
+    explicit_missing = d.get("missingInImpl")
+    if isinstance(explicit_missing, list):
+        return (not explicit_missing), (
+            "all ref-present kinds present" if not explicit_missing
+            else f"missing in impl: {explicit_missing}"
+        )
+    ref = d.get("ref", {})
     impl = d.get("impl", {})
-    missing = [k for k, v in impl.items() if v is False]
+    if ref:
+        missing = [k for k, ref_has in ref.items() if ref_has and not impl.get(k)]
+    else:
+        missing = [k for k, v in impl.items() if v is False]
     if missing:
         return False, f"pass but missing in impl: {missing}"
-    return True, "all 4 kinds present"
+    return True, "all ref-present kinds present"
 
 def runtime_dom_measure(d: dict) -> tuple[bool, str]:
     if d.get("status") == "skip":

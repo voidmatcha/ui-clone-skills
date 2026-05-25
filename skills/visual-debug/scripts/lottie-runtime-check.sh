@@ -297,10 +297,14 @@ if [ "${#REASONS[@]}" -eq 0 ] && [ -n "$IMPL_URL" ] && command -v agent-browser 
 ' > "$PROOF_JSON" 2>/dev/null || true
 
   if [ -s "$PROOF_JSON" ]; then
-    # agent-browser eval prints the eval result; strip everything but
-    # the JSON line and parse it.
-    PROOF_LINE=$(grep -E '^\s*\{' "$PROOF_JSON" | head -1 || true)
+    # agent-browser eval prints the eval result. Recent agent-browser
+    # versions wrap the JSON string return in outer quotes (e.g.
+    # `"{\"count\":1}"`), so the leading `{` no longer appears at column
+    # zero. Accept both forms — line starts with `{` (legacy) OR `"{`
+    # (JSON-string-wrapped) — then unwrap the outer quotes if present.
+    PROOF_LINE=$(grep -E '^\s*("?\{|\{)' "$PROOF_JSON" | head -1 || true)
     if [ -n "$PROOF_LINE" ]; then
+      PROOF_LINE=$(python3 -c "import json,sys; v=sys.argv[1].strip(); o=json.loads(v); print(json.dumps(json.loads(o) if isinstance(o,str) else o))" "$PROOF_LINE" 2>/dev/null || echo "$PROOF_LINE")
       CANDIDATE_COUNT=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('count',0))" "$PROOF_LINE" 2>/dev/null || echo 0)
       ANIMATING_COUNT=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('animating',0))" "$PROOF_LINE" 2>/dev/null || echo 0)
     fi

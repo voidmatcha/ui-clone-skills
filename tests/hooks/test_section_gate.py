@@ -1256,3 +1256,248 @@ class TestSectionGateStructuralCloseout:
         # Canonical path: must demand verify-stamp.json
         assert "verify-stamp.json" in reason
 
+
+
+class TestSectionGateCanvasReplayCloseout:
+    """Canvas-replay closeout policy (v0.7.0) — pipeline-state.closeoutPolicy=='canvas-replay'
+    routes the Stop hook to accept canvas-replay-stamp.json from
+    scripts/verify/check-canvas-replay.sh instead of demanding verify-stamp.json
+    from pipeline.execute_verify. The canonical and structural contracts are
+    untouched; this class only exercises the new policy branch.
+
+    Codex review (2026-05-25) findings applied:
+      [1] No new GATE_ORDER entry — canvas-replay is a closeout policy, not a
+          pipeline phase.
+      [2] Attestation file is operator's explicit license confirmation; the
+          stamp records sha256(attestation) for tamper detection.
+      [5] Stamp records `ref_canvas_sources` URLs from attestation (audit trail
+          for the canvas JS the impl loads at runtime).
+      [7] Section schema: design doc says `kind: "canvas"`; section-compare
+          relief in a follow-up commit will read that field.
+    """
+
+    def _run_gate_hook(
+        self, ref_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[int | str, str]:
+        import importlib
+        import io
+        from unittest.mock import patch
+
+        captured = io.StringIO()
+        exit_code: int | str = 0
+        try:
+            with patch("sys.stdout", captured):
+                from ui_clone.hooks import section_gate
+
+                importlib.reload(section_gate)
+                section_gate.main()
+        except SystemExit as e:
+            exit_code = e.code or 0
+        return exit_code, captured.getvalue()
+
+    def _write_canvas_replay_state(self, ref_dir: Path) -> None:
+        """A ref dir that opted into canvas-replay closeout. Distinct from
+        structural — completed_steps reaches section-compare via canonical
+        gates (canvas-replay does not bypass earlier gates) but the closeout
+        proof is the attestation stamp, not the canonical verify-stamp."""
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        (ref_dir / ".ui-re-active").touch()
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps(
+                {
+                    "component": "comp",
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "completed_steps": [
+                        "reference", "extraction", "bundle", "paid-features",
+                        "spec", "pre-generate", "state-coverage",
+                        "post-implement", "boundary", "font-parity",
+                        "section-compare",
+                    ],
+                    "current_gate": "done",
+                    "last_updated": "2026-01-01T02:00:00Z",
+                    "closeoutPolicy": "canvas-replay",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _write_attestation(self, ref_dir: Path) -> Path:
+        attestation = ref_dir / "canvas-replay-attestation.json"
+        attestation.write_text(
+            json.dumps(
+                {
+                    "license": "https://example.test/license — explicit owner permission granted via email 2026-05-20",
+                    "disclaimer": "Not affiliated with example.test. https://example.test assets loaded for canvas-fidelity per opt-in.",
+                    "attestedBy": "operator-handle",
+                    "attestedAt": "2026-05-25T08:00:00Z",
+                    "ref_canvas_sources": [
+                        "https://example.test/assets/canvas-driver.js",
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return attestation
+
+    def _write_stamp(self, ref_dir: Path, attestation_path: Path,
+                      stamped_by: str = "scripts/verify/check-canvas-replay.sh") -> Path:
+        """Write a canvas-replay-stamp.json with attestation sha256."""
+        import datetime
+        import hashlib
+
+        attestation_sha = hashlib.sha256(attestation_path.read_bytes()).hexdigest()
+        attestation_data = json.loads(attestation_path.read_text(encoding="utf-8"))
+        stamp = ref_dir / "canvas-replay-stamp.json"
+        stamp.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "closeoutKind": "canvas-replay",
+                    "stampedBy": stamped_by,
+                    "verifiedAt": datetime.datetime.now(datetime.UTC).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    "attestationSha256": attestation_sha,
+                    "refCanvasSources": attestation_data.get("ref_canvas_sources", []),
+                    "attestedBy": attestation_data.get("attestedBy", ""),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return stamp
+
+    def test_canvas_replay_stamp_releases_stop_with_valid_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_canvas_replay_state(ref_dir)
+        attestation = self._write_attestation(ref_dir)
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        app = src / "App.tsx"
+        app.write_text("export default function App(){return <canvas />}", encoding="utf-8")
+
+        stamp = self._write_stamp(ref_dir, attestation)
+        now = time.time()
+        os.utime(app, (now - 10, now - 10))
+        os.utime(stamp, (now, now))
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        assert exit_code == 0
+        assert "block" not in output.lower(), (
+            f"canvas-replay stamp must release Stop; got: {output!r}"
+        )
+
+    def test_canvas_replay_policy_blocks_when_stamp_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """canvas-replay policy + no stamp → block. Message must reference
+        canvas-replay-stamp.json (not verify-stamp.json / structural-
+        convergence-stamp.json)."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_canvas_replay_state(ref_dir)
+        self._write_attestation(ref_dir)
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <canvas />}", encoding="utf-8"
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "canvas-replay-stamp.json" in reason
+        assert "check-canvas-replay.sh" in reason
+        # Must NOT reference verify-stamp.json or structural-convergence-stamp.json —
+        # this policy opted out of both.
+        assert "verify-stamp.json" not in reason
+        assert "structural-convergence-stamp.json" not in reason
+
+    def test_canvas_replay_stamp_non_canonical_writer_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stamp written by anything other than scripts/verify/check-canvas-replay.sh
+        must be rejected. Prevents hand-written stamps."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_canvas_replay_state(ref_dir)
+        attestation = self._write_attestation(ref_dir)
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <canvas />}", encoding="utf-8"
+        )
+
+        self._write_stamp(ref_dir, attestation, stamped_by="hand-written")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "non-canonical" in reason.lower() or "stampedBy" in reason
+
+    def test_canvas_replay_attestation_tampered_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If canvas-replay-attestation.json is edited after the stamp was
+        written, the stamp's attestationSha256 won't match. Block."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_canvas_replay_state(ref_dir)
+        attestation = self._write_attestation(ref_dir)
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <canvas />}", encoding="utf-8"
+        )
+
+        self._write_stamp(ref_dir, attestation)
+
+        # Tamper with the attestation — adds a new ref_canvas_source URL.
+        att_data = json.loads(attestation.read_text())
+        att_data["ref_canvas_sources"].append("https://example.test/extra.js")
+        attestation.write_text(json.dumps(att_data), encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "tampered" in reason.lower() or "attestation" in reason.lower()
+
+    def test_canvas_replay_attestation_missing_blocks_stamp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """closeoutPolicy=canvas-replay + canvas-replay-stamp.json present but
+        canvas-replay-attestation.json MISSING → block. The attestation is
+        the operator's license confirmation; the stamp without the attestation
+        it attests to is meaningless."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_canvas_replay_state(ref_dir)
+        attestation = self._write_attestation(ref_dir)
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <canvas />}", encoding="utf-8"
+        )
+
+        self._write_stamp(ref_dir, attestation)
+        attestation.unlink()  # remove the attestation after stamping
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "attestation" in reason.lower()
