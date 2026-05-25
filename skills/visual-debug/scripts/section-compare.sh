@@ -72,6 +72,7 @@ if [[ "$DIR" != /* ]]; then
 fi
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPTS_DIR/../../.." && pwd)"
 
 # ── Optional multi-viewport fan-out ─────────────────────────────────
 # VIEWPORTS is intentionally opt-in. Unset keeps the historical single
@@ -909,6 +910,49 @@ ENUMERATE_SECTIONS='(() => {
 agent-browser --session "$SESSION_REF" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/ref-sections.json" 2>&1
 agent-browser --session "$SESSION_IMPL" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/impl-sections.json" 2>&1
 
+IMPL_SEMANTIC_CANDIDATES='(() => {
+  const selectors = "main, section, header, footer, nav, article, [id]";
+  const seen = new Set();
+
+  return Array.from(document.querySelectorAll(selectors)).flatMap((el, i) => {
+    if (seen.has(el)) return [];
+    seen.add(el);
+
+    const rect = el.getBoundingClientRect();
+    if (rect.height < 50 || rect.width < 100) return [];
+
+    const text = el.innerText || "";
+    const words = text.replace(/\s+/g, " ").trim().substring(0, 200);
+    const fingerprint = words.substring(0, 100).toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    const svgs = el.querySelectorAll("svg");
+    const hasSvgText = [...svgs].some(svg => {
+      const paths = svg.querySelectorAll("path");
+      if (paths.length < 3) return false;
+      const totalD = [...paths].reduce((sum, p) => sum + (p.getAttribute("d")?.length || 0), 0);
+      return totalD > 500;
+    });
+    const cs = getComputedStyle(el);
+
+    return [{
+      index: i,
+      tag: el.tagName.toLowerCase(),
+      id: el.id || null,
+      className: (el.className?.toString?.() || "").substring(0, 80),
+      fingerprint,
+      hasSvgText,
+      rect: {
+        top: Math.round(rect.top + window.scrollY),
+        left: Math.round(rect.left),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      },
+      display: cs.display,
+      gridCols: cs.gridTemplateColumns !== "none" ? cs.gridTemplateColumns : null,
+      childCount: el.children.length,
+    }];
+  });
+})()'
+
 # section-map.json ground truth — observed benchmark gap:
 # the runtime ENUMERATE_SECTIONS JS above descends `<main>` only when its
 # children include `<section>` or `<main>` (line 709-712). When the ref's
@@ -923,6 +967,13 @@ agent-browser --session "$SESSION_IMPL" eval "$ENUMERATE_SECTIONS" > "$DIR/secti
 # Falls back to the runtime enumeration when section-map.json is absent
 # or doesn't validate.
 if [ -f "$DIR/section-map.json" ]; then
+  agent-browser --session "$SESSION_IMPL" eval "$IMPL_SEMANTIC_CANDIDATES" > "$DIR/sections/impl-semantic-candidates.json" 2>&1 || true
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m ui_clone.section_compare_sections augment-impl \
+    "$DIR/section-map.json" \
+    "$DIR/sections/impl-sections.json" \
+    "$DIR/sections/impl-semantic-candidates.json" 2>/dev/null || true
+
   python3 - "$DIR/section-map.json" "$DIR/sections/ref-sections.json" 2>/dev/null <<'PY' || true
 import json
 import sys

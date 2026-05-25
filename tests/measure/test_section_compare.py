@@ -129,6 +129,82 @@ def test_section_compare_synthesis_uses_correct_section_map_keys() -> None:
     )
 
 
+def test_section_compare_augments_impl_with_section_map_semantic_wrappers() -> None:
+    """When ref sections are synthesized from section-map.json, impl sections
+    need matching semantic wrappers too. Otherwise a ref `main#home` row can
+    be paired to its first child section even though the impl DOM contains the
+    matching `main#home` wrapper.
+    """
+    from ui_clone.section_compare_sections import augment_impl_sections_from_section_map
+
+    section_map = {
+        "sections": [
+            {
+                "index": 5,
+                "tag": "main",
+                "id": "home",
+                "className": "page_main__abc",
+                "top": 0,
+                "height": 8000,
+                "childCount": 6,
+            }
+        ]
+    }
+    runtime_impl_sections = [
+        {
+            "index": 0,
+            "tag": "section",
+            "id": "first",
+            "className": "page_first__def",
+            "fingerprint": "first child",
+            "rect": {"top": 900, "left": 0, "width": 1440, "height": 600},
+            "display": "block",
+            "gridCols": None,
+            "childCount": 1,
+        }
+    ]
+    semantic_candidates = [
+        {
+            "index": 0,
+            "tag": "main",
+            "id": "home",
+            "className": "page_main__abc",
+            "fingerprint": "full page text",
+            "hasSvgText": False,
+            "rect": {"top": 0, "left": 0, "width": 1440, "height": 7600},
+            "display": "block",
+            "gridCols": None,
+            "childCount": 6,
+        }
+    ]
+
+    augmented = augment_impl_sections_from_section_map(
+        section_map,
+        runtime_impl_sections,
+        semantic_candidates,
+    )
+
+    assert any(
+        row["tag"] == "main"
+        and row["id"] == "home"
+        and row["className"] == "page_main__abc"
+        for row in augmented
+    )
+    assert any(row["id"] == "first" for row in augmented), (
+        "augmentation must preserve child sections; it only restores the "
+        "semantic wrapper needed for section-map pairing"
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "impl-semantic-candidates.json" in text, (
+        "section-compare.sh must probe impl semantic wrappers before matching"
+    )
+    assert "augment-impl" in text, (
+        "section-compare.sh must augment impl-sections.json from section-map candidates"
+    )
+
+
 
 def test_section_compare_descends_main_wrappers_with_section_descendants() -> None:
     """Loop-56 regression: a `<main>` with only a few color-band wrapper

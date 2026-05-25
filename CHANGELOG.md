@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.11] - 2026-05-26
+
+Patch release for section-map-backed section matching.
+
+### Fixed
+
+- **Impl semantic wrapper pairing.** `section-compare.sh` now probes impl
+  semantic wrappers and augments `impl-sections.json` from `section-map.json`
+  identities before matching. This prevents synthesized ref rows such as
+  `main#home` from being falsely paired to their first child section when the
+  impl DOM contains the matching wrapper but runtime enumeration descended
+  through it.
+
 ## [0.7.10] - 2026-05-26
 
 Patch release for goal-card closeout consistency.
