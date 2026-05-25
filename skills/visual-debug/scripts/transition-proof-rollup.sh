@@ -56,6 +56,7 @@ out_path = Path(sys.argv[2])
 expected: set[str] = set()
 spec_path = ref_dir / "transition-spec.json"
 plan_path = ref_dir / "verification-plan.json"
+VIDEO_MOTION_PRODUCES = "transitions/video-motion-result.txt"
 if plan_path.exists():
     try:
         plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -184,6 +185,8 @@ def measure_keyframes(d: dict | None) -> tuple[bool, str]:
 
 def measure_video_motion(path: Path) -> tuple[bool, str]:
     if not path.exists():
+        if VIDEO_MOTION_PRODUCES in expected:
+            return False, "video-motion expected by verification-plan but artifact missing"
         return True, "not produced (no scroll/splash signal or comprehensive tier skipped)"
     try:
         text = path.read_text(encoding="utf-8")
@@ -205,8 +208,7 @@ def measure_video_motion(path: Path) -> tuple[bool, str]:
         return True, "trajectory pre-filter passed"
     if "trajectory pre-filter FAILED" in text or "early-exit on trajectory fail" in text:
         return False, "trajectory pre-filter failed"
-    # No clear marker — assume not yet run authoritative compare
-    return True, "no PASS/FAIL marker (not a hard fail)"
+    return False, "no PASS/FAIL marker in video-motion-result.txt"
 
 
 def runtime_proof_sources() -> list[str]:

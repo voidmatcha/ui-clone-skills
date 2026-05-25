@@ -255,6 +255,96 @@ def test_transition_proof_rejects_phase6d_declarations_without_runtime_proof(
     assert any("runtime proof" in r for r in artifact["reasons"])
 
 
+def test_transition_proof_rejects_video_motion_without_verdict_marker(
+    tmp_path: Path,
+) -> None:
+    """A present video-motion artifact without PASS/FAIL text is not proof."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-scroll"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [
+            {
+                "selector": ".hero",
+                "samples": [
+                    {"scrollY": 0, "opacity": "0"},
+                    {"scrollY": 800, "opacity": "1"},
+                ],
+            },
+        ],
+    }))
+    transitions = ref / "transitions"
+    transitions.mkdir()
+    (transitions / "video-motion-result.txt").write_text(
+        "recording completed but report parser crashed before verdict\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "fail"
+    assert any("no PASS/FAIL marker" in r for r in artifact["reasons"])
+
+
+def test_transition_proof_fails_when_expected_video_motion_missing(
+    tmp_path: Path,
+) -> None:
+    """If verification-plan requires video-motion, the rollup must agree."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "requiredChecks": [
+            {
+                "id": "video-motion-compare",
+                "produces": "transitions/video-motion-result.txt",
+            }
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-scroll"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [
+            {
+                "selector": ".hero",
+                "samples": [
+                    {"scrollY": 0, "opacity": "0"},
+                    {"scrollY": 800, "opacity": "1"},
+                ],
+            },
+        ],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "fail"
+    assert any("video-motion expected" in r for r in artifact["reasons"])
+
+
 def test_transition_trajectory_supports_structural_motion_mode() -> None:
     """Structural-only section comparison needs selector-level motion proof."""
     script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-trajectory-compare.sh"
