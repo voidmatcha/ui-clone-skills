@@ -120,6 +120,94 @@ def test_text_fidelity_check_fails_when_scaffold_text_is_omitted(tmp_path: Path)
     assert artifact["missing"][0]["text"] == "People creating seasonal recipes"
 
 
+def test_text_fidelity_check_scans_jsx_components(tmp_path: Path) -> None:
+    """Vite/React clones commonly use JSX files, not TSX files."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "dom-scaffold.json").write_text(json.dumps({
+        "tree": {
+            "tag": "main",
+            "children": [
+                {"tag": "h1", "text": "Original Brand Headline", "children": []},
+            ],
+        },
+    }))
+    (src / "App.jsx").write_text(
+        "export default function App() { return <main><h1>Original Brand Headline</h1></main>; }\n"
+    )
+
+    out = ref / "text-fidelity-check.json"
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "text-fidelity-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, f"JSX components must be scanned: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads(out.read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["components_checked"] == 1
+
+
+def test_text_fidelity_check_uses_element_roles_allowlist_without_cookie_overlay(
+    tmp_path: Path,
+) -> None:
+    """Cookie overlays are not clone targets, but element-role text is source evidence."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "dom-scaffold.json").write_text(json.dumps({
+        "tree": {
+            "tag": "body",
+            "children": [
+                {
+                    "tag": "div",
+                    "class": "CybotCookiebotDialogContentWrapper",
+                    "children": [
+                        {"tag": "div", "text": "We use cookies", "children": []},
+                        {"tag": "button", "text": "Allow all", "children": []},
+                    ],
+                }
+            ],
+        },
+    }))
+    (ref / "element-roles.json").write_text(json.dumps({
+        "elements": [
+            {
+                "tag": "h1",
+                "role": "heading",
+                "selector": "h1.view-mode.unstyled",
+                "text": "Design and launch outstanding websites",
+            }
+        ],
+    }))
+    (src / "App.jsx").write_text(
+        "export default function App() { "
+        "return <main><h1>Design and launch outstanding websites</h1></main>; }\n"
+    )
+
+    out = ref / "text-fidelity-check.json"
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "text-fidelity-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads(out.read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["missing_count"] == 0
+
+
 
 def test_text_fidelity_check_ignores_script_style_noscript_template_text(tmp_path: Path) -> None:
     """Loop-61 finding: dom-scaffold.json captures text inside <script>/<style>/
@@ -276,7 +364,7 @@ def test_runtime_proof_rollup_all_skip_when_truly_absent(tmp_path: Path) -> None
     for name in [
         "lottie-runtime.json", "runtime-image-validity.json",
         "runtime-dom-parity.json", "motion-coverage.json",
-        "runtime-spec-coverage.json", "scroll-completion.json",
+        "runtime-spec-coverage.json", "runtime-frame-proof.json", "scroll-completion.json",
         "reveal-trigger.json", "hidden-children.json",
         "svg-provenance.json",
     ]:
@@ -298,6 +386,39 @@ def test_runtime_proof_rollup_all_skip_when_truly_absent(tmp_path: Path) -> None
     assert proc.returncode == 0, f"all-skip with hero-pass must compose to pass/skip: {proc.stdout}"
 
 
+def test_runtime_proof_rollup_requires_planned_runtime_frame_proof(tmp_path: Path) -> None:
+    """Canvas/WebGL/Lottie frame proof must participate in runtime-proof."""
+    import subprocess
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "requiredChecks": [
+            {"id": "hydration-check", "produces": "hydration.json"},
+            {"id": "text-fidelity-check", "produces": "text-fidelity.json"},
+            {"id": "image-fidelity", "produces": "image-fidelity.json"},
+            {"id": "asset-transfer", "produces": "asset-transfer.json"},
+            {"id": "scaffold-warn", "produces": "scaffold-warn.json"},
+            {"id": "runtime-frame-proof", "produces": "runtime-frame-proof.json"},
+        ],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)],
+        capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, (
+        "planned runtime-frame-proof.json must be required by runtime-proof: "
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    artifact = json.loads((ref / "runtime-proof.json").read_text())
+    frame = next(c for c in artifact["components"] if c["artifact"] == "runtime-frame-proof.json")
+    assert frame["present"] is False
+    assert frame["valid"] is False
+
+
 def test_runtime_proof_rollup_accepts_hero_kinds_absent_from_ref_and_impl(tmp_path: Path) -> None:
     """Hero rollup must compare ref-vs-impl kinds, not require all
     possible hero kinds. A ref without video/button should not pressure
@@ -309,7 +430,7 @@ def test_runtime_proof_rollup_accepts_hero_kinds_absent_from_ref_and_impl(tmp_pa
     for name in [
         "lottie-runtime.json", "runtime-image-validity.json",
         "runtime-dom-parity.json", "motion-coverage.json",
-        "runtime-spec-coverage.json", "scroll-completion.json",
+        "runtime-spec-coverage.json", "runtime-frame-proof.json", "scroll-completion.json",
         "reveal-trigger.json", "hidden-children.json", "svg-provenance.json",
     ]:
         (ref / name).write_text(json.dumps({"schemaVersion": 1, "status": "skip"}))
@@ -423,6 +544,7 @@ def test_runtime_proof_rollup_skips_missing_conditional_artifacts(tmp_path: Path
             {"id": "runtime-dom-parity", "produces": "runtime-dom-parity.json"},
             {"id": "motion-coverage", "produces": "motion-coverage.json"},
             {"id": "runtime-spec-coverage", "produces": "runtime-spec-coverage.json"},
+            {"id": "runtime-frame-proof", "produces": "runtime-frame-proof.json"},
             {"id": "header-state-runtime", "produces": "header-state-runtime.json"},
             {"id": "hidden-children", "produces": "hidden-children.json"},
             {"id": "svg-provenance", "produces": "svg-provenance.json"},
@@ -434,7 +556,7 @@ def test_runtime_proof_rollup_skips_missing_conditional_artifacts(tmp_path: Path
     for name in [
         "lottie-runtime.json", "runtime-image-validity.json",
         "runtime-dom-parity.json", "motion-coverage.json",
-        "runtime-spec-coverage.json", "hidden-children.json",
+        "runtime-spec-coverage.json", "runtime-frame-proof.json", "hidden-children.json",
         "svg-provenance.json",
     ]:
         (ref / name).write_text(json.dumps({"schemaVersion": 1, "status": "skip"}))

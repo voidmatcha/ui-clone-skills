@@ -109,6 +109,98 @@ def test_run_loop_dry_run_writes_prompts_without_invoking_codex(tmp_path: Path) 
     assert summary["sites"][0]["clone"]["status"] == "dry-run"
 
 
+def test_build_clone_prompt_forbids_showcase_source_reuse(tmp_path: Path) -> None:
+    showcase = tmp_path / "showcase"
+    work = tmp_path / "work"
+    _write_showcase(showcase)
+
+    item = loop.discover_showcase_items(showcase)[0]
+    site = loop.prepare_site_workspace(showcase, work, item, reset=False)
+
+    prompt = loop.build_clone_prompt(site, showcase, tmp_path / "plugin")
+
+    assert "Do not copy, rsync, cp -R, or port source files" in prompt
+    assert "source-reuse.md" in prompt
+    assert "download assets from the original url" in prompt.lower()
+    assert "canvas/WebGL" in prompt
+
+
+def test_detect_showcase_reuse_flags_copy_commands(tmp_path: Path) -> None:
+    showcase = tmp_path / "showcase"
+    work = tmp_path / "work"
+    _write_showcase(showcase)
+
+    item = loop.discover_showcase_items(showcase)[0]
+    site = loop.prepare_site_workspace(showcase, work, item, reset=False)
+    (site.site_dir / "codex-clone.jsonl").write_text(
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": (
+                    f"rsync -a {showcase}/src/projects/alpha "
+                    f"{site.impl_dir}/src/projects/"
+                ),
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    findings = loop.detect_showcase_reuse(site, showcase)
+
+    assert findings
+    assert "src/projects/alpha" in findings[0]
+
+
+def test_run_loop_marks_showcase_reuse_attempt_contaminated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    showcase = tmp_path / "showcase"
+    work = tmp_path / "work"
+    _write_showcase(showcase)
+
+    def fake_invoke(*args: object, **kwargs: Any) -> dict[str, object]:
+        log_path = kwargs["log_path"]
+        log_path.write_text(
+            json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": (
+                        f"cp -R {showcase}/src/projects/alpha "
+                        f"{work}/alpha/impl/src/projects/"
+                    ),
+                },
+            })
+            + "\n",
+            encoding="utf-8",
+        )
+        return {"status": "ok", "exit_code": 0, "elapsed_s": 0}
+
+    monkeypatch.setattr(loop, "invoke_codex", fake_invoke)
+    monkeypatch.setattr(loop, "inspect_site", lambda site: {"done": True, "unmet": [], "goal": {}})
+
+    args = loop.build_parser().parse_args([
+        "--showcase-root", str(showcase),
+        "--work-root", str(work),
+        "--slugs", "alpha",
+        "--clone-attempts", "1",
+        "--skill-fix-policy", "issue-only",
+    ])
+
+    loop.run_loop(args)
+
+    summary = json.loads((work / "onpixel-codex-loop-summary.json").read_text())
+    site = summary["sites"][0]
+    assert site["done"] is False
+    assert site["completionStatus"] == "contaminated"
+    assert site["previewEligible"] is False
+    assert "showcase source reuse detected" in site["inspection"]["unmet"][0]
+    assert (work / "alpha" / "source-reuse.md").is_file()
+
+
 def test_invoke_codex_polls_status_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeStdin:
         def __init__(self) -> None:

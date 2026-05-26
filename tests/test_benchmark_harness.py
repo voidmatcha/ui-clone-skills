@@ -37,6 +37,26 @@ def _write_state(ref_dir: Path, current_gate: str, gate_fails: dict | None = Non
     (ref_dir / "pipeline-state.json").write_text(json.dumps(payload))
 
 
+def _write_strict_proofs(ref: Path, *, asset_downloaded: int = 8) -> None:
+    (ref / "runtime-proof.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "pass",
+        "checks": [{"artifact": "runtime-dom-parity.json", "status": "pass"}],
+    }))
+    (ref / "transition-proof.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "pass",
+        "checks": [{"artifact": "transition-spec-coverage.json", "status": "pass"}],
+    }))
+    (ref / "asset-utilization.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "pass",
+        "downloaded": asset_downloaded,
+        "referenced": asset_downloaded,
+        "ratio": 1.0,
+    }))
+
+
 # ── check_strict_done ─────────────────────────────────────────────────────
 
 
@@ -79,8 +99,79 @@ def test_check_strict_done_all_satisfied(tmp_path: Path) -> None:
         "counts": {"critical": 0, "major": 0, "layout-major": 0, "minor": 0, "layout-minor": 0, "ok": 150, "unpaired": 0},
         "errorCount": 0, "reason": "all ok",
     }))
+    _write_strict_proofs(ref)
     done, unmet = benchmark_harness.check_strict_done(ref, impl)
     assert done, f"all conditions satisfied but unmet: {unmet}"
+
+
+def test_check_strict_done_missing_runtime_and_transition_proofs_block(tmp_path: Path) -> None:
+    """Pipeline done + static convergence is still incomplete without proof rollups."""
+    ref, impl = _make_ref_dir(tmp_path)
+    _write_state(ref, "done")
+    (impl / "src" / "app").mkdir(parents=True)
+    (impl / "src" / "app" / "page.tsx").write_text("hi\n")
+    comps = impl / "src" / "components"
+    comps.mkdir()
+    for n in ("A", "B", "C", "D"):
+        (comps / f"{n}.tsx").write_text("export default function X() { return null; }\n")
+    (ref / "sections").mkdir()
+    (ref / "sections" / "result.txt").write_text("**Result: 0 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n")
+    (ref / "tree-diff-status.json").write_text(json.dumps({"status": "pass", "counts": {"ok": 20, "unpaired": 0}}))
+    (ref / "asset-utilization.json").write_text(json.dumps({"status": "pass", "downloaded": 8, "referenced": 8}))
+
+    done, unmet = benchmark_harness.check_strict_done(ref, impl)
+
+    assert not done
+    assert any("runtime-proof.json missing" in u for u in unmet)
+    assert any("transition-proof.json missing" in u for u in unmet)
+
+
+def test_check_strict_done_asset_utilization_requires_min_downloaded(tmp_path: Path) -> None:
+    """Asset-utilization PASS with too small a sample is not a useful fidelity signal."""
+    ref, impl = _make_ref_dir(tmp_path)
+    _write_state(ref, "done")
+    (impl / "src" / "app").mkdir(parents=True)
+    (impl / "src" / "app" / "page.tsx").write_text("hi\n")
+    comps = impl / "src" / "components"
+    comps.mkdir()
+    for n in ("A", "B", "C", "D"):
+        (comps / f"{n}.tsx").write_text("export default function X() { return null; }\n")
+    (ref / "sections").mkdir()
+    (ref / "sections" / "result.txt").write_text("**Result: 0 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n")
+    (ref / "tree-diff-status.json").write_text(json.dumps({"status": "pass", "counts": {"ok": 20, "unpaired": 0}}))
+    _write_strict_proofs(ref, asset_downloaded=2)
+
+    done, unmet = benchmark_harness.check_strict_done(ref, impl)
+
+    assert not done
+    assert any("asset-utilization downloaded=2 < 5" in u for u in unmet)
+
+
+def test_check_strict_done_canvas_primary_requires_canvas_replay_closeout(tmp_path: Path) -> None:
+    """Canvas-primary refs need explicit closeout proof, not generic done."""
+    ref, impl = _make_ref_dir(tmp_path)
+    _write_state(ref, "done")
+    (impl / "src" / "app").mkdir(parents=True)
+    (impl / "src" / "app" / "page.tsx").write_text("hi\n")
+    comps = impl / "src" / "components"
+    comps.mkdir()
+    for n in ("A", "B", "C", "D"):
+        (comps / f"{n}.tsx").write_text("export default function X() { return null; }\n")
+    (ref / "sections").mkdir()
+    (ref / "sections" / "result.txt").write_text("**Result: 0 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n")
+    (ref / "tree-diff-status.json").write_text(json.dumps({"status": "pass", "counts": {"ok": 20, "unpaired": 0}}))
+    _write_strict_proofs(ref)
+    (ref / "canvas-webgl-detection.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "primaryRenderType": "canvas",
+        "hasCanvas": True,
+        "hasWebGL": False,
+    }))
+
+    done, unmet = benchmark_harness.check_strict_done(ref, impl)
+
+    assert not done
+    assert any("canvas-primary" in u for u in unmet)
 
 
 def test_check_strict_done_monolithic_page_blocks(tmp_path: Path) -> None:
@@ -95,7 +186,7 @@ def test_check_strict_done_monolithic_page_blocks(tmp_path: Path) -> None:
     done, unmet = benchmark_harness.check_strict_done(ref, impl)
     assert not done
     assert any("LOC >= 200" in u for u in unmet)
-    assert any("components has 0" in u for u in unmet)
+    assert any("component dirs have 0" in u for u in unmet)
 
 
 def test_check_strict_done_tree_diff_fail_blocks(tmp_path: Path) -> None:
@@ -209,6 +300,7 @@ def test_loop_exits_on_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     (ref / "sections").mkdir()
     (ref / "sections" / "result.txt").write_text("**Result: 0 FAIL**\n")
     (ref / "tree-diff-status.json").write_text(json.dumps({"status": "pass"}))
+    _write_strict_proofs(ref)
 
     args = mock.Mock(
         ref_dir=str(ref),
@@ -316,6 +408,7 @@ def test_log_file_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     (ref / "sections").mkdir()
     (ref / "sections" / "result.txt").write_text("**Result: 0 FAIL**\n")
     (ref / "tree-diff-status.json").write_text(json.dumps({"status": "pass"}))
+    _write_strict_proofs(ref)
 
     args = mock.Mock(
         ref_dir=str(ref),

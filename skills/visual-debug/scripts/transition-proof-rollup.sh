@@ -117,24 +117,22 @@ def measure_transition_coverage(d: dict | None) -> tuple[bool, str]:
     if not elements:
         return False, "probe ran but found 0 animated elements (URL or hydration issue)"
     # transition-coverage.json may be produced by Phase 6d as ref-side
-    # static extraction (no samples per element) OR by a post-implement
-    # runtime probe (samples array per element). If no element has a
-    # samples array, treat the artifact as ref-side extraction evidence
-    # and let reveal-trigger / video-motion-result carry the runtime
-    # proof instead — failing here on a schema mismatch the producer
-    # never emits would block every clone.
-    has_any_samples = any(el.get("samples") for el in elements)
-    if not has_any_samples:
+    # extraction (no samples or one baseline sample per element) OR by a
+    # post-implement runtime probe (two or more samples per element). Treat
+    # declaration-only artifacts as inventory and let runtime proof artifacts
+    # carry the firing evidence instead.
+    has_runtime_samples = any(len(el.get("samples") or []) >= 2 for el in elements)
+    if not has_runtime_samples:
         runtime_sources = runtime_proof_sources()
         if not runtime_sources:
             return False, (
                 f"{len(elements)} ref-side animated element(s) declared "
-                "(Phase 6d schema, no runtime samples) but no runtime proof "
+                "(Phase 6d schema, no multi-sample runtime probe) but no runtime proof "
                 "artifact passed"
             )
         return True, (
             f"{len(elements)} ref-side animated element(s) declared "
-            "(Phase 6d schema, no runtime samples — runtime proof carried by "
+            "(Phase 6d schema, no multi-sample runtime probe — runtime proof carried by "
             f"{', '.join(runtime_sources)})"
         )
     # Each element should have ≥2 samples and at least one non-default value
@@ -211,6 +209,25 @@ def measure_video_motion(path: Path) -> tuple[bool, str]:
     return False, "no PASS/FAIL marker in video-motion-result.txt"
 
 
+def measure_transition_compare(path: Path) -> tuple[bool, str]:
+    if not path.exists():
+        return False, "transition compare result missing"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return False, "transition compare result unreadable"
+    m = re.search(r"(\d+)\s+PASS,\s*(\d+)\s+FAIL", text)
+    if not m:
+        return False, "transition compare result has no PASS/FAIL tally"
+    passed = int(m.group(1))
+    failed = int(m.group(2))
+    if passed + failed == 0:
+        return False, "transition compare reports 0 pass / 0 fail"
+    if failed > 0:
+        return False, f"transition compare: {passed} pass / {failed} fail"
+    return True, f"transition compare: {passed} pass / 0 fail"
+
+
 def runtime_proof_sources() -> list[str]:
     sources: list[str] = []
     reveal = read_json_safe(ref_dir / "reveal-trigger.json")
@@ -227,6 +244,10 @@ def runtime_proof_sources() -> list[str]:
             or note == "trajectory pre-filter passed"
         ):
             sources.append("video-motion")
+    transition_compare_path = ref_dir / "transitions" / "result.txt"
+    ok, note = measure_transition_compare(transition_compare_path)
+    if ok and note.startswith("transition compare:"):
+        sources.append("transition-compare")
     return sources
 
 

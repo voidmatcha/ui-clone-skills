@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # text-fidelity-check.sh — block Phase-4 fabrication of visible text.
 #
-# Compares JSX text-position strings in `<impl>/src/**/*.tsx` against the
-# verbatim text in `<ref>/dom-scaffold.json` (Fix 8). Any string the impl
-# renders in a JSX text position that is NOT in the ref allowlist is flagged
-# as fabrication. Any meaningful scaffold text that the impl omits is flagged
-# as missing. Either condition fails the gate.
+# Compares JSX text-position strings in `<impl>/src/**/*.{tsx,jsx}` against the
+# verbatim text in `<ref>/dom-scaffold.json` (Fix 8), supplemented by
+# `<ref>/element-roles.json` when the runtime exposes richer rendered text.
+# Any string the impl renders in a JSX text position that is NOT in the ref
+# allowlist is flagged as fabrication. Any meaningful non-overlay scaffold
+# text that the impl omits is flagged as missing. Either condition fails the
+# gate.
 #
 # This closes the failure mode where Phase 4 invents text like "Eat Real
 # Food" / "Dietary Guidelines" when ref says "Real Food Wins" / "America is
@@ -83,6 +85,41 @@ scaffold = json.loads(scaffold_path.read_text(encoding="utf-8"))
 allowed_strings = set()
 required_strings = set()
 
+SKIP_TEXT_TAGS = {"script", "style", "noscript", "template"}
+OVERLAY_RE = re.compile(
+    r"(cookiebot|cookie[-_\s]?consent|consent|onetrust|iubenda|osano|cky)",
+    re.IGNORECASE,
+)
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def is_overlay_node(node: dict) -> bool:
+    haystack = " ".join(
+        str(node.get(key, ""))
+        for key in ("id", "class", "className", "selector", "aria-label", "role")
+    )
+    return bool(OVERLAY_RE.search(haystack))
+
+
+def add_text(text: str, *, required: bool) -> None:
+    norm = normalize_text(text)
+    if not norm:
+        return
+    allowed_strings.add(norm)
+    if required:
+        required_strings.add(norm)
+    # Also allow individual newline-split lines (some JSX renders
+    # "Real Food Wins" as two lines: "Real Food" and "Wins").
+    for line in re.split(r"[\r\n]+", text):
+        line = line.strip()
+        if line:
+            allowed_strings.add(line)
+            if required:
+                required_strings.add(line)
+
 
 def walk(node, depth=0):
     if depth > 12 or not isinstance(node, dict):
@@ -95,28 +132,45 @@ def walk(node, depth=0):
     # this filter the bidirectional check flags them as "missing" forever.
     # Mirror the dom-extraction skip list (script/style/noscript/template).
     tag = node.get("tag", "")
-    if isinstance(tag, str) and tag.lower() in {"script", "style", "noscript", "template"}:
+    if isinstance(tag, str) and tag.lower() in SKIP_TEXT_TAGS:
+        return
+    # Cookie/consent overlays are intentionally stripped by visual comparison
+    # and are not clone targets. Do not require their vendor copy in JSX.
+    if is_overlay_node(node):
         return
     text = node.get("text")
     if isinstance(text, str) and text.strip():
-        # Normalize: collapse whitespace, strip. We compare on normalized form
-        # so trailing-space variants don't false-positive.
-        norm = re.sub(r"\s+", " ", text).strip()
-        if norm:
-            allowed_strings.add(norm)
-            required_strings.add(norm)
-            # Also allow individual newline-split lines (some JSX renders
-            # "Real Food Wins" as two lines: "Real Food" and "Wins").
-            for line in re.split(r"[\r\n]+", text):
-                line = line.strip()
-                if line:
-                    allowed_strings.add(line)
-                    required_strings.add(line)
+        add_text(text, required=True)
     for child in node.get("children", []) or []:
         walk(child, depth + 1)
 
 
 walk(scaffold.get("tree", {}))
+
+# element-roles.json is a broader rendered-text capture than dom-scaffold.json
+# for Readymag-like runtimes. Use it as fabrication allowlist evidence, while
+# keeping missing-text requirements tied to dom-scaffold leaf text.
+roles_path = scaffold_path.parent / "element-roles.json"
+if roles_path.exists():
+    try:
+        roles_data = json.loads(roles_path.read_text(encoding="utf-8"))
+    except Exception:
+        roles_data = {}
+    for el in roles_data.get("elements", []) if isinstance(roles_data, dict) else []:
+        if not isinstance(el, dict) or is_overlay_node(el):
+            continue
+        tag = el.get("tag", "")
+        if isinstance(tag, str) and tag.lower() in SKIP_TEXT_TAGS:
+            continue
+        text = el.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        norm = normalize_text(text)
+        if len(norm) > 220:
+            continue
+        if any(marker in norm for marker in ("@keyframes", "@font-face", "{", "}")):
+            continue
+        add_text(norm, required=False)
 
 # Also accept short/common strings — these are noise from the allowlist diff
 # perspective (numbers, single words like "Get started", etc.). We're after
@@ -159,14 +213,15 @@ JSX_TEXT_PATTERNS = [
 
 
 SCAN_EXCLUDE = {"node_modules", ".next", "dist", "build", ".turbo"}
-all_tsx = []
+all_components = []
 src_root = impl_dir / "src"
 if src_root.is_dir():
-    for p in src_root.rglob("*.tsx"):
-        if any(part in SCAN_EXCLUDE for part in p.parts):
-            continue
-        all_tsx.append(p)
-impl_components = sorted(all_tsx)
+    for pattern in ("*.tsx", "*.jsx"):
+        for p in src_root.rglob(pattern):
+            if any(part in SCAN_EXCLUDE for part in p.parts):
+                continue
+            all_components.append(p)
+impl_components = sorted(all_components)
 required_meaningful = sorted(s for s in required_strings if is_meaningful(s))
 if not impl_components:
     status = "fail" if required_meaningful else "pass"
@@ -278,9 +333,10 @@ out = {
     "missing": missing[:50],
     "rule": (
         "Every meaningful JSX text-position string in impl/src/ must appear "
-        "in the dom-scaffold.json allowlist, and every meaningful scaffold "
-        "text string must be rendered by the impl. Invented text and omitted "
-        "source text both fail this gate."
+        "in captured rendered-text evidence (dom-scaffold.json plus "
+        "element-roles.json allowlist), and every meaningful non-overlay "
+        "dom-scaffold text string must be rendered by the impl. Invented text "
+        "and omitted source text both fail this gate."
     ),
 }
 print(json.dumps(out, indent=2, ensure_ascii=False))

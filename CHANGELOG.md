@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.7.19] - 2026-05-26
+
+Patch release for general clone-loop completion safeguards.
+
+### Added
+
+- **Local source reuse contamination detection.** Added a generic
+  `ui_clone.local_source_reuse` helper that detects copy-style reuse of
+  protected local exemplar roots from clone transcripts or embedded absolute
+  paths. The onpixel loop now uses it to mark reused showcase implementations
+  as `completionStatus=contaminated`, writes `source-reuse.md`, disables
+  preview eligibility, and skips skill-fix escalation for contamination.
+- **Strict done runtime evidence.** `benchmark_harness.check_strict_done` now
+  requires `runtime-proof.json`, `transition-proof.json`, and a passing
+  `asset-utilization.json` with at least five downloaded assets before a loop
+  can claim completion.
+- **Canvas/WebGL completion guard.** Canvas-primary and WebGL-primary refs now
+  require explicit canvas-replay closeout proof in strict completion checks,
+  and `runtime-proof-rollup.sh` now includes `runtime-frame-proof.json` so
+  planned canvas/WebGL/Lottie frame-delta checks cannot be silently skipped.
+
+### Fixed
+
+- **Rendered text fidelity coverage.** `text-fidelity-check.sh` now scans JSX
+  as well as TSX components, ignores cookie/consent overlay text as non-target
+  copy, and uses `element-roles.json` as rendered-text allowlist evidence.
+- **Transition proof grounding.** `transition-proof-rollup.sh` now treats
+  declaration-only or single-sample transition coverage as inventory unless a
+  runtime proof source, including `transitions/result.txt`, carries the motion
+  evidence.
+- **Original URL preflight tolerance.** `auto-verify.sh` no longer blocks solely
+  because a browser-loadable origin rejects raw curl preflight; the browser
+  verification still decides fidelity.
+
 ## [0.7.18] - 2026-05-26
 
 Patch release for completion-focused onpixel clone loop automation.

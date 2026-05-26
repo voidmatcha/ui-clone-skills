@@ -19,8 +19,11 @@ Stop conditions (STRICT v2; mirrors plan file)
 - 0 section-threshold gaming
 - tree-diff-status.json status == "pass"
 - transitions/result.txt exists AND 0 ❌ rows
+- runtime-proof.json status == "pass"
+- transition-proof.json status == "pass"
 - bundle-impl-coverage.json status == "pass"
 - asset-utilization.json status == "pass" AND downloaded >= 5
+- canvas-primary refs require explicit canvas-replay closeout proof
 
 Outcomes:
 - DONE — all stop conditions met
@@ -80,6 +83,61 @@ def _count_tsx(dir: Path) -> int:
     return sum(1 for p in dir.rglob("*.tsx") if p.is_file() and not p.name.startswith("."))
 
 
+def _find_page_file(impl_dir: Path) -> Path | None:
+    for rel in ("src/app/page.tsx", "app/page.tsx"):
+        path = impl_dir / rel
+        if path.is_file():
+            return path
+    return None
+
+
+def _count_component_tsx(impl_dir: Path) -> int:
+    roots = [
+        impl_dir / "src" / "components",
+        impl_dir / "components",
+        impl_dir / "app" / "components",
+    ]
+    projects_root = impl_dir / "src" / "projects"
+    if projects_root.is_dir():
+        roots.extend(path for path in projects_root.glob("*/components") if path.is_dir())
+
+    seen: set[Path] = set()
+    total = 0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.tsx"):
+            if path.is_file() and not path.name.startswith(".") and path not in seen:
+                seen.add(path)
+                total += 1
+    return total
+
+
+def _artifact_status(ref_dir: Path, name: str) -> str | None:
+    data = _read_json(ref_dir / name)
+    if not isinstance(data, dict):
+        return None
+    status = data.get("status")
+    return str(status) if status is not None else None
+
+
+def _primary_canvas_render_type(ref_dir: Path) -> str | None:
+    data = _read_json(ref_dir / "canvas-webgl-detection.json")
+    if not isinstance(data, dict):
+        return None
+    render_type = str(data.get("primaryRenderType") or "").strip().lower()
+    if render_type in {"canvas", "webgl"}:
+        return render_type
+    return None
+
+
+def _has_canvas_replay_closeout(ref_dir: Path, state: PipelineState) -> bool:
+    if state.closeout_policy != "canvas-replay":
+        return False
+    stamp = _read_json(ref_dir / "canvas-replay-stamp.json")
+    return isinstance(stamp, dict) and stamp.get("closeoutKind") == "canvas-replay"
+
+
 def check_strict_done(ref_dir: Path, impl_dir: Path) -> tuple[bool, list[str]]:
     """Return (done, list_of_unmet_conditions).
 
@@ -101,17 +159,23 @@ def check_strict_done(ref_dir: Path, impl_dir: Path) -> tuple[bool, list[str]]:
     if state.gate_fail_counts:
         unmet.append(f"gate_fail_counts non-empty: {dict(state.gate_fail_counts)}")
 
+    primary_canvas = _primary_canvas_render_type(ref_dir)
+    if primary_canvas and not _has_canvas_replay_closeout(ref_dir, state):
+        unmet.append(
+            f"canvas-primary reference primaryRenderType={primary_canvas!r} "
+            "requires closeoutPolicy='canvas-replay' plus canvas-replay-stamp.json"
+        )
+
     # Structure
-    page = impl_dir / "src" / "app" / "page.tsx"
-    page_loc = _file_lines(page)
+    page = _find_page_file(impl_dir)
+    page_loc = _file_lines(page) if page is not None else 0
     if page_loc == 0:
-        unmet.append("impl/src/app/page.tsx missing")
+        unmet.append("impl page.tsx missing (checked src/app/page.tsx and app/page.tsx)")
     elif page_loc >= 200:
         unmet.append(f"page.tsx {page_loc} LOC >= 200 (need <200 — split into components)")
-    comps_dir = impl_dir / "src" / "components"
-    comps = _count_tsx(comps_dir)
+    comps = _count_component_tsx(impl_dir)
     if comps <= 3:
-        unmet.append(f"impl/src/components has {comps} .tsx files (need >3)")
+        unmet.append(f"impl component dirs have {comps} .tsx files (need >3)")
 
     # Section-compare result
     result_txt = ref_dir / "sections" / "result.txt"
@@ -156,6 +220,13 @@ def check_strict_done(ref_dir: Path, impl_dir: Path) -> tuple[bool, list[str]]:
         if tr_fails > 0:
             unmet.append(f"transitions/result.txt has {tr_fails} ❌ row(s)")
 
+    for artifact_name in ("runtime-proof.json", "transition-proof.json"):
+        status = _artifact_status(ref_dir, artifact_name)
+        if status is None:
+            unmet.append(f"{artifact_name} missing (run required proof rollup)")
+        elif status != "pass":
+            unmet.append(f"{artifact_name} status={status!r} (need 'pass')")
+
     # bundle-impl-coverage
     bic = _read_json(ref_dir / "bundle-impl-coverage.json")
     if isinstance(bic, dict) and bic.get("status") not in (None, "pass", "skip"):
@@ -166,12 +237,17 @@ def check_strict_done(ref_dir: Path, impl_dir: Path) -> tuple[bool, list[str]]:
 
     # asset-utilization
     au = _read_json(ref_dir / "asset-utilization.json")
-    if isinstance(au, dict):
-        if au.get("status") not in (None, "pass", "skip"):
+    if not isinstance(au, dict):
+        unmet.append("asset-utilization.json missing (run asset-utilization-check)")
+    else:
+        if au.get("status") != "pass":
             unmet.append(
                 f"asset-utilization status={au.get('status')!r} "
                 f"(ratio={au.get('ratio')}, threshold={au.get('threshold')})"
             )
+        downloaded = int(au.get("downloaded") or 0)
+        if downloaded < 5:
+            unmet.append(f"asset-utilization downloaded={downloaded} < 5")
 
     return (len(unmet) == 0), unmet
 

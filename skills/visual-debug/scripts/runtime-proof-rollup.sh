@@ -24,6 +24,7 @@
 #   runtime-dom-parity.json        — Tier 2 (DOM node count + structure)
 #   motion-coverage.json           — Tier 2 + Tier 3 (motion presence)
 #   runtime-spec-coverage.json     — Tier 3 (spec coverage runtime)
+#   runtime-frame-proof.json       — Tier 3 (canvas/WebGL/Lottie frame delta)
 #   header-state-runtime.json      — Tier 4 (header state machine)
 #   scroll-completion.json     — Tier 3 (scroll reveal completion)
 #   reveal-trigger.json            — Tier 3 (IO reveal triggers)
@@ -76,6 +77,30 @@ def lottie_measure(d: dict) -> tuple[bool, str]:
         # ref had no lottie signal → not-attempted is fine
         return (not d.get("refDetected", False)), "not-attempted"
     return False, f"runtimeProof.status={rp_status}"
+
+def runtime_frame_measure(d: dict) -> tuple[bool, str]:
+    if d.get("status") == "skip":
+        return True, "skipped"
+    if d.get("status") != "pass":
+        return False, f"status={d.get('status')}"
+    try:
+        canvas_total = int(d.get("canvasTotal", 0) or 0)
+        canvas_adv = int(d.get("canvasAdvanced", 0) or 0)
+        webgl_adv = int(d.get("webglAdvanced", 0) or 0)
+        lottie_inst = int(d.get("lottieInstances", 0) or 0)
+        lottie_adv = int(d.get("lottieAdvanced", 0) or 0)
+    except (TypeError, ValueError):
+        return False, "pass but frame counters are not numeric"
+    if canvas_total == 0 and lottie_inst == 0:
+        return False, "pass but no animation surface was measured"
+    if canvas_total > 0 and canvas_adv == 0 and webgl_adv == 0:
+        return False, f"{canvas_total} canvas surface(s) but 0 frame deltas"
+    if lottie_inst > 0 and lottie_adv == 0:
+        return False, f"{lottie_inst} Lottie instance(s) but 0 frame deltas"
+    return True, (
+        f"canvas={canvas_adv}/{canvas_total} webgl={webgl_adv} "
+        f"lottie={lottie_adv}/{lottie_inst}"
+    )
 
 def header_measure(d: dict) -> tuple[bool, str]:
     if d.get("status") == "skip":
@@ -206,6 +231,7 @@ components = [
     ("runtime-dom-parity.json",    "Tier 2 structure", runtime_dom_measure),
     ("motion-coverage.json",       "Tier 2 motion",   motion_coverage_measure),
     ("runtime-spec-coverage.json", "Tier 3 spec",     runtime_spec_coverage_measure),
+    ("runtime-frame-proof.json",   "Tier 3 frame",    runtime_frame_measure),
     ("scroll-completion.json", "Tier 3 reveal",   scroll_end_measure),
     ("reveal-trigger.json",        "Tier 3 reveal",   reveal_trigger_measure),
     ("header-state-runtime.json",  "Tier 4 state",    header_measure),

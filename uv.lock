@@ -689,7 +689,7 @@ wheels = [
 
 [[package]]
 name = "ui-clone-skills"
-version = "0.7.18"
+version = "0.7.19"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },

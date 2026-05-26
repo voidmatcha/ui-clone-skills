@@ -161,6 +161,8 @@ for url in "$ORIG_URL" "$IMPL_URL"; do
   code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
   if [ "$code" = "200" ]; then
     echo -e "  ${GREEN}✓${NC} $url → $code"
+  elif [ "$url" = "$ORIG_URL" ]; then
+    echo -e "  ${YELLOW}WARN${NC} $url → $code (raw curl preflight only; browser verification will decide)"
   else
     echo -e "  ${RED}✗${NC} $url → $code"
     echo -e "${RED}BLOCKED: Cannot reach $url. Start the server first.${NC}"

@@ -225,6 +225,57 @@ def test_transition_proof_accepts_phase6d_declarations_with_video_motion(tmp_pat
     assert artifact["status"] == "pass"
 
 
+def test_transition_proof_accepts_single_sample_phase6d_with_hover_compare(
+    tmp_path: Path,
+) -> None:
+    """Quick-tier hover proof should carry runtime evidence for ref-side samples."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "tier": "quick",
+        "requiredChecks": [
+            {"id": "transition-spec-coverage", "produces": "transition-spec-coverage.json"},
+            {"id": "transition-proof", "produces": "transition-proof.json"},
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "readymag-nav-hover-transition"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [
+            {
+                "selector": ".rmwidget",
+                "trigger": "css-transition",
+                "samples": [{"scrollY": 0, "opacity": "1"}],
+            }
+        ],
+    }))
+    transitions = ref / "transitions"
+    transitions.mkdir()
+    (transitions / "result.txt").write_text(
+        "Transition compare: 1 PASS, 0 FAIL\n✅ PASS  .rmwidget\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "pass"
+    assert any(
+        "transition-compare" in component["note"]
+        for component in artifact["components"]
+        if component["artifact"] == "transition-coverage.json"
+    )
+
+
 def test_transition_proof_rejects_phase6d_declarations_without_runtime_proof(
     tmp_path: Path,
 ) -> None:

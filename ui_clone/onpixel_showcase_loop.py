@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from ui_clone.local_source_reuse import detect_local_source_reuse
+
 
 @dataclass(frozen=True)
 class ShowcaseItem:
@@ -185,6 +187,9 @@ def write_handover(showcase_root: Path, site: SiteWorkspace) -> None:
         "",
         "- Implement under the work impl dir only.",
         "- Use the work ref dir as the active `tmp/ref/<slug>` equivalent.",
+        "- Do not copy, rsync, cp -R, or port source files/assets from the",
+        "  showcase tree into the impl. Local showcase paths are orientation",
+        "  only; clone fidelity must come from the original URL and ref artifacts.",
         "- Do not edit plugin code during clone work.",
         "- If a gate failure looks like a ui-clone-skills bug, write a concise",
         "  `skill-issue.md` in the site work dir with reproduction commands and",
@@ -235,14 +240,26 @@ Contract:
    capture/extraction flow for `{site.item.original_url}` into that ref dir.
    If `{site.impl_dir}` has no app scaffold, create the smallest Next/React
    implementation scaffold needed for the verification commands to run.
-3. Do not edit `skills/`, `scripts/`, `ui_clone/`, `tests/`, hooks, plugin
+3. Do not copy, rsync, cp -R, or port source files or public assets from
+   `{showcase_root}` into `{site.impl_dir}`. The existing showcase tree is
+   read-only orientation, not a source implementation. Download assets from the original URL
+   or URLs recorded in `{site.ref_dir}` using the normal pipeline scripts.
+   If you discover that you already copied from the showcase tree,
+   write `{site.site_dir / "source-reuse.md"}` and mark the clone INCOMPLETE.
+4. Do not edit `skills/`, `scripts/`, `ui_clone/`, `tests/`, hooks, plugin
    manifests, or any other plugin tooling in this clone pass.
-4. Run the cheapest relevant verification after edits. Prefer `python -m
+5. Run the cheapest relevant verification after edits. Prefer `python -m
    ui_clone.goal {site.ref_dir}` for the next bounded action.
-5. If verification exposes a ui-clone-skills bug, do not patch it here. Write
+6. Do not report build, HTTP 200, source string presence, or copied local
+   showcase behavior as completion. Completion needs strict inspection:
+   `current_gate == "done"` plus runtime/media/transition proof artifacts.
+   Dynamic primary renderers such as canvas/WebGL must have explicit runtime
+   frame proof or canvas-replay closeout proof; static screenshots or
+   approximated scroll effects are not completion.
+7. If verification exposes a ui-clone-skills bug, do not patch it here. Write
    `{site.site_dir / "skill-issue.md"}` with reproduction command, expected
    behavior, actual behavior, and artifact paths.
-6. Exit after one coherent pass. The outer runner will inspect and continue to
+8. Exit after one coherent pass. The outer runner will inspect and continue to
    the next site or launch a separate skill-fix pass.
 """
 
@@ -419,6 +436,83 @@ def inspect_site(site: SiteWorkspace) -> dict[str, Any]:
     return {"done": done, "unmet": unmet, "goal": goal_status}
 
 
+def _protected_showcase_roots(showcase_root: Path, slug: str) -> list[Path]:
+    return [
+        showcase_root / "src" / "projects" / slug,
+        showcase_root / "src" / "app" / slug,
+        showcase_root / "public" / "projects" / slug,
+        showcase_root / "public" / "images" / slug,
+        showcase_root / "public" / "videos" / slug,
+        showcase_root / "public" / "fonts" / slug,
+    ]
+
+
+def detect_showcase_reuse(
+    site: SiteWorkspace,
+    showcase_root: Path,
+    *,
+    log_paths: Sequence[Path] | None = None,
+) -> list[str]:
+    """Return contamination findings when clone work copied from showcase.
+
+    Reading local showcase files is allowed for orientation. Copy-style commands
+    from showcase source/public paths into impl are not, because they measure
+    the pre-existing onpixel implementation rather than the clone pipeline.
+    """
+    logs = list(log_paths) if log_paths is not None else sorted(site.site_dir.glob("codex-clone*.jsonl"))
+    return detect_local_source_reuse(
+        impl_dir=site.impl_dir,
+        protected_roots=_protected_showcase_roots(showcase_root, site.item.slug),
+        log_paths=logs,
+        source_label="showcase",
+    )
+
+
+def _write_source_reuse_report(site: SiteWorkspace, findings: Sequence[str]) -> None:
+    lines = [
+        "# Showcase Source Reuse",
+        "",
+        "This clone attempt is contaminated: it copied or embedded local showcase",
+        "source/assets instead of deriving the implementation from the live",
+        "reference URL and ref artifacts.",
+        "",
+        "## Findings",
+        *(f"- {finding}" for finding in findings),
+        "",
+        "## Required Next Action",
+        "",
+        "Discard the contaminated impl or overwrite it with a clean implementation",
+        "built from the original URL, downloaded assets, and generated ref artifacts.",
+        "Do not use the local showcase implementation as source material.",
+        "",
+    ]
+    site.site_dir.joinpath("source-reuse.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _apply_source_reuse_findings(
+    site: SiteWorkspace,
+    inspection: dict[str, Any],
+    findings: Sequence[str],
+) -> dict[str, Any]:
+    if not findings:
+        return inspection
+    _write_source_reuse_report(site, findings)
+    updated = dict(inspection)
+    unmet = list(updated.get("unmet") or [])
+    unmet.insert(0, f"showcase source reuse detected: {findings[0]}")
+    updated["done"] = False
+    updated["unmet"] = unmet
+    updated["sourceReuse"] = {"status": "fail", "findings": list(findings)}
+    return updated
+
+
+def _completion_status(inspection: dict[str, Any]) -> str:
+    source_reuse = inspection.get("sourceReuse")
+    if isinstance(source_reuse, dict) and source_reuse.get("status") == "fail":
+        return "contaminated"
+    return "done" if inspection.get("done") else "wip"
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
@@ -450,6 +544,9 @@ def _should_run_skill_fix(
     inspection: dict[str, Any],
 ) -> bool:
     if args.dry_run or args.skip_skill_fix:
+        return False
+    source_reuse = inspection.get("sourceReuse")
+    if isinstance(source_reuse, dict) and source_reuse.get("status") == "fail":
         return False
     if args.skill_fix_policy == "issue-only":
         return (site.site_dir / "skill-issue.md").exists()
@@ -494,6 +591,8 @@ def run_loop(args: argparse.Namespace) -> str:
                 "cloneAttempts": [],
                 "skillFixAttempts": [],
                 "done": False,
+                "completionStatus": "wip",
+                "previewEligible": False,
             }
             summary["sites"].append(site_record)
             log({"event": "site_start", "slug": item.slug, "siteDir": str(site.site_dir)})
@@ -505,6 +604,7 @@ def run_loop(args: argparse.Namespace) -> str:
             for attempt in range(1, max_attempts + 1):
                 clone_prompt = build_clone_prompt(site, showcase_root, plugin_root)
                 clone_prompt_path = _attempt_path(site, "codex-clone-prompt", ".md", attempt)
+                clone_log_path = _attempt_path(site, "codex-clone", ".jsonl", attempt)
                 clone_prompt_path.write_text(clone_prompt, encoding="utf-8")
 
                 if args.dry_run:
@@ -514,7 +614,7 @@ def run_loop(args: argparse.Namespace) -> str:
                         clone_prompt,
                         codex_bin=args.codex_bin,
                         cwd=plugin_root,
-                        log_path=_attempt_path(site, "codex-clone", ".jsonl", attempt),
+                        log_path=clone_log_path,
                         output_last_message=_attempt_path(site, "codex-clone-last", ".md", attempt),
                         status_path=_attempt_path(site, "codex-clone-status", ".json", attempt),
                         add_dirs=[work_root, showcase_root],
@@ -525,10 +625,15 @@ def run_loop(args: argparse.Namespace) -> str:
                     )
 
                 inspection = inspect_site(site)
+                reuse_findings = detect_showcase_reuse(site, showcase_root, log_paths=[clone_log_path])
+                inspection = _apply_source_reuse_findings(site, inspection, reuse_findings)
+                completion_status = _completion_status(inspection)
                 attempt_record = {
                     "attempt": attempt,
                     "clone": clone_result,
                     "inspection": inspection,
+                    "completionStatus": completion_status,
+                    "previewEligible": completion_status == "done",
                     "skillIssue": str(site.site_dir / "skill-issue.md")
                     if (site.site_dir / "skill-issue.md").exists()
                     else None,
@@ -537,6 +642,8 @@ def run_loop(args: argparse.Namespace) -> str:
                 site_record["clone"] = clone_result
                 site_record["inspection"] = inspection
                 site_record["done"] = bool(inspection.get("done"))
+                site_record["completionStatus"] = completion_status
+                site_record["previewEligible"] = completion_status == "done"
                 _write_json(work_root / "onpixel-codex-loop-summary.json", summary)
 
                 if inspection.get("done"):
