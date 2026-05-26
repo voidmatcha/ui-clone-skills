@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.17] - 2026-05-26
+
+Patch release for section-compare goal routing consistency.
+
+### Fixed
+
+- **Clean section-compare prerequisite routing.** `ui_clone.goal` now routes a
+  clean `section-compare` state with missing earlier gates to the earliest
+  missing prerequisite instead of asking the worker to re-run
+  `section-compare.sh`, and `--check-done` prints the missing-prerequisite
+  diagnostic to stderr before exiting nonzero.
+
 ## [0.7.16] - 2026-05-26
 
 Patch release for hotlink-protected image asset downloads.

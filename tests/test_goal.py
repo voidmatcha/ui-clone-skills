@@ -702,6 +702,53 @@ def test_goal_card_done_with_missing_prerequisites_points_to_earliest_gap(
     assert "Stop evidence status: not satisfied: pipeline-state.json missing" in card
 
 
+def test_goal_card_section_compare_clean_with_missing_prerequisites_points_to_earliest_gap(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.goal import build_goal_card
+
+    ref_dir = tmp_path / "tmp" / "ref" / "hero"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": "hero",
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": [
+                    "reference",
+                    "extraction",
+                    "bundle",
+                    "spec",
+                    "pre-generate",
+                    "post-implement",
+                ],
+                "current_gate": "section-compare",
+                "last_updated": "2026-01-01T01:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = ref_dir / "sections" / "result.txt"
+    result.parent.mkdir(parents=True)
+    result.write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| hero | 0 | 0 | ok | ✅ |\n"
+        "\n**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+
+    card = build_goal_card(ref_dir)
+
+    assert "Current gate: section-compare" in card
+    assert "Current goal: Resolve out-of-order pipeline state" in card
+    assert "Next action: Run python -m ui_clone.gate" in card
+    assert " paid-features" in card
+    assert "section-compare.sh" not in card
+    assert "paid-features, state-coverage, boundary, font-parity" in card
+    assert "Stop evidence status: not satisfied: pipeline-state.json missing" in card
+
+
 def test_goal_check_done_exits_one_when_done_but_prerequisites_missing(
     tmp_path: Path,
 ) -> None:
@@ -741,6 +788,55 @@ def test_goal_check_done_exits_one_when_done_but_prerequisites_missing(
     )
 
     assert result.returncode == 1
+
+
+def test_goal_check_done_reports_missing_prerequisites_when_section_compare_clean(
+    tmp_path: Path,
+) -> None:
+    ref_dir = tmp_path / "tmp" / "ref" / "hero"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": "hero",
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_steps": [
+                    "reference",
+                    "extraction",
+                    "bundle",
+                    "spec",
+                    "pre-generate",
+                    "post-implement",
+                ],
+                "current_gate": "section-compare",
+                "last_updated": "2026-01-01T01:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_file = ref_dir / "sections" / "result.txt"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---------|-----|--------|----------|--------|\n"
+        "| hero | 0 | 0 | ok | ✅ |\n"
+        "\n**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ui_clone.goal", str(ref_dir), "--check-done"],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert (
+        "pipeline-state.json missing completed prerequisite gate(s): "
+        "paid-features, state-coverage, boundary, font-parity"
+    ) in result.stderr
 
 
 def test_goal_card_unknown_gate_does_not_suggest_invalid_gate_command(tmp_path: Path) -> None:

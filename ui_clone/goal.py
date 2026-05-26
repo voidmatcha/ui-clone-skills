@@ -166,13 +166,20 @@ def _section_compare_status(ref_dir: Path) -> str:
     return f"not satisfied: sections/result.txt has {fail_count} FAIL line(s) and {missing_count} MISSING impl line(s)"
 
 
+def _missing_prerequisite_status(state: PipelineState, gate: str) -> str | None:
+    missing = state.missing_prerequisites(gate)
+    if not missing:
+        return None
+    return (
+        "not satisfied: pipeline-state.json missing completed "
+        f"prerequisite gate(s): {', '.join(missing)}"
+    )
+
+
 def _done_stop_evidence_status(ref_dir: Path, state: PipelineState) -> str:
-    missing = state.missing_prerequisites("done")
-    if missing:
-        return (
-            "not satisfied: pipeline-state.json missing completed "
-            f"prerequisite gate(s): {', '.join(missing)}"
-        )
+    missing_status = _missing_prerequisite_status(state, "done")
+    if missing_status is not None:
+        return missing_status
     return _section_compare_status(ref_dir)
 
 
@@ -426,6 +433,7 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     command_ref = str(ref_dir)
     next_action = step.next_action.replace("<ref-dir>", command_ref)
     evidence = step.required_evidence.replace("<ref-dir>", command_ref)
+    stop_evidence_status: str | None = None
 
     if gate == "done":
         missing = state.missing_prerequisites("done")
@@ -445,6 +453,28 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
             )
             next_action = step.next_action.replace("<ref-dir>", command_ref)
             evidence = step.required_evidence.replace("<ref-dir>", command_ref)
+        stop_evidence_status = _done_stop_evidence_status(ref_dir, state)
+    elif gate == "section-compare":
+        missing_status = _missing_prerequisite_status(state, gate)
+        if (
+            missing_status is not None
+            and _section_compare_status(ref_dir).startswith("satisfied:")
+        ):
+            earliest = state.missing_prerequisites(gate)[0]
+            step = GoalStep(
+                current_goal="Resolve out-of-order pipeline state",
+                next_action=(
+                    f"Run python -m ui_clone.gate <ref-dir> {earliest}, "
+                    "then refresh the goal card"
+                ),
+                required_evidence=(
+                    "pipeline-state.json completed_steps includes missing "
+                    f"prerequisite gate(s): {', '.join(state.missing_prerequisites(gate))}"
+                ),
+            )
+            next_action = step.next_action.replace("<ref-dir>", command_ref)
+            evidence = step.required_evidence.replace("<ref-dir>", command_ref)
+            stop_evidence_status = missing_status
 
     # Visual-judge routing: when sections/result.txt has FAIL rows, AE alone
     # is a dead gradient signal. Override the generic next-action with a
@@ -522,9 +552,7 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
         required_evidence=evidence,
         manual_refresh=f"python -m ui_clone.goal {command_ref}",
         no_infinite_loop=_NO_INFINITE_LOOP,
-        stop_evidence_status=(
-            _done_stop_evidence_status(ref_dir, state) if gate == "done" else None
-        ),
+        stop_evidence_status=stop_evidence_status,
         stuck_banner=stuck_banner,
         abort_banner=abort_banner,
     )
@@ -605,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
         # the pipeline somehow advanced to "done" (it shouldn't, but defend
         # against partial-state runs).
         if card.abort_banner is not None:
+            print(card.abort_banner, file=sys.stderr)
             return 2
         # The stop condition mirrors `_STOP_CONDITION`: gate is "done" AND the
         # section-compare evidence string starts with "satisfied:". stop_evidence_status
@@ -613,6 +642,10 @@ def main(argv: list[str] | None = None) -> int:
             "satisfied:"
         ):
             return 0
+        diagnostic = card.stop_evidence_status or (
+            f"not satisfied: current_gate is {card.current_gate!r}, not 'done'"
+        )
+        print(diagnostic, file=sys.stderr)
         return 1
     if args.json_output:
         print(json.dumps(card.to_json(), ensure_ascii=False, indent=2))
