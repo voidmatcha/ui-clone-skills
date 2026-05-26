@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -199,6 +200,47 @@ def write_handover(showcase_root: Path, site: SiteWorkspace) -> None:
     site.handover_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_impl_agents(site: SiteWorkspace, plugin_root: Path) -> None:
+    lines = [
+        "# AGENTS.md - Natural Clone Workspace",
+        "",
+        f"This directory is the implementation workspace for `{site.item.original_url}`.",
+        "The prompt sent to Codex is intentionally terse and user-like; this",
+        "workspace file carries runner constraints without leaking them into the",
+        "user prompt.",
+        "",
+        "## Workspace",
+        "",
+        "- Create and edit the clone inside this directory only.",
+        "- Serve previews with `--host 0.0.0.0` when possible.",
+        f"- Active reference artifacts: `{site.ref_dir}`.",
+        f"- ui-clone-skills root: `{plugin_root}`.",
+        "",
+        "## Source Rules",
+        "",
+        "- Build from the live URL, downloaded assets, and generated reference",
+        "  artifacts.",
+        "- Do not copy, rsync, cp -R, or port source files or public assets from",
+        "  local showcase/source directories into this implementation.",
+        "- Do not edit plugin code, scripts, hooks, manifests, or tests during the",
+        "  clone pass.",
+        "",
+        "## Closeout",
+        "",
+        "Before claiming done, run both checks from this directory:",
+        "",
+        f"- `bash \"{plugin_root / 'scripts' / 'verify' / 'completion-report.sh'}\" \"{site.ref_dir}\" \"$(pwd)\"`",
+        f"- `uv run --project \"{plugin_root}\" python -m ui_clone.goal \"{site.ref_dir}\" --check-done`",
+        "",
+        "If either check reports missing artifacts, failed rows, or a non-zero exit,",
+        "answer `INCOMPLETE` and list the blockers. Build success, HTTP 200, page",
+        "title checks, manual screenshots, or implementation-only smoke tests are",
+        "not completion evidence.",
+        "",
+    ]
+    site.impl_dir.joinpath("AGENTS.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def prepare_site_workspace(
     showcase_root: Path,
     work_root: Path,
@@ -217,51 +259,16 @@ def prepare_site_workspace(
     site = SiteWorkspace(item, site_dir, ref_dir, impl_dir, handover_path)
     _copy_ref_if_present(showcase_root, site)
     write_handover(showcase_root, site)
+    write_impl_agents(site, Path(__file__).resolve().parents[1])
     return site
 
 
-def build_clone_prompt(site: SiteWorkspace, showcase_root: Path, plugin_root: Path) -> str:
-    return f"""You are the clone worker for onpixel showcase `{site.item.slug}`.
-
-User is sleeping; run autonomously and stop only when this bounded pass is done.
-
-Inputs:
-- Handover: `{site.handover_path}`
-- Original URL: {site.item.original_url}
-- Existing showcase root for read-only context: `{showcase_root}`
-- ui-clone-skills repo: `{plugin_root}`
-- Active ref dir: `{site.ref_dir}`
-- Target impl dir: `{site.impl_dir}`
-
-Contract:
-1. Implement or iterate the clone under `{site.impl_dir}` only.
-2. Use the handover and ref artifacts first; recapture only when necessary.
-   If `{site.ref_dir}` is empty, run the normal ui-clone-skills reference
-   capture/extraction flow for `{site.item.original_url}` into that ref dir.
-   If `{site.impl_dir}` has no app scaffold, create the smallest Next/React
-   implementation scaffold needed for the verification commands to run.
-3. Do not copy, rsync, cp -R, or port source files or public assets from
-   `{showcase_root}` into `{site.impl_dir}`. The existing showcase tree is
-   read-only orientation, not a source implementation. Download assets from the original URL
-   or URLs recorded in `{site.ref_dir}` using the normal pipeline scripts.
-   If you discover that you already copied from the showcase tree,
-   write `{site.site_dir / "source-reuse.md"}` and mark the clone INCOMPLETE.
-4. Do not edit `skills/`, `scripts/`, `ui_clone/`, `tests/`, hooks, plugin
-   manifests, or any other plugin tooling in this clone pass.
-5. Run the cheapest relevant verification after edits. Prefer `python -m
-   ui_clone.goal {site.ref_dir}` for the next bounded action.
-6. Do not report build, HTTP 200, source string presence, or copied local
-   showcase behavior as completion. Completion needs strict inspection:
-   `current_gate == "done"` plus runtime/media/transition proof artifacts.
-   Dynamic primary renderers such as canvas/WebGL must have explicit runtime
-   frame proof or canvas-replay closeout proof; static screenshots or
-   approximated scroll effects are not completion.
-7. If verification exposes a ui-clone-skills bug, do not patch it here. Write
-   `{site.site_dir / "skill-issue.md"}` with reproduction command, expected
-   behavior, actual behavior, and artifact paths.
-8. Exit after one coherent pass. The outer runner will inspect and continue to
-   the next site or launch a separate skill-fix pass.
-"""
+def build_clone_prompt(site: SiteWorkspace, _showcase_root: Path, _plugin_root: Path) -> str:
+    target = site.item.original_url or site.item.title or site.item.slug
+    return (
+        f"Copy {target} as closely as possible, including transitions. "
+        "Make it runnable locally."
+    )
 
 
 def build_skill_fix_prompt(site: SiteWorkspace, plugin_root: Path) -> str:
@@ -303,6 +310,7 @@ def build_codex_command(
         "--json",
         "-C",
         str(cwd),
+        "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
         "--dangerously-bypass-hook-trust",
         "--enable",
@@ -363,6 +371,11 @@ def invoke_codex(
     stderr_path = log_path.with_suffix(log_path.suffix + ".stderr")
     poll_count = 0
     with log_path.open("w", encoding="utf-8") as stdout_fh, stderr_path.open("w", encoding="utf-8") as stderr_fh:
+        env = os.environ.copy()
+        plugin_root = Path(__file__).resolve().parents[1]
+        env.setdefault("PLUGIN_ROOT", str(plugin_root))
+        env.setdefault("CODEX_PLUGIN_ROOT", str(plugin_root))
+        env.setdefault("UI_CLONE_ROOT", str(plugin_root))
         proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -370,6 +383,7 @@ def invoke_codex(
             stderr=stderr_fh,
             text=True,
             cwd=str(cwd),
+            env=env,
         )
         if proc.stdin is not None:
             proc.stdin.write(prompt)
@@ -613,11 +627,11 @@ def run_loop(args: argparse.Namespace) -> str:
                     clone_result = invoke_codex(
                         clone_prompt,
                         codex_bin=args.codex_bin,
-                        cwd=plugin_root,
+                        cwd=site.impl_dir,
                         log_path=clone_log_path,
                         output_last_message=_attempt_path(site, "codex-clone-last", ".md", attempt),
                         status_path=_attempt_path(site, "codex-clone-status", ".json", attempt),
-                        add_dirs=[work_root, showcase_root],
+                        add_dirs=[plugin_root, site.ref_dir],
                         model=args.model,
                         extra_args=args.codex_arg,
                         timeout_s=args.timeout_s,

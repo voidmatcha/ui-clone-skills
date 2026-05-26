@@ -61,6 +61,7 @@ def test_prepare_site_workspace_copies_ref_and_writes_handover(tmp_path: Path) -
 
     assert (site.ref_dir / "transition-spec.json").is_file()
     assert site.impl_dir.is_dir()
+    assert (site.impl_dir / "AGENTS.md").is_file()
     handover = site.handover_path.read_text(encoding="utf-8")
     assert "https://alpha.example" in handover
     assert "src/projects/alpha" in handover
@@ -79,6 +80,7 @@ def test_build_codex_command_is_unattended_and_writable(tmp_path: Path) -> None:
 
     assert command[:2] == ["codex", "exec"]
     assert "--json" in command
+    assert "--skip-git-repo-check" in command
     assert "--dangerously-bypass-approvals-and-sandbox" in command
     assert "--dangerously-bypass-hook-trust" in command
     assert command[-1] == "-"
@@ -109,7 +111,7 @@ def test_run_loop_dry_run_writes_prompts_without_invoking_codex(tmp_path: Path) 
     assert summary["sites"][0]["clone"]["status"] == "dry-run"
 
 
-def test_build_clone_prompt_forbids_showcase_source_reuse(tmp_path: Path) -> None:
+def test_build_clone_prompt_is_natural_user_request_without_internal_handover(tmp_path: Path) -> None:
     showcase = tmp_path / "showcase"
     work = tmp_path / "work"
     _write_showcase(showcase)
@@ -119,10 +121,40 @@ def test_build_clone_prompt_forbids_showcase_source_reuse(tmp_path: Path) -> Non
 
     prompt = loop.build_clone_prompt(site, showcase, tmp_path / "plugin")
 
-    assert "Do not copy, rsync, cp -R, or port source files" in prompt
-    assert "source-reuse.md" in prompt
-    assert "download assets from the original url" in prompt.lower()
-    assert "canvas/WebGL" in prompt
+    assert prompt == (
+        "Copy https://alpha.example as closely as possible, including transitions. "
+        "Make it runnable locally."
+    )
+    lower = prompt.lower()
+    for forbidden in (
+        "handover",
+        "ref dir",
+        "active ref",
+        "plugin",
+        "gate",
+        "showcase",
+        "tmp/ref",
+        "skill-issue",
+        "ui-clone",
+    ):
+        assert forbidden not in lower
+
+
+def test_impl_workspace_agents_carries_internal_contract_without_prompt_leak(tmp_path: Path) -> None:
+    showcase = tmp_path / "showcase"
+    work = tmp_path / "work"
+    _write_showcase(showcase)
+
+    item = loop.discover_showcase_items(showcase)[0]
+    site = loop.prepare_site_workspace(showcase, work, item, reset=False)
+
+    agents = (site.impl_dir / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert "Do not copy, rsync, cp -R, or port source files" in agents
+    assert "completion-report.sh" in agents
+    assert "python -m ui_clone.goal" in agents
+    assert "INCOMPLETE" in agents
+    assert "handover" not in agents.lower()
 
 
 def test_detect_showcase_reuse_flags_copy_commands(tmp_path: Path) -> None:
@@ -274,9 +306,13 @@ def test_run_loop_retries_clone_until_done_without_skill_fix_for_incomplete_clon
     _write_showcase(showcase)
 
     invoke_calls: list[Path] = []
+    invoke_cwds: list[Path] = []
+    invoke_add_dirs: list[list[Path]] = []
 
     def fake_invoke(*args: object, **kwargs: Any) -> dict[str, object]:
         invoke_calls.append(kwargs["log_path"])
+        invoke_cwds.append(kwargs["cwd"])
+        invoke_add_dirs.append(list(kwargs["add_dirs"]))
         return {"status": "ok", "exit_code": 0, "elapsed_s": 0}
 
     inspections = iter([
@@ -302,6 +338,8 @@ def test_run_loop_retries_clone_until_done_without_skill_fix_for_incomplete_clon
         "codex-clone.jsonl",
         "codex-clone-2.jsonl",
     ]
+    assert invoke_cwds == [work / "alpha" / "impl", work / "alpha" / "impl"]
+    assert all(showcase not in add_dirs for add_dirs in invoke_add_dirs)
     summary = json.loads((work / "onpixel-codex-loop-summary.json").read_text())
     site = summary["sites"][0]
     assert site["done"] is True

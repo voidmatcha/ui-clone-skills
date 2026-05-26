@@ -588,6 +588,26 @@ Close every session you opened. Never use `close --all`.
 
 This skill is auto-loaded into Claude Code (with `--plugin-dir`) and Codex sessions, so prompts can be terse. The agent drives the loop inside a single session, iterating against `python -m ui_clone.goal <ref-dir> --check-done` until it exits 0. `ui_clone/hooks/section_gate.py` (Stop hook) emits gate-specific failure diagnostics on every exit attempt so the agent sees what is still blocking.
 
+- **Natural user prompts stay natural.** When benchmarking or dogfooding real
+  usage, send only the user's visible request (for example: `Copy <URL> as
+  closely as possible, including transitions. Make it runnable locally.`). Do
+  not inject internal artifacts, gate names, ref-dir paths, or operator notes
+  into that prompt. Put runner constraints in project instructions, plugin
+  defaults, or harness metadata instead.
+- **Natural prompt closeout guard:** even when the visible request is terse,
+  a clone/same-as-original request cannot be reported as done until the agent
+  runs both `bash scripts/verify/completion-report.sh <ref-dir> <impl-root>`
+  and `python -m ui_clone.goal <ref-dir> --check-done`. If either command
+  reports missing artifacts, failed section rows, missing runtime/transition
+  proofs, or a non-zero exit, the response must start with `INCOMPLETE` and
+  list the blockers. Manual screenshots, build success, HTTP 200, a page title,
+  local smoke checks, or implementation-only runtime checks are supplementary
+  evidence only; they never substitute for the completion report and goal exit
+  code.
+- If a natural prompt run creates a local preview for the user, bind it to
+  `0.0.0.0` when the dev server supports it. A preview bound only to
+  `127.0.0.1` is local-only evidence and should not be presented as an
+  externally reachable preview.
 - **Claude Code:** open with `claude --plugin-dir "$(pwd)"`, then prompt: `Drive the ui-clone-skills pipeline for <ref-dir> until python -m ui_clone.goal <ref-dir> --check-done exits 0.`
 - **Codex (interactive):** in the REPL (Codex CLI ≥ 0.128.0, `[features] goals = true` in `~/.codex/config.toml`), run `/goal Drive the ui-clone-skills pipeline for <ref-dir> until python -m ui_clone.goal <ref-dir> --check-done exits 0.` Codex Goal handles plan → execute → verify → repeat natively against AGENTS.md context.
 - **Unattended / headless / CI:** `python -m ui_clone.benchmark_harness <ref-dir> --orig-url <url> --impl-url <url> ...` wraps `claude --print` per-iter with focused prompts and Python-side stop checks.

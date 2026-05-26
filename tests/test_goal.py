@@ -1009,6 +1009,9 @@ def test_codex_default_prompt_mentions_goal_card_and_stop_condition() -> None:
     assert "python -m ui_clone.goal <ref-dir>" in prompt
     assert 'current_gate == "done"' in prompt
     assert "not an infinite loop" in prompt.lower()
+    assert "natural user prompts" in prompt.lower()
+    assert "completion-report.sh" in prompt
+    assert "INCOMPLETE" in prompt
 
 
 def test_readme_documents_goal_driven_continuation_without_new_public_skill() -> None:

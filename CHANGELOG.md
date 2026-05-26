@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.20] - 2026-05-26
+
+Patch release for natural-prompt Codex clone runs.
+
+### Added
+
+- **Natural prompt closeout guard.** Codex plugin defaults and the
+  `ui-reverse-engineering` skill now require `completion-report.sh` plus
+  `python -m ui_clone.goal <ref-dir> --check-done` before any success claim,
+  even when the visible user prompt is a terse "copy this site" request.
+- **Natural onpixel clone prompts.** The onpixel Codex loop now sends clone
+  workers a short user-like URL copy request and moves runner constraints into
+  the implementation workspace `AGENTS.md`, preventing internal artifact
+  references from leaking into benchmark prompts.
+
 ## [0.7.19] - 2026-05-26
 
 Patch release for general clone-loop completion safeguards.

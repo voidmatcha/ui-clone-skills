@@ -1,6 +1,6 @@
 {
   "name": "ui-clone-skills",
-  "version": "0.7.19",
+  "version": "0.7.20",
   "description": "Motion forensics for the animated web. Four jobs against a live URL: decode (analyse motion + build, no code), clone (URL → React + Tailwind), verify (AE/SSIM + motion-parity score vs. an existing impl), extract (raw JSON dump). Extracts real CSS and animation params (GSAP / Framer Motion / Lenis / anime.js) directly from JS bundles, then verifies with AE/SSIM diff — no vision tokens. Three skills: ui-reverse-engineering (decode/clone/verify/extract entry points, supports Webflow IX2 / Next.js / Tailwind v4), ui-capture (reference + transitions), visual-debug (AE/SSIM diff + computed-style mismatch diagnosis).",
   "author": {
     "name": "YONGJAE LEE"
@@ -62,7 +62,8 @@
     "defaultPrompt": [
       "Use ui-reverse-engineering for live URL builds. Phase 6: run asset-download.sh + generation-plan.sh, enrich plan inline.",
       "Research-mode default: download every image first; substitute only on actual HTTP failure. No emoji/gradient placeholders.",
-      "Goal card: run python -m ui_clone.goal <ref-dir>; stop when current_gate == \"done\". Not an infinite loop. On gate fail follow diagnosis.md."
+      "Goal card: run python -m ui_clone.goal <ref-dir>; stop when current_gate == \"done\". Not an infinite loop. On gate fail follow diagnosis.md.",
+      "Natural user prompts stay natural, but closeout is strict: run scripts/verify/completion-report.sh and python -m ui_clone.goal <ref-dir> --check-done before any success claim. If artifacts fail or are missing, answer INCOMPLETE."
     ],
     "brandColor": "#10A37F"
   }

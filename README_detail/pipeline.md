@@ -47,6 +47,15 @@ plugin_hooks = true
 
 In the Codex REPL, run a one-line `/goal` invocation (the `ui-reverse-engineering` skill ships an `AGENTS.md` block that Codex auto-loads, so the goal prompt doesn't re-embed the full pipeline briefing): `/goal Drive the ui-clone-skills pipeline for tmp/ref/<component> until python -m ui_clone.goal tmp/ref/<component> --check-done exits 0. Never declare completion until the exit code is 0.` Use `/goal pause` to narrow scope mid-run, `/goal resume` to continue.
 
+For real-use dogfooding, keep the visible user prompt natural: `Copy <URL> as
+closely as possible, including transitions. Make it runnable locally.` Do not
+append runner notes, artifact paths, or gate instructions to that prompt. The
+plugin defaults and project instructions still require a strict closeout: run
+`scripts/verify/completion-report.sh <ref-dir> <impl-root>` and
+`python -m ui_clone.goal <ref-dir> --check-done` before any success claim. If
+either command fails or reports missing runtime/transition proof, report
+`INCOMPLETE` instead of done.
+
 The stop condition is bounded: stop when `current_gate == "done"` and `sections/result.txt` has no `FAIL` or `MISSING impl` lines. SessionStart/PostCompact hooks inject the active goal card, and the Stop gate includes the same card when blocking so the next action is explicit.
 
 When an iteration exposes a plugin bug, do not let the iterator edit gate
