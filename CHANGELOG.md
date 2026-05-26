@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.21] - 2026-05-26
+
+Patch release for section-aware asset placement checks.
+
+### Fixed
+
+- **Nested visible-image coordinate mapping.** `asset-placement-check.sh` now
+  reads image coordinates from extractor `rect` payloads and section starts
+  from `section-map.json` `y` fields, so visible assets are no longer skipped
+  as non-mappable solely because the schema is nested.
+- **Component-map file inference.** Asset placement now infers likely React
+  section component files from `sectionId` / `componentName` when
+  `component-map.json` does not include concrete file paths, catching clones
+  that reference downloaded assets globally instead of in their original
+  section.
+
 ## [0.7.20] - 2026-05-26
 
 Patch release for natural-prompt Codex clone runs.
