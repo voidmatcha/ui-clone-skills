@@ -300,6 +300,60 @@ def asset_needles(src: str) -> list[str]:
     return needles
 
 
+def resolve_import_path(from_path: Path, specifier: str) -> Path | None:
+    if not specifier.startswith("."):
+        return None
+    base = (from_path.parent / specifier).resolve()
+    candidates = [base]
+    for suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+        candidates.append(base.with_suffix(suffix))
+    for suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+        candidates.append(base / f"index{suffix}")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def extract_named_exports(module_text: str, names: set[str]) -> str:
+    parts: list[str] = []
+    for name in sorted(names):
+        escaped = re.escape(name)
+        patterns = (
+            rf"(?:export\s+)?(?:const|let|var)\s+{escaped}\s*=\s*\[[\s\S]*?\]\s*;",
+            rf"(?:export\s+)?(?:const|let|var)\s+{escaped}\s*=[\s\S]*?;",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, module_text)
+            if match:
+                parts.append(match.group(0))
+                break
+    return "\n".join(parts)
+
+
+def imported_named_export_text(component_path_value: Path, component_text: str) -> str:
+    parts: list[str] = []
+    import_re = re.compile(r"import\s*\{(?P<names>[^}]+)\}\s*from\s*['\"](?P<specifier>[^'\"]+)['\"]")
+    for match in import_re.finditer(component_text):
+        specifier = match.group("specifier")
+        module_path = resolve_import_path(component_path_value, specifier)
+        if module_path is None:
+            continue
+        names: set[str] = set()
+        for raw_name in match.group("names").split(","):
+            local = raw_name.strip().split(" as ")[0].strip()
+            if local:
+                names.add(local)
+        if not names:
+            continue
+        try:
+            module_text = module_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        parts.append(extract_named_exports(module_text, names))
+    return "\n".join(part for part in parts if part)
+
+
 checked = 0
 missing: list[dict[str, Any]] = []
 skipped = 0
@@ -335,7 +389,8 @@ for entry in visible:
         except OSError:
             missing_files.append(file_value)
             continue
-        if any(needle in text for needle in needles):
+        evidence_text = text + "\n" + imported_named_export_text(path.resolve(), text)
+        if any(needle in evidence_text for needle in needles):
             section_ok = True
             break
     if not section_ok:

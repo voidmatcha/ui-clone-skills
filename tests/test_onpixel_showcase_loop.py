@@ -154,6 +154,8 @@ def test_impl_workspace_agents_carries_internal_contract_without_prompt_leak(tmp
     assert "completion-report.sh" in agents
     assert "python -m ui_clone.goal" in agents
     assert "INCOMPLETE" in agents
+    assert "Do not run `npx playwright node`" in agents
+    assert "Use `node` for inline Playwright scripts" in agents
     assert "handover" not in agents.lower()
 
 

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.7.22] - 2026-05-26
+
+Patch release for natural Codex clone workspace guidance.
+
+### Added
+
+- **Playwright command guard.** Natural clone implementation workspaces now
+  warn workers not to run the invalid `npx playwright node` command and point
+  inline browser-inspection scripts at plain `node`, while keeping the visible
+  user prompt terse.
+
+### Fixed
+
+- **Asset registry placement evidence.** Section asset placement now follows
+  named local imports such as `import { heroImages } from "../data/assets"` and
+  checks only the imported export definition, so central asset registries do
+  not create blanket false passes or false missing placements.
+
 ## [0.7.21] - 2026-05-26
 
 Patch release for section-aware asset placement checks.

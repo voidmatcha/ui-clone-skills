@@ -187,6 +187,94 @@ def test_asset_placement_infers_component_file_from_section_id(tmp_path: Path) -
     assert artifact["missingPlacements"][0]["componentFile"] == "src/components/sections/Cards.tsx"
 
 
+def test_asset_placement_accepts_assets_referenced_through_named_import(tmp_path: Path) -> None:
+    """Section components often reference section assets through a local registry import."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src" / "components").mkdir(parents=True)
+    (impl / "src" / "data").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "visible-images.json").write_text(json.dumps([
+        {"src": "https://cdn.example.com/assets/pyramid.png", "top": 1250}
+    ]))
+    (ref / "section-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 1, "id": "cards", "y": 1000, "height": 900},
+        ]
+    }))
+    (ref / "component-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 1, "file": "src/components/Cards.tsx"},
+        ]
+    }))
+    (impl / "src" / "data" / "assets.ts").write_text(
+        'export const cardImages = ["/assets/pyramid.png"];\n'
+        'export const unrelatedImages = ["/assets/decoy.png"];\n',
+        encoding="utf-8",
+    )
+    (impl / "src" / "components" / "Cards.tsx").write_text(
+        'import { cardImages } from "../data/assets";\n'
+        "export function Cards(){return <img src={cardImages[0]} />}\n",
+        encoding="utf-8",
+    )
+
+    script = ROOT / "skills" / "visual-debug" / "scripts" / "asset-placement-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, f"named import registry asset should pass: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "asset-placement.json").read_text())
+    assert artifact["status"] == "pass"
+
+
+def test_asset_placement_does_not_accept_unimported_registry_assets(tmp_path: Path) -> None:
+    """A central registry is not enough unless the mapped component imports the matching symbol."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src" / "components").mkdir(parents=True)
+    (impl / "src" / "data").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "visible-images.json").write_text(json.dumps([
+        {"src": "https://cdn.example.com/assets/pyramid.png", "top": 1250}
+    ]))
+    (ref / "section-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 1, "id": "cards", "y": 1000, "height": 900},
+        ]
+    }))
+    (ref / "component-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 1, "file": "src/components/Cards.tsx"},
+        ]
+    }))
+    (impl / "src" / "data" / "assets.ts").write_text(
+        'export const cardImages = ["/assets/pyramid.png"];\n'
+        'export const unrelatedImages = ["/assets/decoy.png"];\n',
+        encoding="utf-8",
+    )
+    (impl / "src" / "components" / "Cards.tsx").write_text(
+        'import { unrelatedImages } from "../data/assets";\n'
+        "export function Cards(){return <img src={unrelatedImages[0]} />}\n",
+        encoding="utf-8",
+    )
+
+    script = ROOT / "skills" / "visual-debug" / "scripts" / "asset-placement-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 1, f"unimported registry asset should fail: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "asset-placement.json").read_text())
+    assert artifact["status"] == "fail"
+
+
 def test_asset_placement_runs_with_python39_annotation_semantics(tmp_path: Path) -> None:
     """The script calls host python3, so inline Python must not require 3.10+."""
     ref = tmp_path / "ref"
