@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -170,3 +171,89 @@ def test_invoke_codex_polls_status_file(tmp_path: Path, monkeypatch: pytest.Monk
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["status"] == "ok"
     assert status["pollCount"] >= 1
+
+
+def test_run_loop_retries_clone_until_done_without_skill_fix_for_incomplete_clone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    showcase = tmp_path / "showcase"
+    work = tmp_path / "work"
+    _write_showcase(showcase)
+
+    invoke_calls: list[Path] = []
+
+    def fake_invoke(*args: object, **kwargs: Any) -> dict[str, object]:
+        invoke_calls.append(kwargs["log_path"])
+        return {"status": "ok", "exit_code": 0, "elapsed_s": 0}
+
+    inspections = iter([
+        {"done": False, "unmet": ["post-implement missing"], "goal": {}},
+        {"done": True, "unmet": [], "goal": {}},
+    ])
+
+    monkeypatch.setattr(loop, "invoke_codex", fake_invoke)
+    monkeypatch.setattr(loop, "inspect_site", lambda site: next(inspections))
+
+    args = loop.build_parser().parse_args([
+        "--showcase-root", str(showcase),
+        "--work-root", str(work),
+        "--slugs", "alpha",
+        "--clone-attempts", "3",
+        "--skill-fix-policy", "issue-only",
+    ])
+
+    outcome = loop.run_loop(args)
+
+    assert outcome == "RAN"
+    assert [path.name for path in invoke_calls] == [
+        "codex-clone.jsonl",
+        "codex-clone-2.jsonl",
+    ]
+    summary = json.loads((work / "onpixel-codex-loop-summary.json").read_text())
+    site = summary["sites"][0]
+    assert site["done"] is True
+    assert len(site["cloneAttempts"]) == 2
+    assert site["skillFix"]["status"] == "skipped"
+
+
+def test_issue_only_skill_fix_runs_only_when_issue_file_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    showcase = tmp_path / "showcase"
+    work = tmp_path / "work"
+    _write_showcase(showcase)
+
+    invoke_calls: list[Path] = []
+
+    def fake_invoke(*args: object, **kwargs: Any) -> dict[str, object]:
+        log_path = kwargs["log_path"]
+        invoke_calls.append(log_path)
+        if log_path.name.startswith("codex-clone"):
+            (work / "alpha" / "skill-issue.md").write_text("# issue\n", encoding="utf-8")
+        return {"status": "ok", "exit_code": 0, "elapsed_s": 0}
+
+    monkeypatch.setattr(loop, "invoke_codex", fake_invoke)
+    monkeypatch.setattr(
+        loop,
+        "inspect_site",
+        lambda site: {"done": False, "unmet": ["tool broke"], "goal": {}},
+    )
+
+    args = loop.build_parser().parse_args([
+        "--showcase-root", str(showcase),
+        "--work-root", str(work),
+        "--slugs", "alpha",
+        "--clone-attempts", "1",
+        "--skill-fix-policy", "issue-only",
+    ])
+
+    loop.run_loop(args)
+
+    assert [path.name for path in invoke_calls] == [
+        "codex-clone.jsonl",
+        "codex-skill-fix.jsonl",
+    ]
+    summary = json.loads((work / "onpixel-codex-loop-summary.json").read_text())
+    assert summary["sites"][0]["skillFix"]["status"] == "ok"

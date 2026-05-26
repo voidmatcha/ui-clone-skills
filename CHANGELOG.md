@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.18] - 2026-05-26
+
+Patch release for completion-focused onpixel clone loop automation.
+
+### Added
+
+- **Clone completion attempts.** `python -m ui_clone.onpixel_showcase_loop`
+  now accepts `--clone-attempts` to keep a site on the clone worker for
+  multiple bounded passes until strict inspection reports done or the attempt
+  budget is exhausted.
+- **Issue-only skill fix policy.** The new `--skill-fix-policy issue-only`
+  mode launches the maintainer pass only when a clone pass writes
+  `skill-issue.md`, keeping ordinary incomplete clone work on the clone worker
+  instead of prematurely classifying it as a plugin repair pass.
+
 ## [0.7.17] - 2026-05-26
 
 Patch release for section-compare goal routing consistency.

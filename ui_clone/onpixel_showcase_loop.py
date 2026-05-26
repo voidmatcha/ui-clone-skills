@@ -424,6 +424,38 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
 
 
+def _attempt_path(site: SiteWorkspace, stem: str, suffix: str, attempt: int) -> Path:
+    if attempt == 1:
+        return site.site_dir / f"{stem}{suffix}"
+    return site.site_dir / f"{stem}-{attempt}{suffix}"
+
+
+def _archive_skill_issue(site: SiteWorkspace, attempt: int) -> None:
+    issue_path = site.site_dir / "skill-issue.md"
+    if not issue_path.exists():
+        return
+    archive_path = site.site_dir / f"skill-issue-attempt-{attempt}.md"
+    counter = 2
+    while archive_path.exists():
+        archive_path = site.site_dir / f"skill-issue-attempt-{attempt}-{counter}.md"
+        counter += 1
+    issue_path.rename(archive_path)
+
+
+def _should_run_skill_fix(
+    *,
+    args: argparse.Namespace,
+    site: SiteWorkspace,
+    clone_result: dict[str, Any],
+    inspection: dict[str, Any],
+) -> bool:
+    if args.dry_run or args.skip_skill_fix:
+        return False
+    if args.skill_fix_policy == "issue-only":
+        return (site.site_dir / "skill-issue.md").exists()
+    return clone_result.get("exit_code") != 0 or not inspection.get("done")
+
+
 def run_loop(args: argparse.Namespace) -> str:
     plugin_root = Path(__file__).resolve().parents[1]
     showcase_root = Path(args.showcase_root).expanduser().resolve()
@@ -456,64 +488,108 @@ def run_loop(args: argparse.Namespace) -> str:
     try:
         for item in selected:
             site = prepare_site_workspace(showcase_root, work_root, item, reset=args.reset)
-            clone_prompt = build_clone_prompt(site, showcase_root, plugin_root)
-            clone_prompt_path = site.site_dir / "codex-clone-prompt.md"
-            clone_prompt_path.write_text(clone_prompt, encoding="utf-8")
-            site_record: dict[str, Any] = {"slug": item.slug, "item": asdict(item)}
+            site_record: dict[str, Any] = {
+                "slug": item.slug,
+                "item": asdict(item),
+                "cloneAttempts": [],
+                "skillFixAttempts": [],
+                "done": False,
+            }
+            summary["sites"].append(site_record)
             log({"event": "site_start", "slug": item.slug, "siteDir": str(site.site_dir)})
 
-            if args.dry_run:
-                clone_result = {"status": "dry-run", "prompt": str(clone_prompt_path)}
-            else:
-                clone_result = invoke_codex(
-                    clone_prompt,
-                    codex_bin=args.codex_bin,
-                    cwd=plugin_root,
-                    log_path=site.site_dir / "codex-clone.jsonl",
-                    output_last_message=site.site_dir / "codex-clone-last.md",
-                    status_path=site.site_dir / "codex-clone-status.json",
-                    add_dirs=[work_root, showcase_root],
-                    model=args.model,
-                    extra_args=args.codex_arg,
-                    timeout_s=args.timeout_s,
-                    poll_s=args.poll_s,
-                )
-            site_record["clone"] = clone_result
+            clone_result: dict[str, Any] = {"status": "not-run"}
+            inspection: dict[str, Any] = {"done": False, "unmet": ["not inspected"], "goal": {}}
+            max_attempts = max(1, args.clone_attempts)
 
-            inspection = inspect_site(site)
-            site_record["inspection"] = inspection
+            for attempt in range(1, max_attempts + 1):
+                clone_prompt = build_clone_prompt(site, showcase_root, plugin_root)
+                clone_prompt_path = _attempt_path(site, "codex-clone-prompt", ".md", attempt)
+                clone_prompt_path.write_text(clone_prompt, encoding="utf-8")
 
-            should_skill_fix = (
-                not args.dry_run
-                and not args.skip_skill_fix
-                and (clone_result.get("exit_code") != 0 or not inspection.get("done"))
-            )
-            if should_skill_fix:
-                skill_prompt = build_skill_fix_prompt(site, plugin_root)
-                skill_prompt_path = site.site_dir / "codex-skill-fix-prompt.md"
-                skill_prompt_path.write_text(skill_prompt, encoding="utf-8")
-                site_record["skillFix"] = invoke_codex(
-                    skill_prompt,
-                    codex_bin=args.codex_bin,
-                    cwd=plugin_root,
-                    log_path=site.site_dir / "codex-skill-fix.jsonl",
-                    output_last_message=site.site_dir / "codex-skill-fix-last.md",
-                    status_path=site.site_dir / "codex-skill-fix-status.json",
-                    add_dirs=[site.site_dir, showcase_root],
-                    model=args.model,
-                    extra_args=args.codex_arg,
-                    timeout_s=args.timeout_s,
-                    poll_s=args.poll_s,
-                )
-            elif args.dry_run and not args.skip_skill_fix:
-                skill_prompt = build_skill_fix_prompt(site, plugin_root)
-                skill_prompt_path = site.site_dir / "codex-skill-fix-prompt.md"
-                skill_prompt_path.write_text(skill_prompt, encoding="utf-8")
-                site_record["skillFix"] = {"status": "dry-run", "prompt": str(skill_prompt_path)}
-            else:
+                if args.dry_run:
+                    clone_result = {"status": "dry-run", "prompt": str(clone_prompt_path)}
+                else:
+                    clone_result = invoke_codex(
+                        clone_prompt,
+                        codex_bin=args.codex_bin,
+                        cwd=plugin_root,
+                        log_path=_attempt_path(site, "codex-clone", ".jsonl", attempt),
+                        output_last_message=_attempt_path(site, "codex-clone-last", ".md", attempt),
+                        status_path=_attempt_path(site, "codex-clone-status", ".json", attempt),
+                        add_dirs=[work_root, showcase_root],
+                        model=args.model,
+                        extra_args=args.codex_arg,
+                        timeout_s=args.timeout_s,
+                        poll_s=args.poll_s,
+                    )
+
+                inspection = inspect_site(site)
+                attempt_record = {
+                    "attempt": attempt,
+                    "clone": clone_result,
+                    "inspection": inspection,
+                    "skillIssue": str(site.site_dir / "skill-issue.md")
+                    if (site.site_dir / "skill-issue.md").exists()
+                    else None,
+                }
+                site_record["cloneAttempts"].append(attempt_record)
+                site_record["clone"] = clone_result
+                site_record["inspection"] = inspection
+                site_record["done"] = bool(inspection.get("done"))
+                _write_json(work_root / "onpixel-codex-loop-summary.json", summary)
+
+                if inspection.get("done"):
+                    break
+
+                if _should_run_skill_fix(
+                    args=args,
+                    site=site,
+                    clone_result=clone_result,
+                    inspection=inspection,
+                ):
+                    skill_prompt = build_skill_fix_prompt(site, plugin_root)
+                    skill_prompt_path = _attempt_path(site, "codex-skill-fix-prompt", ".md", attempt)
+                    skill_prompt_path.write_text(skill_prompt, encoding="utf-8")
+                    if args.dry_run:
+                        skill_result = {"status": "dry-run", "prompt": str(skill_prompt_path)}
+                    else:
+                        skill_result = invoke_codex(
+                            skill_prompt,
+                            codex_bin=args.codex_bin,
+                            cwd=plugin_root,
+                            log_path=_attempt_path(site, "codex-skill-fix", ".jsonl", attempt),
+                            output_last_message=_attempt_path(site, "codex-skill-fix-last", ".md", attempt),
+                            status_path=_attempt_path(site, "codex-skill-fix-status", ".json", attempt),
+                            add_dirs=[site.site_dir, showcase_root],
+                            model=args.model,
+                            extra_args=args.codex_arg,
+                            timeout_s=args.timeout_s,
+                            poll_s=args.poll_s,
+                        )
+                    site_record["skillFixAttempts"].append({"attempt": attempt, "skillFix": skill_result})
+                    site_record["skillFix"] = skill_result
+                    if args.skill_fix_policy == "issue-only":
+                        _archive_skill_issue(site, attempt)
+                    if args.skill_fix_policy != "issue-only":
+                        break
+                elif args.dry_run and not args.skip_skill_fix and args.skill_fix_policy != "issue-only":
+                    skill_prompt = build_skill_fix_prompt(site, plugin_root)
+                    skill_prompt_path = _attempt_path(site, "codex-skill-fix-prompt", ".md", attempt)
+                    skill_prompt_path.write_text(skill_prompt, encoding="utf-8")
+                    site_record["skillFix"] = {"status": "dry-run", "prompt": str(skill_prompt_path)}
+                    break
+
+                if args.stop_on_error and clone_result.get("status") in {"error", "timeout"}:
+                    outcome = "STOPPED_ON_ERROR"
+                    break
+
+                if args.dry_run:
+                    break
+
+            if "skillFix" not in site_record:
                 site_record["skillFix"] = {"status": "skipped"}
 
-            summary["sites"].append(site_record)
             log({"event": "site_end", "slug": item.slug, "record": site_record})
             _write_json(work_root / "onpixel-codex-loop-summary.json", summary)
 
@@ -542,6 +618,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reset", action="store_true", help="Delete selected site work dirs first")
     parser.add_argument("--dry-run", action="store_true", help="Write prompts/summary without invoking Codex")
     parser.add_argument("--skip-skill-fix", action="store_true")
+    parser.add_argument(
+        "--clone-attempts",
+        type=int,
+        default=1,
+        help="Maximum clone passes per site before moving to the next site",
+    )
+    parser.add_argument(
+        "--skill-fix-policy",
+        choices=("incomplete", "issue-only"),
+        default="incomplete",
+        help=(
+            "When to launch the maintainer pass: existing incomplete behavior, "
+            "or only when the clone pass writes skill-issue.md"
+        ),
+    )
     parser.add_argument("--stop-on-error", action="store_true")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--model", default=None)
