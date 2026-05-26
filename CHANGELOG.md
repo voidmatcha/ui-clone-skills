@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.16] - 2026-05-26
+
+Patch release for hotlink-protected image asset downloads.
+
+### Fixed
+
+- **Asset download browser fallback.** `asset-download.sh` now uses captured
+  page URL metadata as the referrer for image downloads and replaces the
+  unsupported `agent-browser fetch` fallback with supported `open` and
+  `eval --json` commands, preventing browser-loadable CDN assets from being
+  logged as failed solely because the fallback command is unavailable.
+
 ## [0.7.15] - 2026-05-26
 
 Patch release for one-shot verifier artifact stability.
