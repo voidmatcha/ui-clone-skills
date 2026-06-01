@@ -8,9 +8,8 @@
 #     - target URL + extraction timestamp
 #     - chosen metaphor (motion forensics) header
 #     - detected motion engine + libraries (from external-sdks.json)
-#     - gate verdicts (class-signature-preservation, bundle-paste,
-#       html-paste, ref-screenshot-asset, proxy-mirror, font-parity,
-#       transition-spec, etc.)
+#     - gate verdicts (bundle-paste, html-paste, ref-screenshot-asset,
+#       proxy-mirror, font-parity, transition-spec, etc.)
 #     - AE/SSIM section scores if present
 #     - unclonable_reasons + fallback_suggestions if present (Step G)
 #     - mandatory disclaimer: "Not affiliated with <site>. This is a
@@ -102,7 +101,6 @@ def esc(s) -> str:
 state = load_json("pipeline-state.json") or {}
 sdks = load_json("external-sdks.json") or {}
 transition_spec = load_json("transition-spec.json") or {}
-class_sig = load_json("class-signature-preservation.json") or {}
 bundle_paste = load_json("bundle-paste-check.json") or {}
 html_paste = load_json("html-paste.json") or {}
 ref_screenshot = load_json("ref-screenshot-asset.json") or {}
@@ -172,7 +170,6 @@ def structural_stamp_row(payload: dict | None) -> tuple[str, str, str]:
 
 
 verdicts: list[tuple[str, str, str]] = [
-    verdict_row("class-signature-preservation", class_sig),
     verdict_row("bundle-paste", bundle_paste),
     verdict_row("html-paste", html_paste),
     verdict_row("ref-screenshot-asset", ref_screenshot),
@@ -182,18 +179,6 @@ verdicts: list[tuple[str, str, str]] = [
     verdict_row("verify-stamp (canonical)", verify_stamp),
     structural_stamp_row(structural_stamp),
 ]
-
-# Class-signature numeric summary
-class_sig_summary = ""
-if class_sig:
-    cov = class_sig.get("coverage")
-    pres = class_sig.get("preservedCount")
-    refc = class_sig.get("refSignatureCount")
-    implc = class_sig.get("implSignatureCount")
-    cov_pct = f"{cov*100:.1f}%" if isinstance(cov, (int, float)) else "?"
-    class_sig_summary = (
-        f"ref={refc} impl={implc} preserved={pres} coverage={cov_pct}"
-    )
 
 # Unclonable + fallback suggestions (Step G payload, optional)
 unclonable_rows: list[tuple[str, str, str, list[str]]] = []
@@ -330,7 +315,6 @@ html_doc = f"""<!doctype html>
   <div><strong>Target URL:</strong> <code>{esc(target_url)}</code></div>
   <div><strong>Motion engines detected:</strong> {sdks_html}</div>
   <div><strong>Transition spec entries:</strong> {esc(transition_count)}</div>
-  <div><strong>Class-signature preservation:</strong> {esc(class_sig_summary or "no signal")}</div>
 </section>
 
 <section>

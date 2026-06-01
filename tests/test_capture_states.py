@@ -30,7 +30,7 @@ def _make_fake_agent_browser(
     # by the outer python f-string layer.
     fake.write_text(
         "#!/usr/bin/env bash\n"
-        f"echo \"$@\" >> '{tmp_path / "calls.log"}'\n"
+        f"echo \"$@\" >> '{tmp_path / 'calls.log'}'\n"
         "# Find the subcommand position — after --session NAME comes 'open' or 'eval'.\n"
         "shift 2  # consume --session NAME\n"
         'if [ "$1" = "open" ]; then\n'
@@ -51,6 +51,10 @@ def _run_capture_states(
     """Invoke capture-states.sh with the fake bin dir prepended to PATH."""
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    # Keep the fake bash-backed agent-browser from emitting host locale
+    # warnings into stdout/stderr that the capture script parses as JSON.
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
     args = [str(SCRIPT), "https://example.test", "sess1", str(ref_dir)]
     if reuse_session:
         args.append("--reuse-session")

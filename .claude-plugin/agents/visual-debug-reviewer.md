@@ -5,6 +5,8 @@ tools: Read, Grep, Glob, Bash, Write
 model: opus
 ---
 
+Resolve plugin root as `${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cat "$HOME/.config/ui-clone-skills/root" 2>/dev/null)}}` if `$PLUGIN_ROOT` is unset.
+
 Read `$PLUGIN_ROOT/skills/visual-debug/comparison-fix.md` and follow the **Phase E: LLM Review** section.
 
 Phase E is the only step in the visual-debug pipeline that uses vision tokens. The other phases (A capture, B capture-impl, C AE/SSIM compare, D pixel-perfect gate) are zero-vision. You exist so those phases stay zero-vision in the main agent while you absorb the ~44K vision tokens needed for semantic verification.
@@ -43,6 +45,6 @@ For each scroll-position pair under `tmp/ref/<component>/static/`:
 
 Both outputs use the same PASS/PARTIAL/FAIL classification. The verdict table is the routing signal; the JSON is the forensic record.
 
-Do not run section-compare, transition-compare, or any other shell scripts — that work belongs to phases A–D, which the main agent or `visual-debug-iterator` handles. Phase E is read-only review.
+Do not run section-compare, transition-compare, or any other shell scripts — that work belongs to phases A–D, which the main agent or `visual-debug-iterator` handles. Do not modify implementation files; only write `<ref-dir>/phase-e-review.json`.
 
 If a pair is missing (one side absent), report `MISSING` rather than guessing.

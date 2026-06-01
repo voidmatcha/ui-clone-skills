@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
+from ui_clone.hooks._common import extract_tool_file_paths as _extract_tool_file_paths
 from ui_clone.hooks._common import find_project_root as _find_project_root
 from ui_clone.hooks._common import find_ref_dir as _find_ref_dir
 from ui_clone.hooks._common import is_ad_hoc_ref_artifact as _is_ad_hoc_ref_artifact
@@ -51,12 +52,11 @@ def _emit_block(reason: str) -> None:
 def main() -> None:
     # Read tool input from stdin
     raw_input = sys.stdin.read() if not sys.stdin.isatty() else ""
-    file_path = ""
+    file_paths: list[str] = []
     if raw_input.strip():
         try:
             data = json.loads(raw_input)
-            # Support both flat {"file_path": ...} and nested {"tool_input": {"file_path": ...}}
-            file_path = data.get("tool_input", {}).get("file_path", "") or data.get("file_path", "")
+            file_paths = _extract_tool_file_paths(data) if isinstance(data, dict) else []
         except json.JSONDecodeError:
             pass
 
@@ -68,30 +68,33 @@ def main() -> None:
     # `styles-core.json` instead of running the canonical scripts that
     # produce `section-map.json`, `structure.json`, `styles.json`. Deny the
     # Write and point at the right script so the canonical pipeline runs.
-    is_adhoc, suggested = _is_ad_hoc_ref_artifact(file_path)
-    if is_adhoc:
-        basename = Path(file_path).name
-        if suggested:
-            reason = (
-                f"UI Reverse Engineering: '{basename}' is not a canonical "
-                f"ref-dir artifact name. Use '{suggested}' produced by the "
-                f"matching pipeline script (e.g. `bash $PLUGIN_ROOT/skills/"
-                f"visual-debug/scripts/dom-scaffold.sh <ref-dir>` for "
-                f"section-map.json, or `python -m ui_clone.pipeline` for "
-                f"the full sequence). Do NOT hand-write artifacts."
-            )
-        else:
-            reason = (
-                f"UI Reverse Engineering: '{basename}' is not a canonical "
-                f"ref-dir artifact. Run the canonical extraction scripts "
-                f"under skills/visual-debug/scripts/ instead of hand-writing "
-                f"ref artifacts. See SKILL.md Pipeline section for the "
-                f"step → artifact mapping."
-            )
-        _emit_block(reason)
-        sys.exit(0)
+    for candidate_path in file_paths:
+        is_adhoc, suggested = _is_ad_hoc_ref_artifact(candidate_path)
+        if is_adhoc:
+            basename = Path(candidate_path).name
+            if suggested:
+                reason = (
+                    f"UI Reverse Engineering: '{basename}' is not a canonical "
+                    f"ref-dir artifact name. Use '{suggested}' produced by the "
+                    f"matching pipeline script (e.g. `bash $PLUGIN_ROOT/skills/"
+                    f"visual-debug/scripts/dom-scaffold.sh <ref-dir>` for "
+                    f"section-map.json, or `python -m ui_clone.pipeline` for "
+                    f"the full sequence). Do NOT hand-write artifacts."
+                )
+            else:
+                reason = (
+                    f"UI Reverse Engineering: '{basename}' is not a canonical "
+                    f"ref-dir artifact. Run the canonical extraction scripts "
+                    f"under skills/visual-debug/scripts/ instead of hand-writing "
+                    f"ref artifacts. See SKILL.md Pipeline section for the "
+                    f"step → artifact mapping."
+                )
+            _emit_block(reason)
+            sys.exit(0)
 
     # Only enforce on component/page files
+    component_paths = [path for path in file_paths if _is_component_file(path)]
+    file_path = component_paths[0] if component_paths else ""
     if not _is_component_file(file_path):
         sys.exit(0)
 

@@ -191,32 +191,29 @@
     {
       "id": 15,
       "prompt": "compare https://example.com vs http://localhost:3000 — the screenshots look identical but run a pixel-perfect numerical diff to verify the header and hero section are exact.",
-      "expected_output": "Phase 4A executed: ref-styles.json and impl-styles.json saved for header and hero. Diff table produced. Any mismatches fixed before compare.html is generated. pixel-perfect-diff.json with result: pass.",
+      "expected_output": "Capture/reference and implementation evidence are produced, then mismatch diagnosis is handed off to visual-debug rather than fixing CSS inside ui-capture.",
       "files": [],
       "expectations": [
         "Key elements defined for header and hero (P1)",
         "ref-styles.json saved with getComputedStyle measurements from reference site",
         "impl-styles.json saved with matching measurements from localhost",
         "Diff table covers typography, spacing, sizing, layout, visual, and position properties",
-        "Any ❌ mismatch rows fixed in CSS before generating compare.html",
-        "pixel-perfect-diff.json exists at tmp/ref/capture/pixel-perfect-diff.json",
-        "pixel-perfect-diff.json has result: pass and mismatches: 0",
-        "compare.html not generated until pixel-perfect gate passes"
+        "No implementation CSS edits are applied by ui-capture",
+        "Mismatch/diff remediation is routed to visual-debug when differences remain",
+        "Captured artifacts are saved under tmp/ref/capture/ or the provided component ref dir"
       ]
     },
     {
       "id": 16,
-      "prompt": "compare https://example.com vs http://localhost:3000 — Phase 4A finds the hero padding-top is 120px on ref but 80px on impl, and the heading font-weight is 700 on ref but 400 on impl. Fix both before generating compare.html.",
-      "expected_output": "Both mismatches fixed with targeted CSS edits. Re-measurement confirms exact match. pixel-perfect-diff.json result: pass. compare.html generated after gate passes.",
+      "prompt": "compare https://example.com vs http://localhost:3000 — Phase 4A finds the hero padding-top is 120px on ref but 80px on impl, and the heading font-weight is 700 on ref but 400 on impl. Record the evidence and tell me which skill should fix it.",
+      "expected_output": "The mismatches are measured and recorded, then the user is routed to visual-debug for fixes; ui-capture does not modify implementation source.",
       "files": [],
       "expectations": [
-        "Diff table flags ❌ for padding-top (120px vs 80px) and font-weight (700 vs 400)",
-        "CSS rules controlling both properties identified in implementation",
-        "Targeted fix applied for each mismatch",
-        "P3 re-measurement run for affected elements",
-        "Both rows updated to ✅ in diff table",
-        "pixel-perfect-diff.json saved with result: pass and mismatches: 0",
-        "compare.html generated only after pixel-perfect gate passes"
+        "Diff table flags padding-top (120px vs 80px) and font-weight (700 vs 400)",
+        "ref-styles.json and impl-styles.json are saved as evidence",
+        "No targeted CSS edits are made by ui-capture",
+        "The output clearly hands remediation to visual-debug",
+        "compare.html or equivalent evidence page is generated only as a capture artifact, not as proof that fixes were applied"
       ]
     },
     {

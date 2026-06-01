@@ -20,6 +20,10 @@ When implementing scroll/page-load/interaction transitions extracted from JS bun
 
 If you generate a component without its transitions, it is incomplete.
 
+### Binding mandate (enforced at runtime)
+
+Every `transition-spec.json` entry MUST be implemented with its declared trigger + easing + duration, and is enforced at runtime by the transition-fires gate (post-implement) — a component that imports an animation library but creates no trigger, or whose target does not measurably move at its trigger, FAILS. Per-trigger pattern: IntersectionObserver/whileInView for scroll-into-view reveals; useScroll/scrollYProgress (or rAF + getBoundingClientRect under smooth-scroll) bound to the target's transform/opacity for scroll-scrub; real timeline for splash; autoplay interval for carousel.
+
 ## Bundle → Code translation
 
 ### Scroll-driven animations (GSAP ScrollTrigger / custom)

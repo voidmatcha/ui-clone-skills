@@ -15,7 +15,7 @@ _found_ref() {
 }
 _found_ref || exit 0
 if ! command -v uv >/dev/null 2>&1; then
-  echo "ui-clone-skills: uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  echo 'ui-clone-skills: uv not found. Install: uv_tmp=$(mktemp) && curl -LsSf -o "$uv_tmp" https://astral.sh/uv/install.sh && sh "$uv_tmp" && rm -f "$uv_tmp"' >&2
   exit 0
 fi
 exec uv run --project "$(cd "$(dirname "$0")/.." && pwd)" python -m "$@"

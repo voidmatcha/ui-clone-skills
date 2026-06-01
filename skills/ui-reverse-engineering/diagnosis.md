@@ -539,7 +539,7 @@ A spike of `sw > w` at exactly `<bp>` (with `<bp>-1` and `<bp>+1` clean) is the 
 
 ## Sub-agent / inline-diagnosis contract (Phase 4 gate failures)
 
-This file is the catalog. Both Claude Code (via `mismatch-diagnoser` sub-agent at `.claude-plugin/agents/mismatch-diagnoser.md`) and Codex (inline at any Phase 4 gate-failure point per `.codex-plugin/plugin.json defaultPrompt`) classify failures using the catalog above and emit a structured diagnosis JSON.
+This file is the catalog. Claude Code uses the `mismatch-diagnoser` sub-agent at `.claude-plugin/agents/mismatch-diagnoser.md`; Codex native subagent routing uses `.codex/agents/mismatch-diagnoser.toml`. If a host has no delegated-worker surface, use the inline fallback at any Phase 4 gate-failure point. All paths classify failures using the catalog above and emit the same structured diagnosis JSON.
 
 ### Additional root-cause classes (beyond A-J)
 
@@ -563,7 +563,7 @@ The A-J classes cover visual / layout mismatches surfaced by AE, computed-diff, 
 3. **Find the matching ref artifact**: where does the ref declare this element? `structure.json`, `extracted.json`, `bundle-map.json`, `interactions-detected.json`, etc.
 4. **Classify**: pick ONE root-cause class from the A-J or K-R catalog. Don't return multiple primary causes.
 
-### Output (Claude Code sub-agent path AND Codex inline path)
+### Output (Claude Code sub-agent path, Codex native path, and inline fallback)
 
 ```json
 {
@@ -584,7 +584,7 @@ The A-J classes cover visual / layout mismatches surfaced by AE, computed-diff, 
 
 ### Don'ts
 
-- Don't apply fixes (Claude path); the main agent applies. Codex inline: diagnose first, then apply — never apply before classifying.
+- Don't apply fixes in delegated diagnosis mode; the main agent applies. Inline fallback must still diagnose first, then apply — never apply before classifying.
 - Don't return multiple primary causes. If 2+ classes contribute, pick the highest-severity one and note alternates in `alternates: []`.
 - Don't speculate when evidence is missing. Return `confidence: "low"` with a `needMore: [...]` array of artifacts you'd need to read.
 - Don't return `rootCauseClass: "no-failure"` unless the sidecar's `status` field is actually `"pass"` — re-read carefully.

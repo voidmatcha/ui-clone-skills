@@ -211,6 +211,34 @@ def test_gate_section_compare_accepts_legitimate_minor_under_threshold(tmp_path:
 
 
 
+def test_gate_section_compare_accepts_pass_by_perceptual(tmp_path: Path) -> None:
+    """SECTION_PERCEPTUAL_DENSE=1 emits `pass-by-perceptual` ✅ rows for dense
+    sections that clear the perceptual dssim + structural (DOM + localized-band)
+    gates. These are genuine pixel passes, like `pass-by-dssim`: the gate must
+    treat them as ✅ (no failure) AND must NOT trip the section-threshold gaming
+    detector even though AE/Mpx > 2000 — the severity label is not ok/minor.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    sections = ref / "sections"
+    sections.mkdir()
+    (sections / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---|---|---|---|---|\n"
+        "| navbar | 5048 | 50805 | pass-by-perceptual | ✅ |\n"
+        "| hero | 200 | 100 | ok | ✅ |\n"
+        "\n"
+        "**Result: 2 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_section_compare() if r.status == "fail"]
+    assert not failures, f"pass-by-perceptual ✅ rows must not fail the gate: {failures}"
+    assert not any(r.label == "section-threshold gaming" for r in failures), (
+        "pass-by-perceptual (sev not ok/minor) must not be flagged as threshold gaming"
+    )
+
+
 def test_gate_section_compare_overrides_structural_only_on_critical_diff(tmp_path: Path) -> None:
     """Regression — STRUCTURAL_ONLY rows must NOT silent-pass when the same
     section has severity=critical in structure-diff.json. The realfood.gov
@@ -572,3 +600,79 @@ def test_gate_section_compare_accessible_via_run(tmp_path: Path) -> None:
     # No result.txt → BLOCKED (exit code 1)
     exit_code = gate.run("section-compare", json_output=True)
     assert exit_code == 1
+
+
+def test_section_perceptual_dense_defaults_on() -> None:
+    """SECTION_PERCEPTUAL_DENSE is default-ON (promoted after the cross-site
+    decision: refStd guard closes the blank-ref hole, 0 cross-site false-pass,
+    content-based matcher removed the mis-pairing confound). =0 stays as the
+    strict-AE escape hatch. Guards against an accidental flip back to opt-in,
+    which would silently drop genuine pass-by-perceptual ✅ on text-dense
+    sections and resurrect the strict-AE screenshot-cheat pressure.
+    """
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    )
+    body = script.read_text(encoding="utf-8")
+    assert 'SECTION_PERCEPTUAL_DENSE="${SECTION_PERCEPTUAL_DENSE:-1}"' in body, (
+        "perceptual-dense must default ON (:-1); =0 is the strict escape hatch"
+    )
+    assert 'SECTION_PERCEPTUAL_DENSE:-0}' not in body, (
+        "default must not be 0 (that is the pre-promotion opt-in default)"
+    )
+
+
+# ── FIX 2: async-WebGL/canvas mask robustness ────────────────────────────
+# EXCLUDE_DYNAMIC=1 masks `canvas, video` so a live canvas isn't pixel-AE'd
+# (motion is verified by video-motion-compare instead). But async-mounted
+# WebGL embeds (Unicorn Studio [data-us-project], Spline spline-viewer /
+# [data-spline], Three.js [data-engine]) mount their <canvas> AFTER the mask
+# snapshot, so a faithfully re-embedded WebGL hero diffs catastrophically and
+# FAILs pixel-AE (observed on raviklaassens). Mask the WebGL-embed CONTAINERS
+# (present in the DOM early) symmetrically on ref + impl. fix-not-loosen: this
+# masks MORE genuinely-dynamic regions; a static section is unaffected and the
+# masked region's motion is still verified by video-motion-compare.
+
+_WEBGL_EMBED_SELECTORS = (
+    "[data-us-project]",   # Unicorn Studio
+    "spline-viewer",       # Spline web component
+    "[data-spline]",       # Spline data attr
+    "[data-engine]",       # Three.js / generic engine attr
+)
+
+
+def _section_compare_body() -> str:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    )
+    return script.read_text(encoding="utf-8")
+
+
+def test_dynamic_mask_augments_webgl_embed_selectors() -> None:
+    """The dynamic-content mask must auto-augment DYNAMIC_SELECTORS with the
+    WebGL-embed container selectors so async-mounted WebGL heroes are excluded
+    from pixel-AE (and verified by video-motion-compare instead)."""
+    body = _section_compare_body()
+    for sel in _WEBGL_EMBED_SELECTORS:
+        assert sel in body, f"WebGL-embed selector {sel!r} missing from mask augmentation"
+    # Must be wired INTO DYNAMIC_SELECTORS (the masked set), not just a comment.
+    import re
+    wired = re.search(
+        r'DYNAMIC_SELECTORS="\$\{?DYNAMIC_SELECTORS\}?[^"]*data-us-project',
+        body,
+    )
+    assert wired, (
+        "WebGL-embed selectors must be appended to DYNAMIC_SELECTORS so they are "
+        "masked symmetrically on ref + impl"
+    )
+
+
+def test_dynamic_mask_waits_for_canvas_mount() -> None:
+    """Before the mask snapshot, the script must briefly wait for canvas/WebGL
+    to mount so an async embed is present when the mask is applied."""
+    body = _section_compare_body()
+    assert "querySelector('canvas')" in body or 'querySelector("canvas")' in body, (
+        "must poll for canvas mount before applying the dynamic mask"
+    )

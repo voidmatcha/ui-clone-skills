@@ -90,6 +90,73 @@ def test_load_corrupted_json_quarantines_file(
 
     # Existing behavior preserved: state falls back to safe defaults.
     assert state.current_gate == "reference"
+    # Codex P0 (2026-05-27): load_failed flag is set so callers (mark_failed)
+    # can distinguish "no state ever existed" from "state was corrupted and
+    # quarantined". Without this, mark_failed would silently bail on
+    # current_gate mismatch and the hard-cap auto-record would never fire
+    # against a stuck-with-corrupted-state pipeline.
+    assert state.load_failed is True, (
+        "PipelineState.load must set load_failed=True after quarantining "
+        "a corrupt pipeline-state.json"
+    )
+
+
+def test_load_clean_state_has_load_failed_false(tmp_path: Path) -> None:
+    """Sanity check: load_failed is False on a valid load and on a missing
+    file. Only True after quarantine."""
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+
+    # 1. Missing pipeline-state.json — load_failed must be False (no quarantine).
+    state_missing = PipelineState.load(ref_dir)
+    assert state_missing.load_failed is False
+
+    # 2. Valid pipeline-state.json — load_failed must be False.
+    (ref_dir / "pipeline-state.json").write_text(
+        '{"component": "comp", "current_gate": "reference", "completed_steps": []}'
+    )
+    state_valid = PipelineState.load(ref_dir)
+    assert state_valid.load_failed is False
+
+
+def test_mark_failed_after_state_corruption_records_terminal_unclonable(
+    tmp_path: Path, capsys: "pytest.CaptureFixture[str]"
+) -> None:
+    """Codex P0 (2026-05-27) fail-closed fix: when pipeline-state.json was
+    corrupted and quarantined, mark_failed must NOT silently bail on the
+    current_gate mismatch (fresh state has current_gate='reference'; caller
+    passed e.g. 'post-implement'). The previous behavior allowed the
+    pipeline to drive on stale context with hard-cap never firing. Fix
+    records 'state-corruption' unclonable so termination is explicit.
+    """
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    # Plant a corrupt state file. Next PipelineState.load() will quarantine
+    # it and return a fresh state with load_failed=True.
+    (ref_dir / "pipeline-state.json").write_text("not json{{{")
+
+    # Caller is operating on a stale in-memory state thinking current_gate
+    # is 'post-implement' (typical reality after many gate runs).
+    stale = PipelineState(component="comp", current_gate="post-implement")
+    stale.mark_failed("post-implement", ref_dir)
+    # Drain the quarantine stderr warning so it doesn't leak.
+    capsys.readouterr()
+
+    # Reload to see what's persisted on disk.
+    reloaded = PipelineState.load(ref_dir)
+    state_corruption = [
+        e for e in reloaded.unclonable_reasons
+        if isinstance(e, dict) and e.get("category") == "state-corruption"
+    ]
+    assert state_corruption, (
+        f"mark_failed after quarantine must record state-corruption "
+        f"unclonable; got: {reloaded.unclonable_reasons}"
+    )
+    # Ensure the reason mentions the gate the caller was trying to bump,
+    # so operator can correlate with their pipeline driver's last invocation.
+    assert "post-implement" in state_corruption[0].get("reason", ""), (
+        "state-corruption reason should name the gate the caller passed"
+    )
 
 
 # ── PipelineState.closeout_policy (structural-convergence opt-in) ──
@@ -546,7 +613,6 @@ def test_suggest_fallbacks_known_categories() -> None:
         ("paid-features", "commercial-font"),
         ("post-implement", "drm-canvas"),
         ("post-implement", "auth-gated"),
-        ("post-implement", "class-signature-preservation-mismatch"),
         ("section-compare", "hard-cap-fail"),
         ("font-parity", "subpixel-rendering-diff"),
     ]

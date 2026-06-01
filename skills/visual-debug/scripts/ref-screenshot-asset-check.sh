@@ -72,6 +72,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -118,6 +120,97 @@ if _state_p.is_file() and _att_p.is_file() and _map_p.is_file():
                         canvas_replay_section_names.add(f"section-{_idx}")
     except (json.JSONDecodeError, OSError):
         pass
+
+# ── Near-match detection (perceptual/AE) ──────────────────────────────
+# The screenshot-as-background cheat re-encodes the ref's section crops (so the
+# bytes differ — defeating the sha256 byte-identical check) and serves them at a
+# generic path like public/sections/<name>.png. Compare each impl raster asset
+# against the ref's own capture crops with magick AE (re-encode-tolerant via
+# -fuzz); a near-pixel-identical match is the cheat. Genuine clones may reuse
+# product images, but those do not pixel-match the verifier's full section crops.
+_MAGICK = shutil.which("magick")
+
+
+def _im(sub: str) -> "list[str] | None":
+    if _MAGICK:
+        return [_MAGICK, sub]
+    legacy = shutil.which(sub)
+    return [legacy] if legacy else None
+
+
+_IDENTIFY = _im("identify")
+_COMPARE = _im("compare")
+NEAR_MATCH_ENABLED = bool(_IDENTIFY and _COMPARE)
+NEAR_MATCH_MAX_FRACTION = 0.02  # <=2% of pixels differ (post-fuzz) => near-identical
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+ref_raster_crops: list = []  # (abs Path, rel str) of ref capture images
+_dims_cache: dict = {}
+
+
+def _dims(p: Path):
+    key = str(p)
+    if key in _dims_cache:
+        return _dims_cache[key]
+    val = None
+    if _IDENTIFY:
+        try:
+            r = subprocess.run(_IDENTIFY + ["-format", "%w %h", str(p)],
+                               capture_output=True, text=True, timeout=20)
+            parts = r.stdout.strip().split()
+            if len(parts) >= 2:
+                val = (int(parts[0]), int(parts[1]))
+        except (subprocess.SubprocessError, ValueError, OSError):
+            val = None
+    _dims_cache[key] = val
+    return val
+
+
+def _ae_fraction(ref_img: Path, rw: int, rh: int, impl_img: Path):
+    if not _COMPARE or rw <= 0 or rh <= 0:
+        return None
+    cmd = _COMPARE + ["-metric", "AE", "-fuzz", "6%", str(ref_img),
+                      "(", str(impl_img), "-resize", f"{rw}x{rh}!", ")", "null:"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    raw = (r.stderr or r.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        ae = float(raw.split()[0].replace(",", ""))
+    except (ValueError, IndexError):
+        return None
+    return ae / float(rw * rh)
+
+
+def _near_match_ref(impl_img: Path):
+    # Performance: only AE-compare against ref crops with the SAME basename stem.
+    # The cheat reuses the verifier's crop names (e.g. <section>.png) to
+    # wire ::before backgrounds, so same-stem + AE-verify catches it cheaply (one
+    # compare per impl image, not an O(n^2) all-pairs sweep) while AE-verify
+    # avoids false positives on coincidental name collisions (a real "footer.png"
+    # that does not pixel-match the ref's footer crop is not flagged).
+    if not NEAR_MATCH_ENABLED or impl_img.suffix.lower() not in IMAGE_SUFFIXES:
+        return None
+    stem = impl_img.stem
+    for ref_path, ref_rel in ref_raster_crops:
+        if ref_path.stem != stem:
+            continue
+        rdims = _dims(ref_path)
+        if not rdims or rdims[0] <= 0 or rdims[1] <= 0:
+            continue
+        frac = _ae_fraction(ref_path, rdims[0], rdims[1], impl_img)
+        if frac is not None and frac <= NEAR_MATCH_MAX_FRACTION:
+            # Canvas-replay allowlist: a canvas-section fallback frame is allowed.
+            if canvas_replay_section_names:
+                cstem = Path(ref_rel).stem
+                cstem_base = re.sub(r"-\d+$", "", cstem)
+                if cstem in canvas_replay_section_names or cstem_base in canvas_replay_section_names:
+                    return None
+            return ref_rel
+    return None
+
 
 # 1. Build the forbidden-path set from ref's captured artifacts.
 # These are paths the impl must never reference.
@@ -169,6 +262,8 @@ for d in REF_SCREENSHOT_DIRS:
             h = sha256_of(p)
             if h:
                 ref_screenshot_files[h] = str(p.relative_to(ref_dir))
+            if p.suffix.lower() in IMAGE_SUFFIXES:
+                ref_raster_crops.append((p, str(p.relative_to(ref_dir))))
 
 
 # 2. Scan impl source tree for forbidden references.
@@ -185,6 +280,28 @@ violations = []
 scanned_text = 0
 scanned_binary = 0
 
+# Self-scan guard: the gate writes its own JSON artifacts (ref-screenshot-
+# asset.json and sibling *-check / gate JSONs) into the ref dir, and those
+# artifacts legitimately bake "tmp/ref/" path strings into their bodies (e.g. a
+# prior run's `refSource`). When impl_root overlaps the ref dir, rglob picks
+# those JSONs up and matches the forbidden substring against the gate's OWN
+# output — a false positive (observed: 1 self-ref `tmp/ref/` violation against
+# ref-screenshot-asset.json). Exclude JSON files that live under the ref dir;
+# real impl source JSON (under a non-overlapping impl_root) and impl .tsx/.css
+# reuse are unaffected, so genuine ref-screenshot reuse still flags.
+ref_dir_resolved = ref_dir.resolve()
+
+
+def _is_ref_dir_artifact(p: Path) -> bool:
+    if p.suffix.lower() != ".json":
+        return False
+    try:
+        pr = p.resolve()
+    except OSError:
+        return False
+    return pr == ref_dir_resolved or ref_dir_resolved in pr.parents
+
+
 for p in impl_root.rglob("*"):
     if not p.is_file():
         continue
@@ -193,6 +310,8 @@ for p in impl_root.rglob("*"):
     except ValueError:
         continue
     if any(part in SCAN_EXCLUDE for part in rel_parts):
+        continue
+    if _is_ref_dir_artifact(p):
         continue
     if p.suffix in TEXT_SUFFIXES:
         scanned_text += 1
@@ -232,6 +351,16 @@ for p in impl_root.rglob("*"):
                 "refSource": ref_src,
                 "sha256": h[:12],
             })
+        else:
+            # Not a byte-identical copy — check for a re-encoded near-match
+            # against the ref's own capture crops (the screenshot cheat).
+            near_src = _near_match_ref(p)
+            if near_src is not None:
+                violations.append({
+                    "file": str(p.relative_to(impl_root)),
+                    "kind": "screenshot-asset-near-match",
+                    "refSource": near_src,
+                })
 
 # Dedup by (file, kind, needle/refSource).
 seen = set()

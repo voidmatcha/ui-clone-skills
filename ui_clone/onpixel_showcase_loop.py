@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from ui_clone.clone_experiment_score import score_clone_attempt
 from ui_clone.local_source_reuse import detect_local_source_reuse
 
 
@@ -224,12 +225,38 @@ def write_impl_agents(site: SiteWorkspace, plugin_root: Path) -> None:
         "  local showcase/source directories into this implementation.",
         "- Do not edit plugin code, scripts, hooks, manifests, or tests during the",
         "  clone pass.",
+        "- Do not inspect, patch, or debug ui-clone-skills gate internals from this",
+        "  workspace. If `completion-report.sh` or `ui_clone.goal --check-done`",
+        "  fails, treat the output as clone evidence to fix in `impl/` or report",
+        "  as `INCOMPLETE`; do not chase gate implementation code.",
+        "",
+        "## Research And Scoring",
+        "",
+        f"- Read `{site.site_dir / 'clone-research.md'}` before editing; it summarizes",
+        "  the reference evidence available for this run.",
+        f"- Treat `{site.site_dir / 'clone-experiments.tsv'}` as runner-owned score",
+        "  history. Do not edit it from clone work.",
         "",
         "## Browser Inspection",
         "",
         "- Do not run `npx playwright node`; Playwright CLI has no `node` subcommand.",
         "- Use `node` for inline Playwright scripts, or use real Playwright CLI",
         "  subcommands such as `npx playwright screenshot`.",
+        "",
+        "## Layout Stability",
+        "",
+        "- Before adding broad CSS overrides, check 1440px, 1280px, and 375px",
+        "  viewport geometry.",
+        "- `document.documentElement.scrollWidth` and `document.body.scrollWidth`",
+        "  must not exceed `window.innerWidth` unless the reference does by the",
+        "  same amount.",
+        "- Clip offscreen rails, marquee strips, mosaics, and parallax layers inside",
+        "  section-local wrappers instead of letting children widen the page.",
+        "- Do not keep piling `position:absolute`, `!important`, `zoom`, or fixed",
+        "  `1440px` overrides. Replace stale overrides with structured responsive",
+        "  layout code.",
+        "- If horizontal overflow or distorted fixed-width layout remains, answer",
+        "  `INCOMPLETE` with the offending selectors and viewport.",
         "",
         "## Closeout",
         "",
@@ -245,6 +272,214 @@ def write_impl_agents(site: SiteWorkspace, plugin_root: Path) -> None:
         "",
     ]
     site.impl_dir.joinpath("AGENTS.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _read_json_artifact(path: Path) -> Any:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _artifact_list(data: Any, key: str) -> list[dict[str, Any]]:
+    raw = data.get(key) if isinstance(data, dict) else data
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _entry_index(entry: dict[str, Any]) -> int | None:
+    for key in ("index", "i", "sectionIndex"):
+        value = entry.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _entry_y(entry: dict[str, Any]) -> float | None:
+    for key in ("top", "y"):
+        value = entry.get(key)
+        if isinstance(value, int | float):
+            return float(value)
+    rect = entry.get("rect")
+    if isinstance(rect, dict):
+        for key in ("top", "y"):
+            value = rect.get(key)
+            if isinstance(value, int | float):
+                return float(value)
+    return None
+
+
+def _entry_height(entry: dict[str, Any]) -> float | None:
+    value = entry.get("height")
+    if isinstance(value, int | float):
+        return float(value)
+    rect = entry.get("rect")
+    if isinstance(rect, dict):
+        value = rect.get("height")
+        if isinstance(value, int | float):
+            return float(value)
+    return None
+
+
+def _component_label(entry: dict[str, Any]) -> str | None:
+    for key in ("file", "componentFile", "componentName", "name", "id", "sectionId"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _section_label(entry: dict[str, Any]) -> str:
+    for key in ("id", "name", "className", "class", "cls"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    index = _entry_index(entry)
+    return f"section-{index}" if index is not None else "unnamed"
+
+
+def _component_map_by_index(ref_dir: Path) -> dict[int, str]:
+    data = _read_json_artifact(ref_dir / "component-map.json")
+    mapped: dict[int, str] = {}
+    for entry in _artifact_list(data, "sections"):
+        index = _entry_index(entry)
+        label = _component_label(entry)
+        if index is not None and label:
+            mapped[index] = label
+    return mapped
+
+
+def _section_for_y(sections: Sequence[dict[str, Any]], y: float | None) -> int | None:
+    if y is None:
+        return None
+    fallback: int | None = None
+    for section in sections:
+        index = _entry_index(section)
+        top = _entry_y(section)
+        height = _entry_height(section)
+        if index is None or top is None:
+            continue
+        if top <= y and (height is None or y < top + height):
+            return index
+        if y >= top:
+            fallback = index
+    return fallback
+
+
+def _compact_signal(entry: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("selector", "trigger", "event", "property", "type", "kind", "name", "id"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}={value.strip()}")
+    return ", ".join(parts) if parts else json.dumps(entry, ensure_ascii=False, default=str)[:180]
+
+
+def write_clone_research(site: SiteWorkspace) -> None:
+    ref_dir = site.ref_dir
+    section_entries = _artifact_list(_read_json_artifact(ref_dir / "section-map.json"), "sections")
+    component_by_index = _component_map_by_index(ref_dir)
+    visible_images = _artifact_list(_read_json_artifact(ref_dir / "visible-images.json"), "images")
+    transitions = _artifact_list(_read_json_artifact(ref_dir / "transition-spec.json"), "transitions")
+    runtime = _read_json_artifact(ref_dir / "runtime-spec.json")
+    runtime_signals = _artifact_list(runtime, "signals")
+    if not runtime_signals:
+        runtime_signals = _artifact_list(runtime, "interactions")
+    placement = _read_json_artifact(ref_dir / "asset-placement.json")
+    missing_assets = _artifact_list(placement, "missingPlacements")
+
+    lines = [
+        "# Clone Research",
+        "",
+        f"Original URL: {site.item.original_url or '(none)'}",
+        "",
+        "## Section Map",
+    ]
+    if section_entries:
+        for section in section_entries[:30]:
+            index = _entry_index(section)
+            top = _entry_y(section)
+            height = _entry_height(section)
+            component = component_by_index.get(index) if index is not None else None
+            detail = [
+                f"Section {index}" if index is not None else "Section ?",
+                _section_label(section),
+            ]
+            if top is not None:
+                detail.append(f"top={int(top)}")
+            if height is not None:
+                detail.append(f"height={int(height)}")
+            if component:
+                detail.append(f"component={component}")
+            lines.append(f"- {', '.join(detail)}")
+    else:
+        lines.append("- No section-map.json sections available.")
+
+    lines.extend(["", "## Visible Assets By Section"])
+    if visible_images:
+        grouped: dict[int | None, list[str]] = {}
+        for image in visible_images:
+            src = image.get("src") or image.get("currentSrc") or image.get("url")
+            if not isinstance(src, str) or not src.strip():
+                continue
+            section_index = _section_for_y(section_entries, _entry_y(image))
+            grouped.setdefault(section_index, []).append(src.strip())
+        if grouped:
+            for section_index, assets in sorted(grouped.items(), key=lambda item: -1 if item[0] is None else item[0]):
+                label = "unmapped" if section_index is None else f"section {section_index}"
+                component = component_by_index.get(section_index) if section_index is not None else None
+                suffix = f" ({component})" if component else ""
+                lines.append(f"- {label}{suffix}")
+                lines.extend(f"  - {asset}" for asset in assets[:12])
+        else:
+            lines.append("- visible-images.json had no usable src values.")
+    else:
+        lines.append("- No visible-images.json assets available.")
+
+    lines.extend(["", "## Video Lottie Canvas Evidence"])
+    evidence_files = [
+        "video-detection.json",
+        "lottie-detection.json",
+        "canvas-webgl-detection.json",
+        "animation-runtime-dump.json",
+    ]
+    evidence_lines: list[str] = []
+    for name in evidence_files:
+        data = _read_json_artifact(ref_dir / name)
+        if isinstance(data, dict):
+            status = data.get("status") or data.get("primaryRenderType") or "present"
+            evidence_lines.append(f"- {name}: {status}")
+    lines.extend(evidence_lines or ["- No video/lottie/canvas evidence artifact available."])
+
+    lines.extend(["", "## Known Hover Scroll Transition Signals"])
+    signal_lines: list[str] = []
+    signal_lines.extend(f"- transition: {_compact_signal(entry)}" for entry in transitions[:20])
+    signal_lines.extend(f"- runtime: {_compact_signal(entry)}" for entry in runtime_signals[:20])
+    lines.extend(signal_lines or ["- No transition-spec.json or runtime-spec.json signals available."])
+
+    lines.extend(["", "## Current missing assets"])
+    if missing_assets:
+        for asset in missing_assets[:30]:
+            src = asset.get("src") or asset.get("url") or asset.get("asset")
+            section_value = asset.get("sectionIndex")
+            component = asset.get("componentFile")
+            bits = []
+            if isinstance(src, str):
+                bits.append(src)
+            if section_value is not None:
+                bits.append(f"section={section_value}")
+            if isinstance(component, str):
+                bits.append(f"component={component}")
+            lines.append(f"- {', '.join(bits) if bits else json.dumps(asset, ensure_ascii=False, default=str)[:180]}")
+    else:
+        lines.append("- No current missing assets from asset-placement.json.")
+
+    site.site_dir.joinpath("clone-research.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def prepare_site_workspace(
@@ -266,6 +501,7 @@ def prepare_site_workspace(
     _copy_ref_if_present(showcase_root, site)
     write_handover(showcase_root, site)
     write_impl_agents(site, Path(__file__).resolve().parents[1])
+    write_clone_research(site)
     return site
 
 
@@ -488,6 +724,111 @@ def detect_showcase_reuse(
     )
 
 
+_GATE_SOURCE_PATH_RE = re.compile(r"\b(?:[\w./-]*/)?ui_clone/(?:goal|gate)\.py\b")
+_GATE_MODULE_SOURCE_RE = re.compile(r"\b(?:[\w./-]*/)?ui_clone/gates/[\w./-]+\.py\b")
+_GATE_READ_RE = re.compile(r"\b(?:Read|Edit|Open)\s+(?:goal|gate)\.py\b")
+_GATE_SYMBOL_SEARCH_RE = re.compile(r"\b(?:Search|grep|rg)\b[^\n]*(?:current_gate|VALID_GATES|gate_[a-z_]+)")
+
+
+def _read_text_for_detection(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def detect_clone_scope_leak(
+    *,
+    log_paths: Sequence[Path],
+    text_paths: Sequence[Path] | None = None,
+) -> list[str]:
+    """Detect clone-worker drift into ui-clone-skills implementation internals.
+
+    Normal closeout commands such as `python -m ui_clone.goal --check-done` are
+    allowed. This flags only source/plumbing investigation that belongs in a
+    maintainer pass, not in a natural clone attempt.
+    """
+    findings: list[str] = []
+    seen: set[str] = set()
+
+    def add(message: str) -> None:
+        if message not in seen:
+            seen.add(message)
+            findings.append(message)
+
+    text = "\n".join(_read_text_for_detection(path) for path in [*log_paths, *(text_paths or [])])
+
+    for pattern in (_GATE_SOURCE_PATH_RE, _GATE_MODULE_SOURCE_RE):
+        for match in pattern.finditer(text):
+            add(f"gate source investigation: {match.group(0)}")
+
+    for match in _GATE_READ_RE.finditer(text):
+        add(f"gate source read: {match.group(0)}")
+
+    for match in _GATE_SYMBOL_SEARCH_RE.finditer(text):
+        add(f"gate symbol search: {match.group(0).strip()}")
+
+    return findings
+
+
+def _write_scope_leak_issue(
+    site: SiteWorkspace,
+    findings: Sequence[str],
+    *,
+    count: int,
+    threshold: int,
+) -> None:
+    lines = [
+        "# Clone Scope Leak",
+        "",
+        "The clone worker repeatedly investigated ui-clone-skills gate internals",
+        "instead of treating gate output as clone evidence.",
+        "",
+        f"Observed scope-leak count: {count}/{threshold}",
+        "",
+        "## Findings",
+        *(f"- {finding}" for finding in findings),
+        "",
+        "## Required maintainer action",
+        "",
+        "Review whether the generated clone workspace instructions or runner",
+        "closeout wording need adjustment. Do not continue natural clone retries",
+        "until this scope boundary is addressed.",
+        "",
+    ]
+    site.site_dir.joinpath("skill-issue.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _apply_scope_leak_findings(
+    site: SiteWorkspace,
+    inspection: dict[str, Any],
+    findings: Sequence[str],
+    *,
+    count: int,
+    threshold: int,
+) -> dict[str, Any]:
+    updated = dict(inspection)
+    unmet = list(updated.get("unmet") or [])
+    action = "meta-fix" if count >= threshold else "recorded"
+    updated["done"] = False
+    updated["unmet"] = [
+        f"clone scope leak detected: {findings[0]}",
+        *unmet,
+    ]
+    updated["scopeLeak"] = {
+        "status": "fail",
+        "findings": list(findings),
+        "count": count,
+        "threshold": threshold,
+        "action": action,
+    }
+    if action == "meta-fix":
+        _write_scope_leak_issue(site, findings, count=count, threshold=threshold)
+    return updated
+
+
 def _write_source_reuse_report(site: SiteWorkspace, findings: Sequence[str]) -> None:
     lines = [
         "# Showcase Source Reuse",
@@ -556,6 +897,76 @@ def _archive_skill_issue(site: SiteWorkspace, attempt: int) -> None:
     issue_path.rename(archive_path)
 
 
+EXPERIMENT_COLUMNS = [
+    "attempt",
+    "score",
+    "status",
+    "asset_missing",
+    "section_pass",
+    "section_fail",
+    "runtime_proof",
+    "transition_proof",
+    "commit_or_snapshot",
+    "description",
+]
+
+
+def _tsv_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return " ".join(text.replace("\t", " ").split())
+
+
+def _impl_snapshot(impl_dir: Path) -> str:
+    try:
+        file_count = sum(1 for path in impl_dir.rglob("*") if path.is_file())
+    except OSError:
+        file_count = 0
+    return f"files:{file_count}"
+
+
+def _attempt_description(clone_result: dict[str, Any], last_message_path: Path) -> str:
+    if clone_result.get("status") == "dry-run":
+        return "dry-run"
+    if last_message_path.is_file():
+        try:
+            text = last_message_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        line = " ".join(text.split())
+        if line:
+            return line[:200]
+    return str(clone_result.get("status") or "unknown")
+
+
+def _append_experiment_row(
+    site: SiteWorkspace,
+    score: dict[str, Any],
+    *,
+    commit_or_snapshot: str,
+    description: str,
+) -> None:
+    path = site.site_dir / "clone-experiments.tsv"
+    needs_header = not path.exists() or path.stat().st_size == 0
+    row = {
+        "attempt": score.get("attempt"),
+        "score": score.get("score"),
+        "status": score.get("completionStatus"),
+        "asset_missing": score.get("assetMissing"),
+        "section_pass": score.get("sectionPass"),
+        "section_fail": score.get("sectionFail"),
+        "runtime_proof": score.get("runtimeProof"),
+        "transition_proof": score.get("transitionProof"),
+        "commit_or_snapshot": commit_or_snapshot,
+        "description": description,
+    }
+    lines: list[str] = []
+    if needs_header:
+        lines.append("\t".join(EXPERIMENT_COLUMNS))
+    lines.append("\t".join(_tsv_cell(row[column]) for column in EXPERIMENT_COLUMNS))
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
 def _should_run_skill_fix(
     *,
     args: argparse.Namespace,
@@ -592,6 +1003,10 @@ def run_loop(args: argparse.Namespace) -> str:
         "showcaseRoot": str(showcase_root),
         "workRoot": str(work_root),
         "dryRun": args.dry_run,
+        "experimentLog": args.experiment_log,
+        "scoreCloneAttempts": args.score_clone_attempts,
+        "discardWorse": args.discard_worse,
+        "scopeLeakThreshold": args.scope_leak_threshold,
         "sites": [],
     }
     log_path = work_root / "onpixel-codex-loop.jsonl"
@@ -620,11 +1035,20 @@ def run_loop(args: argparse.Namespace) -> str:
             clone_result: dict[str, Any] = {"status": "not-run"}
             inspection: dict[str, Any] = {"done": False, "unmet": ["not inspected"], "goal": {}}
             max_attempts = max(1, args.clone_attempts)
+            scope_leak_count = 0
 
             for attempt in range(1, max_attempts + 1):
+                previous_score: dict[str, Any] | None = None
+                if args.score_clone_attempts:
+                    previous_score = score_clone_attempt(
+                        site.ref_dir,
+                        site.impl_dir,
+                        completion_status=site_record["completionStatus"],
+                    )
                 clone_prompt = build_clone_prompt(site, showcase_root, plugin_root)
                 clone_prompt_path = _attempt_path(site, "codex-clone-prompt", ".md", attempt)
                 clone_log_path = _attempt_path(site, "codex-clone", ".jsonl", attempt)
+                clone_last_path = _attempt_path(site, "codex-clone-last", ".md", attempt)
                 clone_prompt_path.write_text(clone_prompt, encoding="utf-8")
 
                 if args.dry_run:
@@ -635,7 +1059,7 @@ def run_loop(args: argparse.Namespace) -> str:
                         codex_bin=args.codex_bin,
                         cwd=site.impl_dir,
                         log_path=clone_log_path,
-                        output_last_message=_attempt_path(site, "codex-clone-last", ".md", attempt),
+                        output_last_message=clone_last_path,
                         status_path=_attempt_path(site, "codex-clone-status", ".json", attempt),
                         add_dirs=[plugin_root, site.ref_dir],
                         model=args.model,
@@ -647,7 +1071,48 @@ def run_loop(args: argparse.Namespace) -> str:
                 inspection = inspect_site(site)
                 reuse_findings = detect_showcase_reuse(site, showcase_root, log_paths=[clone_log_path])
                 inspection = _apply_source_reuse_findings(site, inspection, reuse_findings)
+                scope_leak_findings = detect_clone_scope_leak(
+                    log_paths=[clone_log_path],
+                    text_paths=[
+                        clone_last_path,
+                        clone_log_path.with_suffix(clone_log_path.suffix + ".stderr"),
+                    ],
+                )
+                scope_leak_threshold = max(1, args.scope_leak_threshold)
+                scope_leak_threshold_reached = False
+                if scope_leak_findings:
+                    scope_leak_count += 1
+                    scope_leak_threshold_reached = scope_leak_count >= scope_leak_threshold
+                    inspection = _apply_scope_leak_findings(
+                        site,
+                        inspection,
+                        scope_leak_findings,
+                        count=scope_leak_count,
+                        threshold=scope_leak_threshold,
+                    )
                 completion_status = _completion_status(inspection)
+                attempt_score: dict[str, Any] | None = None
+                if args.score_clone_attempts:
+                    attempt_score = score_clone_attempt(
+                        site.ref_dir,
+                        site.impl_dir,
+                        attempt=attempt,
+                        completion_status=completion_status,
+                    )
+                    if previous_score is not None:
+                        previous_value = int(previous_score.get("score") or 0)
+                        delta = int(attempt_score["score"]) - previous_value
+                        attempt_score["previousScore"] = previous_value
+                        attempt_score["delta"] = delta
+                        attempt_score["worseThanPrevious"] = delta < 0
+                    attempt_score["discardWorse"] = "enabled" if args.discard_worse else "disabled"
+                    if args.experiment_log:
+                        _append_experiment_row(
+                            site,
+                            attempt_score,
+                            commit_or_snapshot=_impl_snapshot(site.impl_dir),
+                            description=_attempt_description(clone_result, clone_last_path),
+                        )
                 attempt_record = {
                     "attempt": attempt,
                     "clone": clone_result,
@@ -658,9 +1123,13 @@ def run_loop(args: argparse.Namespace) -> str:
                     if (site.site_dir / "skill-issue.md").exists()
                     else None,
                 }
+                if attempt_score is not None:
+                    attempt_record["score"] = attempt_score
                 site_record["cloneAttempts"].append(attempt_record)
                 site_record["clone"] = clone_result
                 site_record["inspection"] = inspection
+                if attempt_score is not None:
+                    site_record["score"] = attempt_score
                 site_record["done"] = bool(inspection.get("done"))
                 site_record["completionStatus"] = completion_status
                 site_record["previewEligible"] = completion_status == "done"
@@ -698,6 +1167,9 @@ def run_loop(args: argparse.Namespace) -> str:
                     site_record["skillFix"] = skill_result
                     if args.skill_fix_policy == "issue-only":
                         _archive_skill_issue(site, attempt)
+                    if scope_leak_threshold_reached:
+                        site_record["stopReason"] = "repeated-scope-leak"
+                        break
                     if args.skill_fix_policy != "issue-only":
                         break
                 elif args.dry_run and not args.skip_skill_fix and args.skill_fix_policy != "issue-only":
@@ -705,6 +1177,9 @@ def run_loop(args: argparse.Namespace) -> str:
                     skill_prompt_path = _attempt_path(site, "codex-skill-fix-prompt", ".md", attempt)
                     skill_prompt_path.write_text(skill_prompt, encoding="utf-8")
                     site_record["skillFix"] = {"status": "dry-run", "prompt": str(skill_prompt_path)}
+                    break
+                elif scope_leak_threshold_reached:
+                    site_record["stopReason"] = "repeated-scope-leak"
                     break
 
                 if args.stop_on_error and clone_result.get("status") in {"error", "timeout"}:
@@ -746,10 +1221,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Write prompts/summary without invoking Codex")
     parser.add_argument("--skip-skill-fix", action="store_true")
     parser.add_argument(
+        "--experiment-log",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Append clone attempt rows to clone-experiments.tsv",
+    )
+    parser.add_argument(
+        "--score-clone-attempts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Score each clone attempt from ref artifacts",
+    )
+    parser.add_argument(
+        "--discard-worse",
+        action="store_true",
+        help="Reserve destructive worse-score handling for explicit opt-in runs",
+    )
+    parser.add_argument(
         "--clone-attempts",
         type=int,
         default=1,
         help="Maximum clone passes per site before moving to the next site",
+    )
+    parser.add_argument(
+        "--scope-leak-threshold",
+        type=int,
+        default=2,
+        help="Repeated clone-worker gate-internal investigations before switching to a maintainer pass",
     )
     parser.add_argument(
         "--skill-fix-policy",

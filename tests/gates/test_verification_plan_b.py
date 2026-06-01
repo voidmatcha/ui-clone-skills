@@ -68,6 +68,214 @@ def test_verification_plan_omits_image_fidelity_when_visible_images_absent(tmp_p
 
 
 
+def test_observed_scroll_motion_via_transition_coverage_sets_scroll_scrub(tmp_path: Path) -> None:
+    """Unknown / hand-rolled motion library: scroll-engine.json EMPTY and NO
+    bundle GSAP token, but transition-coverage.json recorded a scroll-classified
+    animatedElement. The page WAS OBSERVED to move under scroll, so
+    hasScrollScrub must be true and video-motion-compare must dispatch —
+    library-agnostic, driven off observation not allowlist.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {
+                "id": "handrolled-scroll-motion",
+                "trigger": "scroll",
+                "target": "div.handrolled_sticky",
+                "animation": {"type": "scroll-linked transform"},
+            }
+        ],
+    }))
+    # Empty scroll engine + no bundle => all allowlist signals are false.
+    (ref / "scroll-engine.json").write_text(json.dumps({}))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "url": "https://example.com",
+        "animatedElements": [
+            {
+                "selector": "div.handrolled_sticky",
+                "trigger": "scroll-driven",
+                "sectionAnchor": "handrolled",
+                "decoded": {"position": "sticky", "stickyTop": "0px"},
+            }
+        ],
+        "staticElements": [],
+    }))
+    plan = _run_verification_plan(ref)
+    assert plan["signals"]["hasScrollScrub"] is True, (
+        "observed scroll-driven animatedElement must set hasScrollScrub even "
+        "with empty scroll-engine + no allowlist token"
+    )
+    ids = [c["id"] for c in plan["requiredChecks"]]
+    assert "video-motion-compare" in ids, (
+        f"video-motion row missing for observed scroll motion: {ids}"
+    )
+    assert "transition-compare" not in ids, (
+        "transition-compare is a hover/end-state checker; scroll-only motion "
+        f"must not dispatch it as generic transition evidence: {ids}"
+    )
+
+
+def test_observed_scroll_motion_via_element_tracking_sets_scroll_scrub(tmp_path: Path) -> None:
+    """element-tracking.json shows an element whose transform changes across two
+    scroll positions — observed motion, no library token anywhere. hasScrollScrub
+    must be true.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "scroll-engine.json").write_text(json.dumps({}))
+    (ref / "element-tracking.json").write_text(json.dumps([
+        {"scrollY": 0, "scrollPct": 0, "elements": [
+            {"selector": "div.parallax", "inViewport": True, "top": 100,
+             "transform": "matrix(1, 0, 0, 1, 0, 0)", "opacity": None,
+             "scale": None, "clipPath": None, "position": None},
+        ]},
+        {"scrollY": 2000, "scrollPct": 50, "elements": [
+            {"selector": "div.parallax", "inViewport": True, "top": -300,
+             "transform": "matrix(1, 0, 0, 1, 0, -200)", "opacity": None,
+             "scale": None, "clipPath": None, "position": None},
+        ]},
+    ]))
+    plan = _run_verification_plan(ref)
+    assert plan["signals"]["hasScrollScrub"] is True, (
+        "cross-position transform change must set hasScrollScrub"
+    )
+
+
+def test_observed_io_reveal_via_animations_detected_sets_io_reveal(tmp_path: Path) -> None:
+    """animations-detected.json carries a non-empty textReveals list — observed
+    reveal-on-enter motion, no IntersectionObserver token in any allowlist
+    source. hasIOReveal must be true so reveal-trigger fires.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "scroll-engine.json").write_text(json.dumps({}))
+    (ref / "animations-detected.json").write_text(json.dumps({
+        "scrollAnimations": [],
+        "textReveals": [
+            {"selector": "h2.reveal", "type": "text-reveal"}
+        ],
+    }))
+    plan = _run_verification_plan(ref)
+    assert plan["signals"]["hasIOReveal"] is True, (
+        "non-empty textReveals must set hasIOReveal"
+    )
+
+
+def test_no_false_dispatch_on_fully_static_ref(tmp_path: Path) -> None:
+    """Fix-not-loosen guard: a genuinely static page — no observed motion in any
+    behavioral artifact and no allowlist token — must keep hasScrollScrub and
+    hasIOReveal false (no false dispatch of expensive motion checks).
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "scroll-engine.json").write_text(json.dumps({}))
+    # Behavioral artifacts present but show NO motion.
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [], "staticElements": [{"selector": "div.static"}],
+    }))
+    (ref / "animations-detected.json").write_text(json.dumps({
+        "scrollAnimations": [], "textReveals": [],
+    }))
+    (ref / "element-tracking.json").write_text(json.dumps([
+        {"scrollY": 0, "scrollPct": 0, "elements": [
+            {"selector": "div.static", "inViewport": True, "top": 100,
+             "transform": None, "opacity": None, "scale": None,
+             "clipPath": None, "position": None},
+        ]},
+        {"scrollY": 2000, "scrollPct": 50, "elements": [
+            {"selector": "div.static", "inViewport": True, "top": 100,
+             "transform": None, "opacity": None, "scale": None,
+             "clipPath": None, "position": None},
+        ]},
+    ]))
+    plan = _run_verification_plan(ref)
+    assert plan["signals"]["hasScrollScrub"] is False, (
+        "static page must not set hasScrollScrub"
+    )
+    assert plan["signals"]["hasIOReveal"] is False, (
+        "static page must not set hasIOReveal"
+    )
+    ids = [c["id"] for c in plan["requiredChecks"]]
+    assert "video-motion-compare" not in ids, (
+        f"video-motion must not dispatch on static page: {ids}"
+    )
+
+
+def test_observed_carousel_via_auto_timers_sets_swiper(tmp_path: Path) -> None:
+    """Fix B — unknown / hand-rolled carousel: NO Swiper name token anywhere,
+    but animations-detected.json recorded an auto-rotating timer (Embla/Splide/
+    keen-slider/hand-rolled all surface as an observed autoTimer). The periodic
+    transform change WAS OBSERVED, so hasSwiper must be true and swiper-runtime
+    must dispatch — driven off observation, not the Swiper class grep.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "animations-detected.json").write_text(json.dumps({
+        "scrollAnimations": [],
+        "textReveals": [],
+        "autoTimers": [
+            {"selector": ".embla__container", "interval_ms": 4000, "type": "slideshow"}
+        ],
+    }))
+    plan = _run_verification_plan(ref)
+    assert plan["signals"]["hasSwiper"] is True, (
+        "observed auto-rotating carousel must set hasSwiper even with no Swiper "
+        "name token"
+    )
+    ids = [c["id"] for c in plan["requiredChecks"]]
+    assert "swiper-runtime" in ids, f"swiper-runtime row missing: {ids}"
+
+
+def test_observed_canvas_vector_player_sets_lottie(tmp_path: Path) -> None:
+    """Fix B — unknown vector player (Rive .riv / custom JSON-on-canvas): NO
+    lottie/bodymovin/dotlottie name token anywhere, but a <canvas> surface is
+    present AND it was OBSERVED advancing frames (idle auto-timer on the canvas
+    region). hasLottie must be true so the runtime gate (real runtime + asset)
+    dispatches — a static SVG/canvas freehand fails it, which is the point.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "canvas-webgl-detection.json").write_text(json.dumps({
+        "hasCanvas": True, "hasWebGL": False, "primaryRenderType": "canvas",
+    }))
+    (ref / "animations-detected.json").write_text(json.dumps({
+        "scrollAnimations": [],
+        "textReveals": [],
+        "autoTimers": [
+            {"selector": "canvas.hero-vector", "interval_ms": 0, "type": "css-animation"}
+        ],
+    }))
+    plan = _run_verification_plan(ref)
+    assert plan["signals"]["hasLottie"] is True, (
+        "canvas surface observed advancing frames must set hasLottie even with "
+        "no lottie/bodymovin name token"
+    )
+    ids = [c["id"] for c in plan["requiredChecks"]]
+    assert "lottie-runtime" in ids, f"lottie-runtime row missing: {ids}"
+
+
+def test_no_false_swiper_lottie_dispatch_on_static_ref(tmp_path: Path) -> None:
+    """Fix-not-loosen guard for Fix B: a genuinely static page — no autoTimers,
+    no canvas, no name token — must keep hasSwiper and hasLottie false so the
+    swiper/lottie runtime gates do not false-dispatch.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "canvas-webgl-detection.json").write_text(json.dumps({
+        "hasCanvas": False, "hasWebGL": False,
+    }))
+    (ref / "animations-detected.json").write_text(json.dumps({
+        "scrollAnimations": [], "textReveals": [], "autoTimers": [],
+    }))
+    plan = _run_verification_plan(ref)
+    assert plan["signals"]["hasSwiper"] is False, "static page must not set hasSwiper"
+    assert plan["signals"]["hasLottie"] is False, "static page must not set hasLottie"
+    ids = [c["id"] for c in plan["requiredChecks"]]
+    assert "swiper-runtime" not in ids, f"swiper-runtime must not dispatch: {ids}"
+    assert "lottie-runtime" not in ids, f"lottie-runtime must not dispatch: {ids}"
+
+
 def test_bench_verification_smoke_markdown() -> None:
     """bench-verification.sh --repeat=1 must exit 0 and emit the expected
     markdown header + the three named fixtures.
@@ -139,4 +347,3 @@ def test_bench_verification_rejects_bad_repeat() -> None:
         )
         assert proc.returncode == 2, f"--repeat={bad} should exit 2, got {proc.returncode}: {proc.stderr}"
         assert "repeat" in proc.stderr.lower()
-

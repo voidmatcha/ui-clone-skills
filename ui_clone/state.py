@@ -40,6 +40,21 @@ GATE_ORDER: list[str] = [
 # this constant as `_MAX_GATE_FAILS` for back-compat with benchmark_harness.
 HARD_CAP_GATE_FAILS = 10
 
+# Canonical hard-cap unclonable reason string. Lives next to
+# HARD_CAP_GATE_FAILS so the dedup key (gate, reason) inside
+# _record_unclonable_unlocked can't drift from the rendered wording.
+# Anyone reading state.json (Stop hook, goal card, benchmark) must match
+# this exact format to recognize hard-cap terminations.
+HARD_CAP_REASON_TEMPLATE = (
+    "hard cap reached: gate '{gate}' failed {cap} consecutive times "
+    "(auto-terminated by state.mark_failed)"
+)
+
+
+def format_hard_cap_reason(gate: str) -> str:
+    """Render the canonical hard-cap unclonable reason for a gate."""
+    return HARD_CAP_REASON_TEMPLATE.format(gate=gate, cap=HARD_CAP_GATE_FAILS)
+
 
 def prerequisite_gates(gate: str) -> list[str]:
     """Return gates that must be completed before `gate` can pass."""
@@ -73,11 +88,6 @@ _FALLBACK_SUGGESTIONS: dict[tuple[str, str], list[str]] = {
     ("post-implement", "auth-gated"): [
         "Capture once via agent-browser --profile <profile-with-cookies>, then extract from the logged-in snapshot.",
         "Limit clone scope to the public landing — flag auth-gated sections as out-of-scope.",
-    ],
-    ("post-implement", "class-signature-preservation-mismatch"): [
-        "Re-run extraction with --interactions to capture more class tokens.",
-        "Verify pipeline Phase 1-6 ran (tmp/ref/<c>/ should have html/, dom-scaffold.json, structure.json). If not, the impl is freehand and won't preserve signatures.",
-        "Increase scope: include hover/focus states so dynamic classes are captured.",
     ],
     ("section-compare", "hard-cap-fail"): [
         "Increase iteration budget on highest-AE sections first (goal card → fail_count > 5).",
@@ -172,6 +182,13 @@ class PipelineState:
     # when sections/result.txt shows 0 FAIL. The two stamps are NEVER
     # interchangeable; the field gates which one the Stop hook accepts.
     closeout_policy: str = "canonical"
+    # Codex P0 (2026-05-27 architectural review): transient flag set to True
+    # when PipelineState.load() had to quarantine a corrupt pipeline-state.json.
+    # mark_failed() reads this to decide between "advance fail count on fresh
+    # state" (false-positive on quarantine, hard-cap never fires) and "treat
+    # the quarantine itself as a terminal state-corruption". NOT persisted to
+    # disk (excluded from _to_disk_payload + dataclass repr/compare).
+    load_failed: bool = field(default=False, repr=False, compare=False)
 
     @classmethod
     def load(cls, ref_dir: Path) -> PipelineState:
@@ -227,10 +244,14 @@ class PipelineState:
                 f"the quarantine file if needed.",
                 file=sys.stderr,
             )
-            return cls(component=ref_dir.name)
+            fresh = cls(component=ref_dir.name)
+            fresh.load_failed = True
+            return fresh
         except OSError as exc:
             print(f"ui-clone-skills: Cannot read {path}: {exc}", file=sys.stderr)
-            return cls(component=ref_dir.name)
+            fresh = cls(component=ref_dir.name)
+            fresh.load_failed = True
+            return fresh
 
     def _to_disk_payload(self) -> dict:
         """Single source of truth for the on-disk JSON schema.
@@ -489,6 +510,33 @@ class PipelineState:
             authoritative = (
                 PipelineState.load(ref_dir) if state_path.is_file() else self
             )
+            # Codex P0 fail-closed (2026-05-27): if PipelineState.load() had
+            # to quarantine a corrupt pipeline-state.json, the in-memory
+            # `authoritative` is fresh (current_gate='reference', no fail
+            # counts, no completed_steps). Without this guard, the next
+            # `authoritative.current_gate != gate` check below would
+            # silently bail (mismatch with caller's gate) — fail counter
+            # never bumps, hard-cap never fires, pipeline drives on stale
+            # context. Record state-corruption as canonical terminal
+            # unclonable so Stop hook / goal card / benchmark all see one
+            # explicit termination signal instead of a phantom no-op.
+            if authoritative.load_failed:
+                authoritative._record_unclonable_unlocked(
+                    gate=gate,
+                    reason=(
+                        f"pipeline-state.json was corrupt and quarantined "
+                        f"by PipelineState.load(); cannot bump fail counter "
+                        f"for gate '{gate}' on fresh state without losing "
+                        f"audit trail. Recover unclonable_reasons / "
+                        f"completed_steps from the .json.corrupt.* quarantine "
+                        f"file in {ref_dir} if needed."
+                    ),
+                    category="state-corruption",
+                )
+                authoritative._save_unlocked(ref_dir)
+                if authoritative is not self:
+                    self._mirror_from(authoritative)
+                return
             # Re-check inside the lock against the freshly-loaded snapshot.
             if authoritative.current_gate != gate:
                 if authoritative is not self:
@@ -512,11 +560,7 @@ class PipelineState:
             if authoritative.gate_fail_counts[gate] >= HARD_CAP_GATE_FAILS:
                 authoritative._record_unclonable_unlocked(
                     gate=gate,
-                    reason=(
-                        f"hard cap reached: gate '{gate}' failed "
-                        f"{HARD_CAP_GATE_FAILS} consecutive times "
-                        f"(auto-terminated by state.mark_failed)"
-                    ),
+                    reason=format_hard_cap_reason(gate),
                     category="hard-cap-fail",
                 )
 
@@ -545,9 +589,8 @@ class PipelineState:
         (codex review 2026-05-24).
 
         category (Step G): short machine-readable kind name (e.g.,
-            "drm-canvas", "commercial-font", "auth-gated", "hard-cap-fail",
-            "class-signature-preservation-mismatch"). Used by the receipt
-            HTML to look up downstream documentation.
+            "drm-canvas", "commercial-font", "auth-gated", "hard-cap-fail").
+            Used by the receipt HTML to look up downstream documentation.
 
         fallback_suggestions (Step G): ordered list of human-readable
             remediation suggestions. Callers pass either an explicit list

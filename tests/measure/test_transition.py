@@ -276,6 +276,48 @@ def test_transition_proof_accepts_single_sample_phase6d_with_hover_compare(
     )
 
 
+def test_transition_proof_does_not_use_hover_compare_for_scroll_runtime_proof(
+    tmp_path: Path,
+) -> None:
+    """A hover/end-state compare pass cannot prove a scroll transition fired."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-scroll", "trigger": "scroll"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [
+            {
+                "selector": ".hero",
+                "trigger": "scroll",
+                "transition": "hero-scroll",
+            }
+        ],
+    }))
+    transitions = ref / "transitions"
+    transitions.mkdir()
+    (transitions / "result.txt").write_text(
+        "Transition compare: 1 PASS, 0 FAIL\n✅ PASS  .hero\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "fail"
+    assert any("runtime proof" in r for r in artifact["reasons"])
+
+
 def test_transition_proof_rejects_phase6d_declarations_without_runtime_proof(
     tmp_path: Path,
 ) -> None:
@@ -651,8 +693,8 @@ def test_fix16_extract_dom_captures_transitions_and_animations() -> None:
 
 
 
-def test_required_media_pass_when_artifact_absent(tmp_path: Path) -> None:
-    """Coverage gate dispatched unconditionally; absent required-media.json → pass."""
+def test_required_media_fails_when_artifact_absent(tmp_path: Path) -> None:
+    """Coverage gate must not silently pass when Step 6b-bis was skipped."""
     ref = tmp_path / "ref"
     ref.mkdir()
     impl = tmp_path / "impl"
@@ -663,9 +705,10 @@ def test_required_media_pass_when_artifact_absent(tmp_path: Path) -> None:
         "skills/visual-debug/scripts/required-media-coverage-check.sh",
         str(ref), str(impl),
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.returncode == 1, proc.stdout + proc.stderr
     art = json.loads((ref / "required-media-coverage.json").read_text())
-    assert art["status"] == "pass"
+    assert art["status"] == "fail"
+    assert art["reason"].startswith("required-media.json absent")
     assert art["implRoot"] == str(impl)
     assert art["implDir"] == str(impl)
     assert art["implSrcDir"] == str(impl / "src")
@@ -718,6 +761,57 @@ def test_transition_compare_no_ref_transitions_writes_result_artifact(tmp_path: 
     result = out_dir / "transitions" / "result.txt"
     assert result.is_file(), proc.stdout + proc.stderr
     assert "0 PASS, 0 FAIL" in result.read_text(encoding="utf-8")
+
+
+def test_transition_proof_rejects_failed_transition_compare_even_with_runtime_samples(
+    tmp_path: Path,
+) -> None:
+    """transition-proof must be at least as strict as transition-compare."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "requiredChecks": [
+            {"id": "transition-compare", "produces": "transitions/result.txt"},
+            {"id": "transition-proof", "produces": "transition-proof.json"},
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "btn-arrow", "trigger": "hover"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [
+            {
+                "selector": ".btn-arrow",
+                "samples": [
+                    {"scrollY": 0, "opacity": "0", "transform": "matrix(1, 0, 0, 1, 0, 8)"},
+                    {"scrollY": 10, "opacity": "1", "transform": "matrix(1, 0, 0, 1, 0, 0)"},
+                ],
+            }
+        ],
+    }))
+    transitions = ref / "transitions"
+    transitions.mkdir()
+    (transitions / "result.txt").write_text(
+        "Transition compare: 2 PASS, 1 FAIL\n❌ FAIL .btn-arrow timing mismatch\n",
+        encoding="utf-8",
+    )
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "fail"
+    assert any("transition compare" in reason for reason in artifact["reasons"])
 
 
 
@@ -814,3 +908,272 @@ def test_required_media_skips_unknown_shapes(tmp_path: Path) -> None:
         capture_output=True, text=True, timeout=15, check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# ── D1: transition-proof-rollup string-list animatedElements ──────────────
+
+
+def test_transition_proof_rollup_handles_string_list_animated_elements(
+    tmp_path: Path,
+) -> None:
+    """D1: transition-coverage.json may carry animatedElements as a list of
+    selector strings (Phase 6d ref-side extraction). The rollup must normalize
+    those instead of crashing with AttributeError ('str' has no attribute
+    'get'), then compose a verdict like any other input.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "nav-hover"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    # animatedElements as bare selector strings — the crashing schema.
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [".nav-link", ".cta-btn", "#hero"],
+    }))
+    # A passing runtime proof source carries the firing evidence.
+    (ref / "reveal-trigger.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass",
+    }))
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts"
+        / "transition-proof-rollup.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert "AttributeError" not in proc.stderr, proc.stderr
+    artifact_path = ref / "transition-proof.json"
+    assert artifact_path.is_file(), (
+        "rollup must produce a verdict artifact, not crash"
+    )
+    artifact = json.loads(artifact_path.read_text())
+    assert artifact["status"] == "pass", artifact
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_transition_proof_rollup_string_list_without_runtime_proof_fails(
+    tmp_path: Path,
+) -> None:
+    """D1 no-loosening guard: string-list animatedElements with NO runtime proof
+    source must still FAIL. The normalization is a robustness fix, not a change
+    to pass/fail semantics.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "nav-hover"}],
+    }))
+    (ref / "transition-spec-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "covered": 1,
+    }))
+    (ref / "spec-implementation-coverage.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass", "total": 1, "withMotion": 1,
+    }))
+    (ref / "transition-coverage.json").write_text(json.dumps({
+        "animatedElements": [".nav-link", ".cta-btn"],
+    }))
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts"
+        / "transition-proof-rollup.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert "AttributeError" not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    assert artifact["status"] == "fail"
+    assert any("runtime proof" in r for r in artifact["reasons"]), artifact["reasons"]
+
+
+# ── B4: transition-compare per-property matching ──────────────────────────
+
+# getComputedStyle joins transition-timing-function with commas, but
+# cubic-bezier() contains internal commas, so a naive split over-fragments it
+# into four tokens. The element captures below mirror that real on-wire shape.
+_CUBIC_TOKENS = ["cubic-bezier(0.165", "0.84", "0.44", "1)"]
+
+
+def _trans_el(
+    selector: str,
+    props: list[str],
+    durs: list[str],
+    easings: list[str],
+    *,
+    color: str = "rgb(20, 20, 20)",
+) -> dict[str, object]:
+    """Build a captured transition element matching transition-compare.sh's
+    ref-elements.json / impl-elements.json schema."""
+    return {
+        "selector": selector,
+        "tag": "a",
+        "text": selector.lstrip(".#"),
+        "rect": {"top": 80, "left": 80, "width": 240, "height": 60},
+        "transition": {"properties": props, "durations": durs, "easings": easings},
+        "idleStyle": {
+            "opacity": "1",
+            "transform": "none",
+            "backgroundColor": "rgb(17, 17, 17)",
+            "color": color,
+            "scale": "none",
+            "filter": "none",
+            "boxShadow": "none",
+        },
+    }
+
+
+def _run_transition_compare_with_fake_browser(
+    tmp_path: Path,
+    ref_elements: list[dict[str, object]],
+    impl_elements: list[dict[str, object]],
+) -> str:
+    """Drive transition-compare.sh end-to-end with a fake agent-browser that
+    feeds canned element captures, then return transitions/result.txt.
+
+    The fake browser answers the detection eval (identified by the
+    'transitionProperty' probe) with ref/impl element JSON keyed by session
+    suffix, returns an empty object for hover computed-style evals (so no hover
+    issues fire), and 'ok' for everything else. No real browser or served page
+    is required, so the pure per-property comparison logic is exercised in
+    isolation against realistic captures.
+    """
+    root = _project_root()
+    out_dir = tmp_path / "ref"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+
+    ref_file = tmp_path / "ref-elements.json"
+    impl_file = tmp_path / "impl-elements.json"
+    ref_file.write_text(json.dumps(ref_elements), encoding="utf-8")
+    impl_file.write_text(json.dumps(impl_elements), encoding="utf-8")
+
+    agent_browser = shim_dir / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        'session=""\n'
+        'if [ "$1" = "--session" ]; then session="$2"; shift 2; fi\n'
+        'cmd="${1:-}"\n'
+        'if [ "$cmd" = "eval" ]; then\n'
+        '  js="${2:-}"\n'
+        '  if [[ "$js" == *transitionProperty* ]]; then\n'
+        '    case "$session" in\n'
+        '      *-tc-ref) cat "$_SHIM_REF_ELEMENTS" ;;\n'
+        '      *-tc-impl) cat "$_SHIM_IMPL_ELEMENTS" ;;\n'
+        "      *) printf '[]' ;;\n"
+        "    esac\n"
+        '  elif [[ "$js" == *boxShadow* ]]; then\n'
+        "    printf '{}'\n"
+        "  else\n"
+        "    printf 'ok'\n"
+        "  fi\n"
+        "else\n"
+        "  printf 'ok'\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    agent_browser.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "_SHIM_REF_ELEMENTS": str(ref_file),
+        "_SHIM_IMPL_ELEMENTS": str(impl_file),
+        "WAIT_REF": "0",
+        "WAIT_IMPL": "0",
+        "TRANSITION_WAIT": "0",
+        "_TC_SCROLL_WAIT": "0",
+    }
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "skills" / "visual-debug" / "scripts" / "transition-compare.sh"),
+            "https://ref.test",
+            "http://127.0.0.1:1",
+            "trans-fix",
+            str(out_dir),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return (out_dir / "transitions" / "result.txt").read_text(encoding="utf-8")
+
+
+def test_transition_compare_passes_faithful_clone_with_extra_inert_property(
+    tmp_path: Path,
+) -> None:
+    """B4: a faithful hover (exact ref duration+easing on the property that
+    actually animates) must PASS even when the impl additionally declares a
+    harmless extra inert transition the ref does not animate. Per-property
+    matching, not whole-list equality.
+    """
+    ref = [
+        _trans_el(".cta-btn", ["opacity"], ["0.5s"], list(_CUBIC_TOKENS)),
+        _trans_el(".fade-link", ["color"], ["0.3s"], ["ease"]),
+    ]
+    impl = [
+        # faithful opacity 0.5s cubic PLUS an inert transform 0.5s cubic
+        _trans_el(
+            ".cta-btn",
+            ["opacity", "transform"],
+            ["0.5s", "0.5s"],
+            _CUBIC_TOKENS + _CUBIC_TOKENS,
+        ),
+        _trans_el(".fade-link", ["color"], ["0.3s"], ["ease"]),
+    ]
+    result = _run_transition_compare_with_fake_browser(tmp_path, ref, impl)
+    assert "2 PASS, 0 FAIL" in result, result
+
+
+def test_transition_compare_fails_wrong_duration_and_easing(
+    tmp_path: Path,
+) -> None:
+    """B4 no-loosening guard: a WRONG duration+easing on the property the ref
+    animates must still FAIL after per-property matching.
+    """
+    ref = [
+        _trans_el(".cta-btn", ["opacity"], ["0.5s"], list(_CUBIC_TOKENS)),
+        _trans_el(".fade-link", ["color"], ["0.3s"], ["ease"]),
+    ]
+    impl = [
+        _trans_el(".cta-btn", ["opacity"], ["0.1s"], ["linear"]),
+        _trans_el(".fade-link", ["color"], ["0.3s"], ["ease"]),
+    ]
+    result = _run_transition_compare_with_fake_browser(tmp_path, ref, impl)
+    assert "1 PASS, 1 FAIL" in result, result
+    assert "DURATION_MISMATCH" in result, result
+    assert ".cta-btn" in result, result
+
+
+def test_transition_compare_fails_when_impl_omits_animated_property(
+    tmp_path: Path,
+) -> None:
+    """B4 no-loosening guard: if the impl element exists but does NOT transition
+    a property the ref animates, that is a MISSING transition → FAIL (the impl
+    cannot 'drop' a ref-animated property and still pass).
+    """
+    ref = [
+        _trans_el(".cta-btn", ["opacity"], ["0.5s"], list(_CUBIC_TOKENS)),
+    ]
+    impl = [
+        # impl transitions only 'color', never the ref's animated 'opacity'
+        _trans_el(".cta-btn", ["color"], ["0.3s"], ["ease"]),
+    ]
+    result = _run_transition_compare_with_fake_browser(tmp_path, ref, impl)
+    assert "0 PASS, 1 FAIL" in result, result
+    assert "MISSING_TRANSITION" in result, result

@@ -92,6 +92,9 @@ Gate._check_audit_artifacts = pre_generate._check_audit_artifacts  # type: ignor
 Gate._check_detection_artifact_integrity = (  # type: ignore[method-assign]
     pre_generate._check_detection_artifact_integrity
 )
+Gate._scroll_motion_signals = (  # type: ignore[method-assign]
+    pre_generate._scroll_motion_signals
+)
 Gate._check_scroll_spec_coverage = (  # type: ignore[method-assign]
     pre_generate._check_scroll_spec_coverage
 )
@@ -157,6 +160,7 @@ _BASE_OWNED: frozenset[str] = frozenset(
         "check_file",
         "check_json_key",
         "_load_json",
+        "_load_json_any",
         "_check_artifact_provenance",
         "_PAID_FONT_CDN_HOSTS",
     }

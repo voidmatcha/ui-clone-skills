@@ -51,6 +51,9 @@ fi
 
 cd "$REPO_ROOT"
 
+EXCEPTIONS_FILE="$REPO_ROOT/.impl-scope-exceptions"
+EXCEPTIONS_BLOB_FILE="$REF_DIR/iteration-exceptions-blob.txt"
+
 # Initialize baseline on first call.
 if [ ! -f "$BASELINE_FILE" ]; then
   CURRENT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
@@ -59,6 +62,17 @@ if [ ! -f "$BASELINE_FILE" ]; then
     exit 2
   fi
   printf '%s\n' "$CURRENT_SHA" > "$BASELINE_FILE"
+  # Fix 4 constrained (codex 2026-05-27): snapshot the .impl-scope-exceptions
+  # blob hash at baseline time. Subsequent runs verify the file hasn't been
+  # modified since baseline — same-turn self-whitelist produces a hash
+  # mismatch and is rejected. If the file doesn't exist at baseline time,
+  # snapshot "absent" sentinel so adding the file later also mismatches.
+  if [ -f "$EXCEPTIONS_FILE" ]; then
+    EXCEPTIONS_BLOB=$(git hash-object "$EXCEPTIONS_FILE" 2>/dev/null || echo "unknown")
+    printf '%s\n' "$EXCEPTIONS_BLOB" > "$EXCEPTIONS_BLOB_FILE"
+  else
+    printf '%s\n' "absent" > "$EXCEPTIONS_BLOB_FILE"
+  fi
   python3 - "$OUT" "$CURRENT_SHA" <<'PY'
 import json, sys
 from pathlib import Path
@@ -90,6 +104,38 @@ if [ -z "$BASELINE" ]; then
   echo "impl-scope: baseline file empty" >&2
   exit 2
 fi
+
+# Fix 4 constrained: resolve trusted exception list.
+# Honor only when the .impl-scope-exceptions file's blob hash matches the
+# baseline snapshot. Any post-baseline edit (including a same-turn self-
+# whitelist by the agent under review) flips the hash and invalidates the
+# exception list. Globs are forbidden — exact paths only.
+TRUSTED_EXCEPTIONS=""
+EXCEPTION_STATUS="none"
+if [ -f "$EXCEPTIONS_BLOB_FILE" ]; then
+  BASELINE_BLOB=$(head -n 1 "$EXCEPTIONS_BLOB_FILE")
+  if [ -f "$EXCEPTIONS_FILE" ]; then
+    CURRENT_BLOB=$(git hash-object "$EXCEPTIONS_FILE" 2>/dev/null || echo "unknown")
+    if [ "$CURRENT_BLOB" = "$BASELINE_BLOB" ] && [ "$BASELINE_BLOB" != "absent" ]; then
+      # File matches the committed-at-baseline state → trustworthy.
+      # Filter blanks/comments and reject glob chars defensively.
+      TRUSTED_EXCEPTIONS=$(
+        grep -v -E '^\s*(#|$)' "$EXCEPTIONS_FILE" 2>/dev/null \
+        | grep -v -E '[*?\[]' \
+        | awk 'NF' \
+        | sort -u
+      )
+      EXCEPTION_STATUS="trusted"
+    elif [ "$BASELINE_BLOB" = "absent" ]; then
+      EXCEPTION_STATUS="added-after-baseline-rejected"
+    else
+      EXCEPTION_STATUS="modified-after-baseline-rejected"
+    fi
+  elif [ "$BASELINE_BLOB" != "absent" ]; then
+    EXCEPTION_STATUS="deleted-after-baseline-rejected"
+  fi
+fi
+export TRUSTED_EXCEPTIONS EXCEPTION_STATUS
 
 # Resolve impl-root relative path for the allowlist
 IMPL_REL=$(python3 -c "
@@ -131,6 +177,15 @@ allowed_literal: set = {
     ".gitattributes",
 }
 
+# Fix 4 constrained: trusted exception paths from .impl-scope-exceptions.
+# Empty when EXCEPTION_STATUS != "trusted" (file missing, modified
+# post-baseline, deleted post-baseline, or contained only glob lines).
+trusted_exceptions = {
+    p.strip() for p in os.environ.get("TRUSTED_EXCEPTIONS", "").splitlines()
+    if p.strip()
+}
+exception_status = os.environ.get("EXCEPTION_STATUS", "none")
+
 violations: list = []
 allowed: list = []
 
@@ -140,6 +195,12 @@ for path in all_changes:
         continue
     if path.startswith(allowed_prefixes):
         allowed.append({"path": path, "reason": "scope-prefix"})
+        continue
+    if path in trusted_exceptions:
+        allowed.append({
+            "path": path,
+            "reason": "impl-scope-exception (.impl-scope-exceptions, blob-hash-verified)",
+        })
         continue
     # Reject everything else — including skills/, scripts/, ui_clone/,
     # tests/, hooks/, pyproject.toml, etc.
@@ -170,6 +231,8 @@ payload = {
     "filesChecked": len(all_changes),
     "violations": violations[:50],
     "allowed": allowed[:50],
+    "exceptionStatus": exception_status,
+    "trustedExceptionCount": len(trusted_exceptions),
     "reasons": reasons,
     "nextAction": (
         "Revert all changes outside the impl tree. Use `git checkout " + baseline + " -- "

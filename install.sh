@@ -2,7 +2,7 @@
 # ui-clone-skills installer — bootstraps system deps and registers the Claude Code plugin.
 #
 # Usage (one of):
-#   curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh | bash
+#   tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp"
 #   git clone https://github.com/voidmatcha/ui-clone-skills.git && cd ui-clone-skills && ./install.sh
 #
 # Idempotent: every step detects existing installs and skips. Safe to re-run.
@@ -63,6 +63,8 @@ CODEX_MARKETPLACE_NAME="local"
 CODEX_PERSONAL_MARKETPLACE="$HOME/.agents/plugins/marketplace.json"
 CODEX_PLUGIN_DIR="$HOME/plugins/$PLUGIN_NAME"
 CODEX_PLUGIN_SOURCE_PATH="./plugins/$PLUGIN_NAME"
+CODEX_NATIVE_AGENTS_DIR="${CODEX_HOME:-$HOME/.codex}/agents"
+CODEX_PUBLIC_SKILLS="ui-reverse-engineering ui-capture visual-debug"
 
 NO_DEPS=0
 NO_MARKETPLACE=0
@@ -135,7 +137,12 @@ apt_install() {
 ensure_uv() {
   if have uv; then skip "uv $(uv --version | awk '{print $2}')"; return; fi
   act "Installing uv (Python package manager)"
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  local uv_installer
+  uv_installer=$(mktemp "${TMPDIR:-/tmp}/uv-installer.XXXXXX.sh")
+  curl -LsSf https://astral.sh/uv/install.sh -o "$uv_installer"
+  warn "Downloaded uv installer from https://astral.sh/uv/install.sh to $uv_installer"
+  sh "$uv_installer"
+  rm -f "$uv_installer"
   if ! have uv; then
     # uv installs to ~/.local/bin or ~/.cargo/bin depending on platform; surface the next step.
     warn "uv installed but not on PATH yet. Add ~/.local/bin (or ~/.cargo/bin) to PATH and re-run."
@@ -298,7 +305,7 @@ prepare_codex_plugin_projection() {
   mkdir -p "$plugin_dir"
 
   local item src dst
-  for item in .codex-plugin skills hooks scripts ui_clone docs AGENTS.md README.md pyproject.toml uv.lock LICENSE.txt; do
+  for item in .codex-plugin .codex hooks scripts ui_clone docs AGENTS.md README.md pyproject.toml uv.lock LICENSE.txt; do
     src="$REPO_ROOT/$item"
     dst="$plugin_dir/$item"
     if [ ! -e "$src" ]; then
@@ -309,7 +316,54 @@ prepare_codex_plugin_projection() {
     ln -s "$src" "$dst"
   done
 
+  # Codex skill discovery points at ./skills/. Keep the projection public-only
+  # so maintainer-only skills in the development checkout (for example
+  # skills/benchmark) never appear in the installed Codex plugin surface.
+  rm -rf "$plugin_dir/skills"
+  mkdir -p "$plugin_dir/skills"
+  local skill
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    src="$REPO_ROOT/skills/$skill"
+    dst="$plugin_dir/skills/$skill"
+    if [ ! -d "$src" ]; then
+      err "Missing public Codex skill directory: $src"
+      return 1
+    fi
+    ln -s "$src" "$dst"
+  done
+
   ok "Codex plugin projection → $plugin_dir"
+}
+
+install_codex_native_agents() {
+  # Codex native subagents are discovered from CODEX_HOME agents, not from the
+  # plugin manifest. Symlink this plugin's role adapters so installed Codex
+  # sessions can dispatch agent_type names such as generation-planner.
+  local src_dir="$REPO_ROOT/.codex/agents"
+  if [ ! -d "$src_dir" ]; then
+    return
+  fi
+
+  mkdir -p "$CODEX_NATIVE_AGENTS_DIR"
+
+  local src dst existing
+  for src in "$src_dir"/*.toml; do
+    [ -e "$src" ] || continue
+    dst="$CODEX_NATIVE_AGENTS_DIR/$(basename "$src")"
+    if [ -L "$dst" ]; then
+      existing="$(readlink "$dst")"
+      if [ "$existing" = "$src" ]; then
+        skip "Codex native agent $(basename "$dst")"
+        continue
+      fi
+    fi
+    if [ -e "$dst" ]; then
+      warn "Codex native agent $(basename "$dst") already exists — leaving user copy"
+      continue
+    fi
+    ln -s "$src" "$dst"
+    ok "Codex native agent → $dst"
+  done
 }
 
 write_codex_personal_marketplace() {
@@ -401,6 +455,7 @@ register_codex_marketplace() {
 
   act "Preparing Codex personal plugin source"
   prepare_codex_plugin_projection || return
+  install_codex_native_agents || return
   write_codex_personal_marketplace || return
 
   act "Installing Codex plugin from personal marketplace"

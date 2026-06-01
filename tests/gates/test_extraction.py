@@ -39,3 +39,133 @@ def test_gate_extraction_does_not_require_transition_coverage(tmp_path: Path) ->
         "gate_extraction must not require transition-coverage.json (Step 6d artifact)"
     )
 
+
+def _write_minimal_extraction_artifacts(ref: Path) -> None:
+    """Plant minimum extraction artifacts so unclonable-preflight tests
+    aren't tripped by missing-file failures from earlier checks."""
+    for fname in [
+        "head.json", "styles.json", "fonts.json",
+        "visible-images.json", "inline-svgs.json", "body-state.json",
+        "design-bundles.json",
+    ]:
+        (ref / fname).write_text(json.dumps({}))
+    css_dir = ref / "css"
+    css_dir.mkdir(exist_ok=True)
+    (css_dir / "variables.txt").write_text(":root {}")
+
+
+def test_unclonable_preflight_detects_auth_gated(tmp_path: Path) -> None:
+    """Codex Fix 3 (2026-05-27): a structure.json carrying <form> with
+    <input type='password'> is a login wall. Pipeline must short-circuit
+    via record_unclonable instead of burning iterations against an
+    auth-walled page."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_minimal_extraction_artifacts(ref)
+    structure = {
+        "tag": "html",
+        "children": [{
+            "tag": "body",
+            "children": [{
+                "tag": "form",
+                "children": [
+                    {"tag": "input", "type": "email"},
+                    {"tag": "input", "type": "password"},
+                    {"tag": "button", "text": "Sign in"},
+                ],
+            }],
+        }],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure))
+
+    gate = Gate(ref)
+    results = gate.gate_extraction()
+    preflight = [r for r in results if r.label == "unclonable-preflight" and r.status == "fail"]
+    assert preflight, (
+        f"auth-gated structure.json must emit unclonable-preflight fail; "
+        f"got: {[(r.label, r.status) for r in results]}"
+    )
+    assert "auth-gated" in preflight[0].message, "fail message should classify as auth-gated"
+
+    # record_unclonable must have persisted to state.json
+    from ui_clone.state import PipelineState
+    state = PipelineState.load(ref)
+    auth_entries = [
+        e for e in state.unclonable_reasons
+        if (e.get("category") if isinstance(e, dict) else None) == "auth-gated"
+    ]
+    assert auth_entries, (
+        f"record_unclonable(category='auth-gated') must persist; "
+        f"got: {state.unclonable_reasons}"
+    )
+
+
+def test_unclonable_preflight_detects_drm_canvas(tmp_path: Path) -> None:
+    """Codex Fix 3: canvas-dominant page with sparse DOM text is a DRM
+    surface that section-compare cannot clone. Short-circuit via
+    record_unclonable with category 'drm-canvas'."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_minimal_extraction_artifacts(ref)
+    structure = {
+        "tag": "html",
+        "children": [{
+            "tag": "body",
+            "children": [{
+                "tag": "canvas",
+                # canvas covering most of a 1440x900 viewport equivalent
+                "styles": {"width": "1440", "height": "900"},
+            }],
+        }],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure))
+
+    gate = Gate(ref)
+    results = gate.gate_extraction()
+    preflight = [r for r in results if r.label == "unclonable-preflight" and r.status == "fail"]
+    assert preflight, (
+        f"DRM-canvas structure.json must emit unclonable-preflight fail; "
+        f"got: {[(r.label, r.status) for r in results]}"
+    )
+    assert "drm-canvas" in preflight[0].message
+
+    from ui_clone.state import PipelineState
+    state = PipelineState.load(ref)
+    drm_entries = [
+        e for e in state.unclonable_reasons
+        if (e.get("category") if isinstance(e, dict) else None) == "drm-canvas"
+    ]
+    assert drm_entries, "record_unclonable(category='drm-canvas') must persist"
+
+
+def test_unclonable_preflight_quiet_on_normal_page(tmp_path: Path) -> None:
+    """Codex Fix 3 false-positive guard: a normal product page with no
+    password input and no dominant canvas must NOT emit unclonable-
+    preflight. Models a juanmora-shape page (lots of nodes, lots of text,
+    no auth or DRM signals)."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_minimal_extraction_artifacts(ref)
+    structure = {
+        "tag": "html",
+        "children": [{
+            "tag": "body",
+            "children": [
+                {"tag": "header", "text": "Welcome to the product"},
+                {"tag": "main", "children": [
+                    {"tag": "section", "text": "Lorem ipsum dolor sit amet " * 30},
+                    {"tag": "section", "text": "Consectetur adipiscing elit " * 30},
+                ]},
+            ],
+        }],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure))
+
+    gate = Gate(ref)
+    results = gate.gate_extraction()
+    preflight = [r for r in results if r.label == "unclonable-preflight"]
+    assert not preflight, (
+        f"normal product page must NOT trigger unclonable-preflight; "
+        f"got: {[(r.label, r.status, r.message[:60]) for r in preflight]}"
+    )
+

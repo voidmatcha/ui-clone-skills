@@ -94,6 +94,24 @@ def _write_bundle_map(ref_dir: Path, content: dict) -> None:
     )
 
 
+def _write_phase_baseline(ref_dir: Path) -> None:
+    """Plant minimum scroll/hover artifacts so motion-rich tests that focus
+    on the splash sub-check don't trip the Fix 2 partial-capture detector
+    (gate_state_coverage requires all three phase artifacts to exist on
+    motion-rich refs before consulting individual sub-checks). Splash is
+    planted by the per-test `_write_splash` calls."""
+    _write_scroll(
+        ref_dir,
+        trajectory=[],
+        summary={"static": True},
+    )
+    _write_hover(
+        ref_dir,
+        manifest={"targets": []},
+        summary={"checked": True},
+    )
+
+
 # ── tests ────────────────────────────────────────────────────────────
 
 
@@ -501,6 +519,86 @@ def test_non_motion_rich_bundle_keeps_legacy_skip(ref_dir: Path) -> None:
                for r in results)
 
 
+def test_infinite_scroll_emits_policy_hint(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Fix 3 reframed (codex review 2026-05-27): scroll/summary.json
+    `infiniteScroll=true` must produce a non-blocking policy-recommendation
+    `warn` so the iteration loop sees the unclonable-shape signal BEFORE
+    exhausting 10 post-implement iterations. Drives codex's
+    'partial-unclonable signal → policy recommendation, not new gate' path.
+    """
+    _write_bundle_map(ref_dir, {"libraries": ["gsap"]})
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "bodyClass": "is-loading", "htmlClass": ""},
+            {"ts_ms": 800, "bodyClass": "is-loaded", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2},
+    )
+    _write_scroll(
+        ref_dir,
+        trajectory=[],
+        summary={"static": False, "infiniteScroll": True},
+    )
+    _write_hover(
+        ref_dir,
+        manifest={"targets": []},
+        summary={"checked": True},
+    )
+    _write_impl_src(impl_root, {
+        "App.tsx": "export default function App() { return <div />; }",
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    hints = [
+        r for r in results
+        if r.status == "warn" and "infiniteScroll" in (r.message or "")
+    ]
+    assert hints, (
+        f"infiniteScroll=true must emit a policy-recommendation warn; got: "
+        f"{[(r.label, r.status, (r.message or '')[:80]) for r in results]}"
+    )
+    # The hint should point at closeoutPolicy switch, not at a code fix.
+    assert any("closeoutPolicy" in (r.fix or "") for r in hints), (
+        "warn.fix should recommend closeoutPolicy switch"
+    )
+
+
+def test_motion_rich_partial_capture_fails(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Fix 2 (codex review 2026-05-27): motion-rich ref with states/ present
+    but one or more phase artifacts MISSING must fail with a partial-
+    capture diagnostic — not silently pass via the "no signal" fallback.
+
+    Failure mode this protects against: capture-states.sh runs and writes
+    splash artifacts, then capture-scroll.sh crashes (network blip,
+    timeout). The sub-checks for the missing phases return None, the
+    aggregator returns 'no signal' PASS, and a motion-rich ref ships with
+    only partial transition ground truth — fidelity gaps are masked.
+    """
+    _write_bundle_map(ref_dir, {"libraries": ["gsap"]})
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "bodyClass": "is-loading", "htmlClass": ""},
+            {"ts_ms": 800, "bodyClass": "is-loaded", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2},
+    )
+    # NOTE: deliberately omit _write_scroll and _write_hover — partial capture.
+    results = Gate(ref_dir).gate_state_coverage()
+    failures = [r for r in results if r.status == "fail"]
+    assert failures, (
+        f"motion-rich + missing scroll/hover must fail; got: "
+        f"{[(r.label, r.status, r.message[:60]) for r in results]}"
+    )
+    assert any("missing required phase" in (r.message or "") for r in failures), (
+        "fail message should explain the partial-capture cause"
+    )
+
+
 def test_motion_rich_states_exist_no_impl_root_fails(
     ref_dir: Path, tmp_path: Path,
 ) -> None:
@@ -516,6 +614,7 @@ def test_motion_rich_states_exist_no_impl_root_fails(
         ],
         summary={"checked": True, "polls": 2},
     )
+    _write_phase_baseline(ref_dir)
     # NOTE: no .impl-root marker, no UI_CLONE_IMPL_ROOT env, no fallback impl dir.
     # _find_impl_root should return None.
     results = Gate(ref_dir).gate_state_coverage()
@@ -568,6 +667,7 @@ def test_class_only_in_comment_not_matched(
         ],
         summary={"checked": True, "polls": 2},
     )
+    _write_phase_baseline(ref_dir)
     # Impl mentions `is-loading` only in a block comment + a line comment.
     _write_impl_src(impl_root, {
         "App.tsx": (
@@ -603,6 +703,7 @@ def test_url_double_slash_not_stripped_as_comment(
         ],
         summary={"checked": True, "polls": 2},
     )
+    _write_phase_baseline(ref_dir)
     # `is-loading` appears AFTER `https://` on the same line — must still match.
     _write_impl_src(impl_root, {
         "App.tsx": (

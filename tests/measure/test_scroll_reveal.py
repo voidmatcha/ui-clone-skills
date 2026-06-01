@@ -80,3 +80,35 @@ def test_scroll_engine_parity_pass_on_matching_impl(tmp_path: Path) -> None:
     art = json.loads((ref / "scroll-engine-parity.json").read_text())
     assert art["status"] == "pass"
 
+
+def test_scroll_engine_parity_reads_scroll_engine_json_for_scrolltrigger_pin_scrub(tmp_path: Path) -> None:
+    """scroll-engine.json is enough ref evidence to reject native handlers
+    for ScrollTrigger pin/scrub pages.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "scroll-engine.json").write_text(json.dumps({
+        "library": "ScrollTrigger",
+        "smoothScroll": {"library": "Lenis", "matches": 1},
+        "features": {"scrub": True, "pin": True},
+    }))
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    (impl / "package.json").write_text(json.dumps(
+        {"dependencies": {"react": "19"}},
+    ))
+    (impl / "src" / "App.jsx").write_text(
+        "window.addEventListener('scroll', () => { "
+        "document.querySelector('.rail').style.transform = `translateX(${window.scrollY}px)`;"
+        "});\n",
+    )
+
+    proc = _run_script(
+        "skills/visual-debug/scripts/scroll-engine-parity-check.sh",
+        str(ref), str(impl),
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    art = json.loads((ref / "scroll-engine-parity.json").read_text())
+    missing = {v["refClass"] for v in art["violations"]}
+    assert {"gsap-scrolltrigger", "lenis-smooth-scroll", "scroll-pin", "scroll-scrub"} <= missing

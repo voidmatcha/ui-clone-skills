@@ -47,12 +47,75 @@ def test_converged_all_pass_no_fail_exits_zero(tmp_path: Path) -> None:
     assert proc.returncode == 0, f"expected 0, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
 
 
-def test_structural_only_counts_as_pass(tmp_path: Path) -> None:
-    """STRUCTURAL_ONLY rows are PASS per briefing §2C; 0 FAIL → exit 0."""
+def test_genuine_pass_with_substitution_converges(tmp_path: Path) -> None:
+    """Phase 2: substitution is allowed when real passes exist too — >=1 genuine
+    pixel PASS alongside STRUCTURAL_ONLY rows + 0 FAIL → converged (exit 0)."""
     ref = tmp_path / "ref"
     _write_result(ref, "**Result: 13 PASS, 0 FAIL, 2 SKIP, 13 STRUCTURAL_ONLY**")
     proc = _run(ref)
     assert proc.returncode == 0
+
+
+def test_pure_structural_only_zero_genuine_pass_does_not_converge(tmp_path: Path) -> None:
+    """Phase 2: 0 genuine pixel PASS with only STRUCTURAL_ONLY rows — even at
+    0 FAIL — is the gaming vector. Convergence requires >=1 genuine PASS, so this
+    must NOT converge (exit 1)."""
+    ref = tmp_path / "ref"
+    _write_result(ref, "**Result: 0 PASS, 0 FAIL, 0 SKIP, 12 STRUCTURAL_ONLY**")
+    proc = _run(ref)
+    assert proc.returncode == 1, (
+        f"pure STRUCTURAL_ONLY (0 genuine PASS) must NOT converge: "
+        f"rc={proc.returncode} stdout={proc.stdout} stderr={proc.stderr}"
+    )
+
+
+def test_stale_inflated_footer_with_zero_genuine_rows_does_not_converge(tmp_path: Path) -> None:
+    """Legacy (pre-33a7f8f) result.txt inflates footer PASS by folding in
+    STRUCTURAL_ONLY, so the footer says e.g. '6 PASS' while the table has 0
+    genuine ✅ rows (all 🔁). When a real status table is present the detector
+    must count genuine ✅ ROWS, not the untrustworthy legacy footer — so this
+    gamed shape must NOT converge (exit 1)."""
+    ref = tmp_path / "ref"
+    sections = ref / "sections"
+    sections.mkdir(parents=True)
+    (sections / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---|---|---|---|---|\n"
+        "| sec-a | — | — | substituted | 🔁 STRUCTURAL_ONLY |\n"
+        "| sec-b | — | — | substituted | 🔁 STRUCTURAL_ONLY |\n"
+        "\n**Result: 6 PASS, 0 FAIL, 0 SKIP, 6 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    proc = _run(ref)
+    assert proc.returncode == 1, (
+        f"stale inflated footer with 0 genuine ✅ rows must NOT converge: "
+        f"rc={proc.returncode} stdout={proc.stdout} stderr={proc.stderr}"
+    )
+
+
+def test_pass_by_perceptual_row_counts_as_genuine_pass(tmp_path: Path) -> None:
+    """A `pass-by-perceptual` ✅ row (emitted by section-compare.sh under
+    SECTION_PERCEPTUAL_DENSE=1) is a genuine pixel PASS, exactly like
+    `pass-by-dssim`. Here it is the ONLY genuine ✅ row alongside a
+    STRUCTURAL_ONLY row; with 0 FAIL the detector must converge (exit 0)
+    via the genuine-✅-row path. If pass-by-perceptual were not counted as a
+    genuine ✅, genuine_rows would be 0 and this would NOT converge."""
+    ref = tmp_path / "ref"
+    sections = ref / "sections"
+    sections.mkdir(parents=True)
+    (sections / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---|---|---|---|---|\n"
+        "| navbar | 5048 | 50805 | pass-by-perceptual | ✅ |\n"
+        "| promo | — | — | substituted | 🔁 STRUCTURAL_ONLY |\n"
+        "\n**Result: 1 PASS, 0 FAIL, 0 SKIP, 1 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    proc = _run(ref)
+    assert proc.returncode == 0, (
+        f"pass-by-perceptual ✅ must count as a genuine PASS and converge: "
+        f"rc={proc.returncode} stdout={proc.stdout} stderr={proc.stderr}"
+    )
 
 
 def test_skip_present_but_zero_fail_still_converges(tmp_path: Path) -> None:

@@ -173,6 +173,36 @@ class TestImplScaffoldGate:
         assert "impl-scaffold gate" in reason, reason
         assert "bundle" in reason, reason  # current gate label in message
 
+    def test_blocks_codex_cmd_alias_when_pre_generate_not_reached(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex shell payloads may use cmd instead of command."""
+        search_root = make_search_root(tmp_path)
+        ref = make_ref_dir(search_root, name="loop-codex-N")
+        _set_phase2_only_state(ref)
+        (ref / "regions.json").write_text(json.dumps({"sections": []}))
+
+        payload = json.dumps(
+            {
+                "tool_name": "exec_command",
+                "tool_input": {
+                    "cmd": "npm create vite@latest scratch/loop-codex-N/impl -- --template react"
+                },
+            }
+        )
+        result = run_hook(
+            self.MODULE,
+            stdin_data=payload,
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected block JSON, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        reason = data.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        assert "impl-scaffold gate" in reason, reason
+
     def test_blocks_npx_create_react_app_too(self, tmp_path: Path) -> None:
         search_root = make_search_root(tmp_path)
         ref = make_ref_dir(search_root, name="loop-codex-N")

@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 
+from ui_clone.hooks._common import extract_tool_command as _extract_tool_command
 from ui_clone.hooks._common import find_project_root as _find_project_root
 from ui_clone.hooks._common import find_ref_dir as _find_ref_dir
 
@@ -186,7 +187,7 @@ def main() -> None:
     if raw_input.strip():
         try:
             data = json.loads(raw_input)
-            bash_cmd = data.get("tool_input", {}).get("command", "") or data.get("command", "")
+            bash_cmd = _extract_tool_command(data) if isinstance(data, dict) else ""
         except json.JSONDecodeError:
             pass
 

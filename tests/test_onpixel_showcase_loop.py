@@ -109,6 +109,24 @@ def test_run_loop_dry_run_writes_prompts_without_invoking_codex(tmp_path: Path) 
     summary = json.loads((work / "onpixel-codex-loop-summary.json").read_text())
     assert summary["sites"][0]["slug"] == "alpha"
     assert summary["sites"][0]["clone"]["status"] == "dry-run"
+    ledger = (work / "alpha" / "clone-experiments.tsv").read_text(encoding="utf-8").splitlines()
+    assert ledger[0].split("\t") == [
+        "attempt",
+        "score",
+        "status",
+        "asset_missing",
+        "section_pass",
+        "section_fail",
+        "runtime_proof",
+        "transition_proof",
+        "commit_or_snapshot",
+        "description",
+    ]
+    row = dict(zip(ledger[0].split("\t"), ledger[1].split("\t"), strict=True))
+    assert row["attempt"] == "1"
+    assert row["status"] == "wip"
+    assert row["description"] == "dry-run"
+    assert summary["sites"][0]["cloneAttempts"][0]["score"]["completionStatus"] == "wip"
 
 
 def test_build_clone_prompt_is_natural_user_request_without_internal_handover(tmp_path: Path) -> None:
@@ -136,11 +154,14 @@ def test_build_clone_prompt_is_natural_user_request_without_internal_handover(tm
         "tmp/ref",
         "skill-issue",
         "ui-clone",
+        "clone-experiments",
+        "clone-research",
+        "score",
     ):
         assert forbidden not in lower
 
 
-def test_impl_workspace_agents_carries_internal_contract_without_prompt_leak(tmp_path: Path) -> None:
+def test_impl_workspace_agents_carries_research_and_scoring_contract_without_prompt_leak(tmp_path: Path) -> None:
     showcase = tmp_path / "showcase"
     work = tmp_path / "work"
     _write_showcase(showcase)
@@ -156,7 +177,62 @@ def test_impl_workspace_agents_carries_internal_contract_without_prompt_leak(tmp
     assert "INCOMPLETE" in agents
     assert "Do not run `npx playwright node`" in agents
     assert "Use `node` for inline Playwright scripts" in agents
+    assert "Do not inspect, patch, or debug ui-clone-skills gate internals" in agents
+    assert "## Layout Stability" in agents
+    assert "scrollWidth" in agents
+    assert "offscreen rails" in agents
+    assert "clone-research.md" in agents
+    assert "clone-experiments.tsv" in agents
     assert "handover" not in agents.lower()
+
+
+def test_prepare_site_workspace_writes_clone_research_from_ref_artifacts(tmp_path: Path) -> None:
+    showcase = tmp_path / "showcase"
+    work = tmp_path / "work"
+    _write_showcase(showcase)
+    ref_src = showcase / "tmp" / "ref" / "alpha"
+    ref_src.mkdir(parents=True)
+    (ref_src / "section-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 0, "id": "hero", "y": 0, "height": 700},
+            {"index": 1, "id": "gallery", "y": 700, "height": 700},
+        ]
+    }))
+    (ref_src / "component-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 0, "componentName": "HeroSection"},
+            {"index": 1, "file": "src/components/Gallery.tsx"},
+        ]
+    }))
+    (ref_src / "visible-images.json").write_text(json.dumps({
+        "images": [
+            {"src": "https://cdn.example.com/hero.png", "rect": {"y": 120}},
+            {"src": "https://cdn.example.com/gallery.png", "rect": {"y": 820}},
+        ]
+    }))
+    (ref_src / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"selector": ".gallery", "trigger": "scroll", "property": "transform"},
+        ]
+    }))
+    (ref_src / "runtime-spec.json").write_text(json.dumps({
+        "signals": [{"selector": ".gallery", "event": "hover"}]
+    }))
+    (ref_src / "asset-placement.json").write_text(json.dumps({
+        "missingPlacements": [{"src": "https://cdn.example.com/gallery.png", "sectionIndex": 1}]
+    }))
+
+    item = loop.discover_showcase_items(showcase)[0]
+    site = loop.prepare_site_workspace(showcase, work, item, reset=False)
+
+    research = (site.site_dir / "clone-research.md").read_text(encoding="utf-8")
+    assert "Original URL: https://alpha.example" in research
+    assert "HeroSection" in research
+    assert "src/components/Gallery.tsx" in research
+    assert "https://cdn.example.com/gallery.png" in research
+    assert "scroll" in research
+    assert "hover" in research
+    assert "Current missing assets" in research
 
 
 def test_detect_showcase_reuse_flags_copy_commands(tmp_path: Path) -> None:
@@ -185,6 +261,62 @@ def test_detect_showcase_reuse_flags_copy_commands(tmp_path: Path) -> None:
 
     assert findings
     assert "src/projects/alpha" in findings[0]
+
+
+def test_detect_clone_scope_leak_ignores_normal_closeout(tmp_path: Path) -> None:
+    log = tmp_path / "codex-clone.jsonl"
+    log.write_text(
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": (
+                    "uv run --project /repo python -m ui_clone.goal "
+                    "/tmp/ref --check-done"
+                ),
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    last = tmp_path / "codex-clone-last.md"
+    last.write_text(
+        "INCOMPLETE: ui_clone.goal --check-done failed: "
+        "not satisfied: current_gate is 'reference', not 'done'\n",
+        encoding="utf-8",
+    )
+
+    assert loop.detect_clone_scope_leak(log_paths=[log], text_paths=[last]) == []
+
+
+def test_detect_clone_scope_leak_flags_gate_source_investigation(tmp_path: Path) -> None:
+    log = tmp_path / "codex-clone.jsonl"
+    log.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "sed -n '1,120p' /repo/ui_clone/goal.py",
+                },
+            }),
+            json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "rg current_gate /repo/ui_clone",
+                },
+            }),
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+
+    findings = loop.detect_clone_scope_leak(log_paths=[log])
+
+    assert findings
+    assert any("ui_clone/goal.py" in finding for finding in findings)
+    assert any("current_gate" in finding for finding in findings)
 
 
 def test_run_loop_marks_showcase_reuse_attempt_contaminated(
@@ -233,6 +365,64 @@ def test_run_loop_marks_showcase_reuse_attempt_contaminated(
     assert site["previewEligible"] is False
     assert "showcase source reuse detected" in site["inspection"]["unmet"][0]
     assert (work / "alpha" / "source-reuse.md").is_file()
+
+
+def test_run_loop_stops_natural_retries_after_repeated_scope_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    showcase = tmp_path / "showcase"
+    work = tmp_path / "work"
+    _write_showcase(showcase)
+
+    invoke_calls: list[Path] = []
+
+    def fake_invoke(*args: object, **kwargs: Any) -> dict[str, object]:
+        log_path = kwargs["log_path"]
+        invoke_calls.append(log_path)
+        if log_path.name.startswith("codex-clone"):
+            log_path.write_text(
+                json.dumps({
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "sed -n '1,120p' /repo/ui_clone/goal.py",
+                    },
+                })
+                + "\n",
+                encoding="utf-8",
+            )
+        return {"status": "ok", "exit_code": 0, "elapsed_s": 0}
+
+    monkeypatch.setattr(loop, "invoke_codex", fake_invoke)
+    monkeypatch.setattr(
+        loop,
+        "inspect_site",
+        lambda site: {"done": False, "unmet": ["section-compare failed"], "goal": {}},
+    )
+
+    args = loop.build_parser().parse_args([
+        "--showcase-root", str(showcase),
+        "--work-root", str(work),
+        "--slugs", "alpha",
+        "--clone-attempts", "3",
+        "--skill-fix-policy", "issue-only",
+    ])
+
+    loop.run_loop(args)
+
+    assert [path.name for path in invoke_calls] == [
+        "codex-clone.jsonl",
+        "codex-clone-2.jsonl",
+        "codex-skill-fix-2.jsonl",
+    ]
+    assert (work / "alpha" / "skill-issue-attempt-2.md").is_file()
+    summary = json.loads((work / "onpixel-codex-loop-summary.json").read_text())
+    site = summary["sites"][0]
+    assert site["stopReason"] == "repeated-scope-leak"
+    assert len(site["cloneAttempts"]) == 2
+    assert site["cloneAttempts"][0]["inspection"]["scopeLeak"]["count"] == 1
+    assert site["cloneAttempts"][1]["inspection"]["scopeLeak"]["action"] == "meta-fix"
 
 
 def test_invoke_codex_polls_status_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

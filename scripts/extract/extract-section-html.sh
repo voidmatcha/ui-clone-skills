@@ -82,8 +82,8 @@ RESULT=$(agent-browser --session "$SESSION" eval "(() => {
         text: el.textContent?.trim().substring(0, 50) || undefined,
         styles: {
           display: s.display, position: s.position,
-          width: Math.round(r.width), height: Math.round(r.height),
-          x: Math.round(r.left), y: Math.round(r.top + window.scrollY),
+          width: +r.width.toFixed(2), height: +r.height.toFixed(2),
+          x: +r.left.toFixed(2), y: +(r.top + window.scrollY).toFixed(2),
           fontSize: s.fontSize, fontWeight: s.fontWeight, fontFamily: s.fontFamily,
           color: s.color, backgroundColor: s.backgroundColor,
           padding: s.padding, margin: s.margin,
@@ -148,9 +148,9 @@ RESULT=$(agent-browser --session "$SESSION" eval "(() => {
       id: id || undefined,
       class: cls.substring(0, 100),
       rect: {
-        top: Math.round(section.getBoundingClientRect().top + window.scrollY),
-        height: Math.round(section.getBoundingClientRect().height),
-        width: Math.round(section.getBoundingClientRect().width),
+        top: +(section.getBoundingClientRect().top + window.scrollY).toFixed(2),
+        height: +section.getBoundingClientRect().height.toFixed(2),
+        width: +section.getBoundingClientRect().width.toFixed(2),
       },
       section: sectionStyles,
       children,

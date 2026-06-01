@@ -14,23 +14,8 @@ jobs:
         with:
           version: "latest"
 
-      - name: Run tests
-        run: uv run python -m pytest tests/ -q
-
-      - name: Type check
-        run: uv run python -m mypy ui_clone/ tests/
-
-      - name: Lint check
-        run: uv run python -m ruff check ui_clone/ tests/
-
-      - name: Shell syntax check
-        run: |
-          for f in scripts/ci/*.sh scripts/hooks/*.sh scripts/extract/*.sh scripts/verify/*.sh hooks/*.sh skills/visual-debug/scripts/*.sh; do
-            bash -n "$f" || exit 1
-          done
-
-      - name: Review checks
-        run: bash scripts/ci/review.sh
+      - name: Local CI mirror
+        run: bash scripts/ci/ci-local.sh --quiet
 
   security:
     runs-on: ubuntu-latest

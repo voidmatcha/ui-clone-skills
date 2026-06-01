@@ -20,6 +20,124 @@ from .base import CheckResult
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
 
+_CSS_MODULE_CLASS_RE = re.compile(r"\b[A-Za-z][\w-]*__[A-Za-z0-9_-]{4,}\b")
+_FORENSIC_SOURCE_SUFFIXES = (".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte", ".astro")
+
+
+def _check_forensic_preservation_compliance(self: Gate) -> CheckResult | None:
+    """Enforce generation-plan forensic preservation after implementation.
+
+    When generation-plan.json marks a CSS-module-heavy reference as requiring
+    forensic preservation, freehand class systems are not a valid first pass.
+    The implementation must copy the reference CSS chunks into src/ref-css,
+    import them, and render JSX that preserves a meaningful slice of the
+    original CSS-module className tokens.
+    """
+    plan_path = self.ref_dir / "generation-plan.json"
+    if not plan_path.is_file():
+        return None
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    forensic = plan.get("forensicPreservation")
+    if not isinstance(forensic, dict) or forensic.get("required") is not True:
+        return None
+
+    if forensic.get("blockedUntilCssArtifacts") is True or forensic.get("missingCssArtifacts") is True:
+        return CheckResult(
+            "forensic-preservation-compliance",
+            "fail",
+            "generation-plan.json requires forensicPreservation, but ref CSS artifacts "
+            "were missing/incomplete when the plan was created.",
+            fix=(
+                "Do not bypass this with handwritten local CSS or a Tailwind rebuild. "
+                "Rerun CSS capture or recover bundle CSS into tmp/ref/<component>/css/, "
+                "then rerun generation-plan.sh so cssFiles/cssBytes prove the source "
+                "CSS is available before generating the implementation."
+            ),
+        )
+
+    impl_root = self._find_impl_root()
+    if impl_root is None:
+        return CheckResult(
+            "forensic-preservation-compliance",
+            "fail",
+            "generation-plan.json requires forensicPreservation, but impl root "
+            "could not be resolved.",
+            fix=(
+                "Write the implementation under the resolved impl/ root or set "
+                "UI_CLONE_IMPL_ROOT, then preserve ref-derived JSX + local CSS."
+            ),
+        )
+
+    src_dir = impl_root / "src"
+    copy_to = forensic.get("copyCssTo")
+    copy_to_str = copy_to if isinstance(copy_to, str) and copy_to.strip() else "src/ref-css"
+    css_dir = impl_root / copy_to_str
+    css_files = sorted(css_dir.glob("*.css")) if css_dir.is_dir() else []
+
+    code_texts: list[str] = []
+    import_texts: list[str] = []
+    if src_dir.is_dir():
+        for path in src_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() in _FORENSIC_SOURCE_SUFFIXES:
+                try:
+                    code_texts.append(path.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    continue
+            if path.suffix.lower() in (*_FORENSIC_SOURCE_SUFFIXES, ".css"):
+                try:
+                    import_texts.append(path.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    continue
+
+    class_tokens = {
+        token
+        for text in code_texts
+        for token in _CSS_MODULE_CLASS_RE.findall(text)
+    }
+    ref_count_raw = forensic.get("classSignatureCount")
+    ref_count = ref_count_raw if isinstance(ref_count_raw, int) and ref_count_raw > 0 else 0
+    required_token_count = max(10, int(ref_count * 0.25)) if ref_count else 10
+    has_ref_css_import = any("ref-css" in text for text in import_texts)
+
+    failures: list[str] = []
+    if not css_files:
+        failures.append(f"missing copied reference CSS files under {copy_to_str}")
+    if not has_ref_css_import:
+        failures.append("missing src/ref-css CSS import before local overrides")
+    if len(class_tokens) < required_token_count:
+        failures.append(
+            f"preserved CSS-module className tokens {len(class_tokens)} "
+            f"< required {required_token_count} (ref signatures={ref_count})"
+        )
+
+    if failures:
+        return CheckResult(
+            "forensic-preservation-compliance",
+            "fail",
+            "generation-plan.json requires forensicPreservation, but the impl "
+            "looks like a freehand rebuild: " + "; ".join(failures) + ".",
+            fix=(
+                "Regenerate the first pass from dom-scaffold.json: copy "
+                f"tmp/ref/<component>/css/*.css into impl/{copy_to_str}, import "
+                "those CSS files before local overrides, and keep the ref's "
+                "CSS-module className tokens in JSX. Add transitions only after "
+                "the preserved scaffold renders."
+            ),
+        )
+
+    return CheckResult(
+        "forensic-preservation-compliance",
+        "pass",
+        f"✓ forensicPreservation satisfied: {len(css_files)} local CSS file(s), "
+        f"{len(class_tokens)} preserved CSS-module className token(s).",
+    )
+
+
 def _check_generation_completeness(self: Gate) -> list[CheckResult]:
     """Reject components with empty function bodies / no JSX return.
 
@@ -249,7 +367,13 @@ def _check_sections_result_health(self: Gate) -> CheckResult | None:
         )
     # Footer format produced by section-compare.sh:
     # "**Result: <P> PASS, <F> FAIL, <S> SKIP, <Q> STRUCTURAL_ONLY**"
-    m = re.search(r"Result:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL", text)
+    # P is real pixel passes only; STRUCTURAL_ONLY (substituted fonts/images)
+    # is its own field and also counts as visual evidence.
+    m = re.search(
+        r"Result:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL"
+        r"(?:,\s*\d+\s+SKIP)?(?:,\s*(\d+)\s+STRUCTURAL_ONLY)?",
+        text,
+    )
     if not m:
         return CheckResult(
             label="sections/result.txt visual health",
@@ -265,16 +389,19 @@ def _check_sections_result_health(self: Gate) -> CheckResult | None:
         )
     pass_count = int(m.group(1))
     fail_count = int(m.group(2))
-    # Universalised check: pass_count == 0 catches both the all-FAIL
-    # shape (0 PASS / N FAIL) AND the empty-pipeline shape (0 PASS /
-    # 0 FAIL — section-compare emitted but produced no rows, also a
-    # non-completion state).
+    structural_count = int(m.group(3) or 0)
+    # Phase 2 — genuine-fidelity convergence: require >=1 genuine pixel PASS.
+    # pass_count is real ✅ passes only (STRUCTURAL_ONLY is its own field since
+    # 33a7f8f). pass_count == 0 blocks every non-genuine shape: all-FAIL,
+    # empty-pipeline (0/0/0), AND pure-substitution (0 PASS / N STRUCTURAL_ONLY —
+    # the gaming vector). A genuine pass alongside legitimate substitution passes.
     if pass_count == 0 or fail_count > 0:
         return CheckResult(
             label="sections/result.txt visual health",
             status="fail",
             message=(
-                f"section-compare reports {pass_count} PASS / {fail_count} FAIL — the "
+                f"section-compare reports {pass_count} PASS / {fail_count} FAIL "
+                f"/ {structural_count} STRUCTURAL_ONLY — the "
                 "auxiliary gates passing while the canonical visual diff "
                 "is failing or has no successful section. Re-run "
                 "section-compare or fix the missing impl sections before "
@@ -289,28 +416,34 @@ def _check_sections_result_health(self: Gate) -> CheckResult | None:
 
 
 def _check_transitions_result_health(self: Gate) -> CheckResult | None:
-    """Fail post-implement when transition-spec exists but compare evidence is missing.
+    """Fail post-implement when required hover/end-state compare evidence is bad.
 
-    verification-plan.json can omit transition-compare under lower tiers or be
-    bypassed by direct post-implement invocations. This direct aggregate keeps
-    transitions/result.txt on the same contract as sections/result.txt.
+    ``transition-compare.sh`` measures idle/hover end states. Scroll/splash/IO
+    motion is covered by transition-proof/video-motion/transition-fires, so do
+    not require ``transitions/result.txt`` merely because transition-spec.json
+    exists.
     """
     if self._transition_spec_count() <= 0:
         return None
-    if _sections_result_pass_count(self) == 0:
+    if _sections_result_evidence_count(self) == 0:
         return None
     result_path = self.ref_dir / "transitions" / "result.txt"
+    result_required = _verification_plan_requires_produces(
+        self, "transitions/result.txt"
+    )
     fix = (
         "bash $PLUGIN_ROOT/skills/visual-debug/scripts/transition-compare.sh "
         f"<orig-url> <impl-url> <session> {self.ref_dir}"
     )
     if not result_path.is_file():
+        if not result_required:
+            return None
         return CheckResult(
             label="transitions/result.txt visual health",
             status="fail",
             message=(
                 "transitions/result.txt — MISSING. post-implement cannot pass "
-                "until transition-compare has produced canonical motion evidence."
+                "until required hover/end-state transition-compare evidence exists."
             ),
             fix=fix,
         )
@@ -338,12 +471,14 @@ def _check_transitions_result_health(self: Gate) -> CheckResult | None:
         pass_count = int(summary.group(1))
         fail_count = int(summary.group(2))
         if pass_count == 0 or fail_count > 0:
+            if pass_count == 0 and fail_count == 0 and not result_required:
+                return None
             return CheckResult(
                 label="transitions/result.txt visual health",
                 status="fail",
                 message=(
                     f"transition-compare reports {pass_count} PASS / {fail_count} FAIL — "
-                    "motion evidence is failing or empty."
+                    "hover/end-state evidence is failing or empty."
                 ),
                 fix=fix,
             )
@@ -353,20 +488,42 @@ def _check_transitions_result_health(self: Gate) -> CheckResult | None:
         if ("✅" in line or "❌" in line) and "result:" not in line.lower()
     )
     if measurement_rows == 0:
+        if not result_required:
+            return None
         return CheckResult(
             label="transitions/result.txt visual health",
             status="fail",
             message=(
                 "transitions/result.txt contains 0 measurement rows despite "
-                f"transition-spec.json declaring {self._transition_spec_count()} transition(s)."
+                "verification-plan.json requiring transition-compare."
             ),
             fix=fix,
         )
     return None
 
 
-def _sections_result_pass_count(self: Gate) -> int | None:
-    """Return the parsed section PASS count, or None when no footer exists."""
+def _verification_plan_requires_produces(self: Gate, produces: str) -> bool:
+    plan_path = self.ref_dir / "verification-plan.json"
+    if not plan_path.is_file():
+        return False
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    checks = plan.get("requiredChecks") or []
+    if not isinstance(checks, list):
+        return False
+    return any(
+        isinstance(row, dict) and row.get("produces") == produces
+        for row in checks
+    )
+
+
+def _sections_result_evidence_count(self: Gate) -> int | None:
+    """Return real PASS + STRUCTURAL_ONLY (total visual evidence) from the
+    sections footer, or None when no footer exists. Used to decide whether
+    there is enough section evidence to bother checking transitions — a
+    structural-only converged site has 0 real PASS but is still evidence."""
     result_path = self.ref_dir / "sections" / "result.txt"
     if not result_path.is_file():
         return None
@@ -374,10 +531,14 @@ def _sections_result_pass_count(self: Gate) -> int | None:
         text = result_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    m = re.search(r"Result:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL", text)
+    m = re.search(
+        r"Result:\s*(\d+)\s+PASS,\s*\d+\s+FAIL"
+        r"(?:,\s*\d+\s+SKIP)?(?:,\s*(\d+)\s+STRUCTURAL_ONLY)?",
+        text,
+    )
     if not m:
         return None
-    return int(m.group(1))
+    return int(m.group(1)) + int(m.group(2) or 0)
 
 
 def _sections_result_exists(self: Gate) -> bool:
@@ -433,6 +594,30 @@ def _check_visual_debug_stamp(self: Gate) -> CheckResult | None:
             "fail",
             "visual-debug-stamp.json is unreadable / malformed. Re-run "
             "auto-verify.sh to regenerate it.",
+            fix=(
+                "bash $PLUGIN_ROOT/scripts/verify/auto-verify.sh <session> "
+                "<orig-url> <impl-url> <ref-dir>"
+            ),
+        )
+    # Provisional handling (Fix 1, codex review 2026-05-27): auto-verify
+    # writes a provisional stamp at the start of its run so post-implement
+    # gate can pass DURING that same run (chicken-and-egg). A crashed/
+    # orphaned auto-verify leaves provisional=true behind, which without
+    # this guard would falsely satisfy the next post-implement check.
+    # The provisional stamp carries `invocationId` correlating to the
+    # exporter's env var; only accept provisional when both match.
+    if stamp.get("provisional"):
+        inflight_id = os.environ.get("UI_RE_AUTOVERIFY_INFLIGHT", "")
+        stamp_id = stamp.get("invocationId", "")
+        if inflight_id and stamp_id and inflight_id == stamp_id:
+            return None  # in-flight: trust the current auto-verify run
+        return CheckResult(
+            "visual-debug-stamp.json",
+            "fail",
+            "visual-debug-stamp.json is provisional (auto-verify.sh started "
+            "but did not write the final verdict). The previous auto-verify "
+            "run likely crashed or was killed mid-execution; the stale "
+            "provisional stamp cannot be trusted. Re-run auto-verify.sh.",
             fix=(
                 "bash $PLUGIN_ROOT/scripts/verify/auto-verify.sh <session> "
                 "<orig-url> <impl-url> <ref-dir>"
@@ -916,6 +1101,9 @@ def gate_post_implement(self: Gate) -> list[CheckResult]:
     html_paste_required = _check_html_paste_required(self)
     if html_paste_required is not None:
         results.append(html_paste_required)
+    forensic_preservation = _check_forensic_preservation_compliance(self)
+    if forensic_preservation is not None:
+        results.append(forensic_preservation)
     results.extend(self._check_componentization())
     results.extend(self._check_generation_completeness())
     section_health = _check_sections_result_health(self)

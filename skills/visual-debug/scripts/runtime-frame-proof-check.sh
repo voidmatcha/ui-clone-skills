@@ -186,7 +186,29 @@ agent-browser --session "$PROBE_SESSION" eval '
     }
   });
 
+  // video sampling — canvas-replay fallback surface. A declared
+  // canvas-replay video whose currentTime advances renders the reference
+  // OWN recorded motion, so a 0-canvas hero is NOT blank.
+  const videos = Array.from(document.querySelectorAll("video")).filter(visible);
+  const sampleVideo = (v) => {
+    const r = v.getBoundingClientRect();
+    return {
+      currentTime: v.currentTime || 0,
+      paused: !!v.paused,
+      readyState: v.readyState || 0,
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+    };
+  };
+  const videoBefore = videos.map(sampleVideo);
+
   await new Promise(r => setTimeout(r, 1500));
+
+  const videoAfter = videos.map(sampleVideo);
+  const videoAdvanced = videoBefore.filter((b, i) => {
+    const a = videoAfter[i] || {};
+    return (a.currentTime || 0) - (b.currentTime || 0) > 0.05 && a.w > 10 && a.h > 10;
+  }).length;
 
   const canvasAfter = canvases.map((c, i) => {
     try {
@@ -251,9 +273,12 @@ agent-browser --session "$PROBE_SESSION" eval '
     webglAdvanced,
     lottieInstances: lottieBefore.filter(b => b.hasInstance).length,
     lottieAdvanced,
+    videoTotal: videos.length,
+    videoAdvanced,
     canvasBefore, canvasAfter,
     webglBefore, webglAfter,
     lottieBefore, lottieAfter,
+    videoBefore, videoAfter,
   });
 })()
 ' > "$PROBE_RAW" 2>/dev/null || true
@@ -295,15 +320,83 @@ canvas_adv = int(probe.get("canvasAdvanced", 0))
 webgl_adv = int(probe.get("webglAdvanced", 0))
 lottie_inst = int(probe.get("lottieInstances", 0))
 lottie_adv = int(probe.get("lottieAdvanced", 0))
+video_total = int(probe.get("videoTotal", 0))
+video_adv = int(probe.get("videoAdvanced", 0))
+
+
+def _load_replay_plan() -> dict | None:
+    """canvas-replay-plan.json from the ref dir (sibling of out_path)."""
+    p = Path(out_path).parent / "canvas-replay-plan.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _replay_satisfies_blank_hero(plan, video_advanced) -> bool:
+    """Mirror of ui_clone.policies.canvas_replay_auto.replay_satisfies_blank_hero
+    (inlined so the gate has no import dependency on the package path)."""
+    if not isinstance(plan, dict) or plan.get("decision") != "canvas-replay":
+        return False
+    return int(video_advanced or 0) > 0
+
+def ref_has_real_canvas() -> bool:
+    """True only when the ref artifact carries genuine canvas/WebGL evidence:
+    canvas-webgl-detection.json with canvasCount>0 or a canvas/webgl
+    primaryRenderType. Gating the fail on this keeps a genuinely canvas-less
+    ref (signal came from a lottie keyword, etc.) on the informational path.
+    """
+    detect = Path(out_path).parent / "canvas-webgl-detection.json"
+    try:
+        data = json.loads(detect.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    try:
+        if int(data.get("canvasCount", 0)) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(data.get("primaryRenderType", "")).strip().lower() in {"webgl", "canvas"}
+
 
 if probe.get("error"):
     status = "fail"
     reasons.append(f"probe failed: {probe['error']}")
+elif (
+    canvas_total == 0
+    and lottie_inst == 0
+    and ref_has_real_canvas()
+    and _replay_satisfies_blank_hero(_load_replay_plan(), video_adv)
+):
+    # Ref renders WebGL/canvas and the impl mounts 0 canvases, BUT a declared
+    # canvas-replay <video> is advancing frames — the hero now renders the
+    # ref's OWN recorded motion (origin-locked engine could not be re-embedded,
+    # so it was recorded and replayed). Non-blank, declared, faithful → pass.
+    status = "pass"
+    reasons.append(
+        f"canvas-replay: impl mounts 0 canvases but a declared <video> replay "
+        f"is advancing ({video_adv}/{video_total} videos). The hero renders "
+        "the reference's own recorded motion (canvas-replay-plan.json) — "
+        "non-blank and faithful, so the blank-hero fail is satisfied."
+    )
+elif canvas_total == 0 and lottie_inst == 0 and ref_has_real_canvas():
+    # Ref genuinely renders WebGL/canvas (canvas-webgl-detection.json says so)
+    # but the impl mounts zero canvases — a blank hero that escaped detection.
+    # This is a real failure, not a false-positive: fail loudly.
+    status = "fail"
+    reasons.append(
+        "ref renders WebGL/canvas but impl hero is blank (0 canvases). "
+        "canvas-webgl-detection.json shows the reference draws on a canvas/"
+        "WebGL surface, yet the impl mounted none — the hero is not "
+        "reproduced (origin-locked engine, missing mount, or init failure)."
+    )
 elif canvas_total == 0 and lottie_inst == 0:
-    # Ref signaled canvas/webgl/lottie but impl has neither surface.
-    # The signal might be a false positive (e.g., ref's
-    # canvas-webgl-detection.json has hasCanvas=true because of a
-    # different element class). Pass with informational note.
+    # Ref signaled canvas/webgl/lottie but impl has neither surface, and the
+    # ref has no genuine canvas/WebGL evidence (the signal might be a lottie
+    # keyword or a stray "canvas" string). Pass with informational note.
     status = "pass"
     reasons.append(
         "informational: ref signaled canvas/webgl/lottie but impl has no "
@@ -337,6 +430,8 @@ payload = {
     "webglAdvanced": webgl_adv,
     "lottieInstances": lottie_inst,
     "lottieAdvanced": lottie_adv,
+    "videoTotal": video_total,
+    "videoAdvanced": video_adv,
     "reasons": reasons,
     "nextAction": (
         "Start the animation loop. For canvas/WebGL: confirm requestAnimationFrame "

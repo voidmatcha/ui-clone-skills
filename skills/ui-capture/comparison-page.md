@@ -229,5 +229,5 @@ Present URL to user and wait for feedback (interactive mode) or check pixel-perf
 
 When no implementation exists yet, generate `$OUT_DIR/report.html` instead of `compare.html`. In standalone mode with no component, `$OUT_DIR` is `tmp/ref/capture`. Shows the fullpage screenshot with interactive transition overlays pinned at exact page coordinates.
 
-- User calls `/ui-capture <url>` without a local-url → generate `report.html`
-- User calls `/ui-capture <url> vs <local-url>` → generate `compare.html` (default comparison mode)
+- User invokes `ui-capture <url>` without a local-url (Claude slash command: `/ui-capture <url>`) → generate `report.html`
+- User invokes `ui-capture <url> vs <local-url>` (Claude slash command: `/ui-capture <url> vs <local-url>`) → generate `compare.html` (default comparison mode)

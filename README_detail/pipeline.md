@@ -6,12 +6,12 @@ Hooks register automatically through the host manifest when supported: `hooks/ho
 
 | Hook module | Event | Purpose |
 |------|-------|---------|
-| `ui_clone.hooks.pre_generate` | `PreToolUse` (Write/Edit) | Blocks component writes until extraction completes. Creates `.ui-re-active` on first passing gate (activation site for the rest of the chain). Demotes state + invalidates `sections/result.txt` on post-`done` component edits |
-| `ui_clone.hooks.pre_bash` | `PreToolUse` (Bash) | Two checks. (1) Blocks declaration-of-done bash commands (`git commit`, `git push`, `gh pr create/merge/close`) when verification is incomplete. (2) Blocks Bash redirects/streams that write to component files (`cat > Foo.tsx`, `tee Foo.tsx`, `sed -i ... Foo.tsx`) when extraction is incomplete — symmetrical with the `Edit/Write` gate so shell-redirect bypass is closed. Read-only commands pass through. Bypass: `UI_RE_SKIP_BASH_GATE=1` |
-| `ui_clone.hooks.post_verify` | `PostToolUse` (Bash) | Warns on completion signals if verification hasn't run |
-| `ui_clone.hooks.devtools_errors` | `PostToolUse` (Bash) | Checks browser devtools for console errors after each Bash call |
+| `ui_clone.hooks.pre_generate` | `PreToolUse` (Write/Edit/MultiEdit; Codex also apply_patch) | Blocks component writes until extraction completes. Creates `.ui-re-active` on first passing gate (activation site for the rest of the chain). Demotes state + invalidates `sections/result.txt` on post-`done` component edits |
+| `ui_clone.hooks.pre_bash` | `PreToolUse` (Bash / Codex exec_command) | Two checks. (1) Blocks declaration-of-done bash commands (`git commit`, `git push`, `gh pr create/merge/close`) when verification is incomplete. (2) Blocks Bash redirects/streams that write to component files (`cat > Foo.tsx`, `tee Foo.tsx`, `sed -i ... Foo.tsx`) when extraction is incomplete — symmetrical with the `Edit/Write` gate so shell-redirect bypass is closed. Read-only commands pass through. Bypass: `UI_RE_SKIP_BASH_GATE=1` |
+| `ui_clone.hooks.post_verify` | `PostToolUse` (Bash / Codex exec_command) | Warns on completion signals if verification hasn't run |
+| `ui_clone.hooks.devtools_errors` | `PostToolUse` (Bash / Codex exec_command) | Checks browser devtools for console errors after each Bash call |
 | `ui_clone.hooks.section_gate` | `Stop` | Blocks finishing if the current gate hasn't passed. Marker persists past section-compare; `current_gate == "done"` is the canonical complete signal |
-| `ui_clone.hooks.session_resume` | `SessionStart`, `PostCompact` | Reinjects the verification checklist into context after a session resume or context compact (empirical: 73% of past verification skips happened within 20 min of a `compact_boundary`). Skipped when state is `done` |
+| `ui_clone.hooks.session_resume` | `SessionStart`; Claude Code also `PostCompact` | Reinjects the verification checklist into context after a session resume; Claude Code also reinjects after context compact (empirical: 73% of past verification skips happened within 20 min of a `compact_boundary`). Codex compact-boundary reinjection depends on host hook support. Skipped when state is `done` |
 
 ## Goal-driven continuation
 
@@ -56,7 +56,7 @@ plugin defaults and project instructions still require a strict closeout: run
 either command fails or reports missing runtime/transition proof, report
 `INCOMPLETE` instead of done.
 
-The stop condition is bounded: stop when `current_gate == "done"` and `sections/result.txt` has no `FAIL` or `MISSING impl` lines. SessionStart/PostCompact hooks inject the active goal card, and the Stop gate includes the same card when blocking so the next action is explicit.
+The stop condition is bounded: stop when `current_gate == "done"` and `sections/result.txt` has no `FAIL` or `MISSING impl` lines. SessionStart hooks inject the active goal card (Claude Code also PostCompact), and the Stop gate includes the same card when blocking so the next action is explicit.
 
 When an iteration exposes a plugin bug, do not let the iterator edit gate
 code inline. Escalate via [Plugin Code Edits During Clone Iteration](./plugin-code-edits-during-iteration.md):

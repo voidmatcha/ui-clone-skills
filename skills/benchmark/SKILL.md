@@ -202,7 +202,7 @@ Follow the normal ui-reverse-engineering pipeline:
 
 - **Phase 1 (capture)** — if `<ref>/static/ref/` has fewer than 5 PNGs:
   ```
-  /ui-capture https://realfood.gov '' realfood
+  ui-capture https://realfood.gov '' realfood
   ```
   Populates sections + scroll video + regions.json into `<ref>` via the symlink.
 

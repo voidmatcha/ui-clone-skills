@@ -50,7 +50,7 @@ if [ "$REUSE_SESSION" = "true" ]; then
   SCROLL_SESSION="$SESSION"
 fi
 
-OUTDIR="$REF_DIR/states/scroll"
+OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/scroll"
 mkdir -p "$OUTDIR"
 
 # Open page in the derived session unless reusing the caller's session.
@@ -145,12 +145,41 @@ EVAL_JS='(async () => {
 
   // Codex item (a): detect wrapper-scroll engines and use their API for scrolling.
   // Returns the engine name used and the actual scroll position read from the engine.
+  //
+  // juanmora false-negative fix (2026-05-28). Original detector only
+  // checked window globals (window.lenis / window.Lenis as object). Lenis
+  // module-loaded mode does NOT expose its instance on window.lenis by
+  // default; it intercepts wheel events and translates to transform,
+  // leaving window.scroll* untouched. Fix: also probe DOM markers (Lenis
+  // adds class "lenis" on <html>; Locomotive adds "has-scroll-init") and
+  // fall through on Lenis class being loaded. Instance-less paths return
+  // null so downstream performScroll/readScrollY fall back to native API.
+  // NOTE: this JS lives inside a single-quoted shell string upstream; no
+  // ASCII apostrophes allowed in comments or string literals here.
   const detectScrollEngine = () => {
-    const lenis = window.lenis || (typeof window.Lenis === "object" ? window.Lenis : null);
-    if (lenis && typeof lenis.scrollTo === "function") return { name: "lenis", instance: lenis };
+    const html = document.documentElement;
+    const lenisInstance = window.lenis
+      || (typeof window.Lenis === "object" ? window.Lenis : null);
+    if (lenisInstance && typeof lenisInstance.scrollTo === "function") {
+      return { name: "lenis", instance: lenisInstance };
+    }
+    if (html.classList.contains("lenis")) {
+      // DOM marker present (Lenis active even when instance is not on window).
+      return { name: "lenis", instance: null };
+    }
     const loco = window.locomotive || window.locomotiveScroll
       || (window.scroll && typeof window.scroll.scrollTo === "function" ? window.scroll : null);
-    if (loco && typeof loco.scrollTo === "function") return { name: "locomotive", instance: loco };
+    if (loco && typeof loco.scrollTo === "function") {
+      return { name: "locomotive", instance: loco };
+    }
+    if (html.classList.contains("has-scroll-init")) {
+      return { name: "locomotive", instance: null };
+    }
+    // Last resort: Lenis CLASS loaded but instance hidden in a closure.
+    // Better to label as lenis (no instance) than falsely report native.
+    if (typeof window.Lenis === "function") {
+      return { name: "lenis", instance: null };
+    }
     return { name: "native", instance: null };
   };
 

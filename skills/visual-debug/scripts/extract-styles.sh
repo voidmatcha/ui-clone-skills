@@ -76,6 +76,37 @@ SHORTHAND = (
     ("margin", "margin"),
     ("width", "width"),
     ("height", "height"),
+    # Fidelity-critical props extract-dom.sh already captures into
+    # structure.json but were dropped here — so the generator (which reads
+    # dom-scaffold.json) never saw a real shadow / radius / alignment and
+    # freehanded all of them. Keyed by full CSS name (no shorthand) so the
+    # value reaches Phase 4 self-documenting. ADDITIVE — no existing key
+    # removed or weakened.
+    ("border-radius", "border-radius"),
+    ("border", "border"),
+    ("box-shadow", "box-shadow"),
+    ("text-align", "text-align"),
+    ("text-transform", "text-transform"),
+    ("white-space", "white-space"),
+    ("transform", "transform"),
+    ("opacity", "opacity"),
+    ("overflow", "overflow"),
+    ("flex", "flex"),
+    ("flex-direction", "flex-direction"),
+    ("justify-content", "justify-content"),
+    ("align-items", "align-items"),
+    ("gap", "gap"),
+    ("grid-template-columns", "grid-template-columns"),
+    ("grid-template-rows", "grid-template-rows"),
+    ("z-index", "z-index"),
+    ("min-width", "min-width"),
+    ("max-width", "max-width"),
+    ("min-height", "min-height"),
+    ("max-height", "max-height"),
+    ("top", "top"),
+    ("left", "left"),
+    ("right", "right"),
+    ("bottom", "bottom"),
 )
 
 NOISE = {"", "normal", "none", "auto", "0px", "rgba(0, 0, 0, 0)"}
@@ -128,6 +159,17 @@ buckets: defaultdict = defaultdict(lambda: defaultdict(Counter))
 # and exceptional instances inherit the dominant class's layout.
 CLASS_LEVEL_STRUCTURAL_KEYS = {
     "display", "position", "padding", "margin", "width", "height",
+    # The fidelity props added to SHORTHAND that ALSO vary instance-by-instance
+    # (offsets, sizing bounds, transforms, grid tracks, gaps, z-order) get the
+    # same carve-out: aggregating them at the class level would stamp the
+    # dominant instance's value onto exceptions, and dom-scaffold reads these
+    # per-node from structure.json directly (per-node wins). Design-system-stable
+    # fidelity props (border-radius/border/box-shadow/text-align/text-transform/
+    # white-space/overflow/opacity/justify-content/align-items/flex-direction)
+    # stay at class level — they're consistent across instances of a class.
+    "z-index", "top", "left", "right", "bottom", "transform",
+    "grid-template-columns", "grid-template-rows", "gap", "flex",
+    "min-width", "max-width", "min-height", "max-height",
 }
 
 

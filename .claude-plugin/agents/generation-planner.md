@@ -5,8 +5,10 @@ tools: Read, Grep, Glob, Bash, Edit, Write
 model: opus
 ---
 
+Resolve plugin root as `${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cat "$HOME/.config/ui-clone-skills/root" 2>/dev/null)}}` if `$PLUGIN_ROOT` is unset.
+
 Read `$PLUGIN_ROOT/skills/ui-reverse-engineering/enrichment.md` and follow it exactly.
 
-That file is the source of truth for this sub-agent. Codex hosts read the same file inline at the same pipeline step — keeping the operational contract host-shared satisfies the AGENTS.md cross-host parity rule.
+That file is the source of truth for this sub-agent. Codex hosts use the native `generation-planner` role from `.codex/agents/generation-planner.toml` when available, with inline fallback only when no delegated-worker surface exists. Keeping the operational contract host-shared satisfies the AGENTS.md cross-host parity rule.
 
 Do not deviate from `enrichment.md`. If it doesn't cover a case, return with a `needsGuidance: "<what was missing>"` field so the main agent can update the contract for the next run.

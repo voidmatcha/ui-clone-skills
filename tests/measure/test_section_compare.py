@@ -245,6 +245,17 @@ def test_section_compare_script_has_viewport_fanout_wrapper() -> None:
     assert "sections/viewports" in text
 
 
+def test_section_compare_protects_motion_sections_from_structural_only() -> None:
+    """Motion-critical sections must not be hidden behind STRUCTURAL_ONLY."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "MOTION_STRUCTURAL_ONLY_PATTERNS" in text
+    assert "motion-critical section cannot use STRUCTURAL_ONLY" in text
+    assert "transition-spec.json" in text
+    assert "required-media.json" in text
+
+
 def test_section_compare_fans_out_per_viewport_with_stub_inner(tmp_path: Path) -> None:
     """VIEWPORTS runs section-compare once per viewport and aggregates result.txt."""
     ref = tmp_path / "ref"
@@ -289,6 +300,75 @@ def test_section_compare_fans_out_per_viewport_with_stub_inner(tmp_path: Path) -
     assert (ref / "sections" / "viewports" / "1280x800" / "viewport.txt").read_text().strip() == "1280x800"
 
 
+def test_pair_sections_uses_text_content_when_class_signatures_differ() -> None:
+    """A faithful Tailwind clone of a CSS-Modules reference shares ZERO class
+    tokens with the ref, so class-signature pairing is blind. The ref
+    fingerprint is class-derived (synthesis path), the impl fingerprint is real
+    innerText — fingerprint Jaccard is also zero. With only same-tag + order to
+    go on, the matcher pairs the ref to whichever impl section iterates first,
+    which mis-pairs when a decoy precedes the true content match.
+
+    Text-content fingerprinting (`textWords`) must drive the pairing: the ref
+    section must pair to the impl section that SAYS the same thing, not the
+    decoy that merely comes first in DOM order.
+    """
+    from ui_clone.section_compare_sections import pair_sections
+
+    ref = [
+        {
+            "index": 0,
+            "tag": "section",
+            "id": None,
+            "className": "dga_hero__AjMaf",          # CSS-Modules class
+            "fingerprint": "dgaheroajmaf",            # class-derived, no real text
+            "textWords": "eat real food restores health wins",
+            "rect": {"top": 0, "left": 0, "width": 1440, "height": 800},
+            "childCount": 4,
+        },
+    ]
+    impl = [
+        # Decoy FIRST in DOM order — same tag, unrelated text. Current matcher
+        # pairs ref->this by the +0.1 same-tag boost + iteration order.
+        {
+            "index": 0,
+            "tag": "section",
+            "id": None,
+            "className": "block min-h-[900px] bg-[#1412]",   # Tailwind, zero overlap
+            "fingerprint": "frequently asked questions about the pyramid",
+            "textWords": "frequently asked questions about the pyramid guidance",
+            "rect": {"top": 0, "left": 0, "width": 1440, "height": 900},
+            "childCount": 4,
+        },
+        # True content match SECOND — Tailwind class, zero token overlap with
+        # the CSS-Modules ref class, but the SAME visible words as the ref.
+        {
+            "index": 1,
+            "tag": "section",
+            "id": None,
+            "className": "relative block min-h-[800px] bg-[#f4f1]",
+            "fingerprint": "eat real food restores health wins",
+            "textWords": "eat real food restores health wins",
+            "rect": {"top": 0, "left": 0, "width": 1440, "height": 800},
+            "childCount": 4,
+        },
+    ]
+
+    matches = pair_sections(ref, impl)
+    ref_pair = next(m for m in matches if m.get("ref") and m["ref"]["index"] == 0)
+
+    assert ref_pair["impl"] is not None, "ref hero must pair, not be left unmatched"
+    assert ref_pair["impl"]["index"] == 1, (
+        "ref must pair to the impl section with matching TEXT (index 1), not the "
+        f"decoy that comes first in DOM order (index 0); got impl index "
+        f"{ref_pair['impl']['index']}"
+    )
+    # The decoy must not be paired to the ref hero.
+    assert not any(
+        m.get("ref") and m["ref"]["index"] == 0 and m.get("impl") and m["impl"]["index"] == 0
+        for m in matches
+    ), "decoy (impl index 0) must not steal the ref hero pairing"
+
+
 def test_section_compare_failure_guidance_avoids_sigpipe_prone_head_pipelines() -> None:
     """Regression: the failure-report path runs with `set -o pipefail`.
 
@@ -304,3 +384,72 @@ def test_section_compare_failure_guidance_avoids_sigpipe_prone_head_pipelines() 
     )[0]
 
     assert "| head -" not in failure_block
+
+
+def test_section_compare_delegates_capture_to_safe_python_module() -> None:
+    """Section screenshot capture should not build shell command strings from
+    selector-derived names. The shell script delegates to a typed Python module
+    that runs argv commands with shell=False.
+    """
+    root = _project_root()
+    script = root / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "python3 -m ui_clone.section_capture" in text
+    assert "subprocess.run(cmd_scroll, shell=True" not in text
+    assert "subprocess.run(cmd_crop, shell=True" not in text
+
+
+def test_section_capture_sanitizes_section_filenames() -> None:
+    from ui_clone.section_capture import safe_section_name
+
+    assert safe_section_name('hero"; touch /tmp/pwned #') == "hero_touch_tmp_pwned"
+    assert safe_section_name("../../secret") == "secret"
+    assert safe_section_name("" * 50) == "section"
+
+
+def test_section_capture_finish_js_is_direct_eval_source_not_shell_escaped() -> None:
+    from ui_clone.section_capture import _finish_js
+
+    js = _finish_js()
+
+    assert 'typeof document.getAnimations === "function"' in js
+    assert '\\"function\\"' not in js
+
+
+def test_section_capture_runs_commands_as_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import subprocess
+
+    from ui_clone import section_capture
+
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(section_capture.subprocess, "run", fake_run)
+    monkeypatch.setattr(section_capture.time, "sleep", lambda _seconds: None)
+    monkeypatch.setenv("SECTION_CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("SECTION_CAPTURE_SESSION_REF", "ref-session")
+    monkeypatch.setenv("SECTION_CAPTURE_SESSION_IMPL", "impl-session")
+    monkeypatch.setenv("SECTION_CAPTURE_REF_SCROLLER_SEL", 'main[data-x="quoted"]')
+    monkeypatch.setenv("SECTION_CAPTURE_IMPL_SCROLLER_SEL", "__document__")
+
+    (tmp_path / "sections" / "ref").mkdir(parents=True)
+    (tmp_path / "sections" / "impl").mkdir(parents=True)
+
+    section_capture.capture_matched_sections([
+        {
+            "name": 'hero"; touch /tmp/pwned #',
+            "ref": {"rect": {"top": 120, "left": 0, "width": 300, "height": 200}},
+            "impl": {"rect": {"top": 140, "left": 0, "width": 300, "height": 220}},
+        }
+    ])
+
+    assert calls, "capture must invoke agent-browser/magick commands"
+    assert all(isinstance(cmd, list) for cmd, _kwargs in calls)
+    assert all(_kwargs.get("shell") is not True for _cmd, _kwargs in calls)
+    joined = "\n".join(" ".join(cmd) for cmd, _kwargs in calls)
+    assert "hero_touch_tmp_pwned.png" in joined
+    assert 'document.querySelector("main[data-x=\\"quoted\\"]")' in joined

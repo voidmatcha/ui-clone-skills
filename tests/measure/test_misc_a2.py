@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -601,3 +602,111 @@ def test_fix13_skill_md_phase_2_8() -> None:
     text = skill.read_text(encoding="utf-8")
     assert "Phase 2.8" in text, "benchmark/SKILL.md must document Phase 2.8 (Fix 13)"
     assert "scaffold-to-jsx" in text, "benchmark/SKILL.md must reference the transpiler"
+
+
+# ── FIX 1: dom-scaffold degenerate-sections guard ────────────────────────
+# dom-scaffold.sh silently emitted a scaffold with `sections: []` when it ran
+# while section-map.json was incomplete (a timing race: section-map later had
+# 9/7 sections but the scaffold the generator consumed had 0 → the generator
+# freehanded per-section layout). Mirror the text-fidelity degenerate-scaffold
+# guard: if structure.json has substantial content but section extraction
+# yielded 0 usable sections, fail loud instead of emitting a degenerate
+# scaffold. Env escape hatch DOM_SCAFFOLD_ALLOW_NO_SECTIONS=1 for genuinely
+# section-less pages.
+
+
+def _real_structure() -> dict:
+    """A structure.json with substantial node content (well above the floor)."""
+    leaves = [
+        {"tag": "p", "text": f"paragraph {i}", "children": []}
+        for i in range(12)
+    ]
+    return {
+        "tag": "main",
+        "class": "page",
+        "children": [
+            {"tag": "header", "class": "site-head", "children": [
+                {"tag": "h1", "text": "Brand Headline", "children": []},
+                {"tag": "nav", "children": [
+                    {"tag": "a", "text": "Home", "children": []},
+                    {"tag": "a", "text": "About", "children": []},
+                ]},
+            ]},
+            {"tag": "section", "class": "body", "children": leaves},
+        ],
+    }
+
+
+def test_dom_scaffold_guards_degenerate_zero_sections(tmp_path: Path) -> None:
+    """structure.json has real nodes but section-map yields 0 usable sections
+    → dom-scaffold must EXIT NON-ZERO with a guard message and NOT emit a
+    silent degenerate scaffold the generator would freehand on."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps(_real_structure()))
+    (ref / "styles.json").write_text(json.dumps({}))
+    # section-map extraction incomplete: zero usable sections.
+    (ref / "section-map.json").write_text(json.dumps({"sections": []}))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "dom-scaffold.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)],
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert proc.returncode != 0, (
+        f"degenerate (0-section) scaffold over a substantial structure.json "
+        f"must fail loud, got rc=0:\n{proc.stdout}\n{proc.stderr}"
+    )
+    msg = proc.stdout + proc.stderr
+    assert "0 usable sections" in msg, f"guard message missing: {msg}"
+    assert "extract-section-map" in msg, f"remediation hint missing: {msg}"
+    # Fail-loud, do-not-emit: the degenerate scaffold must not be written.
+    assert not (ref / "dom-scaffold.json").exists(), (
+        "guard must NOT emit a degenerate dom-scaffold.json"
+    )
+
+
+def test_dom_scaffold_passes_with_healthy_section_map(tmp_path: Path) -> None:
+    """A healthy section-map (>=1 usable section) must still pass."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps(_real_structure()))
+    (ref / "styles.json").write_text(json.dumps({}))
+    (ref / "section-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 0, "tag": "header", "cls": "site-head", "top": 0, "height": 80},
+            {"index": 1, "tag": "section", "cls": "body", "top": 80, "height": 600},
+        ],
+    }))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "dom-scaffold.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)],
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert proc.returncode == 0, f"healthy section-map must pass:\n{proc.stdout}\n{proc.stderr}"
+    doc = json.loads((ref / "dom-scaffold.json").read_text())
+    assert len(doc["sections"]) == 2
+
+
+def test_dom_scaffold_escape_hatch_allows_zero_sections(tmp_path: Path) -> None:
+    """DOM_SCAFFOLD_ALLOW_NO_SECTIONS=1 opts genuinely section-less pages out
+    of the guard — exits 0 and emits the (empty-section) scaffold."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps(_real_structure()))
+    (ref / "styles.json").write_text(json.dumps({}))
+    (ref / "section-map.json").write_text(json.dumps({"sections": []}))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "dom-scaffold.sh"
+    env = dict(**os.environ, DOM_SCAFFOLD_ALLOW_NO_SECTIONS="1")
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+
+    assert proc.returncode == 0, f"escape hatch must pass:\n{proc.stdout}\n{proc.stderr}"
+    doc = json.loads((ref / "dom-scaffold.json").read_text())
+    assert doc["sections"] == []

@@ -3,7 +3,8 @@
 **Audience**: anyone (host-agnostic) iterating Phase 7 fix cycles on a failed section-compare or tree-diff.
 
 - **Claude Code path**: invoked via `visual-debug-iterator` sub-agent (`.claude-plugin/agents/visual-debug-iterator.md`). The sub-agent reads this file as its operational contract. The sub-agent's `disallowedTools` field enforces the vision-free rule by blocking `Read(*.png)` etc.
-- **Codex path**: read this file inline at Step 8b on FAIL per `.codex-plugin/plugin.json defaultPrompt`. The vision-free rule is policy, not tool-level — DO NOT `Read` PNG/JPG/WebP files in the main context either.
+- **Codex native path**: invoked via the `visual-debug-iterator` native subagent (`.codex/agents/visual-debug-iterator.toml`) when Codex/OMX subagent routing is available. The vision-free rule is policy in the TOML instructions: do not read PNG/JPG/WebP/GIF files.
+- **Inline fallback**: if a host has no delegated-worker surface, perform the same work in the main context and state that fallback explicitly. The vision-free rule still applies.
 
 ## Pre-condition
 
@@ -20,7 +21,7 @@
 
 ## Discipline
 
-1. **VISION-FREE — strict.** Do NOT `Read` any `.png` / `.jpg` / `.jpeg` / `.webp` / `.gif` file. The plugin's value prop is "near-zero vision tokens"; reading diff images here defeats the entire purpose AND introduces Claude Vision interpretation variance. Use the text-based signals in order:
+1. **VISION-FREE — strict.** Do NOT `Read` any `.png` / `.jpg` / `.jpeg` / `.webp` / `.gif` file. The plugin's value prop is "near-zero vision tokens"; reading diff images here defeats the entire purpose AND introduces host vision-model interpretation variance. Use the text-based signals in order:
    - **1st: `auto-diagnose.sh`** — `bash $PLUGIN_ROOT/skills/visual-debug/scripts/auto-diagnose.sh "$(pwd)/tmp/ref/<component>" <impl>` returns root-cause class + impl file:line, all text.
    - **2nd: `tree-diff-status.json` + `tree-diff.json`** — DOM/style mismatches in text form (display, flex-direction, position, dimensions, font props). This catches structural fails that pixel diff can't explain.
    - **3rd: `computed-diff.sh`** — per-element computed-style comparison, text only.

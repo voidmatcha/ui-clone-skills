@@ -58,7 +58,7 @@ These are the decisions that shape how the plugin is structured. They aim to kee
 
 | User intent | Skill | Owned responsibility | Non-goal | Handoff/next action |
 |---|---|---|---|---|
-| Build/route | **`ui-reverse-engineering`** | Run the website-to-React pipeline and route the next phase from pipeline status. | Not a standalone capture utility or mismatch diagnosis tool. | Calls `/ui-capture` for reference artifacts; uses `visual-debug` for visual verification. |
+| Build/route | **`ui-reverse-engineering`** | Run the website-to-React pipeline and route the next phase from pipeline status. | Not a standalone capture utility or mismatch diagnosis tool. | Calls `ui-capture` for reference artifacts; uses `visual-debug` for visual verification. |
 | Capture/reference | **`ui-capture`** | Capture reference screenshots, scroll/transition evidence, and optional implementation clips for the caller. | Not the primary post-implementation mismatch diagnosis tool. | Handoff failing diffs or mismatch investigation to `visual-debug`. |
 | Diagnose mismatch | **`visual-debug`** | Compare original vs implementation, run AE/SSIM/computed-style diagnosis, and identify fixes. | Not the build pipeline or baseline capture owner. | Return concrete findings/fixes to `ui-reverse-engineering` or the caller. |
 
@@ -71,7 +71,7 @@ The public surface stays small: Claude Code and Codex expose the same three skil
 ## Install
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh | bash
+tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"
 ```
 
 The default install registers **both** Claude Code and Codex marketplaces in one pass; each registration is skipped silently if that host's CLI is not on PATH. Inside Claude Code: `/plugin install ui-clone-skills@voidmatcha`. For Codex: launch with `codex --enable plugin_hooks` after the installer runs.

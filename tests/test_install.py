@@ -32,6 +32,20 @@ def test_codex_install_uses_personal_projection_marketplace() -> None:
     assert 'codex plugin add "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"' in text
 
 
+def test_codex_install_projects_and_installs_native_agents() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert (
+        "CODEX_NATIVE_AGENTS_DIR=\"${CODEX_HOME:-$HOME/.codex}/agents\"" in text
+    )
+    assert 'CODEX_PUBLIC_SKILLS="ui-reverse-engineering ui-capture visual-debug"' in text
+    assert "install_codex_native_agents" in text
+    assert "for item in .codex-plugin .codex hooks scripts" in text
+    assert "for item in .codex-plugin .codex skills hooks scripts" not in text
+    assert "for skill in $CODEX_PUBLIC_SKILLS" in text
+    assert 'ln -s "$src" "$dst"' in text
+
+
 def test_shell_quote_produces_copy_paste_safe_codex_command() -> None:
     helper = _extract_shell_quote()
     cases = {

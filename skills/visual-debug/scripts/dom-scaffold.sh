@@ -55,6 +55,7 @@ OUT="$REF_DIR/dom-scaffold.json"
 
 python3 - "$STRUCT" "$STYLES" "$SECMAP" "$OUT" <<'PY'
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -65,6 +66,14 @@ from pathlib import Path
 STYLE_KEYS = (
     "display", "position", "bg", "color", "ff", "fs", "fw", "lh", "ls",
     "padding", "margin", "width", "height",
+    # Fidelity-critical props extract-dom.sh captures but the scaffold used to
+    # drop — so the generator freehanded shadows / alignment / radius / z-order.
+    # ADDITIVE: carried through to Phase 4 so it must reproduce them, not invent.
+    "border-radius", "border", "box-shadow", "text-align", "text-transform",
+    "white-space", "transform", "opacity", "overflow", "flex", "flex-direction",
+    "justify-content", "align-items", "gap", "grid-template-columns",
+    "grid-template-rows", "z-index", "min-width", "max-width", "min-height",
+    "max-height", "top", "left", "right", "bottom",
 )
 
 # Per-node style shortener — mirrors extract-styles.sh's shorten_styles. The
@@ -88,8 +97,42 @@ _PER_NODE_SHORTHAND = (
     ("margin", "margin"),
     ("width", "width"),
     ("height", "height"),
+    # Same fidelity props as STYLE_KEYS — read per-node from structure.json so
+    # the exceptional-instance value (this node's real shadow/alignment/radius)
+    # wins over the class aggregate (per-node-wins, see walk()). ADDITIVE.
+    ("border-radius", "border-radius"),
+    ("border", "border"),
+    ("box-shadow", "box-shadow"),
+    ("text-align", "text-align"),
+    ("text-transform", "text-transform"),
+    ("white-space", "white-space"),
+    ("transform", "transform"),
+    ("opacity", "opacity"),
+    ("overflow", "overflow"),
+    ("flex", "flex"),
+    ("flex-direction", "flex-direction"),
+    ("justify-content", "justify-content"),
+    ("align-items", "align-items"),
+    ("gap", "gap"),
+    ("grid-template-columns", "grid-template-columns"),
+    ("grid-template-rows", "grid-template-rows"),
+    ("z-index", "z-index"),
+    ("min-width", "min-width"),
+    ("max-width", "max-width"),
+    ("min-height", "min-height"),
+    ("max-height", "max-height"),
+    ("top", "top"),
+    ("left", "left"),
+    ("right", "right"),
+    ("bottom", "bottom"),
 )
 _PER_NODE_NOISE = {"", "normal", "none", "auto", "0px", "rgba(0, 0, 0, 0)"}
+
+# Cheap typography keys (shorthand) carried onto deep text nodes past the
+# depth cap. RANK-4 fix: deep leaf text otherwise arrived with no
+# fs/fw/color/lh/ls and the generator freehanded typography. These 5 strings
+# are cheap; the heavy structural props stay dropped past the cap.
+_TYPOGRAPHY_KEYS = {"fs", "fw", "color", "lh", "ls"}
 
 
 def shorten_node_styles(raw):
@@ -148,12 +191,49 @@ def resolve_styles(tag, class_str, styles_map):
 
 def walk(node, styles_map, depth=0, max_depth=8):
     """Walk structure.json into a scaffold-friendly shape: tag/text/class/
-    styles/children. Caps depth so massive trees don't blow up the prompt.
+    styles/children. Caps STYLE/structure detail past max_depth so massive
+    trees don't blow up the prompt — but NEVER drops text. Verbatim text is
+    the fidelity ground truth; truncating it makes the generator omit or
+    fabricate copy (observed: a flat depth-8 cap dropped ~79% of a deep site's
+    text leaves — structure.json had 232 to depth 14, the scaffold kept 49).
+    Past the cap, text-bearing nodes are still carried but emitted lightweight
+    (tag + text only, no per-node styles dict — the styles are the heavy part,
+    not the text).
     """
-    if not isinstance(node, dict) or depth > max_depth:
+    if not isinstance(node, dict):
         return None
     tag = node.get("tag", "")
     text = node.get("text", "") or ""
+    children = []
+    for c in node.get("children", []) or []:
+        sub = walk(c, styles_map, depth + 1, max_depth)
+        if sub is not None:
+            children.append(sub)
+    if depth > max_depth:
+        # Past the cap: keep the node ONLY if it (or a descendant) carries
+        # text; emit it lightweight (tag/text/children) so the deep copy
+        # survives without re-bloating the prompt with full style dicts.
+        if not text and not children:
+            return None
+        item = {"tag": tag}
+        if text:
+            item["text"] = text
+            # RANK-4 fix (ADDITIVE): the skill says "copy the measured px/weight
+            # for ALL text" — so deep text must carry its real typography, not
+            # be freehanded. Attach ONLY the cheap typography subset
+            # (fs/fw/color/lh/ls); keep dropping the heavy structural props
+            # (border/box-shadow/flex/grid/...) past the cap so the cap still
+            # protects the prompt budget.
+            type_styles = {
+                k: v
+                for k, v in shorten_node_styles(node.get("styles") or {}).items()
+                if k in _TYPOGRAPHY_KEYS
+            }
+            if type_styles:
+                item["styles"] = type_styles
+        if children:
+            item["children"] = children
+        return item
     cls = (node.get("class") or "")[:80]
     # Per-node styles win over the class/tag aggregate: the aggregate is a
     # fallback for nodes that did not capture a computed value, but the raw
@@ -162,11 +242,6 @@ def walk(node, styles_map, depth=0, max_depth=8):
     per_node = shorten_node_styles(node.get("styles") or {})
     aggregate = resolve_styles(tag, cls, styles_map)
     styles = {**aggregate, **per_node}
-    children = []
-    for c in node.get("children", []) or []:
-        sub = walk(c, styles_map, depth + 1, max_depth)
-        if sub is not None:
-            children.append(sub)
     item = {"tag": tag}
     if text:
         item["text"] = text
@@ -177,6 +252,58 @@ def walk(node, styles_map, depth=0, max_depth=8):
     if children:
         item["children"] = children
     return item
+
+
+def find_section_node(root, section):
+    """Locate the section's OWN root node in structure.json so its per-node
+    computed styles can win over the tag/class aggregate (RANK-3 fix). Without
+    this, every section descriptor's `styles` came purely from
+    resolve_styles(tag, class, ...) — and extract-styles.sh strips structural
+    keys (padding/display/margin/width/height) from per-CLASS buckets, leaving
+    them only in the per-TAG bucket, so a section's padding/display resolved to
+    the page-MODAL value across all elements of that tag (the dominant
+    section's padding stamped on every section).
+
+    Match priority: section id (unique) first, then exact tag + class-token
+    containment in document order. Returns None when no node matches — callers
+    then fall back to the aggregate alone (per-node wins, aggregate fills gaps;
+    no behavior is removed).
+    """
+    sid = (section.get("id") or "").strip()
+    s_cls = (section.get("cls") or section.get("className") or "").strip()
+    s_tag = section.get("tag") or ""
+    s_tokens = set(s_cls.split())
+
+    id_match = [None]
+    cls_match = [None]
+
+    def visit(node):
+        if not isinstance(node, dict):
+            return
+        if id_match[0] is None and sid:
+            nid = (node.get("id") or "").strip()
+            if nid and nid == sid:
+                id_match[0] = node
+        if cls_match[0] is None and s_tokens:
+            n_tokens = set((node.get("class") or "").split())
+            if s_tokens <= n_tokens and (not s_tag or node.get("tag") == s_tag):
+                cls_match[0] = node
+        for c in node.get("children", []) or []:
+            visit(c)
+
+    visit(root)
+    return id_match[0] or cls_match[0]
+
+
+def count_nodes(node):
+    """Total node count in the structure.json tree — the 'substantial content'
+    signal for the degenerate-sections guard."""
+    if not isinstance(node, dict):
+        return 0
+    n = 1
+    for c in node.get("children", []) or []:
+        n += count_nodes(c)
+    return n
 
 
 def normalize_section_id(s):
@@ -216,7 +343,15 @@ for s in sections:
         continue
     sid = normalize_section_id(s)
     cls = (s.get("cls") or s.get("className") or "").strip()
-    sec_styles = resolve_styles(s.get("tag", "section"), cls, styles_map)
+    # Aggregate (tag/class) is the gap-filler; the section's OWN root-node
+    # computed styles win (RANK-3 fix). resolve_styles alone stamps the
+    # page-modal padding/display on every section; per-node restores the real
+    # per-section layout (its own padding/display/margin/min-height + RANK-1
+    # fidelity props). Same per-node-wins precedence as walk().
+    aggregate = resolve_styles(s.get("tag", "section"), cls, styles_map)
+    sec_node = find_section_node(structure, s)
+    per_node = shorten_node_styles(sec_node.get("styles") or {}) if sec_node else {}
+    sec_styles = {**aggregate, **per_node}
     sec_out.append({
         "id": sid,
         "tag": s.get("tag", "section"),
@@ -225,6 +360,31 @@ for s in sections:
         "height": s.get("height"),
         "styles": sec_styles,
     })
+
+# Degenerate-sections guard: section-map.json is the authoritative section
+# enumeration. A timing race (dom-scaffold run before extract-section-map.sh
+# finished) yields a section-map with 0 usable sections even though
+# structure.json already holds the full DOM. Emitting `sections: []` then is a
+# SILENT degenerate scaffold — the generator freehands per-section layout
+# (observed on 2 of 3 smoke clones: section-map later had 9/7 sections but the
+# scaffold the generator consumed had 0). Mirror the text-fidelity
+# degenerate-scaffold guard: fail loud, do NOT emit, demand re-extraction.
+# Env escape hatch for genuinely section-less pages (preloader-only, etc.).
+def _truthy(v):
+    return str(v).strip().lower() not in ("", "0", "false", "no")
+
+
+ALLOW_NO_SECTIONS = _truthy(os.environ.get("DOM_SCAFFOLD_ALLOW_NO_SECTIONS", ""))
+NODE_FLOOR = int(os.environ.get("DOM_SCAFFOLD_NODE_FLOOR", "10"))
+node_count = count_nodes(structure)
+if not sec_out and node_count >= NODE_FLOOR and not ALLOW_NO_SECTIONS:
+    sys.stderr.write(
+        f"dom-scaffold: section-map.json has 0 usable sections but "
+        f"structure.json has {node_count} nodes — section-map extraction is "
+        "incomplete; re-run extract-section-map.sh before dom-scaffold "
+        "(set DOM_SCAFFOLD_ALLOW_NO_SECTIONS=1 for genuinely section-less pages).\n"
+    )
+    sys.exit(3)
 
 # Anti-fabrication rule string travels with the scaffold so the agent sees
 # it the moment it reads the file.

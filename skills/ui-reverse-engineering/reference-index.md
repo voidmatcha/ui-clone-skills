@@ -31,6 +31,7 @@ Look up which sub-doc owns a topic. Read SKILL.md first for pipeline flow; read 
 | `animation-detection.md` | 6 | Idle/scroll/per-element animation phases |
 | `section-audit.md` | 6c | Six-stage audit: element ownership via parentElement chain |
 | `transition-coverage.md` | 6d | Multi-position scroll measurement → transition-coverage.json |
+| `enrichment.md` | 6-pre | Generation-plan enrichment contract — operational doc for `generation-planner` sub-agent (Claude + Codex native paths) |
 | `component-generation.md` | 7 | Generation entry, parallel worktree, verification gates |
 | `css-first-generation.md` | 7 | CSS-first assembly strategy for sites with downloadable CSS |
 | `generation-pitfalls.md` | 7 | Common implementation errors to avoid |
@@ -58,6 +59,7 @@ Look up which sub-doc owns a topic. Read SKILL.md first for pipeline flow; read 
 | `splash-extraction.md` | Step 5c-a preloader signal OR Step 6A Tier 1 AE shows changes in first 1–3s | Preloader overlay handling sub-protocol |
 | `dynamic-content-protocol.md` | Capture exhibits non-determinism | Handling dynamic/animated UIs during capture |
 | `asset-substitution.md` | Impl uses different font/asset than ref by design (license, availability) | Declares substitutions so section-compare switches affected sections to structural-only diff |
+| `canvas-replay-mode.md` | Ref visual identity is canvas/WebGL/shader-driven and section-compare cannot converge | Operator-opt-in closeout policy that swaps `section-compare` for `canvas-replay` proof (v0.7.0+) |
 
 ## Cross-skill (visual-debug)
 
@@ -67,3 +69,4 @@ Look up which sub-doc owns a topic. Read SKILL.md first for pipeline flow; read 
 | `../visual-debug/comparison-fix.md` | 8 | Phase C comparison + Phase E LLM review + Phase H self-healing |
 | `../visual-debug/scripts/section-compare.sh` | 8b | Section-level crop + AE + structure diff. **Always pass `"$(pwd)/tmp/ref/<component>"` as the 4th arg** — Stop gate reads result.txt from that path |
 | `../visual-debug/scripts/transition-compare.sh` | 8c | Idle/hover state comparison + timing diff |
+| `iteration-discipline.md` | Phase 7 loop | Visual-debug fix-cycle discipline contract — operational doc for `visual-debug-iterator` sub-agent (vision-free, measurement-only iteration) |

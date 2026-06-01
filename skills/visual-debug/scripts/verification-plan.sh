@@ -107,6 +107,7 @@ if command -v jq >/dev/null 2>&1; then
 fi
 
 # Read a JSON path safely; return empty string if file or path missing.
+# shellcheck disable=SC2329 # Kept as a local helper for plan extensions.
 read_json() {
   local file="$1"
   local path="$2"
@@ -137,6 +138,16 @@ contains_pattern() {
   grep -Eq "$pattern" "$file" 2>/dev/null
 }
 
+contains_ref_pattern() {
+  local pattern="$1"
+  grep -R -Eiq "$pattern" \
+    "$REF_DIR/bundles" \
+    "$REF_DIR/transition-spec.json" \
+    "$REF_DIR/scroll-engine.json" \
+    "$REF_DIR/animation-runtime-dump.json" \
+    2>/dev/null
+}
+
 BUNDLE_MAP="$REF_DIR/bundle-map.json"
 INTERACTIONS="$REF_DIR/interactions-detected.json"
 EXTERNAL_SDKS="$REF_DIR/external-sdks.json"
@@ -144,6 +155,220 @@ SCROLL_ENGINE="$REF_DIR/scroll-engine.json"
 TRANSITION_SPEC="$REF_DIR/transition-spec.json"
 CANVAS_DETECT="$REF_DIR/canvas-webgl-detection.json"
 PAID_FEATURES="$REF_DIR/paid-features.json"
+TRANSITION_COVERAGE="$REF_DIR/transition-coverage.json"
+ANIMATIONS_DETECTED="$REF_DIR/animations-detected.json"
+ELEMENT_TRACKING="$REF_DIR/element-tracking.json"
+
+# observed_motion_signal MODE — library-agnostic, closed-form detection of
+# motion that was actually OBSERVED during extraction, independent of any
+# library/token allowlist. Prints "true" / "false".
+#   MODE=scroll  → page moved under scroll (scroll-scrub / parallax / sticky-pin)
+#   MODE=reveal  → element entered an on-state as it scrolled into the viewport
+# Signals (any-of) per the behavioral artifacts:
+#   transition-coverage.json animatedElements[].trigger ~ /scroll/
+#   animations-detected.json scrollAnimations[] non-empty (scroll) / textReveals|reveals (reveal)
+#   element-tracking.json: same selector's transform/opacity/scale/clipPath/top
+#     changes across >=2 scroll positions (scroll); off->on viewport entry with a
+#     property change (reveal).
+# A fully static page (no observed motion anywhere) returns "false" so the
+# expensive motion checks never falsely dispatch.
+observed_motion_signal() {
+  local mode="$1"
+  python3 - "$mode" "$TRANSITION_COVERAGE" "$ANIMATIONS_DETECTED" "$ELEMENT_TRACKING" <<'PY'
+import json, re, sys
+
+mode = sys.argv[1]
+tc_path, ad_path, et_path = sys.argv[2], sys.argv[3], sys.argv[4]
+
+
+def load(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def transition_coverage_scroll():
+    d = load(tc_path)
+    if not isinstance(d, dict):
+        return False
+    for el in d.get("animatedElements", []) or []:
+        if not isinstance(el, dict):
+            continue
+        trig = str(el.get("trigger", "")).lower()
+        if "scroll" in trig:
+            return True
+        dec = el.get("decoded") or {}
+        if isinstance(dec, dict) and str(dec.get("position", "")).lower() == "sticky":
+            return True
+    return False
+
+
+def animations_detected_scroll():
+    d = load(ad_path)
+    if not isinstance(d, dict):
+        return False
+    return bool(d.get("scrollAnimations"))
+
+
+def animations_detected_reveal():
+    d = load(ad_path)
+    if not isinstance(d, dict):
+        return False
+    if d.get("textReveals") or d.get("reveals"):
+        return True
+    for sa in d.get("scrollAnimations", []) or []:
+        if isinstance(sa, dict) and "reveal" in str(sa.get("type", "")).lower():
+            return True
+    return False
+
+
+_PROPS = ("transform", "opacity", "scale", "clipPath", "top")
+
+
+def element_tracking_frames():
+    d = load(et_path)
+    if not isinstance(d, list) or len(d) < 2:
+        return None
+    return d
+
+
+def element_tracking_scroll():
+    frames = element_tracking_frames()
+    if not frames:
+        return False
+    # selector -> {prop -> set(values seen)}
+    seen = {}
+    for frame in frames:
+        for el in (frame.get("elements", []) if isinstance(frame, dict) else []) or []:
+            if not isinstance(el, dict):
+                continue
+            sel = el.get("selector")
+            if sel is None:
+                continue
+            bucket = seen.setdefault(sel, {p: set() for p in _PROPS})
+            for p in _PROPS:
+                bucket[p].add(json.dumps(el.get(p), sort_keys=True))
+    for props in seen.values():
+        for p in _PROPS:
+            if len(props[p]) >= 2:
+                return True
+    return False
+
+
+def element_tracking_reveal():
+    frames = element_tracking_frames()
+    if not frames:
+        return False
+    # selector -> ordered list of (inViewport, prop-fingerprint)
+    states = {}
+    for frame in frames:
+        for el in (frame.get("elements", []) if isinstance(frame, dict) else []) or []:
+            if not isinstance(el, dict):
+                continue
+            sel = el.get("selector")
+            if sel is None:
+                continue
+            fp = json.dumps([el.get(p) for p in _PROPS], sort_keys=True)
+            states.setdefault(sel, []).append((bool(el.get("inViewport")), fp))
+    for seq in states.values():
+        entered = False
+        for i in range(1, len(seq)):
+            prev_in, prev_fp = seq[i - 1]
+            cur_in, cur_fp = seq[i]
+            # off-state (out of viewport) -> on-state (in viewport) with a
+            # property change between the two samples = reveal-on-enter.
+            if (not prev_in) and cur_in and prev_fp != cur_fp:
+                entered = True
+                break
+        if entered:
+            return True
+    return False
+
+
+# Fix B — library-agnostic OR-inputs (additive). Auto-rotation and canvas/SVG
+# frame-advance are OBSERVED behaviors that the Swiper / Lottie name-greps miss
+# for Embla/Splide/keen-slider/hand-rolled carousels and Rive (.riv) / custom
+# canvas vector players. These widen dispatch only; a static page hits none.
+_CAROUSEL_RE = re.compile(
+    r"slide|carousel|rotat|gallery|marquee|slider|embla|splide|keen|swiper|rail",
+    re.IGNORECASE,
+)
+_VECTOR_RE = re.compile(r"canvas|svg|rive|\.riv|lottie|bodymovin", re.IGNORECASE)
+
+
+def animations_detected_carousel():
+    """An OBSERVED auto-rotating carousel/slideshow timer (periodic transform/
+    content change), regardless of slider library."""
+    d = load(ad_path)
+    if not isinstance(d, dict):
+        return False
+    for t in d.get("autoTimers", []) or []:
+        if not isinstance(t, dict):
+            continue
+        hay = str(t.get("type", "")) + " " + str(t.get("selector", ""))
+        if _CAROUSEL_RE.search(hay):
+            return True
+    return False
+
+
+def animations_detected_vector():
+    """A canvas/SVG region that was OBSERVED animating (auto-timer / scroll /
+    reveal entry on a canvas|svg|rive|lottie selector) — a vector/canvas player
+    regardless of which runtime drives it."""
+    d = load(ad_path)
+    if not isinstance(d, dict):
+        return False
+    for key in ("autoTimers", "scrollAnimations", "textReveals", "reveals"):
+        for e in d.get(key, []) or []:
+            if isinstance(e, dict) and _VECTOR_RE.search(str(e.get("selector", ""))):
+                return True
+    return False
+
+
+def element_tracking_vector():
+    """A canvas/SVG-ish selector whose tracked props change across >=2 frames —
+    observed continuous frame change on a vector surface."""
+    frames = element_tracking_frames()
+    if not frames:
+        return False
+    seen = {}
+    for frame in frames:
+        for el in (frame.get("elements", []) if isinstance(frame, dict) else []) or []:
+            if not isinstance(el, dict):
+                continue
+            sel = el.get("selector")
+            if sel is None or not _VECTOR_RE.search(str(sel)):
+                continue
+            bucket = seen.setdefault(sel, {p: set() for p in _PROPS})
+            for p in _PROPS:
+                bucket[p].add(json.dumps(el.get(p), sort_keys=True))
+    for props in seen.values():
+        for p in _PROPS:
+            if len(props[p]) >= 2:
+                return True
+    return False
+
+
+if mode == "scroll":
+    result = (
+        transition_coverage_scroll()
+        or animations_detected_scroll()
+        or element_tracking_scroll()
+    )
+elif mode == "reveal":
+    result = animations_detected_reveal() or element_tracking_reveal()
+elif mode == "carousel":
+    result = animations_detected_carousel()
+elif mode == "vector":
+    result = animations_detected_vector() or element_tracking_vector()
+else:
+    result = False
+
+print("true" if result else "false")
+PY
+}
 
 file_mtime_epoch() {
   local path="$1"
@@ -209,23 +434,52 @@ fi
 # *running* a check — a false-positive runs an extra check (cheap), a
 # false-negative misses a bug class (expensive).
 
-# hasScrollScrub: scroll-driven animation present in some form
+# hasScrollScrub: scroll-driven animation present in some form.
+# The allowlist greps below are param-extraction *hints* (one OR-input each).
+# Observed motion (observed_motion_signal scroll) is an authoritative,
+# library-agnostic OR-input: if pixels actually moved under scroll during
+# extraction, dispatch the motion checks regardless of which library (or none)
+# drove it. Catches unknown / hand-rolled motion that no token grep sees.
 HAS_SCROLL_SCRUB="false"
 if contains_pattern "$EXTERNAL_SDKS" '"(useScroll|scrollYProgress|ScrollTrigger|scrubbed|scrub)"' \
    || contains_pattern "$SCROLL_ENGINE" '"library":\s*"(Lenis|Locomotive|ScrollSmoother)"' \
    || contains_pattern "$SCROLL_ENGINE" '"(motion|useScroll|scrollYProgress)":\s*\{[^}]*"matches":\s*[1-9]' \
    || contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"scroll' \
    || contains_pattern "$INTERACTIONS" '"engine":\s*"scroll"' \
-   || contains_pattern "$BUNDLE_MAP" '"(framer-motion|motion-one|gsap-scrolltrigger)"'; then
+   || contains_pattern "$BUNDLE_MAP" '"(framer-motion|motion-one|gsap-scrolltrigger)"' \
+   || [ "$(observed_motion_signal scroll)" = "true" ]; then
   HAS_SCROLL_SCRUB="true"
 fi
 
-# hasIOReveal: IntersectionObserver-driven entry animations
+# hasScrollStateMachine: scroll-driven motion that does work after scroll stop
+# (smooth return, snap-back, section snap). This is stricter than
+# hasScrollScrub: require both a progress signal and a controller signal. The
+# runtime check self-skips if the reference does not actually auto-move at the
+# tested viewport, so false positives cost one browser probe instead of hiding
+# a missing settled/returned phase.
+HAS_SCROLL_STATE_MACHINE="false"
+if contains_ref_pattern 'scrollYProgress|useScroll|ScrollTrigger|scrollY\.on|scroll[^[:alnum:]]*progress' \
+   && contains_ref_pattern 'window\.scrollTo|[^[:alnum:]_]scrollTo[[:space:]]*\(|scrollIntoView|setTimeout|clearTimeout|getVelocity|velocity|guardRef|autoReturning|isScrolling'; then
+  HAS_SCROLL_STATE_MACHINE="true"
+elif contains_pattern "$SCROLL_ENGINE" 'ScrollTrigger|gsap-scrolltrigger|GSAP' \
+   && contains_pattern "$SCROLL_ENGINE" '"(pin|scrub)":\s*true|\b(sticky-scrub|scroll-scrub|scroll-pin)\b'; then
+  HAS_SCROLL_STATE_MACHINE="true"
+elif contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(sticky-scrub|scroll-scrub|scroll-pin)"' \
+   && contains_pattern "$SCROLL_ENGINE" 'ScrollTrigger|gsap-scrolltrigger|GSAP|Lenis'; then
+  HAS_SCROLL_STATE_MACHINE="true"
+fi
+
+# hasIOReveal: IntersectionObserver-driven entry animations. As with
+# hasScrollScrub, observed reveal-on-enter motion (observed_motion_signal
+# reveal) is an authoritative OR-input — an element that went off-state→on-state
+# as it entered the viewport, or a non-empty textReveals/reveals list, fires the
+# reveal-trigger check even when no IO token is present.
 HAS_IO_REVEAL="false"
 if contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(intersection|inview|onView)"' \
    || contains_pattern "$INTERACTIONS" '"trigger":\s*"intersection"' \
    || contains_pattern "$SCROLL_ENGINE" '"IntersectionObserver":\s*\{[^}]*"matches":\s*[1-9]' \
-   || contains_pattern "$BUNDLE_MAP" 'IntersectionObserver'; then
+   || contains_pattern "$BUNDLE_MAP" 'IntersectionObserver' \
+   || [ "$(observed_motion_signal reveal)" = "true" ]; then
   HAS_IO_REVEAL="true"
 fi
 
@@ -339,6 +593,7 @@ fi
 # not generic CSS/GSAP motion. Evidence can come from bundle resources,
 # transition specs, runtime dumps, or canvas/WebGL detection.
 HAS_LOTTIE="false"
+LOTTIE_SIGNAL_PATTERN='[Ll]ottie[[:space:]]*\.|[Ll]ottie["[:space:]]*:[[:space:]]*(\{|\[|")|lottie-web|lottie-react|bodymovin|dotlottie|lottie-player|\.lottie'
 for LOTTIE_FILE in \
   "$BUNDLE_MAP" \
   "$TRANSITION_SPEC" \
@@ -348,11 +603,37 @@ for LOTTIE_FILE in \
   "$REF_DIR/interactions-detected.json" \
   "$REF_DIR/assets.json" \
   "$REF_DIR/extracted.json"; do
-  if contains_pattern "$LOTTIE_FILE" '[Ll]ottie|bodymovin|dotlottie|lottie-player'; then
+  if contains_pattern "$LOTTIE_FILE" "$LOTTIE_SIGNAL_PATTERN"; then
     HAS_LOTTIE="true"
     break
   fi
 done
+if [ "$HAS_LOTTIE" != "true" ] && contains_ref_pattern "$LOTTIE_SIGNAL_PATTERN"; then
+  HAS_LOTTIE="true"
+fi
+# Fix B (additive OR-input): a <canvas> surface OBSERVED advancing frames at
+# runtime is a vector/canvas player (Rive .riv, custom JSON-on-canvas) even with
+# no lottie/bodymovin name token. hasCanvas + observed continuous frame motion →
+# dispatch the runtime gate. The name-grep above stays as a hint; this only makes
+# MORE real cases dispatch. A static canvas (no observed motion) does NOT trigger.
+if [ "$HAS_LOTTIE" != "true" ] && [ "$HAS_CANVAS" = "true" ] \
+   && [ "$(observed_motion_signal vector)" = "true" ]; then
+  HAS_LOTTIE="true"
+fi
+
+# hasSwiper — card rails/sliders whose spacing and translate are runtime-owned.
+HAS_SWIPER="false"
+if contains_ref_pattern '\bSwiper\b|swiper-wrapper|swiper-slide|swiper\.bundle|swiper/css'; then
+  HAS_SWIPER="true"
+fi
+# Fix B (additive OR-input): an OBSERVED auto-rotating carousel/slideshow
+# (animations-detected autoTimers) is runtime-owned card motion regardless of
+# library — Embla/Splide/keen-slider/hand-rolled all surface here, not just
+# Swiper. The Swiper class grep above stays as a hint; this only widens dispatch.
+# A page with no observed auto-rotation does NOT trigger.
+if [ "$HAS_SWIPER" != "true" ] && [ "$(observed_motion_signal carousel)" = "true" ]; then
+  HAS_SWIPER="true"
+fi
 
 # ── Required checks (dispatch table) ──
 # Built incrementally as JSON array body.
@@ -468,19 +749,6 @@ add_check "proxy-mirror-check" \
           "block" \
           "quick"
 
-# Universal — class-signature preservation. Catches "invented design" cheats
-# where the impl freehands utility classes / vanilla CSS and discards captured
-# CSS-Modules class signatures from <ref-dir>/html/*. Root-cause pattern:
-# zero captured class refs in impl vs 100+ in ref. Pure static analysis
-# (no browser), so tier=quick. Skips on sites without enough captured class
-# tokens (< 10).
-add_check "class-signature-preservation" \
-          "skills/visual-debug/scripts/class-signature-preservation-check.sh" \
-          "class-signature-preservation.json" \
-          "Universal — ref's CSS-Modules class signatures (componentName__hash / prefix_hash) must appear in impl source at >= 30% rate when ref total >= 10" \
-          "block" \
-          "quick"
-
 # Universal — bundle-paste anti-cheat. Catches the L41/L44 cheat shape where
 # impl bulk-pastes the ref's compiled CSS bundles into public/css/ (or any
 # hex-hash-filename dir), mirrors the ref's _next/static/ runtime, or imports
@@ -492,21 +760,6 @@ add_check "bundle-paste" \
           "Universal — impl must not bulk-paste ref's compiled CSS bundles, _next runtime, or rendered HTML (?raw + dangerouslySetInnerHTML)" \
           "block" \
           "quick"
-
-# Universal — class-signature CSS coverage. Pairs with the
-# class-signature-preservation gate above: that one verifies NAME
-# preservation, this one verifies STYLE presence for those names.
-# Catches the L64 gap where impl preserved 95% of ref class signatures
-# but defined CSS rules for ~0% of the splash/animation set → visual
-# renders as a single solid color despite high signature-preservation
-# metric. Pure filesystem grep (no browser), so tier=quick.
-add_check "class-signature-css-coverage" \
-          "skills/visual-debug/scripts/class-signature-css-coverage-check.sh" \
-          "class-signature-css-coverage.json" \
-          "Universal — preserved class signatures must have matching CSS rules in impl (style coverage >= 30% over preserved set)" \
-          "block" \
-          "quick" \
-          "class-signature-preservation"
 
 # Universal — Fix 8 anti-fabrication gates. Both are pure static analysis
 # (no LLM, no browser) so they're tier=quick. They compare the generated
@@ -574,6 +827,19 @@ if [ "$HAS_SCROLL_SCRUB" = "true" ]; then
             "runtime-env"
 fi
 
+# Tier=standard: compares ref and impl at initial, active/expanded, and
+# settled/returned phases when the bundle/spec suggests scroll-stop logic
+# such as smooth return, snap-back, timers, velocity checks, or guard refs.
+if [ "$HAS_SCROLL_STATE_MACHINE" = "true" ]; then
+  add_check "scroll-state-machine" \
+            "skills/visual-debug/scripts/scroll-state-machine-check.sh" \
+            "scroll-state-machine.json" \
+            "signals.hasScrollStateMachine=true — scroll state-machine transitions require initial → active/expanded → settled/returned runtime proof" \
+            "block" \
+            "standard" \
+            "runtime-env"
+fi
+
 # Tier=standard: same browser-one-shot shape as scroll-end-completion.
 if [ "$HAS_IO_REVEAL" = "true" ]; then
   add_check "reveal-trigger" \
@@ -617,6 +883,35 @@ add_check "transition-proof" \
           "Composite roll-up: every transition-spec entry must have impl file + motion declaration + runtime probe evidence (catches partial coverage and empty runtime probes)" \
           "block" \
           "quick"
+
+# Dynamic final-state anti-cheat — self-skips when the reference has no
+# scroll/intersection/state-class evidence. Blocks reveal-all patches such as
+# hardcoded is-active/is-visible/is-show plus transition:none/transform:none.
+add_check "forced-state-class" \
+          "skills/visual-debug/scripts/forced-state-class-check.sh" \
+          "forced-state-class.json" \
+          "Impl must not force dynamic reveal/state classes or final styles at load; scroll/intersection transitions need runtime triggers" \
+          "block" \
+          "quick"
+
+if [ "$HAS_LOTTIE" = "true" ] && { [ "$HAS_SCROLL_SCRUB" = "true" ] || [ "$HAS_SCROLL_STATE_MACHINE" = "true" ] || contains_ref_pattern 'ScrollTrigger|scrollYProgress|scrub\s*:\s*true|useScroll'; }; then
+  add_check "lottie-scroll-scrub" \
+            "skills/visual-debug/scripts/lottie-scroll-scrub-check.sh" \
+            "lottie-scroll-scrub.json" \
+            "Scroll-scrubbed Lottie must bind frames to scroll progress and match visible/active containers at 0/25/50/75/100% scroll; autoplay/loop or one-container-for-many fails" \
+            "block" \
+            "standard" \
+            "runtime-env"
+fi
+
+if [ "$HAS_SWIPER" = "true" ]; then
+  add_check "swiper-runtime" \
+            "skills/visual-debug/scripts/swiper-runtime-check.sh" \
+            "swiper-runtime.json" \
+            "Swiper card rails must use the real runtime or extracted sizing/translate; copied swiper-wrapper/swiper-slide classes are insufficient" \
+            "block" \
+            "quick"
+fi
 
 # 2026-05-22 SKILL.md Tier 5 (codex-rescue a125b997): the existing
 # anti-cheat gates catch screenshot/HTML cheats; this catches the
@@ -759,19 +1054,12 @@ if contains_pattern "$REGIONS_JSON" '"triggerType":\s*"'; then
 fi
 
 # Every site with a transition-spec.json should verify each entry is wired
-# into the impl. Catches the "hover matched while intersection/scroll entries
-# were never wired" failure class that transition-compare.sh can't see.
+# into the impl. Do not dispatch transition-compare just because the spec
+# exists: transition-compare is a hover/end-state checker, while scroll,
+# splash, IO, and click arcs are covered by transition-fires plus their
+# dedicated temporal gates.
 # Tier=quick: file-presence + grep over generated source — no browser.
 if [ -f "$TRANSITION_SPEC" ]; then
-  if [ "$HAS_HOVER" != "true" ]; then
-    add_check "transition-compare" \
-              "skills/visual-debug/scripts/transition-compare.sh" \
-              "transitions/result.txt" \
-              "transition-spec.json present — runtime/end-state transition comparison must produce measurement rows, even when hover is not the detected trigger" \
-              "block" \
-              "standard" \
-              "runtime-env"
-  fi
   add_check "transition-spec-coverage" \
             "skills/visual-debug/scripts/transition-spec-coverage.sh" \
             "transition-spec-coverage.json" \
@@ -790,6 +1078,24 @@ if [ -f "$TRANSITION_SPEC" ]; then
             "Every matched spec entry must have a motion declaration in its impl file (catches generated components that render the selector without animating it)" \
             "block" \
             "standard"
+  # RUNTIME source-of-truth for motion fidelity. The two coverage rows above
+  # are STATIC string-matching (selector/class present in source = "covered"),
+  # decoupled from whether the animation actually runs — so an unimplemented
+  # scroll-reveal passes on the class name while a working FAQ fails because its
+  # spec id is not a substring. This row drives each spec entry's trigger in a
+  # real browser and asserts a MEASURED runtime delta on the target
+  # (opacity/transform/rect/scroll-progress/currentTime/canvas-pixels); it
+  # cannot be satisfied by a class name or a transition- token. Kept ALONGSIDE
+  # (not replacing) the cheap static pre-filters above. Tier=standard: one
+  # browser session, before/after measurement per entry. Already gated on
+  # transition-spec.json having entries (the enclosing `if`).
+  add_check "transition-fires" \
+            "skills/visual-debug/scripts/transition-fires-check.sh" \
+            "transition-fires.json" \
+            "Every transition-spec entry must produce a MEASURED runtime delta when its trigger is driven in the impl — class-name presence is not motion" \
+            "block" \
+            "standard" \
+            "runtime-env"
 fi
 
 # Enforce transition-spec.json reflects animation-runtime-dump.json signal classes.
@@ -1126,6 +1432,7 @@ cat > "$OUT" <<JSON
   "tier": "$TIER",
   "signals": {
     "hasScrollScrub": $HAS_SCROLL_SCRUB,
+    "hasScrollStateMachine": $HAS_SCROLL_STATE_MACHINE,
     "hasIOReveal": $HAS_IO_REVEAL,
     "hasHover": $HAS_HOVER,
     "hasSplash": $HAS_SPLASH,
@@ -1133,7 +1440,8 @@ cat > "$OUT" <<JSON
     "hasCustomScroll": $HAS_CUSTOM_SCROLL,
     "hasCommercialFont": $HAS_COMMERCIAL_FONT,
     "hasClickStateTransition": $HAS_CLICK_STATE,
-    "hasLottie": $HAS_LOTTIE
+    "hasLottie": $HAS_LOTTIE,
+    "hasSwiper": $HAS_SWIPER
   },
   "requiredChecks": [$CHECKS
   ],
@@ -1148,7 +1456,7 @@ JSON
 
 echo "Wrote $OUT"
 echo "Tier: $TIER"
-echo "Signals: scrollScrub=$HAS_SCROLL_SCRUB ioReveal=$HAS_IO_REVEAL hover=$HAS_HOVER splash=$HAS_SPLASH canvas=$HAS_CANVAS customScroll=$HAS_CUSTOM_SCROLL commercialFont=$HAS_COMMERCIAL_FONT clickState=$HAS_CLICK_STATE lottie=$HAS_LOTTIE"
+echo "Signals: scrollScrub=$HAS_SCROLL_SCRUB scrollStateMachine=$HAS_SCROLL_STATE_MACHINE ioReveal=$HAS_IO_REVEAL hover=$HAS_HOVER splash=$HAS_SPLASH canvas=$HAS_CANVAS customScroll=$HAS_CUSTOM_SCROLL commercialFont=$HAS_COMMERCIAL_FONT clickState=$HAS_CLICK_STATE lottie=$HAS_LOTTIE swiper=$HAS_SWIPER"
 
 # Validate JSON
 if [ "$HAS_JQ" -eq 1 ]; then

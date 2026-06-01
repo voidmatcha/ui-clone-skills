@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.23] - 2026-05-31
+
+Patch release for CSS-module-heavy clone fidelity.
+
+### Added
+
+- **Forensic preservation planning.** `generation-plan.json` now emits a `forensicPreservation` contract for CSS-module-heavy references, directing agents to start from ref-derived JSX plus local CSS chunks instead of freehand Tailwind rebuilds.
+- **Forensic preservation enforcement.** The post-implement gate now fails CSS-module-heavy clones that ignore the contract by omitting copied `src/ref-css` files, local CSS imports, or preserved CSS-module `className` tokens.
+
+### Changed
+
+- **Clone generation guidance.** The `ui-reverse-engineering` skill now treats CSS Modules / heavy motion pages as local-CSS scaffold preservation targets first, with transitions layered on via local React/CSS/runtime controllers and the existing no-proxy/no-ref-JS boundaries preserved.
+- **Missing CSS artifact recovery/blocker.** CSS-module-heavy refs no longer downgrade to `standard-react-rebuild` when CSS chunks are absent. The generation plan first recovers stylesheet links from `head.json` / `extracted.json`; if CSS still cannot be recovered, it marks the run blocked and the post-implement gate rejects handwritten local CSS as a bypass.
+- **Transition proof semantics.** `transition-compare` is now treated as hover/end-state evidence only; scroll, splash, IO, and click motion rely on `transition-fires`, `video-motion`, and composite `transition-proof` instead of a misleading generic transition pass.
+
 ## [0.7.22] - 2026-05-26
 
 Patch release for natural Codex clone workspace guidance.

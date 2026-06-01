@@ -46,6 +46,24 @@ Reverse-engineer a live website into a **React + Tailwind** component.
 - **Pipeline verify PASS is required for clean completion.** If it is not PASS, report the failing gate and keep fixing.
 - **Missing artifact is failure.** Do not substitute generic notes, placeholder JSON, proxy mirrors, or source-reference manifests for the required evidence.
 
+## Host-neutral subagent dispatch
+
+When a pipeline step names a role, delegate with the host's native mechanism
+before falling back to inline execution. Claude Code uses the matching
+`.claude-plugin/agents/<role>.md` adapter through `Agent(...)`. Codex uses the
+Codex native subagent with the same `agent_type` backed by
+`.codex/agents/<role>.toml` (or an equivalent delegated worker when the runtime
+exposes subagents differently). Inline fallback is allowed only when the host has
+no delegated-worker surface; state that fallback and follow the same shared
+contract file.
+
+Role → contract mapping:
+
+- `bundle-analyzer` → `js-animation-extraction.md`
+- `generation-planner` → `enrichment.md`
+- `mismatch-diagnoser` → `diagnosis.md`
+- `visual-debug-iterator` → `iteration-discipline.md`
+
 ### Done = all five tiers PASS
 
 Completion requires **runtime + transition + state-machine fidelity**, not just static
@@ -69,6 +87,28 @@ match. Treat anything below as INCOMPLETE.
    - Page-load reveals, scroll reveals, sticky/pinned, parallax, hover/dropdown,
      text morph/fade — every transition family present in the ref must have a
      working impl counterpart.
+   - Never force `is-active` / `is-visible` / `is-show` globally at load, and
+     never neutralize dynamic elements with `transition: none`, `opacity: 1`,
+     or `transform: none` final-state patches. That is a static screenshot
+     workaround, not a transition implementation.
+   - **scroll state-machine completion:** if bundle/spec evidence contains
+     `window.scrollTo`, `scrollYProgress`, `setTimeout`, `velocity` /
+     `getVelocity`, a guard ref around scroll-stop behavior, or a
+     ScrollTrigger pin/scrub section, completion requires
+     `initial → active/expanded → settled/returned` runtime proof. A scroll
+     state-machine is INCOMPLETE when it only matches endpoint screenshots or
+     replaces GSAP/Lenis scrub with a bare native scroll handler.
+   - **scroll-scrubbed Lottie frame control:** when the ref connects Lottie /
+     bodymovin to scroll progress, the impl must control frames with
+     `goToAndStop`, `playSegments`, `currentFrame`, `totalFrames`, or equivalent
+     seeking, every named ref Lottie container must be represented, and
+     visible/active Lottie counts must match at 0/25/50/75/100% scroll.
+     `autoplay` / `loop` alone is a failure.
+   - **Swiper runtime fidelity:** copied Swiper classes without Swiper runtime
+     (`swiper-wrapper`, `swiper-slide`) are incomplete when the ref uses
+     Swiper/Splide-style sizing, gap, active-state, or translate behavior.
+     Install/init the same runtime or reproduce the extracted sizing/translate
+     rules explicitly.
    - Coverage check against `transition-spec.json` is mandatory; missing entries
      are INCOMPLETE.
    - **Duration / easing / threshold values are extracted from ref artifacts,
@@ -148,6 +188,14 @@ constituent gate has a measurement-free pass or is missing):
   browser-eval frame-change proof
 - `runtime-image-validity.json`, `runtime-dom-parity.json`,
   `motion-coverage.json`
+- `forced-state-class.json` — blocks reveal-all / final-state patches that
+  force dynamic classes or disable transitions.
+- `lottie-scroll-scrub.json` — requires scroll-scrubbed Lottie frame seeking
+  and the ref's named Lottie containers instead of autoplay/loop or a single
+  mounted animation standing in for many; with ref/impl URLs it also compares
+  visible/active Lottie containers at 0/25/50/75/100% scroll.
+- `swiper-runtime.json` — fails copied Swiper classes without Swiper runtime or
+  extracted sizing/translate logic.
 - `video-play-proof.json` (`video-play-proof-check.sh`) — `<video>` must
   advance currentTime
 - `runtime-frame-proof.json` (`runtime-frame-proof-check.sh`) — Lottie
@@ -218,7 +266,7 @@ When `runtime-env` fails, downstream gates that need a healthy page
 SKIPPED_DEP rather than running and producing misleading verdicts.
 
 **Primary trigger:** Build/route from a live reference into React.
-**Non-goals:** Do not use this as a standalone capture command or post-implementation mismatch diagnosis tool; hand reference capture to `/ui-capture` and mismatch diagnosis to `visual-debug`.
+**Non-goals:** Do not use this as a standalone capture command or post-implementation mismatch diagnosis tool; hand reference capture to the `ui-capture` skill (Claude slash command: `/ui-capture`) and mismatch diagnosis to `visual-debug`.
 
 ## How to use this file
 
@@ -247,11 +295,13 @@ Follow this path in order: **Inputs → First action → Pipeline → Validation
 > **Visual iteration rule:** dismiss modals before capture, always re-capture ref frames before comparing (never trust "already implemented"), iterate until visual match — measurements only, no guessing.
 >
 > **Compaction-survival rule:** post-compact, any "ref shows X / impl shows Y at scroll N" claim is *unverified*. Re-capture both ref and impl at that scroll position BEFORE implementing a fix — compaction flattens earlier evidence into a confident summary that may already be stale. Detail under Context management.
+>
+> **Evidence-pack rule:** when `tmp/ref/<component>/brief/WORKER_BRIEF.md` exists, read that compact brief before raw artifacts. Treat the evidence pack as a path-indexed rollup, not a new source of truth and never as a substitute for JS bundle analysis. Do not skip `bundle-map.json`, `external-sdks.json`, `scroll-engine.json`, or `transition-spec.json`; use the brief to find the right paths without pasting full DOM/style/screenshot JSON into context.
 
 ## Core principles
 
 - **URL input:** extract real values via `getComputedStyle`, DOM, JS bundle analysis. **Never guess.**
-- **Screenshot/video input (fallback):** Claude Vision approximations only.
+- **Screenshot/video input (fallback):** host vision-model approximations only; live URL extraction is the primary fidelity path.
 - **Extraction ≠ completion.** Done = `extracted.json` saved AND verification passes.
 - **Source fidelity beats placeholders.** For a user-provided URL, preserve source visible text, identity strings, asset references, and motion runtimes verbatim. Placeholder text is allowed only when the reference itself contains it.
 - **Diagnose before fixing.** Name root cause in one sentence before touching code.
@@ -297,7 +347,7 @@ After `run` exits 0, the ref dir has `regions.json` + Phase 2 artifacts; the hoo
 
 The fast path is the LLM-free-choice reduction: the agent picks URL + component name + session, the driver picks every step. The hook makes the reduction non-optional.
 
-**0. Preflight (run once before the first pipeline action in a session — `npx skills add` install path skips system deps).** If anything is missing, halt and surface the bootstrap one-liner to the user; do **not** auto-execute `curl | bash` on their behalf — let the user run it themselves.
+**0. Preflight (run once before the first pipeline action in a session — `npx skills add` install path skips system deps).** If anything is missing, halt and surface the bootstrap one-liner to the user; do **not** auto-execute a remote installer on their behalf — let the user run it themselves.
 
 ```bash
 miss=""
@@ -324,7 +374,7 @@ if [ -n "$miss" ]; then
   cat >&2 <<'EOF'
 
 Fastest fix (clones full repo and installs deps):
-  curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh | bash
+  tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"
 
 Or set UI_CLONE_ROOT to an existing checkout:
   export UI_CLONE_ROOT=/path/to/ui-clone-skills
@@ -332,7 +382,7 @@ Or set UI_CLONE_ROOT to an existing checkout:
 Or install manually:
   brew install ffmpeg imagemagick dssim   # macOS  (Linux: apt install ffmpeg imagemagick && cargo install dssim)
   npm i -g agent-browser
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  uv_tmp=$(mktemp) && curl -LsSf -o "$uv_tmp" https://astral.sh/uv/install.sh && sh "$uv_tmp" && rm -f "$uv_tmp"
   git clone https://github.com/voidmatcha/ui-clone-skills.git "$HOME/.local/share/ui-clone-skills"
 EOF
   exit 1
@@ -353,11 +403,11 @@ fi
 uv run --project "$PLUGIN_ROOT" python -m ui_clone.pipeline <url> <component-name> <session> status
 ```
 
-**Smart state router (mandatory before any phase, after `status`):** Users do not need to know internal gate names before invoking this skill. Inspect `tmp/ref/<component>/pipeline-state.json`, the status output, and usable artifacts, then route from the current state. State names come from `GATE_ORDER`: `reference` -> `extraction` -> `bundle` -> `paid-features` -> `spec` -> `pre-generate` -> `post-implement` -> `boundary` -> `font-parity` -> `section-compare` -> `done`. Usable artifacts must not be discarded or restarted blindly. Fresh/no-artifact is the original live URL workflow; route it through `/ui-capture`, extraction, validation gates, and component generation. Every partial state resumes from the next missing pipeline phase or failing gate instead of restarting.
+**Smart state router (mandatory before any phase, after `status`):** Users do not need to know internal gate names before invoking this skill. Inspect `tmp/ref/<component>/pipeline-state.json`, the status output, and usable artifacts, then route from the current state. State names come from `GATE_ORDER`: `reference` -> `extraction` -> `bundle` -> `paid-features` -> `spec` -> `pre-generate` -> `post-implement` -> `boundary` -> `font-parity` -> `section-compare` -> `done`. Usable artifacts must not be discarded or restarted blindly. Fresh/no-artifact is the original live URL workflow; route it through `ui-capture` (Claude slash command: `/ui-capture`), extraction, validation gates, and component generation. Every partial state resumes from the next missing pipeline phase or failing gate instead of restarting.
 
 | State found | Next action |
 |---|---|
-| **Fresh**: no `tmp/ref/<component>/`, or `static/ref/`/`transitions/ref/`/`regions.json` unusable. | `/ui-capture <url> "" <component>` → `gate reference` → rerun `status`. Only route that starts at Phase 1. |
+| **Fresh**: no `tmp/ref/<component>/`, or `static/ref/`/`transitions/ref/`/`regions.json` unusable. | Invoke `ui-capture` with `<url> "" <component>` (Claude: `/ui-capture <url> "" <component>`) → `gate reference` → rerun `status`. Only route that starts at Phase 1. |
 | **Ref captured, no extraction**: ref artifacts exist; `structure.json`/`styles.json`/`extracted.json` missing; `current_gate` ∈ {reference, extraction, bundle, paid-features, spec, pre-generate}. | Keep the capture. Run next missing extraction from `status`, then matching `gate`, continue. Do NOT restart Phase 1. |
 | **Extraction/spec present, no impl**: `extracted.json` / `transition-spec.json` exist; component files or `static/impl/` missing. | Re-read spec, run `gate pre-generate`, then generate + post-implement loop. Don't re-capture unless gate output says ref artifacts invalid. |
 | **Impl present, gate/diff failing**: component files / `static/impl/` exist; `post-implement`/`boundary`/`font-parity`/`section-compare`/visual-diff fail. | Keep the impl. Visual-diff/section mismatch → route to `visual-debug`. Artifact/gate failure → remediate that gate, rerun. |
@@ -365,7 +415,7 @@ uv run --project "$PLUGIN_ROOT" python -m ui_clone.pipeline <url> <component-nam
 | **State missing/corrupt**: `pipeline-state.json` missing/unreadable/disagrees with artifacts. | Don't delete artifacts. Run `status` + gates in `GATE_ORDER` to find first failing gate, continue from there. Ask only if URL/component undetermined or state is unrecoverable. |
 
 Follow its output. Run `status` after each phase. Do not guess which phase you're in.
-The Stop gate activates automatically on the first component write that passes the pre-generate gate — the hook creates `tmp/ref/<c>/.ui-re-active`, after which Stop / Bash / SessionStart / PostCompact hooks all enforce. The marker persists past `section-compare` passing; pipeline state in `pipeline-state.json` is the canonical "complete" signal (`current_gate == "done"`). A subsequent component-source edit on a `done` project demotes state back to `section-compare` and invalidates `sections/result.txt`, forcing re-verification before the next git commit / Stop event. Genuinely abandoned WIP markers are reaped after 3 days (configurable via `UI_RE_STALE_DAYS`).
+The Stop gate activates automatically on the first component write that passes the pre-generate gate — the hook creates `tmp/ref/<c>/.ui-re-active`, after which Stop / Bash / SessionStart hooks enforce; Claude Code also has a PostCompact reinjection hook, while Codex compact-boundary reinjection depends on host support. The marker persists past `section-compare` passing; pipeline state in `pipeline-state.json` is the canonical "complete" signal (`current_gate == "done"`). A subsequent component-source edit on a `done` project demotes state back to `section-compare` and invalidates `sections/result.txt`, forcing re-verification before the next git commit / Stop event. Genuinely abandoned WIP markers are reaped after 3 days (configurable via `UI_RE_STALE_DAYS`).
 
 **Loop flow** (repeat until `status` shows all phases green):
 ```
@@ -408,7 +458,7 @@ of dumping JSON yourself.
 |---|---|---|
 | **0A** | — | Canvas/WebGL detection — `python -m ui_clone.pipeline` runs this automatically. If `hasCanvas=True` in `canvas-webgl-detection.json`, read `canvas-webgl-extraction.md` BEFORE Phase 2. **Advisory only — no gate.** This is a routing signal, not a blocker; the agent reads the canvas extraction sub-doc when the flag is set, but no validation gate enforces it. |
 | **0** | — | Load `transition-spec.json`/`bundle-map.json` if they exist. Skip re-extraction of known transitions. |
-| **1** | R | `/ui-capture <url> "" <component>` → `tmp/ref/<component>/static/ref/`, `tmp/ref/<component>/transitions/ref/`, `regions.json`. ⛔ Gate: `reference`. The 3rd arg is REQUIRED so output lands where gates look — passing only `/ui-capture <url>` writes to `tmp/ref/capture/` and the gate fails. Pass `""` for the local-url slot to skip impl capture in this phase. |
+| **1** | R | Invoke `ui-capture` with `<url> "" <component>` (Claude: `/ui-capture <url> "" <component>`) → `tmp/ref/<component>/static/ref/`, `tmp/ref/<component>/transitions/ref/`, `regions.json`. ⛔ Gate: `reference`. The 3rd arg is REQUIRED so output lands where gates look — passing only `<url>` writes to `tmp/ref/capture/` and the gate fails. Pass `""` for the local-url slot to skip impl capture in this phase. |
 | **2** | 1–2 | `dom-extraction.md` → `structure.json`, `section-map.json`, `portal-candidates.json`, `sticky-elements.json`, `hidden-elements.json`. |
 | | 2-W | After Step 1–2: check `head.json` for `<meta name=generator>` containing "Webflow". If found, `webflow-ix2.md` — **mandatory before proceeding**. ⛔ Gate: `webflow-detection.json`, `webflow-hide-rule.json`, `webflow-ix2.json`. |
 | | 2.5 | `asset-extraction.md` → `head.json`, `assets.json`, `inline-svgs.json`, `fonts.json`, `visible-images.json`, CSS files, `css/variables.txt` |
@@ -418,30 +468,31 @@ of dumping JSON yourself.
 | | 3 | `style-extraction.md` → `styles.json`, `advanced-styles.json`, `body-state.json`, `decorative-svgs.json`, `design-bundles.json`. ⛔ If `scalingSystem !== 'px-fixed'` → `em-conversion.json` MUST exist. |
 | | 4 | `responsive-detection.md` → `detected-breakpoints.json`. **Step 4-C1b MANDATORY** → `mobile-swap.json` (mobile-only sibling sections). **Step 4-C2 MANDATORY** → `sizing-expressions.json`. |
 | | 5 | `interaction-detection.md` → `interactions-detected.json`, `scroll-transitions.json`, `hover-deltas.json`, `hover-timing.json`, `hover-css-rules.json`. |
-| | 5b | If new interactive elements found → re-run `/ui-capture` Phase 2B–2E |
+| | 5b | If new interactive elements found → re-run `ui-capture` Phase 2B–2E |
 | | 5c-a | `bundle-analysis.md` — Download ALL JS chunks → `scroll-engine.json`. If custom scroll detected → `js-animation-extraction.md` → `scroll-library.json`. ⛔ Gate: `bundle` |
 | | 5c-b | `bundle-verification.md` — Numerical comparison of impl vs spec for auto-rotating / scroll-driven / timer-based animations (screenshots are unreliable for these). |
 | | 5c-c | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/paid-features-detect.sh" "$(pwd)/tmp/ref/<component>"` ⛔ Gate: `paid-features`. Static-greps downloaded `bundles/`, `css/`, `fonts.json`, `head.json`, `external-sdks.json` for paid font CDN hosts (Adobe Typekit, Monotype, Hoefler/Cloud.typography, Linotype, FONTPLUS / TypeSquare in Japan). Writes `paid-features.json` with `decision: null` for each finding. Edit each entry to set `decision` to one of `use` / `substitute` / `skip` BEFORE Step 7 — generation is wasted effort if you discover a paid font dependency at section-compare time and every text-bearing section reports 100% mismatch. **Note:** GSAP plugins are no longer flagged here — GSAP became 100% free following the Webflow acquisition. |
-| | 5d | `bundle-map.json`, `transition-spec.json` (DRAFT), `external-sdks.json`. After writing those, run `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/verification-plan.sh" "$(pwd)/tmp/ref/<component>"` → `verification-plan.json` (universal `hydration-check` row + signal-derived rows for scroll-scrub / IO-reveal / hover / paid-font sites). ⛔ Gate: `spec` — refuses to pass until `verification-plan.json` exists; downstream `post-implement` enforces each declared check. **Claude Code: if `bundle-map.json` shows detected libraries but `transition-spec.json.transitions` is empty / under-populated, invoke `Agent({subagent_type: "bundle-analyzer", description: "Parse JS bundles for animation params", prompt: "Read tmp/ref/<component>/bundles/*.js + bundle-map.json, extract Lenis/GSAP/Framer/Anime/Webflow-IX2 construction sites with parameters into tmp/ref/<component>/bundle-extraction.json."})` to populate before re-running this gate.** |
+| | 5d | `bundle-map.json`, `transition-spec.json` (DRAFT), `external-sdks.json`. After writing those, run `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/verification-plan.sh" "$(pwd)/tmp/ref/<component>"` → `verification-plan.json` (universal `hydration-check` row + signal-derived rows for scroll-scrub / IO-reveal / hover / paid-font sites). ⛔ Gate: `spec` — refuses to pass until `verification-plan.json` exists; downstream `post-implement` enforces each declared check. **If `bundle-map.json` shows detected libraries but `transition-spec.json.transitions` is empty / under-populated, dispatch the host-neutral `bundle-analyzer` subagent role. Prompt: "Read tmp/ref/<component>/bundles/*.js + bundle-map.json, extract Lenis/GSAP/Framer/Anime/Webflow-IX2 construction sites with parameters into tmp/ref/<component>/bundle-extraction.json." Re-run this gate only after the extraction artifact exists.** |
 | | 5e | Handoff to `ui-capture` Phase 4A for capture verification when transition/video evidence is needed; on pass resume here at Step 6, on fail hand mismatch diagnosis to `visual-debug` before resuming. |
 | | 6 | `animation-detection.md`. ALL 3 phases: A (idle 10s), B (scroll), C (per-element). Canvas/WebGL → `canvas-webgl-extraction.md`. |
 | | 6b | Assemble `extracted.json` |
-| | 6b-bis | `bash "$PLUGIN_ROOT/scripts/extract/required-media.sh" "$(pwd)/tmp/ref/<component>"` → `required-media.json`. Promotes `<video>` / `<source>` URLs from per-section `html/<name>.json.media[]` AND Lottie/bodymovin `loadAnimation({path:...})` URLs from `bundles/*.js` to required-asset status. Closes the div-soup-site family blind spot where `visible-images.json` only catalogues `<img>` so the impl ships zero `.mp4` + zero Lottie .json while every asset gate passes. The `required-media-coverage` post-implement gate enforces: every entry must be downloaded to `impl/public/` AND referenced in impl source, and Lottie URLs require a Lottie runtime package in `impl/package.json`. Asset download must extend `impl/public/` to include each `videos[*].src` and each `lottie[*].path` before Step 7 ends. |
+| | 6b-bis | `bash "$PLUGIN_ROOT/scripts/extract/required-media.sh" "$(pwd)/tmp/ref/<component>"` → `required-media.json`. Promotes `<video>` / `<source>` URLs from per-section `html/<name>.json.media[]` AND Lottie/bodymovin `loadAnimation({path:...})` URLs from `bundles/*.js` to required-asset status. Closes the div-soup-site family blind spot where `visible-images.json` only catalogues `<img>` so the impl ships zero `.mp4` + zero Lottie .json while every asset gate passes. This extractor is mandatory even when it emits zero entries; `required-media-coverage` fails a missing `required-media.json` because absence means the media inventory was never proven. The coverage gate enforces: every entry must be downloaded to `impl/public/` AND referenced in impl source, and Lottie URLs require a Lottie runtime package in `impl/package.json`. Asset download must extend `impl/public/` to include each `videos[*].src` and each `lottie[*].path` before Step 7 ends. |
 | | 6c | `section-audit.md` — → `element-roles.json`, `element-groups.json`, `layout-decisions.json`, `component-map.json`. **Never skip.** |
 | | 6d | `transition-coverage.md` — → `transition-coverage.json`. ⛔ Gate: `pre-generate`. |
 | | 6e | `bash "$PLUGIN_ROOT/scripts/extract/asset-download.sh" "$(pwd)/tmp/ref/<component>" "<impl>/public"` ⛔ MANDATORY. Downloads every image in `visible-images.json` to `impl/public/`. Writes `download-log.json` with HTTP status per attempt. Plugin philosophy: **research-mode default — download everything, substitute only on actual HTTP 4xx/5xx**. The Sonnet vs Opus comparison showed both models default to substitution-declaration over download attempt; this gate forces the download first. Image substitution declarations in `asset-substitution.json` are rejected unless `download-log.json` shows a matching `status: "failed"` entry. |
-| **3** | 7-pre | `bash "$PLUGIN_ROOT/scripts/extract/generation-plan.sh" "$(pwd)/tmp/ref/<component>"` ⛔ MANDATORY before Step 7. Writes `generation-plan.json` — the SINGLE SOURCE OF TRUTH for component list, library installs, sticky strategy, hidden-element initial state, mobile-swap, architectural layers, smooth-scroll wrapper, intro animation, signature effects. **Claude Code: MUST invoke `Agent({subagent_type: "generation-planner", description: "Enrich generation-plan.json", prompt: "Read tmp/ref/<component>/generation-plan.json and enrich with token names, ds-components groupings, per-component wires, signature effects, sticky mechanism. Write back schemaVersion 2."})` immediately after the Bash succeeds — do NOT proceed to Step 7 with schemaVersion 1.** Codex hosts skip the sub-agent and inline-enrich per `defaultPrompt`. |
-| | 7 | Read `site-detection.md` FIRST, then `component-generation.md` + `transition-implementation.md`. **Follow `generation-plan.json` exactly** — every entry in `componentList`, `libraries.required`, `stickyStrategy`, `hiddenElements`, `mobileSwap`, `architectureLayers`, `smoothScroll`, `scrollListener`, `introAnimation`, `signatureEffects` is a contract. Missing any entry = generation incomplete. Skip-with-reason requires artifact-backed rationale in implementation notes; "looks fine" / "small page" is not enough. **Parallel generation (option C):** when `componentList` has >= 4 entries, dispatch a separate `general-purpose` sub-agent per 2-3 components IN PARALLEL (single message with multiple Agent tool blocks). Each sub-agent builds its assigned components in isolated context. Reduces wall-clock from ~10min/section serial to ~2-3min for the full batch. Main agent assembles the imports + page.tsx after all sub-agents return. |
+| **3** | 7-pre | `bash "$PLUGIN_ROOT/scripts/extract/generation-plan.sh" "$(pwd)/tmp/ref/<component>"` ⛔ MANDATORY before Step 7. Writes `generation-plan.json` — the SINGLE SOURCE OF TRUTH for component list, library installs, sticky strategy, hidden-element initial state, mobile-swap, architectural layers, smooth-scroll wrapper, intro animation, signature effects, and `forensicPreservation` strategy. It also recovers missing `head.json` / `extracted.json` stylesheet links into `tmp/ref/<component>/css/` before deciding whether forensic preservation is possible. **MUST dispatch the host-neutral `generation-planner` subagent role immediately after the Bash succeeds. Prompt: "Read tmp/ref/<component>/generation-plan.json and enrich with token names, ds-components groupings, per-component wires, signature effects, sticky mechanism. Preserve forensicPreservation exactly. Write back schemaVersion 2." Do NOT proceed to Step 7 with schemaVersion 1.** |
+| | 7 | Read `site-detection.md` FIRST, then `component-generation.md` + `transition-implementation.md`. **Follow `generation-plan.json` exactly** — every entry in `componentList`, `libraries.required`, `stickyStrategy`, `hiddenElements`, `mobileSwap`, `architectureLayers`, `smoothScroll`, `scrollListener`, `introAnimation`, `signatureEffects`, and `forensicPreservation` is a contract. When `forensicPreservation.required=true`, the first implementation pass MUST be ref-derived JSX plus local CSS: copy ref CSS chunks into the impl, preserve CSS-module className tokens, and translate `dom-scaffold.json` into JSX before adding local transition controllers. If `forensicPreservation.missingCssArtifacts=true` or `blockedUntilCssArtifacts=true`, STOP generation and recover `tmp/ref/<component>/css/*.css` first; do not downgrade to `standard-react-rebuild`. Missing any entry = generation incomplete. Skip-with-reason requires artifact-backed rationale in implementation notes; "looks fine" / "small page" is not enough. **Parallel generation (option C):** when `componentList` has >= 4 entries and forensic preservation is not required, dispatch a separate host-supported subagent per 2-3 components IN PARALLEL (Claude delegated subagents, Codex native subagents, or equivalent). Main agent assembles imports + page.tsx after all subagents return. |
 | | 7-rapid | **Two-phase mode (option A) — RECOMMENDED for initial visual iteration.** Set `UI_CLONE_PHASE=rapid` before running post-implement gate to relax block-severity checks to warn (except the anti-cheat allowlist: `ref-screenshot-asset`, `invalidation`, `scaffold-warn`, `remote-asset-ref`, `html-paste`, `proxy-mirror-check`, `hidden-children`, `monolithic-impl`, `entry-coherence` — those stay strict). Iterate visually with `visual-debug-iterator` sub-agent until the rapid-mode gate is green. THEN unset (or `export UI_CLONE_PHASE=strict`) and re-run the gate for canonical block-severity enforcement. This lets the agent reach a visually-close clone fast without consuming the iteration budget on edge-case gate fidelity checks. |
-| **4** | 8-pre | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/stray-absolute-check.sh" <session>-stray <impl> <w> <h>` — run for each viewport you support (e.g. 375×812, 1280×800). Catches Root Cause H (footer/sticky elements with `position: absolute` and no positioned ancestor — silently anchors to `<body>`, often only manifests on shorter pages). Cheap (one page load); runs before AE so you fix structure before chasing pixels. Then run the two universal-block checks declared by `verification-plan.json`: `REF_DIR="$(pwd)/tmp/ref/<component>" bash "$PLUGIN_ROOT/skills/visual-debug/scripts/hydration-check.sh" <session>-hyd <impl>` (catches console hydration errors / SSR boundary mismatches — silent in AE) and `REF_DIR="$(pwd)/tmp/ref/<component>" bash "$PLUGIN_ROOT/skills/visual-debug/scripts/tailwind-transform-conflict-check.sh" <session>-tw <impl>` (catches Root Cause I — Tailwind v3↔v4 transform shorthand/individual-property stacking). Both write JSON artifacts the `post-implement` gate enforces; running them here surfaces failures BEFORE you waste time on AE. See `diagnosis.md` → Root Causes H and I. **Claude Code on any of these checks failing:** invoke `Agent({subagent_type: "mismatch-diagnoser", description: "Diagnose <check> failure", prompt: "Read tmp/ref/<component>/<check>.json + impl source + ref artifact, return single root-cause hypothesis with file:line and confidence."})` for a structured root-cause hypothesis BEFORE applying a fix — the main agent applies the fix the diagnoser identifies. |
+| **4** | 8-pre | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/stray-absolute-check.sh" <session>-stray <impl> <w> <h>` — run for each viewport you support (e.g. 375×812, 1280×800). Catches Root Cause H (footer/sticky elements with `position: absolute` and no positioned ancestor — silently anchors to `<body>`, often only manifests on shorter pages). Cheap (one page load); runs before AE so you fix structure before chasing pixels. Then run the two universal-block checks declared by `verification-plan.json`: `REF_DIR="$(pwd)/tmp/ref/<component>" bash "$PLUGIN_ROOT/skills/visual-debug/scripts/hydration-check.sh" <session>-hyd <impl>` (catches console hydration errors / SSR boundary mismatches — silent in AE) and `REF_DIR="$(pwd)/tmp/ref/<component>" bash "$PLUGIN_ROOT/skills/visual-debug/scripts/tailwind-transform-conflict-check.sh" <session>-tw <impl>` (catches Root Cause I — Tailwind v3↔v4 transform shorthand/individual-property stacking). Both write JSON artifacts the `post-implement` gate enforces; running them here surfaces failures BEFORE you waste time on AE. See `diagnosis.md` → Root Causes H and I. **On any of these checks failing:** dispatch the host-neutral `mismatch-diagnoser` subagent role. Prompt: "Read tmp/ref/<component>/<check>.json + impl source + ref artifact, return single root-cause hypothesis with file:line and confidence." Get that structured root-cause hypothesis BEFORE applying a fix; the main agent applies the fix the diagnoser identifies. |
 | | 8-pre-bound | `REF_DIR="$(pwd)/tmp/ref/<component>" bash "$PLUGIN_ROOT/skills/visual-debug/scripts/breakpoint-collision-check.sh" <session>-bound <impl-url>` ⛔ MANDATORY before the `boundary` gate fires. Probes the impl at every Tailwind breakpoint ±1 and writes `responsive/boundary-collisions.json`. Catches Root Cause J (Tailwind `min-width` ↔ project `max-width` overlap producing 1-pixel-wide horizontal overflow zones invisible to AE). The `boundary` gate refuses to pass until this file exists and is `[]`. |
 | | 8-pre-cheat | Run the screenshot-as-background anti-cheat runtime gates declared by `verification-plan.json` (any tier ≥ standard). `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/hidden-children-check.sh" <session>-hidden <impl-url> "$(pwd)/tmp/ref/<component>"` catches the screenshot-as-background cheat: for each major section (area > 20000), if ≥ 2 non-trivial direct children exist AND every one of them is permanently hidden after animations finish, that section fails. `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/runtime-dom-parity-check.sh" <session>-rdp <ref-url> <impl-url> "$(pwd)/tmp/ref/<component>"` enforces positive runtime parity (node count ±30%, visible text-node floor, no single `<img>` / `<picture>` / `<video>` / `<canvas>` / background-image element covering > 90% of viewport, Lottie containers if ref had Lottie). `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/svg-dom-parity-check.sh" <session>-svg <ref-url> <impl-url> "$(pwd)/tmp/ref/<component>"` enforces per-section SVG inventory parity (catches the div-soup-site CSS-background-SVG blind spot). All three write JSON artifacts the `post-implement` gate enforces via `STATUS_REQUIRED`. Running them here surfaces failures before section-compare so you fix the underlying cheat instead of chasing pixel diffs. See `../visual-debug/SKILL.md` script table. |
 | | 8-pre-batch | ⛔ **RECOMMENDED — replaces the per-gate invocations above for comprehensive tier**. `bash "$PLUGIN_ROOT/scripts/verify/run-required-checks.sh" <session> <ref-url> <impl-url> "$(pwd)/tmp/ref/<component>"` reads `verification-plan.json` and dispatches every `requiredCheck` whose artifact is missing (or stale vs newest impl source) in a single shell call. Closes the failure mode where the 10-consecutive-Bash circuit breaker tripped before the agent could invoke the 25+ runtime/static checks declared by the comprehensive plan one at a time. Skips checks whose artifact already exists with `status: "pass"`. Exit 0 = every dispatched check passed; exit 1 = at least one failed (run `gate.py post-implement` for the canonical verdict). New gates must be added to the script's `SIGNATURES` table — diff `verification-plan.sh add_check` rows against the table on every PR. |
 | | 8 | `bash "$PLUGIN_ROOT/scripts/verify/auto-verify.sh" <session> <orig-url> <impl-url> "$(pwd)/tmp/ref/<component>"`. ⛔ MANDATORY — must run before 8b. |
 | | 8b-pre | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/font-parity-check.sh" <session>-fp <ref-url> <impl-url> "$(pwd)/tmp/ref/<component>"` ⛔ MANDATORY before the `font-parity` gate fires. Writes `font-parity.json`. If `parity == "mismatch"` and the substitution is intentional (commercial font → free variable font, etc.), declare it in `tmp/ref/<component>/asset-substitution.json` per `asset-substitution.md` schema. Gate refuses to pass when fonts diverge but no `fonts[]` entry acknowledges it. Without this gate, section-compare reports 100% FAIL forever and the agent thrashes. |
-| | 8b | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/section-compare.sh" <orig-url> <impl-url> <session> "$(pwd)/tmp/ref/<component>"` ⛔ MANDATORY — runs IN ADDITION to Step 8, not instead. 4th arg required for Stop gate. Reads `asset-substitution.json` if present and switches matching sections to structural-only diff. **Re-runs:** set `ONLY_IF_CHANGED=1 IMPL_SRC_DIR=<impl-src-root>` to short-circuit when the impl source hash is unchanged (reuses prior `sections/result.txt`); see `../visual-debug/SKILL.md` ONLY_IF_CHANGED. **Claude Code on FAIL (`FAIL_COUNT > 0` or `INCOMPLETE`):** invoke `Agent({subagent_type: "visual-debug-iterator", description: "Iterate section-compare fixes", prompt: "Read tmp/ref/<component>/sections/result.txt + matches.json + diff/*.png, apply ONE scoped fix per iteration, re-run section-compare.sh, max 5 iterations, return verdict."})` instead of editing impl files directly — the sub-agent isolates the diff-image context from the main agent. Bailout cases (asset 404 / hydration / missing install) return to main agent for pipeline-level intervention. |
+| | 8b | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/section-compare.sh" <orig-url> <impl-url> <session> "$(pwd)/tmp/ref/<component>"` ⛔ MANDATORY — runs IN ADDITION to Step 8, not instead. 4th arg required for Stop gate. Reads `asset-substitution.json` if present and switches matching sections to structural-only diff, but motion-critical sections derived from `transition-spec.json` / `required-media.json` cannot use `STRUCTURAL_ONLY`; they must produce pixel/runtime evidence. **Re-runs:** set `ONLY_IF_CHANGED=1 IMPL_SRC_DIR=<impl-src-root>` to short-circuit when the impl source hash is unchanged (reuses prior `sections/result.txt`); see `../visual-debug/SKILL.md` ONLY_IF_CHANGED. **On FAIL (`FAIL_COUNT > 0` or `INCOMPLETE`):** dispatch the host-neutral `visual-debug-iterator` subagent role instead of editing impl files directly. Prompt: "Read tmp/ref/<component>/sections/result.txt + matches.json + diff metadata, apply ONE scoped fix per iteration without reading PNG/JPG/WebP/GIF files, re-run section-compare.sh, max 5 iterations, return verdict." The subagent isolates the fix loop from the main agent. Bailout cases (asset 404 / hydration / missing install) return to main agent for pipeline-level intervention. |
 | | 8c-pre | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/transition-spec-coverage.sh" "$(pwd)/tmp/ref/<component>" <impl-src-dir>` and `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/spec-implementation-coverage.sh" "$(pwd)/tmp/ref/<component>" <impl-src-dir>` ⛔ MANDATORY before 8c if `transition-spec.json` exists. Static coverage checks that every spec entry's `id` / `selector` / type-derived hooks are present; implementation coverage checks trigger-specific runtime wiring. Hidden marker spans, `data-*` hook strings, or generic motion words do not count as implementations. This catches the "hover transitions matched while intersection/scroll/click entries were never wired" failure class that `transition-compare.sh` can't see (it only verifies idle↔hover diffs). |
 | | 8c | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/transition-compare.sh" <orig-url> <impl-url> <session>` ⛔ MANDATORY if `interactions-detected.json` exists. |
+| | 8c-scroll | When `verification-plan.json` includes `scroll-state-machine`, run `scroll-state-machine-check.sh`: scroll-driven `window.scrollTo` / `scrollYProgress` / `setTimeout` / `velocity` / guard ref logic, plus ScrollTrigger pin/scrub sections, must prove `initial → active/expanded → settled/returned`, not just the active endpoint. |
 | | 9 | Test every interaction. Dispatch `mouseenter` for JS hovers. 100% ✅. |
 
 ### Step 7 architecture — WHY / HOW (plan dictates WHAT)
@@ -481,7 +532,7 @@ When animation detection (Step 5/6) identifies transitions, use this sub-pipelin
 
 ```
 Step T-1: Multi-point measurement  — measurement.md → measurements.json (11 points). ⛔ Gate.
-Step T0:  Capture reference frames — element-capture.md or /ui-capture. ⛔ Gate: frames/ref/ populated
+Step T0:  Capture reference frames — element-capture.md or ui-capture (Claude: `/ui-capture`). ⛔ Gate: frames/ref/ populated
 Step T1:  Classify effect          — eval below. ⛔ Gate: result recorded
 Step T2a: CSS path                 — css-extraction.md
 Step T2b: JS bundle path           — js-animation-extraction.md

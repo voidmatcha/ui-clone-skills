@@ -3,7 +3,7 @@
 The default install registers **both** Claude Code and Codex marketplaces in one pass. Each registration is skipped silently if that host's CLI (`claude` / `codex`) is not on PATH, so the same one-liner works on a Claude-only box, a Codex-only box, or a box with both.
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh | bash
+tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"
 ```
 
 Inside Claude Code, after the installer finishes:
@@ -12,7 +12,7 @@ Inside Claude Code, after the installer finishes:
 /plugin install ui-clone-skills@voidmatcha
 ```
 
-For Codex: the installer creates a lightweight personal plugin source at `~/plugins/ui-clone-skills`, writes `~/.agents/plugins/marketplace.json`, and runs `codex plugin add ui-clone-skills@local`. Verify `codex plugin list` shows `ui-clone-skills@local (installed)`, then launch Codex with plugin hooks enabled:
+For Codex: the installer creates a lightweight personal plugin source at `~/plugins/ui-clone-skills`, writes `~/.agents/plugins/marketplace.json`, and runs `codex plugin add ui-clone-skills@local`. That projection includes only the three public skills, so maintainer-only skills such as `skills/benchmark` do not appear in Codex. Verify `codex plugin list` shows `ui-clone-skills@local (installed)`, then launch Codex with plugin hooks enabled:
 
 ```bash
 codex --enable plugin_hooks
@@ -25,9 +25,9 @@ The installer is idempotent: it bootstraps shared dependencies, registers the lo
 ## Install only one host
 
 ```bash
-# curl-pipe (flags pass through with -s --)
-curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh | bash -s -- --claude-only
-curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh | bash -s -- --codex-only
+# downloaded installer
+tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" --claude-only && rm -f "$tmp"
+tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" --codex-only && rm -f "$tmp"
 
 # from a local checkout
 ./install.sh --claude-only       # register Claude marketplace only
@@ -58,10 +58,10 @@ npx skills add voidmatcha/ui-clone-skills
 
 ```bash
 # one-liner (macOS)
-brew install imagemagick dssim ffmpeg && npm i -g agent-browser && curl -LsSf https://astral.sh/uv/install.sh | sh
+brew install imagemagick dssim ffmpeg && npm i -g agent-browser && uv_tmp=$(mktemp) && curl -LsSf -o "$uv_tmp" https://astral.sh/uv/install.sh && sh "$uv_tmp" && rm -f "$uv_tmp"
 
 # one-liner (Linux / WSL2)
-sudo apt install -y ffmpeg imagemagick && cargo install dssim && npm i -g agent-browser && curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo apt install -y ffmpeg imagemagick && cargo install dssim && npm i -g agent-browser && uv_tmp=$(mktemp) && curl -LsSf -o "$uv_tmp" https://astral.sh/uv/install.sh && sh "$uv_tmp" && rm -f "$uv_tmp"
 
 # verify
 agent-browser --version && magick --version && dssim --help && ffmpeg -version && uv --version && python3 --version

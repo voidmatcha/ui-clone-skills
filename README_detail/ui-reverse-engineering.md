@@ -1,6 +1,6 @@
 # `ui-reverse-engineering` — Website → React Component
 
-Turns any live website into a React + Tailwind component. For URL input, extracts real values. Screenshot and video inputs fall back to Claude Vision approximation.
+Turns any live website into a React + Tailwind component. For URL input, extracts real values. Screenshot and video inputs fall back to host vision-model approximation.
 
 **Usage:**
 
@@ -95,6 +95,6 @@ Visual-debug scripts that open browser sessions support `VIEW_W`/`VIEW_H` env va
 | Mode | Quality | When to use |
 |---|---|---|
 | URL (primary) | Exact values | Live site — `getComputedStyle`, real DOM, JS bundle |
-| Screenshot | Approximation (Claude Vision) | Design mockup, inaccessible site |
-| Video / recording | Approximation (Claude Vision) | Interactions visible in recording |
-| Multiple screenshots | Approximation (Claude Vision) | Different pages or breakpoints |
+| Screenshot | Approximation (host vision model) | Design mockup, inaccessible site |
+| Video / recording | Approximation (host vision model) | Interactions visible in recording |
+| Multiple screenshots | Approximation (host vision model) | Different pages or breakpoints |

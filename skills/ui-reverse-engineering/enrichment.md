@@ -3,7 +3,8 @@
 **Audience**: anyone (host-agnostic) performing Phase 6-pre enrichment of `generation-plan.json`.
 
 - **Claude Code path**: invoked via the `generation-planner` sub-agent (`.claude-plugin/agents/generation-planner.md`). The sub-agent reads this file as its operational contract.
-- **Codex path**: read this file inline at Step 7-pre per `.codex-plugin/plugin.json defaultPrompt`. Perform the same work in the main context.
+- **Codex native path**: invoked via the `generation-planner` native subagent (`.codex/agents/generation-planner.toml`) when Codex/OMX subagent routing is available. The native subagent reads this file as the same operational contract.
+- **Inline fallback**: if a host has no delegated-worker surface, perform the same work in the main context and state that fallback explicitly.
 
 ## Pre-condition
 
@@ -116,7 +117,7 @@ When the enrichment encounters an existing `asset-substitution.json` with `image
 
 ## Post-condition verification
 
-After writing back, the main agent (or Codex inline) MUST verify:
+After writing back, the main agent or delegated worker MUST verify:
 
 1. `jq '.schemaVersion == 2' tmp/ref/<component>/generation-plan.json` returns true
 2. Every `tokens.colors`/`spacing`/etc. value is grep-able in `css/variables.txt` or `styles.json`

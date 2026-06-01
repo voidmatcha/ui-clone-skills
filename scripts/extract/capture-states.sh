@@ -59,7 +59,7 @@ if [ "$REUSE_SESSION" = "true" ]; then
   STATES_SESSION="$SESSION"
 fi
 
-OUTDIR="$REF_DIR/states/splash"
+OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/splash"
 mkdir -p "$OUTDIR"
 
 # Open page in the derived session unless reusing the caller's session.

@@ -70,6 +70,7 @@ fi
 
 python3 - "$SCAFFOLD" "$IMPL_DIR" "${OUT_PATH:-}" <<'PY'
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -320,9 +321,34 @@ for required in required_meaningful:
     missing.append({"text": required[:160]})
 
 
-status = "fail" if fabrications or missing else "pass"
+# Degenerate-scaffold guard: dom-scaffold is the authoritative "required" text
+# ground truth. If extraction yielded ~no meaningful scaffold text (a JS-heavy
+# site captured pre-hydration, or a text walk that missed every leaf) yet the
+# impl renders substantial text, the missing-side check is vacuous and silently
+# under-reports — and if the fabricated strings happen to land in the
+# element-roles allowlist there are 0 fabrications too, so the gate FALSE-PASSES
+# a clone built on no text ground truth (observed: a JS-heavy reference site
+# whose body copy was fabricated yet passed). Refuse to validate; fail loudly and demand
+# re-extraction instead of giving false confidence. Same class as the blank-ref
+# refStd guard for the perceptual section gate. Env escape hatch for genuine
+# JS-only-text architectures.
+scaffold_text_floor = int(os.environ.get("TEXT_FIDELITY_SCAFFOLD_FLOOR", "1"))
+impl_text_floor = int(os.environ.get("TEXT_FIDELITY_IMPL_FLOOR", "5"))
+degenerate_scaffold = (
+    len(required_meaningful) < scaffold_text_floor
+    and total_meaningful >= impl_text_floor
+)
+
+status = "fail" if fabrications or missing or degenerate_scaffold else "pass"
 out = {
     "status": status,
+    "degenerate_scaffold": degenerate_scaffold,
+    "degenerate_reason": (
+        f"ref dom-scaffold has {len(required_meaningful)} meaningful text leaves "
+        f"(< {scaffold_text_floor}) but impl renders {total_meaningful} meaningful "
+        "strings — extraction likely failed; text fidelity cannot be validated. "
+        "Re-extract dom-scaffold before trusting this clone."
+    ) if degenerate_scaffold else "",
     "components_checked": len(impl_components),
     "total_meaningful_strings": total_meaningful,
     "required_meaningful_strings": len(required_meaningful),

@@ -61,11 +61,11 @@ agent-browser --session <s> eval "(() => {
 |--------|-------------|----------------|
 | `hasReadableClasses + siteCSS > 0` | **CSS-First**: Download CSS, use original class names | Use original classes in JSX |
 | `hasTailwind` | **Extract-Values**: Read computed styles | Rewrite with Tailwind utilities |
-| `hasCSSModules` | **Extract-Values**: Read computed styles | Generate new class names |
+| `hasCSSModules` | **Forensic preservation**: ref-derived JSX + local CSS | Preserve original hashed/CSS-module class names |
 | `isShopify` | **CSS-First** (Shopify uses readable Liquid class names) | Use original classes |
 | `isNextJS + hasTailwind` | **Extract-Values** | Tailwind utilities |
 
-**Default:** If `hasReadableClasses` is true AND `siteCSS > 2`, use CSS-First. Otherwise use Extract-Values.
+**Default:** If `generation-plan.json.forensicPreservation.required=true`, use forensic preservation. If that object also has `missingCssArtifacts=true` or `blockedUntilCssArtifacts=true`, recover CSS artifacts and rerun `generation-plan.sh` before generation; do not fall back to `standard-react-rebuild`. Else if `hasReadableClasses` is true AND `siteCSS > 2`, use CSS-First. Otherwise use Extract-Values.
 
 ### Tailwind major version mismatch — flag early
 
@@ -121,27 +121,42 @@ agent-browser --session <s> eval "(() => {
 
 | Condition | Approach | Why |
 |-----------|----------|-----|
-| `cssModuleRatio > 0.3` OR `jsInlineStyles > 20` | **Raw HTML Injection** | CSS Modules hashes must be preserved; rewriting loses all styling |
-| `hasGSAP + hasLottie + hasCanvas > 1` | **Raw HTML Injection** | Too many animation libraries to re-implement from scratch |
-| `totalHTMLSize > 200KB` | **Raw HTML Injection** | Converting 200KB+ HTML to JSX is token-expensive and error-prone |
+| `cssModuleRatio > 0.3` OR `jsInlineStyles > 20` | **Forensic preservation** | CSS Modules hashes and JS-set layout states must be preserved; rewriting loses styling |
+| `hasGSAP + hasLottie + hasCanvas > 1` | **Forensic preservation** | Too many animation libraries to freehand from scratch |
+| `totalHTMLSize > 200KB` | **Forensic preservation** | Converting 200KB+ HTML by hand is token-expensive and error-prone |
 | `cssModuleRatio < 0.1` AND simple Tailwind | **React Component** | Clean class names, straightforward conversion |
 | Static site, no JS animations | **React Component** | Simplest approach works |
 
-### Raw HTML Injection approach
+> **Behavioral signals are primary; library-name probes are a hint (allowlist audit).**
+> The `hasGSAP + hasLottie + hasCanvas` row matches library IDENTITY (`typeof gsap`,
+> `script[src*=lottie]`) and misses unknown/hand-rolled motion (ScrollMagic,
+> anime.js, Motion One, native scroll-timeline, rAF/IO). Do NOT route a
+> motion-heavy site to a clean **React Component** rebuild just because no *known*
+> library was detected — that silently drops its motion. Decide "motion-heavy →
+> motion-preserving approach" from the LIBRARY-AGNOSTIC behavioral signals that
+> are already computed: `jsInlineStyles > 20` (row 1, JS-set inline transform/
+> opacity), `hasFramerMotion` (`[style*=will-change]`), `hasCanvas`, and the
+> observed-motion density from Phase B element-tracking / `transition-coverage.json`.
+> The library names then only inform HOW to reproduce the motion, not WHETHER it
+> exists. "Static site, no JS animations" must mean *behaviorally* static (no
+> observed motion), not merely "no recognized library".
 
-**When to use:** Complex sites with CSS Modules, GSAP, Lottie, Canvas, or 200KB+ HTML.
+### Forensic preservation approach
+
+**When to use:** `generation-plan.json.forensicPreservation.required=true`, or complex sites with CSS Modules, GSAP, Lottie, Canvas, heavy JS inline styles, or 200KB+ HTML.
 
 This mode is still a component-generation strategy, not a whole-page static
 mirror. Never dump `document.documentElement.outerHTML` / `document.body.innerHTML`
 or a captured `live.html` into `impl/index.html`; that preserves a frozen DOM
-state while dropping the original transition runtime. Use section-level HTML
-only, preserve runtime libraries/data, and run the normal verification gates.
+state while dropping the original transition runtime. Generate ref-derived JSX,
+copy local CSS chunks into the impl, preserve CSS-module className tokens, add
+runtime libraries/data/controllers locally, and run the normal verification gates.
 
-1. Extract outerHTML of each major section from the original site
-2. Download ALL CSS files and serve from `/public/css/`
-3. Download ALL fonts, images, Lottie JSON to `/public/assets/`
-4. Render via `dangerouslySetInnerHTML` — **NO wrapper divs** between parent and child elements
-5. Port animations to project animation library, WAAPI, or keep original library if allowed
+1. Extract/consume `dom-scaffold.json` as the visible DOM authority.
+2. Copy ALL local `tmp/ref/<component>/css/*.css` chunks into `impl/src/ref-css/` and import them before local overrides. If the plan says `missingCssArtifacts=true`, stop and recover those CSS chunks first instead of writing a freehand Tailwind approximation.
+3. Download ALL fonts, images, videos, Lottie JSON to `/public/assets/` (or the host's public asset layout).
+4. Translate scaffold nodes to JSX with original tags, depth, text, media elements, and CSS-module className tokens intact. Use section-level `dangerouslySetInnerHTML` only when it preserves depth better than manual JSX, never as a whole-page paste.
+5. Port animations to project animation library, WAAPI, or a local controller using extracted durations/easing.
 6. Clean GSAP inline styles carefully: **preserve layout values** (height, width in svh/vh), **remove animation values** (transform, opacity, visibility)
 
 **Critical: wrapper div problem.**

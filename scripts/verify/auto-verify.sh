@@ -97,15 +97,16 @@ write_visual_debug_stamp() {
   local total_fail="$4"
   local phase_e="$5"
   local provisional="${6:-false}"
+  local invocation_id="${7:-${UI_RE_AUTOVERIFY_INFLIGHT:-}}"
   local stamp_path="$REF_DIR/visual-debug-stamp.json"
   local phase_e_present="$phase_e"
   local verified_at
   verified_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  python3 - "$stamp_path" "$verified_at" "$passed" "$exit_code" "$phase_e_present" "$total_checks" "$total_fail" "$provisional" <<'PY'
+  python3 - "$stamp_path" "$verified_at" "$passed" "$exit_code" "$phase_e_present" "$total_checks" "$total_fail" "$provisional" "$invocation_id" <<'PY'
 import json, sys
-path, verified_at, passed, exit_code, phase_e, total_checks, total_fail, provisional = sys.argv[1:]
+path, verified_at, passed, exit_code, phase_e, total_checks, total_fail, provisional, invocation_id = sys.argv[1:]
 stamp = {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "stampedBy": "scripts/verify/auto-verify.sh",
     "verifiedAt": verified_at,
     "passed": passed == "true",
@@ -114,6 +115,12 @@ stamp = {
     "totalFail": int(total_fail),
     "phaseE": phase_e == "true",
 }
+if invocation_id:
+    # Schema v2: invocation correlation. Lets post-implement gate distinguish
+    # an in-flight provisional stamp from this exact auto-verify run (env
+    # var UI_RE_AUTOVERIFY_INFLIGHT must match) vs a stale provisional left
+    # by a crashed/orphaned prior run.
+    stamp["invocationId"] = invocation_id
 if provisional == "true":
     stamp["provisional"] = True
 with open(path, "w", encoding="utf-8") as fh:
@@ -244,9 +251,20 @@ fi
 # Break the stamp/gate circular dependency: post-implement requires the
 # canonical stamp, while auto-verify is the command that writes it. This
 # provisional stamp is overwritten with the real verdict below.
+#
+# Crash safety (Fix 1, codex 2026-05-27 architectural review): the
+# provisional stamp carries an `invocationId` matching the exported env var
+# `UI_RE_AUTOVERIFY_INFLIGHT`. The gate accepts a provisional stamp ONLY
+# when both ids match — so a crashed/orphaned prior run leaves a provisional
+# stamp whose id does NOT match the current process env, and the gate
+# correctly rejects it instead of trusting a false `passed=true`. Stale
+# stamp also gets deleted at the very start (below) for defense in depth.
 PHASE_E_PRESENT="false"
 [ -f "$REF_DIR/phase-e-result.json" ] && PHASE_E_PRESENT="true"
-write_visual_debug_stamp "true" 0 "$TOTAL_CHECKS" "$TOTAL_FAIL" "$PHASE_E_PRESENT" "true"
+UI_RE_AUTOVERIFY_INFLIGHT="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+export UI_RE_AUTOVERIFY_INFLIGHT
+rm -f "$REF_DIR/visual-debug-stamp.json"
+write_visual_debug_stamp "true" 0 "$TOTAL_CHECKS" "$TOTAL_FAIL" "$PHASE_E_PRESENT" "true" "$UI_RE_AUTOVERIFY_INFLIGHT"
 run_check "Gate: post-implement" \
   uv run --project "$REPO_ROOT" python -m ui_clone.gate "$REF_DIR" post-implement
 

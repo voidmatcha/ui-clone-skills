@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from ui_clone.hooks._common import find_project_root, find_ref_dir, run_gate
+from ui_clone.hooks._common import extract_tool_command, find_project_root, find_ref_dir, run_gate
 from ui_clone.state import PipelineState
 
 from .bash_write import (
@@ -358,7 +358,7 @@ def main() -> None:
     if not isinstance(data, dict):
         sys.exit(0)
 
-    cmd = data.get("tool_input", {}).get("command", "") or data.get("command", "")
+    cmd = extract_tool_command(data)
     if not isinstance(cmd, str):
         sys.exit(0)
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # layout-health-check.sh — Structural layout comparison before pixel comparison
-# Catches: empty sections, collapsed text, zero-dimension elements, height ratios
+# Catches: empty sections, collapsed text, zero-dimension elements, height ratios,
+# desktop horizontal overflow
 #
 # Usage: bash layout-health-check.sh <session> <orig-url> <impl-url> [outdir]
 # Exit: 0 = healthy, 1 = issues found
@@ -31,6 +32,34 @@ EXTRACT_JS='(() => {
   const body = document.body;
   const totalHeight = document.documentElement.scrollHeight;
   const viewportHeight = window.innerHeight;
+  const viewportWidth = window.innerWidth;
+  const scrollWidth = Math.max(document.documentElement.scrollWidth, body ? body.scrollWidth : 0);
+  const overflowPx = Math.max(0, scrollWidth - viewportWidth);
+
+  const labelFor = (el) => {
+    const tag = el.tagName ? el.tagName.toLowerCase() : "element";
+    const id = el.id ? "#" + el.id : "";
+    const rawClass = typeof el.className === "string" ? el.className : "";
+    const classes = rawClass.trim().split(/\s+/).filter(Boolean).slice(0, 3).map(c => "." + c).join("");
+    return (tag + id + classes).slice(0, 100);
+  };
+  const overflowOffenders = [...document.body.querySelectorAll("*")]
+    .map(el => {
+      const rect = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      return {
+        selector: labelFor(el),
+        right: Math.round(rect.right),
+        left: Math.round(rect.left),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        position: cs.position,
+        overflow: cs.overflow,
+      };
+    })
+    .filter(item => item.width > 0 && item.height > 0 && item.right > viewportWidth + 4)
+    .sort((a, b) => b.right - a.right)
+    .slice(0, 8);
 
   // Get all direct children of main/body that are visible sections
   // Recurse through single-child wrapper divs (e.g., eBay has main > div.home > sections)
@@ -77,6 +106,10 @@ EXTRACT_JS='(() => {
   return JSON.stringify({
     totalHeight,
     viewportHeight,
+    viewportWidth,
+    scrollWidth,
+    overflowPx,
+    overflowOffenders,
     sectionCount: sections.length,
     sections: sectionData
   });
@@ -133,7 +166,30 @@ if (ratio > 1.3 || ratio < 0.7) {
   console.log('  ✅ Within 10% tolerance');
 }
 
-// 2. Section count
+// 2. Horizontal overflow
+const origOverflow = Math.max(0, (orig.scrollWidth || orig.viewportWidth || 0) - (orig.viewportWidth || 0));
+const implOverflow = Math.max(0, (impl.scrollWidth || impl.viewportWidth || 0) - (impl.viewportWidth || 0));
+const overflowTolerance = Math.max(4, origOverflow + 4);
+console.log('');
+console.log('── Horizontal Overflow ──');
+console.log('  Original: viewport ' + orig.viewportWidth + 'px, scrollWidth ' + orig.scrollWidth + 'px, overflow ' + origOverflow + 'px');
+console.log('  Implementation: viewport ' + impl.viewportWidth + 'px, scrollWidth ' + impl.scrollWidth + 'px, overflow ' + implOverflow + 'px');
+if (implOverflow > overflowTolerance) {
+  console.log('  ⛔ HORIZONTAL OVERFLOW: implementation exceeds the reference tolerance by ' + (implOverflow - overflowTolerance) + 'px');
+  console.log('  Typical cause: fixed-width absolute layers, offscreen rails, marquees, or mosaics not clipped in a section-local wrapper.');
+  const offenders = impl.overflowOffenders || [];
+  if (offenders.length > 0) {
+    console.log('  Top right-edge offenders:');
+    offenders.forEach(item => {
+      console.log('    - ' + item.selector + ' right=' + item.right + 'px left=' + item.left + 'px width=' + item.width + 'px position=' + item.position + ' overflow=' + item.overflow);
+    });
+  }
+  issues++;
+} else {
+  console.log('  ✅ Within reference overflow tolerance');
+}
+
+// 3. Section count
 console.log('');
 console.log('── Section Count ──');
 console.log('  Original: ' + orig.sectionCount);
@@ -142,7 +198,7 @@ if (orig.sectionCount !== impl.sectionCount) {
   console.log('  ⚠️  Section count differs');
 }
 
-// 3. Per-section comparison
+// 4. Per-section comparison
 console.log('');
 console.log('── Section Heights ──');
 console.log('| # | Orig Height | Impl Height | Ratio | Status |');
@@ -170,7 +226,7 @@ for (let i = 0; i < maxSections; i++) {
   console.log('| ' + i + ' | ' + o.height + 'px | ' + m.height + 'px | ' + sRatio.toFixed(2) + ' | ' + status + ' |');
 }
 
-// 4. Collapsed elements
+// 5. Collapsed elements
 console.log('');
 console.log('── Collapsed Elements ──');
 let totalCollapsed = 0;
@@ -183,7 +239,7 @@ impl.sections.forEach((s, i) => {
 });
 if (totalCollapsed === 0) console.log('  ✅ No collapsed elements');
 
-// 5. Empty text elements
+// 6. Empty text elements
 console.log('');
 console.log('── Empty Text Elements ──');
 let totalEmpty = 0;
@@ -195,7 +251,7 @@ impl.sections.forEach((s, i) => {
 });
 if (totalEmpty === 0) console.log('  ✅ No empty text elements');
 
-// 6. Sections taller than 3x viewport (potential blank space)
+// 7. Sections taller than 3x viewport (potential blank space)
 console.log('');
 console.log('── Oversized Sections ──');
 impl.sections.forEach((s, i) => {

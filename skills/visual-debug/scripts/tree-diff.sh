@@ -2,8 +2,12 @@
 # tree-diff.sh — Exhaustive per-element CSS diff between ref and impl
 #
 # Walks every visible element on impl (≥ MIN_SIZE px, ranked by area),
-# pairs each with the ref element at the same screen-center via
-# elementFromPoint, and runs computed-style diff per pair.
+# pairs each with its true ref counterpart by CONTENT + STRUCTURE (text
+# similarity → tag/role/src/alt/box/path identity → section-relative position
+# as a final tiebreaker), then runs computed-style diff per pair. Pairing is
+# done in ui_clone.tree_diff_pairing (unit-tested) — NOT by screen coordinate,
+# because a clone in progress has a different layout/height than the ref, so
+# same-coordinate pairing mis-pairs (anchor to content, not the y-coordinate).
 #
 # Catches mismatches that pixel-AE misses:
 #   - Wrong font-family that renders identically (both fonts available)
@@ -14,10 +18,25 @@
 #
 # Env:
 #   VIEW_W=1440 VIEW_H=900    Viewport
-#   WAIT_MS=4000              Settle time
+#   WAIT_MS=4000              Initial page settle time
+#   SCROLL_SETTLE_MS=350      Per-frame settle after each scroll step
 #   MIN_SIZE=16               Skip elements smaller than NxN px
-#   MAX_ELEMENTS=200          Cap per-page walk (top N by area)
-#   PAIR_TOLERANCE=10         Max center-distance for valid pair (px)
+#   MAX_ELEMENTS=400          Cap whole-page walk (top N by area). Raised from
+#                             200 because the walk now covers the FULL page
+#                             (every section, not just the top viewport), so a
+#                             200-cap would arbitrarily discard the newly-reached
+#                             deep-section coverage. Coverage knob only — no
+#                             severity threshold is touched.
+#   PAIR_TOLERANCE=10         Legacy (no longer gates pairing — pairing is by
+#                             content+structure in ui_clone.tree_diff_pairing)
+#
+# Coverage: the walk scrolls the page in viewport-height steps (15% overlap) and
+# walks the elements in view at each step, so below-the-fold sections are walked
+# too — a single top-viewport walk was structurally blind to them, leaving deep
+# sections perpetually "unpaired". Elements seen in overlapping frames are
+# de-duplicated by a stable key (tag + DOM path + page-absolute top/left + text).
+# This ONLY extends coverage; the per-pair computed-style diff, severity buckets,
+# and thresholds are unchanged.
 #
 # Output:
 #   <dir>/tree-diff.md   — Markdown table (severity-sorted)
@@ -41,11 +60,15 @@ OUT_DIR="${4:-tmp/tree-diff}"
 VIEW_W="${VIEW_W:-1440}"
 VIEW_H="${VIEW_H:-900}"
 WAIT_MS="${WAIT_MS:-4000}"
+SCROLL_SETTLE_MS="${SCROLL_SETTLE_MS:-350}"
 MIN_SIZE="${MIN_SIZE:-16}"
-MAX_ELEMENTS="${MAX_ELEMENTS:-200}"
+MAX_ELEMENTS="${MAX_ELEMENTS:-400}"
 PAIR_TOLERANCE="${PAIR_TOLERANCE:-10}"
 
 mkdir -p "$OUT_DIR"
+
+SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPTS_DIR/../../.." && pwd)"
 
 REF_SESS="${SESSION}-tree-ref"
 IMPL_SESS="${SESSION}-tree-impl"
@@ -58,11 +81,15 @@ TMP_REF=$(mktemp "${TMPDIR:-/tmp}/tree-diff-ref.XXXXXX") || {
   echo "ERROR: failed to create ref temp file"
   exit 2
 }
+TMP_REF_FULL=$(mktemp "${TMPDIR:-/tmp}/tree-diff-ref-full.XXXXXX") || {
+  echo "ERROR: failed to create ref-full temp file"
+  exit 2
+}
 
 cleanup() {
   agent-browser --session "$REF_SESS" close >/dev/null 2>&1 || true
   agent-browser --session "$IMPL_SESS" close >/dev/null 2>&1 || true
-  rm -f "$TMP_IMPL" "$TMP_REF"
+  rm -f "$TMP_IMPL" "$TMP_REF" "$TMP_REF_FULL"
 }
 trap cleanup EXIT
 
@@ -83,44 +110,107 @@ agent-browser --session "$IMPL_SESS" wait "$WAIT_MS" >/dev/null 2>&1
 # ── Step 1: walk impl tree ──
 echo "  ▸ Walking impl tree..."
 WALK_JS=$(cat <<JSEOF
-(() => {
+(async () => {
   const props = ['fontFamily','fontSize','fontWeight','fontStyle','letterSpacing',
                  'lineHeight','textTransform','textAlign','color','backgroundColor',
                  'display','position','padding','margin','borderRadius',
-                 'borderTopWidth','borderTopColor','opacity'];
+                 'borderTopWidth','borderTopColor',
+                 // Fidelity props extract-dom.sh captures but tree-diff used to
+                 // skip — without them a freehanded shadow / wrong alignment /
+                 // missing radius / z-order pairs as "ok". ADDITIVE: compare
+                 // more props. Severity buckets below are UNCHANGED (these land
+                 // in "minor"), so no threshold is loosened.
+                 'borderRightWidth','borderRightColor','borderBottomWidth',
+                 'borderBottomColor','borderLeftWidth','borderLeftColor',
+                 'borderTopStyle','boxShadow','transform','overflow','zIndex',
+                 'justifyContent','alignItems','flexDirection','gap',
+                 'gridTemplateColumns','gridTemplateRows','opacity'];
   const SKIP_TAGS = new Set(['SCRIPT','STYLE','META','LINK','HEAD','TITLE','NOSCRIPT','BR','HR']);
   const minSize = ${MIN_SIZE};
   const maxN    = ${MAX_ELEMENTS};
-  const out = [];
-  const all = document.querySelectorAll('body *');
-  for (const el of all) {
-    if (SKIP_TAGS.has(el.tagName)) continue;
-    const r = el.getBoundingClientRect();
-    // Allow thin separators/borders (1-3px tall, wide) — important for layout diff
-    const isThin = (r.height >= 0.5 && r.height < 4 && r.width >= 80) ||
-                   (r.width  >= 0.5 && r.width  < 4 && r.height >= 80);
-    if (!isThin && (r.width < minSize || r.height < minSize)) continue;
-    if (r.bottom < 0 || r.top > window.innerHeight) continue;
-    if (r.right  < 0 || r.left > window.innerWidth)  continue;
-    const s = getComputedStyle(el);
-    if (s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity) === 0) continue;
-    const cx = Math.max(1, Math.min(window.innerWidth  - 1, r.left + r.width  / 2));
-    const cy = Math.max(1, Math.min(window.innerHeight - 1, r.top  + r.height / 2));
-    const txt = (el.textContent || '').trim().replace(/\s+/g,' ').slice(0, 30);
-    const styleObj = {};
-    props.forEach(p => styleObj[p] = s[p]);
-    out.push({
-      tag: el.tagName,
-      cls: (el.className && el.className.toString) ? el.className.toString().slice(0, 60) : '',
-      txt,
-      x: +cx.toFixed(1), y: +cy.toFixed(1),
-      top: +r.top.toFixed(1), left: +r.left.toFixed(1),
-      w: +r.width.toFixed(1), h: +r.height.toFixed(1),
-      area: +(r.width * r.height).toFixed(0),
-      thin: isThin,
-      style: styleObj,
-    });
+  const settle  = ${SCROLL_SETTLE_MS};
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  // De-dup across overlapping frames. Page-absolute top/left is stable for a
+  // given element regardless of scroll position, so this key identifies one
+  // DOM element uniquely; an element straddling two frames is captured once.
+  const seen = new Map();
+  // DOM structural path: nth-of-type chain up to 6 ancestors. Used to pair
+  // text-less elements (wrappers/img/svg) by structural position, not coords.
+  const pathOf = (el) => {
+    const parts = []; let node = el, depth = 0;
+    while (node && node.nodeType === 1 && node.tagName !== 'BODY' && depth < 6) {
+      let i = 1, sib = node;
+      while ((sib = sib.previousElementSibling)) { if (sib.tagName === node.tagName) i++; }
+      parts.unshift(node.tagName.toLowerCase() + ':' + i);
+      node = node.parentElement; depth++;
+    }
+    return parts.join('>');
+  };
+  // Walk every element currently in the viewport at the present scroll position.
+  // Coordinates are recorded PAGE-ABSOLUTE (rect + scroll offset) so deltas and
+  // section-relative pairing stay correct across frames; at scrollY=0 (the only
+  // frame a single-viewport walk ever saw) this is identical to before.
+  const captureVisible = () => {
+    const sx = window.scrollX, sy = window.scrollY;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const all = document.querySelectorAll('body *');
+    for (const el of all) {
+      if (SKIP_TAGS.has(el.tagName)) continue;
+      const r = el.getBoundingClientRect();
+      // Allow thin separators/borders (1-3px tall, wide) — important for layout diff
+      const isThin = (r.height >= 0.5 && r.height < 4 && r.width >= 80) ||
+                     (r.width  >= 0.5 && r.width  < 4 && r.height >= 80);
+      if (!isThin && (r.width < minSize || r.height < minSize)) continue;
+      // In-view gate for THIS frame (viewport-relative rect). Unchanged from the
+      // original walk — but now re-applied at every scroll step, so below-fold
+      // sections become visible in a later frame instead of never at all.
+      if (r.bottom < 0 || r.top > vh) continue;
+      if (r.right  < 0 || r.left > vw) continue;
+      const s = getComputedStyle(el);
+      if (s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity) === 0) continue;
+      const pageTop = r.top + sy, pageLeft = r.left + sx;
+      const txt = (el.textContent || '').trim().replace(/\s+/g,' ').slice(0, 120);
+      const path = pathOf(el);
+      const key = el.tagName + '|' + path + '|' + Math.round(pageTop) + '|' +
+                  Math.round(pageLeft) + '|' + txt.slice(0, 40);
+      if (seen.has(key)) continue;
+      const cx = pageLeft + r.width  / 2;
+      const cy = pageTop  + r.height / 2;
+      const styleObj = {};
+      props.forEach(p => styleObj[p] = s[p]);
+      seen.set(key, {
+        tag: el.tagName,
+        cls: (el.className && el.className.toString) ? el.className.toString().slice(0, 60) : '',
+        txt,
+        role: el.getAttribute('role') || '',
+        src: (el.currentSrc || el.getAttribute('src') || el.getAttribute('xlink:href') || '').slice(0, 200),
+        alt: (el.getAttribute('alt') || el.getAttribute('aria-label') || el.getAttribute('title') || '').slice(0, 80),
+        path,
+        x: +cx.toFixed(1), y: +cy.toFixed(1),
+        top: +pageTop.toFixed(1), left: +pageLeft.toFixed(1),
+        w: +r.width.toFixed(1), h: +r.height.toFixed(1),
+        area: +(r.width * r.height).toFixed(0),
+        thin: isThin,
+        style: styleObj,
+      });
+    }
+  };
+  // Step through the full page in viewport-height frames with 15% overlap so an
+  // element straddling a frame boundary is still fully walked in an adjacent
+  // frame. Covers the entire scrollHeight, so EVERY section is reached.
+  const vh = window.innerHeight;
+  const maxScroll = Math.max(0, document.documentElement.scrollHeight - vh);
+  const step = Math.max(100, Math.floor(vh * 0.85));
+  let top = 0;
+  while (true) {
+    window.scrollTo({ top, behavior: 'instant' });
+    await sleep(settle);
+    captureVisible();
+    if (top >= maxScroll) break;
+    top = Math.min(maxScroll, top + step);
   }
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  const out = Array.from(seen.values());
   out.sort((a,b) => b.area - a.area);
   return JSON.stringify(out.slice(0, maxN));
 })()
@@ -131,55 +221,24 @@ if [ ! -s "$TMP_IMPL" ]; then
   echo "ERROR: impl walk returned empty"; exit 2
 fi
 
-# ── Step 2: pair each impl element with ref via elementFromPoint ──
-echo "  ▸ Pairing on ref via elementFromPoint..."
-# Pass impl JSON to ref-side eval via window var (encoded as JSON literal in JS)
-PAIR_JS=$(python3 - "$TMP_IMPL" <<'PYEOF'
-import json, sys
-with open(sys.argv[1]) as f:
-    raw = f.read().strip()
-# agent-browser wraps string results in extra JSON quotes
-if raw.startswith('"') and raw.endswith('"'):
-    impl_list = json.loads(json.loads(raw))
-else:
-    impl_list = json.loads(raw)
-points = [{"i": i, "x": e["x"], "y": e["y"]} for i, e in enumerate(impl_list)]
-points_json = json.dumps(points)
-js = """
-(() => {
-  const points = %s;
-  const props = ['fontFamily','fontSize','fontWeight','fontStyle','letterSpacing',
-                 'lineHeight','textTransform','textAlign','color','backgroundColor',
-                 'display','position','padding','margin','borderRadius',
-                 'borderTopWidth','borderTopColor','opacity'];
-  const out = [];
-  for (const p of points) {
-    let el = document.elementFromPoint(p.x, p.y);
-    if (!el) { out.push({ i: p.i, miss: true }); continue; }
-    const r = el.getBoundingClientRect();
-    const s = getComputedStyle(el);
-    const styleObj = {};
-    props.forEach(k => styleObj[k] = s[k]);
-    const cx = r.left + r.width / 2;
-    const cy = r.top  + r.height / 2;
-    out.push({
-      i: p.i,
-      tag: el.tagName,
-      cls: (el.className && el.className.toString) ? el.className.toString().slice(0, 60) : '',
-      txt: (el.textContent || '').trim().replace(/\\s+/g,' ').slice(0, 30),
-      x: +cx.toFixed(1), y: +cy.toFixed(1),
-      top: +r.top.toFixed(1), left: +r.left.toFixed(1),
-      w: +r.width.toFixed(1), h: +r.height.toFixed(1),
-      style: styleObj,
-    });
-  }
-  return JSON.stringify(out);
-})()
-""" % points_json
-print(js)
-PYEOF
-)
-agent-browser --session "$REF_SESS" eval "$PAIR_JS" > "$TMP_REF" 2>&1
+# ── Step 2a: walk the FULL ref tree (same walk as impl) ──
+echo "  ▸ Walking ref tree..."
+agent-browser --session "$REF_SESS" eval "$WALK_JS" > "$TMP_REF_FULL" 2>&1
+if [ ! -s "$TMP_REF_FULL" ]; then
+  echo "ERROR: ref walk returned empty"; exit 2
+fi
+
+# ── Step 2b: pair impl ↔ ref by CONTENT + STRUCTURE ──
+# Pairing lives in ui_clone.tree_diff_pairing (unit-tested) so it can be
+# verified independently. It anchors each impl element to its ref counterpart
+# by text similarity → structural identity (tag/role/src/alt/box/path) →
+# section-relative position (final tiebreaker) — NEVER by absolute screen
+# coordinate, which mis-pairs across differently-tall pages. Output is tagged
+# with the impl index `i`, the exact shape the diff below already consumes.
+echo "  ▸ Pairing impl ↔ ref by content + structure..."
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m ui_clone.tree_diff_pairing pair \
+  "$TMP_IMPL" "$TMP_REF_FULL" "$TMP_REF" 2>&1
 if [ ! -s "$TMP_REF" ]; then
   echo "ERROR: ref pairing returned empty"; exit 2
 fi
@@ -244,6 +303,37 @@ def norm(prop, v):
             except: pass
     return v
 
+# Typographic props that norm() rounds to 0.5px for the PASS/FAIL decision.
+TYPO_PX = ("fontSize", "lineHeight", "letterSpacing")
+
+def _px(v):
+    """Parse a 'NNpx' computed value to float, else None."""
+    if v is None: return None
+    v = str(v).strip()
+    if v.endswith("px"):
+        try: return float(v[:-2])
+        except (TypeError, ValueError): return None
+    return None
+
+def subpx_drift(a, b):
+    """Raw (unrounded) px deltas for typographic props the norm() rounding
+    collapses to equal. REPORTING-ONLY: this never feeds severity_of() or the
+    status sidecar, so the PASS/FAIL tolerance is unchanged — it only surfaces
+    sub-pixel drift (e.g. 15.84px vs 16.0px) that rounding would otherwise hide.
+    A token-system value like 15.84px must not silently vanish from the diff."""
+    out = []
+    for k in TYPO_PX:
+        av, bv = a.get(k, ""), b.get(k, "")
+        # Only the masked case: PASS/FAIL diff already dropped it (normed-equal)
+        # but the raw values genuinely differ.
+        if norm(k, av) != norm(k, bv): continue
+        fa, fb = _px(av), _px(bv)
+        if fa is None or fb is None: continue
+        d = abs(fa - fb)
+        if d > 0:
+            out.append((k, av, bv, round(d, 4)))
+    return out
+
 def diff_styles(a, b):
     diffs = []
     for k in a:
@@ -289,19 +379,19 @@ for i, ie in enumerate(impl):
             "impl_tag": ie["tag"], "impl_cls": ie["cls"], "txt": ie["txt"],
             "impl_xy": (ie["x"], ie["y"]),
             "ref_xy": None,
-            "diffs": [], "layout_diffs": [],
+            "diffs": [], "layout_diffs": [], "subpx_drift": [],
         }); continue
-    # confidence by center distance
+    # Pairing is decided upstream by ui_clone.tree_diff_pairing (content +
+    # structure). A non-miss `re` here is an accepted pair, so the per-pair
+    # style + layout diff runs unconditionally — the screen-coordinate gate
+    # that used to drop content-correct pairs across differently-tall pages is
+    # gone. dx/dy are kept for reporting only (cross-page position delta).
     dx = abs(ie["x"] - re["x"]); dy = abs(ie["y"] - re["y"])
-    pair_ok = (dx <= tol and dy <= tol)
-    diffs = diff_styles(ie["style"], re["style"]) if pair_ok else []
-    layout_diffs = diff_layout(ie, re) if pair_ok else []
-    if not pair_ok:
-        sev = "unpaired"
-    else:
-        style_sev = severity_of(diffs)
-        lay_sev   = layout_severity(layout_diffs)
-        sev = style_sev if SEV_RANK[style_sev] >= SEV_RANK[lay_sev] else lay_sev
+    diffs = diff_styles(ie["style"], re["style"])
+    layout_diffs = diff_layout(ie, re)
+    style_sev = severity_of(diffs)
+    lay_sev   = layout_severity(layout_diffs)
+    sev = style_sev if SEV_RANK[style_sev] >= SEV_RANK[lay_sev] else lay_sev
     rows.append({
         "i": i, "sev": sev,
         "impl_tag": ie["tag"], "impl_cls": ie["cls"], "txt": ie["txt"],
@@ -313,6 +403,7 @@ for i, ie in enumerate(impl):
         "dx": dx, "dy": dy,
         "diffs": diffs,
         "layout_diffs": layout_diffs,
+        "subpx_drift": subpx_drift(ie["style"], re["style"]),
     })
 
 rows.sort(key=lambda r: (-SEV_RANK[r["sev"]], -impl[r["i"]]["area"]))
@@ -361,6 +452,22 @@ with open(md_path, "w") as f:
         if len(ld) > 3: ld_str += f" (+{len(ld)-3})"
         f.write(f"| {r['i']} | {sev_label} | `{impl_id}` | {txt} | {xy} | {d} | {ld_str} |\n")
 
+    # ── Sub-pixel typographic drift (within PASS tolerance — reported, not failing) ──
+    # norm() rounds fontSize/lineHeight/letterSpacing to 0.5px for the gate, so a
+    # 15.84px-vs-16.0px difference is masked from the table above (sev "ok"). It is
+    # still real token-system drift, so surface the RAW unrounded delta here. This
+    # section is informational only — it does NOT change any PASS/FAIL count.
+    drift_rows = [r for r in rows if r.get("subpx_drift")]
+    if drift_rows:
+        f.write("\n## Sub-pixel typographic drift (within tolerance — reported, not failing)\n\n")
+        f.write("| # | Impl tag.cls | Text | Raw drift (impl→ref Δpx) |\n")
+        f.write("|---|---|---|---|\n")
+        for r in drift_rows:
+            impl_id = f"{r['impl_tag']}.{r['impl_cls'][:25]}".rstrip(".")
+            txt = (r["txt"] or "")[:24]
+            ds = "; ".join(f"`{p}`: {a}→{b} Δ{d}" for p, a, b, d in r["subpx_drift"])
+            f.write(f"| {r['i']} | `{impl_id}` | {txt} | {ds} |\n")
+
 # ── JSON ──
 json_path = os.path.join(out_dir, "tree-diff.json")
 with open(json_path, "w") as f:
@@ -396,6 +503,9 @@ print(f"  Walked {len(impl)} elements")
 print(f"  🔴 critical: {counts['critical']}   🟠 major: {counts['major']}   🟣 layout-major: {counts['layout-major']}   🔶 advisory: {counts['advisory']}   🟡 minor: {counts['minor']}   🟦 layout-minor: {counts['layout-minor']}   ⚪ unpaired: {counts['unpaired']}   ✓ ok: {counts['ok']}")
 print(f"  Report: {md_path}")
 print(f"  Raw:    {json_path}")
+_drift_n = sum(1 for r in rows if r.get("subpx_drift"))
+if _drift_n:
+    print(f"  📐 sub-pixel typographic drift (within tolerance, reported): {_drift_n} element(s)")
 print()
 if counts["critical"] or counts["major"] or counts["layout-major"] or pairing_fail:
     print("Top critical/major/layout-major:")

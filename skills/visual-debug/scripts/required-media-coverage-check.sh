@@ -64,19 +64,20 @@ from pathlib import Path
 out_path = Path(sys.argv[1])
 payload = {
     "schemaVersion": 1,
-    "status": "pass",
-    "reason": "required-media.json absent — extractor (Step 6b-bis) has not run; nothing to enforce at this gate",
+    "status": "fail",
+    "reason": "required-media.json absent — extractor (Step 6b-bis) has not run; required media coverage cannot be proven",
     "implRoot": sys.argv[2],
     "implDir": sys.argv[3],
     "implSrcDir": sys.argv[4],
     "implPublicDir": sys.argv[5],
     "implPkgJson": sys.argv[6],
     "missing": {"video": [], "lottie": [], "svg": []},
+    "fix": "Run scripts/extract/required-media.sh <ref-dir> before required-media-coverage-check.sh, even when it emits zero required media.",
 }
 out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
-  echo "required-media-coverage: pass (no required-media.json — extractor not run)"
-  exit 0
+  echo "required-media-coverage: fail (required-media.json missing — run extractor Step 6b-bis)"
+  exit 1
 fi
 
 if [ -z "$IMPL_ROOT" ] || [ ! -d "$IMPL_ROOT" ]; then

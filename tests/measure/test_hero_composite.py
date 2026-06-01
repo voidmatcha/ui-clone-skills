@@ -210,3 +210,48 @@ def test_hero_composite_check_prefers_data_section_locator(tmp_path: Path) -> No
     assert art["status"] == "pass", art
     assert any("Banner" in f for f in art["implCandidateFiles"]), art
 
+
+
+def test_hero_composite_check_inventories_canvas_kind(tmp_path: Path) -> None:
+    """FIX 2a addendum (rank235): a ref hero with a <canvas> (bare WebGL mount
+    div) must be inventoried as the `canvas` kind, so an impl whose hero has no
+    canvas FAILS with canvas listed in missingInImpl. Previously the kind set
+    (video/button/h1|h2/span) omitted canvas, so a blank WebGL hero slipped by.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src" / "components"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "section", "class": "site_hero__X",
+            "children": [
+                {"tag": "canvas", "class": "hero-webgl", "children": []},
+                {"tag": "h1", "text": "Shaders", "children": []},
+            ],
+        }],
+    }))
+    # Impl hero renders the heading but mounts no canvas.
+    (src / "Hero.tsx").write_text(
+        'export function Hero() {\n'
+        '  return (\n'
+        '    <section data-section="hero">\n'
+        '      <h1>Shaders</h1>\n'
+        '    </section>\n'
+        '  );\n'
+        '}\n'
+    )
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "hero-composite.json").read_text(encoding="utf-8"))
+    assert artifact["ref"]["canvas"] is True
+    assert artifact["impl"]["canvas"] is False
+    assert "canvas" in artifact["missingInImpl"]

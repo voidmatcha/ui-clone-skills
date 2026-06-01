@@ -14,6 +14,22 @@ Use JS bundle extraction when ANY of these are true:
 - Element uses Motion (`motion.div`, `E.div`), GSAP (`gsap.to`), or rAF-based animation
 - Values change only during scroll (not on hover/click/load)
 
+> **Presence is decided by BEHAVIOR, not by bundle-grep (Fix 30 / allowlist audit).**
+> The bundle-grep / library-token detection below (`ANIM_PATTERNS`, `gsap.*`,
+> `new Lenis`, `ScrollTrigger`, `matches >= 2`, the scroll-library signature
+> table) is a **parameter-extraction HINT** used AFTER motion is confirmed — it
+> pulls exact easing/duration/offset/from-to for an element already known to
+> move. It is NOT the presence gate. **An empty bundle-grep does NOT mean the
+> page is static.** Whether an element animates is decided by OBSERVED behavior —
+> the Phase B element-tracking / `transition-coverage.json` variance
+> classification (does its transform/opacity/scale/clipPath/top change across
+> scroll positions?), which is library-agnostic and catches ScrollMagic, AOS,
+> anime.js, Motion One, native CSS scroll-timeline, and hand-rolled rAF/IO that
+> no token list enumerates. If behavior shows motion but bundle-grep finds no
+> known library, still author the `transition-spec.json` entry from the observed
+> from/to values; the missing library just means you extract params from runtime
+> samples instead of the bundle.
+
 ## Step 1: Find the relevant JS chunk
 
 ```bash

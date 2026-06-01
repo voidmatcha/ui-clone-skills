@@ -166,6 +166,28 @@ if isinstance(ard, dict):
         ref_classes.add("gsap-scrolltrigger")
         ref_evidence.append("animation-runtime:scrollTrigger")
 
+# Scroll-engine extraction artifact. This is the canonical Step 5c/bundle
+# signal, and often contains the only normalized Lenis/ScrollTrigger pin/scrub
+# evidence when bundle-map failed to name the library precisely.
+se = read_json(ref_dir / "scroll-engine.json")
+if isinstance(se, dict):
+    se_text = json.dumps(se, ensure_ascii=False).lower()
+    if "scrolltrigger" in se_text or ("gsap" in se_text and "scroll" in se_text):
+        ref_classes.add("gsap-scrolltrigger")
+        ref_evidence.append("scroll-engine:ScrollTrigger")
+    if "lenis" in se_text or "locomotive" in se_text or "scrollsmoother" in se_text:
+        ref_classes.add("lenis-smooth-scroll")
+        ref_evidence.append("scroll-engine:smooth-scroll")
+    if re.search(r'"scrub"\s*:\s*true|\bscrub\s*[:=]|\bsticky-scrub\b|\bscroll-scrub\b', se_text):
+        ref_classes.add("scroll-scrub")
+        ref_evidence.append("scroll-engine:scrub")
+    if re.search(r'"pin"\s*:\s*true|\bpin\s*[:=]|\bsticky-scrub\b|\bscroll-pin\b', se_text):
+        ref_classes.add("scroll-pin")
+        ref_evidence.append("scroll-engine:pin")
+    if "scroll" in se_text:
+        ref_classes.add("scroll-driven")
+        ref_evidence.append("scroll-engine:scroll")
+
 # CSS scroll-timeline in ref bundles.
 bundles_css = ref_dir / "bundles"
 if bundles_css.is_dir():

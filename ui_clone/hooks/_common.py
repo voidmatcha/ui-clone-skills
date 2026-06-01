@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -180,6 +181,82 @@ def load_json_safe(path: Path) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     return data
+
+
+def extract_tool_command(data: dict[str, Any]) -> str:
+    """Return a shell command from Claude- or Codex-shaped hook payloads."""
+    candidates: list[Any] = []
+    tool_input = data.get("tool_input")
+    if isinstance(tool_input, dict):
+        candidates.extend([tool_input.get("command"), tool_input.get("cmd")])
+    candidates.extend([data.get("command"), data.get("cmd")])
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return ""
+
+
+def _parse_patch_paths(patch: str) -> list[str]:
+    """Extract touched paths from Codex/Claude apply_patch or unified diff text."""
+    paths: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith(("*** Add File: ", "*** Update File: ", "*** Delete File: ")):
+            paths.append(line.split(": ", 1)[1].strip())
+            continue
+        if line.startswith("*** Move to: "):
+            paths.append(line.removeprefix("*** Move to: ").strip())
+            continue
+        match = re.match(r"diff --git a/(.+?) b/(.+)$", line)
+        if match:
+            paths.extend([match.group(1), match.group(2)])
+            continue
+        if line.startswith(("+++ b/", "--- a/")):
+            paths.append(line[6:].strip())
+    return paths
+
+
+def extract_tool_file_paths(data: dict[str, Any]) -> list[str]:
+    """Return all file paths from Claude- or Codex-shaped write hook payloads.
+
+    Claude Write/Edit/MultiEdit payloads normally provide `file_path`. Codex
+    apply_patch payloads may provide only a patch body, so parse patch headers
+    too. Unknown payload shapes safely return an empty list.
+    """
+    paths: list[str] = []
+    containers: list[dict[str, Any]] = [data]
+    tool_input = data.get("tool_input")
+    if isinstance(tool_input, dict):
+        containers.insert(0, tool_input)
+
+    for container in containers:
+        for key in ("file_path", "filepath", "path", "filename"):
+            value = container.get(key)
+            if isinstance(value, str) and value:
+                paths.append(value)
+        for key in ("file_paths", "paths", "files"):
+            value = container.get(key)
+            if isinstance(value, list):
+                paths.extend(item for item in value if isinstance(item, str) and item)
+        edits = container.get("edits")
+        if isinstance(edits, list):
+            for edit in edits:
+                if isinstance(edit, dict):
+                    value = edit.get("file_path") or edit.get("path")
+                    if isinstance(value, str) and value:
+                        paths.append(value)
+        for key in ("patch", "input", "content", "diff"):
+            value = container.get(key)
+            if isinstance(value, str) and value:
+                paths.extend(_parse_patch_paths(value))
+
+    # Preserve order while de-duplicating.
+    seen: set[str] = set()
+    result: list[str] = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            result.append(path)
+    return result
 
 
 _DEFAULT_COMPONENT_SUBSTRINGS = ("/src/components/", "/src/projects/")

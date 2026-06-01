@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from ._helpers import (
     _baseline_post_implement_inputs,
@@ -377,6 +380,77 @@ def test_ref_screenshot_asset_pass_on_clean_impl(tmp_path: Path) -> None:
     assert art["status"] == "pass"
 
 
+def test_ref_screenshot_asset_fail_on_reencoded_near_match(tmp_path: Path) -> None:
+    """The screenshot-as-background cheat re-encodes ref section crops (so the
+    bytes — and sha256 — differ) and serves them at a generic /sections/<name>.png
+    path. The sha256 byte-identical check misses it; a perceptual/AE near-match
+    against ref/sections/ref/*.png must catch it."""
+    magick = shutil.which("magick") or shutil.which("convert")
+    if not magick:
+        pytest.skip("ImageMagick not available")
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    impl = tmp_path / "impl"
+    (impl / "public" / "sections").mkdir(parents=True)
+    (impl / "src").mkdir()
+    ref_crop = ref / "sections" / "ref" / "dga_hero__AjMaf.png"
+    subprocess.run(
+        [magick, "-size", "200x300", "xc:white", "-fill", "navy",
+         "-draw", "rectangle 20,20 180,160", str(ref_crop)],
+        check=True,
+    )
+    # Re-encode the same pixels under a generic crop path (the cheat).
+    impl_png = impl / "public" / "sections" / "dga_hero__AjMaf.png"
+    subprocess.run(
+        [magick, str(ref_crop), "-strip", "-quality", "88", str(impl_png)],
+        check=True,
+    )
+    assert ref_crop.read_bytes() != impl_png.read_bytes(), "fixture must re-encode (differ in bytes)"
+    (impl / "src" / "App.tsx").write_text("export default function A(){return null}\n")
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    art = json.loads((ref / "ref-screenshot-asset.json").read_text())
+    assert art["status"] == "fail"
+    kinds = {v["kind"] for v in art["violations"]}
+    assert "screenshot-asset-near-match" in kinds, kinds
+
+
+def test_ref_screenshot_asset_pass_on_genuine_different_image(tmp_path: Path) -> None:
+    """A genuine clone ships its own images; as long as they do NOT pixel-match
+    the verifier's ref section crops, near-match must not false-positive."""
+    magick = shutil.which("magick") or shutil.which("convert")
+    if not magick:
+        pytest.skip("ImageMagick not available")
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    impl = tmp_path / "impl"
+    (impl / "public").mkdir(parents=True)
+    (impl / "src").mkdir()
+    ref_crop = ref / "sections" / "ref" / "hero.png"
+    subprocess.run(
+        [magick, "-size", "200x300", "xc:white", "-fill", "navy",
+         "-draw", "rectangle 20,20 180,160", str(ref_crop)],
+        check=True,
+    )
+    impl_png = impl / "public" / "logo.png"
+    subprocess.run(
+        [magick, "-size", "200x300", "xc:black", "-fill", "yellow",
+         "-draw", "circle 100,150 100,40", str(impl_png)],
+        check=True,
+    )
+    (impl / "src" / "App.tsx").write_text("export default function A(){return null}\n")
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    art = json.loads((ref / "ref-screenshot-asset.json").read_text())
+    assert art["status"] == "pass"
+
+
 
 # ── Canvas-replay allowlist for ref-screenshot-asset (v0.7.0) ───────────
 # When closeoutPolicy=="canvas-replay" AND attestation is present AND a
@@ -565,3 +639,71 @@ def test_gate_svg_dom_parity_status_fail_fails(tmp_path: Path) -> None:
     failures = [r for r in results if r.status == "fail"]
     assert any("svg-dom-parity" in r.label for r in failures), results
 
+
+
+# ── FIX 3: ref-screenshot-asset self-scan false positive ─────────────────
+# The check flagged 1 violation {"file":"ref-screenshot-asset.json",
+# "kind":"ref-path-reference","needle":"tmp/ref/"} — it scanned its OWN output
+# artifact (and sibling gate JSONs in the ref dir) and matched the "tmp/ref/"
+# path string baked inside them. The gate's own output artifacts must be
+# excluded from the scanned set; real ref-screenshot reuse in impl source still
+# flags.
+
+
+def test_ref_screenshot_asset_ignores_own_gate_artifacts(tmp_path: Path) -> None:
+    """A prior gate-output JSON in the ref dir (containing 'tmp/ref/' paths)
+    must NOT be flagged as a ref-path-reference when the ref dir is scanned —
+    it is the gate's own artifact, not impl source."""
+    d = tmp_path / "ref"
+    (d / "sections" / "ref").mkdir(parents=True)  # empty: no binary self-match
+    (d / "src").mkdir()
+    # Prior gate outputs that bake the forbidden substring into their bodies.
+    (d / "ref-screenshot-asset.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "fail",
+        "violations": [{"file": "x", "kind": "byte-identical-copy",
+                        "refSource": "tmp/ref/comp/sections/ref/hero.png"}],
+    }))
+    (d / "svg-dom-parity-check.json").write_text(json.dumps({
+        "refUrl": "tmp/ref/comp/static/ref/0.png", "violations": [],
+    }))
+    # Clean impl source: no reference reuse at all.
+    (d / "src" / "App.tsx").write_text("export default function A(){return null}\n")
+
+    # The reported config: impl_root resolves onto the ref dir's own artifacts.
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(d), str(d),
+    )
+    assert proc.returncode == 0, (
+        f"gate must not flag its own output artifacts: {proc.stdout}\n{proc.stderr}"
+    )
+    art = json.loads((d / "ref-screenshot-asset.json").read_text())
+    assert art["status"] == "pass", art
+    assert art["violationCount"] == 0, art["violations"]
+
+
+def test_ref_screenshot_asset_real_reuse_still_flags_with_ref_artifacts(tmp_path: Path) -> None:
+    """Boundary: even when the ref dir holds gate-output JSONs, a REAL
+    ref-screenshot reference in impl SOURCE still flags."""
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    # A prior gate artifact present in the ref dir (the false-positive source).
+    (ref / "ref-screenshot-asset.json").write_text(json.dumps({
+        "status": "pass", "violations": [],
+        "note": "tmp/ref/comp/sections/ref/hero.png",
+    }))
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    (impl / "src" / "App.tsx").write_text(
+        'export const BG = "tmp/ref/comp/sections/ref/hero.png";\n'
+    )
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 1, (
+        f"real ref-screenshot reuse must still flag: {proc.stdout}\n{proc.stderr}"
+    )
+    art = json.loads((ref / "ref-screenshot-asset.json").read_text())
+    kinds = {v["kind"] for v in art["violations"]}
+    assert "ref-path-reference" in kinds, art

@@ -258,7 +258,10 @@ def test_spec_implementation_coverage_passes_trigger_specific_impls(tmp_path: Pa
         "export function Interactions() {\n"
         "  const [open, setOpen] = useState(false);\n"
         "  const lenis = new Lenis({ smoothWheel: true });\n"
-        "  return <main>\n"
+        # data-transition wires the smooth-scroll-lenis entry to this file so
+        # FIX 3's missing-entirely accounting can locate it (Lenis targets the
+        # whole page, so the spec selector is "html" with no class hook).
+        "  return <main data-transition=\"smooth-scroll-lenis\">\n"
         "    <button className=\"nav-dot transition-transform hover:scale-105\" onPointerEnter={() => lenis.raf(performance.now())}>dot</button>\n"
         "    <section className=\"faq\" aria-expanded={open} onClick={() => setOpen(!open)} style={{ transition: 'height .3s' }}>faq</section>\n"
         "  </main>;\n"
@@ -636,3 +639,36 @@ def test_hover_state_compare_fans_out_per_viewport(tmp_path: Path) -> None:
     assert (ref / "transitions" / "hover-state" / "375x812" / "btn").is_dir()
     assert (ref / "transitions" / "hover-state" / "1920x1080" / "btn").is_dir()
 
+
+
+def test_spec_implementation_coverage_counts_missing_entirely_entries(tmp_path: Path) -> None:
+    """FIX 3 (rank235): a transition-spec entry whose selector/id matches NO
+    impl file is a real coverage gap, not an exemption. Previously this case
+    printed a ⚠️ row and `continue`d without incrementing UNCOVERED, so a
+    transition that was never implemented at all was invisible to this gate's
+    pass/fail. The gate must now exit 1 and count it under missingEntirely.
+    """
+    import subprocess
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "ghost-reveal", "trigger": "scroll", "type": "scroll-driven",
+             "selector": ".totally-absent-section"}
+        ]
+    }))
+    # Impl has an unrelated component — the entry's id/selector match nothing.
+    (impl / "src" / "Footer.tsx").write_text(
+        "export function Footer() { return <footer>contact</footer>; }\n"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["missingEntirely"] == 1

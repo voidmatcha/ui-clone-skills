@@ -7,6 +7,7 @@ fits under the per-gate ≤500-line budget. They're imported back into
 
 from __future__ import annotations
 
+import json
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -263,10 +264,22 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
         rules = hover_rules.get("rules") or hover_rules.get("entries")
         if isinstance(rules, list) and rules:
             upstream_signals.append(f"hover-css-rules.json.rules[{len(rules)}]")
-    regions = self._load_json("regions.json")
-    if isinstance(regions, list):
+    # juanmora-iter-10 finding (2026-05-28): regions.json schema migrated
+    # from bare list to `{"regions": [...]}` dict-wrap (per
+    # _capture_artifacts.write_regions_json). The old `isinstance(list)`
+    # branch silently never fired against new captures, masking any
+    # hover/click upstream signal regions.json carried. Accept both shapes.
+    regions_raw = self._load_json("regions.json")
+    region_list: list = []
+    if isinstance(regions_raw, list):
+        region_list = regions_raw
+    elif isinstance(regions_raw, dict):
+        nested = regions_raw.get("regions")
+        if isinstance(nested, list):
+            region_list = nested
+    if region_list:
         hover_click = [
-            r for r in regions
+            r for r in region_list
             if isinstance(r, dict)
             and str(r.get("triggerType") or "").startswith(("hover", "click-"))
         ]
@@ -294,21 +307,121 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
     ]
 
 
+# Strong scroll-motion tokens. scroll-engine.json can be EMPTY on a GSAP
+# ScrollTrigger site — the real evidence then lives in the JS bundles / plan /
+# sdk artifacts, so we scan those too (heuristic substring grep, not a parser).
+_SCROLL_MOTION_TOKENS = (
+    "ScrollTrigger",
+    "gsap-scrolltrigger",
+    "scrollYProgress",
+    "useScroll",
+    "scroll-scrub",
+    "scroll-pin",
+    "scrub:",
+    "pin:",
+)
+
+
+_TRACK_PROPS = ("transform", "opacity", "scale", "clipPath", "top")
+
+
+def _observed_scroll_motion(self: Gate) -> bool:
+    """Library-agnostic: True when motion was OBSERVED under scroll during
+    extraction, independent of any token allowlist. Catches unknown / hand-rolled
+    motion and non-sticky parallax/reveal that no token grep sees, via
+    transition-coverage scroll-classified elements (trigger ~ /scroll/ or sticky
+    decoded.position) or element-tracking cross-position property change.
+    """
+    cov = self._load_json("transition-coverage.json")
+    if isinstance(cov, dict):
+        for el in cov.get("animatedElements") or []:
+            if not isinstance(el, dict):
+                continue
+            if "scroll" in str(el.get("trigger", "")).lower():
+                return True
+            dec = el.get("decoded") or {}
+            if isinstance(dec, dict) and str(dec.get("position", "")).lower() == "sticky":
+                return True
+    track = self._load_json_any("element-tracking.json")
+    if isinstance(track, list) and len(track) >= 2:
+        seen: dict[str, dict[str, set[str]]] = {}
+        for frame in track:
+            elems = frame.get("elements") if isinstance(frame, dict) else None
+            for el in elems or []:
+                if not isinstance(el, dict):
+                    continue
+                sel = el.get("selector")
+                if sel is None:
+                    continue
+                bucket = seen.setdefault(sel, {p: set() for p in _TRACK_PROPS})
+                for p in _TRACK_PROPS:
+                    bucket[p].add(json.dumps(el.get(p), sort_keys=True))
+        for props in seen.values():
+            if any(len(props[p]) >= 2 for p in _TRACK_PROPS):
+                return True
+    return False
+
+
+def _scroll_motion_signals(self: Gate) -> bool:
+    """True when STRONG scroll-motion evidence appears in ANY upstream artifact.
+
+    Sources (broadened beyond scroll-engine.json so GSAP ScrollTrigger sites,
+    whose scroll-engine.json is often empty, are not missed):
+      - scroll-engine.json detected.<x>.matches > 0 (framer-motion / IO path)
+      - _SCROLL_MOTION_TOKENS in bundle-map.json / external-sdks.json /
+        generation-plan.json
+      - _SCROLL_MOTION_TOKENS in the first ~30 JS bundles under bundles/
+        (each read up to ~2MB — a bounded heuristic, not a full parse)
+      - observed motion (transition-coverage scroll-classified / element-tracking
+        cross-position change) — library-agnostic, see _observed_scroll_motion
+    """
+    # 1) framer-motion / IntersectionObserver path via scroll-engine.json.
+    scroll_engine = self._load_json("scroll-engine.json") or {}
+    detected = (scroll_engine.get("detected") or {}) if isinstance(scroll_engine, dict) else {}
+    for key in ("motion", "useScroll", "scrollYProgress", "IntersectionObserver"):
+        entry = detected.get(key) or {}
+        if isinstance(entry, dict) and (entry.get("matches") or 0) > 0:
+            return True
+    # 2) GSAP / scroll tokens in JSON artifacts (list-or-dict safe).
+    for fname in ("bundle-map.json", "external-sdks.json", "generation-plan.json"):
+        blob = json.dumps(self._load_json_any(fname) or "")
+        if any(tok in blob for tok in _SCROLL_MOTION_TOKENS):
+            return True
+    # 3) bounded scan of the first ~30 JS bundles (≤2MB each).
+    bundles_dir = self.ref_dir / "bundles"
+    if bundles_dir.is_dir():
+        for path in sorted(bundles_dir.glob("*.js"))[:30]:
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")[: 2 * 1024 * 1024]
+            except OSError:
+                continue
+            if any(tok in text for tok in _SCROLL_MOTION_TOKENS):
+                return True
+    # 4) observed motion (library-agnostic) — fires regardless of which library
+    #    (or none) drove it, if pixels actually moved under scroll.
+    if _observed_scroll_motion(self):
+        return True
+    return False
+
+
 def _check_scroll_spec_coverage(self: Gate, spec: Any) -> list[CheckResult]:
     """Detect the audit incident / Codex audit issue 5 escape: upstream artifacts
-    show sticky elements + non-GSAP scroll engine signals (framer-motion,
-    IntersectionObserver, scrollYProgress) but transition-spec.json has
-    zero scroll-triggered entries, so motion verification never fires.
+    show sticky elements + scroll-motion evidence (framer-motion,
+    IntersectionObserver, scrollYProgress, or GSAP ScrollTrigger / scroll-scrub /
+    pin tokens in the bundles / plan / sdk) but transition-spec.json has zero
+    scroll-triggered entries, so motion verification never fires.
 
-    Fails when ALL of the following hold:
-      - sticky-elements.json (or extracted.json.stickyElements) is non-empty
-      - scroll-engine.json shows at least one detected.<x>.matches > 0
-        among (motion / useScroll / scrollYProgress / IntersectionObserver)
-      - transition-spec.json has zero entries whose trigger / type contains
-        scroll | intersection | inview | viewport | scrub
+    Fires whenever scroll motion was observed/evidenced — sticky OR non-sticky
+    parallax/reveal (the sticky-ONLY precondition is dropped so unknown-library
+    and non-sticky cases are caught). Fails when ALL of the following hold:
+      - sticky-elements.json is non-empty OR a scroll-classified element was
+        observed (transition-coverage / element-tracking)
+      - _scroll_motion_signals() is True (allowlist tokens OR observed motion)
+      - transition-spec.json has zero entries whose trigger / type / mechanism
+        contains scroll | intersection | inview | viewport | scrub
     """
     # sticky-elements.json can be a list OR a wrapper dict — coerce to list[Any].
-    raw_sticky = self._load_json("sticky-elements.json")
+    raw_sticky = self._load_json_any("sticky-elements.json")
     sticky: list[Any] = []
     if isinstance(raw_sticky, list):
         sticky = raw_sticky
@@ -321,17 +434,12 @@ def _check_scroll_spec_coverage(self: Gate, spec: Any) -> list[CheckResult]:
         ext_sticky = extracted.get("stickyElements") if isinstance(extracted, dict) else None
         if isinstance(ext_sticky, list):
             sticky = ext_sticky
-    if not sticky:
+    observed = _observed_scroll_motion(self)
+    # Drop the sticky-ONLY precondition: any observed scroll-classified element
+    # (sticky OR non-sticky parallax/reveal) requires a scroll-trigger spec entry.
+    if not sticky and not observed:
         return []
-    scroll_engine = self._load_json("scroll-engine.json") or {}
-    detected = (scroll_engine.get("detected") or {}) if isinstance(scroll_engine, dict) else {}
-    non_gsap_signal = False
-    for key in ("motion", "useScroll", "scrollYProgress", "IntersectionObserver"):
-        entry = detected.get(key) or {}
-        if isinstance(entry, dict) and (entry.get("matches") or 0) > 0:
-            non_gsap_signal = True
-            break
-    if not non_gsap_signal:
+    if not self._scroll_motion_signals():
         return []
     spec_entries: list[Any] = []
     if isinstance(spec, list):
@@ -347,36 +455,36 @@ def _check_scroll_spec_coverage(self: Gate, spec: Any) -> list[CheckResult]:
         if scroll_pattern.search(blob):
             has_scroll_entry = True
             break
+    if sticky:
+        sample_sticky = ", ".join(
+            (e.get("className") or e.get("cls") or e.get("tag") or "?")
+            for e in sticky[:3]
+            if isinstance(e, dict)
+        )
+        observed_desc = f"{len(sticky)} sticky element(s) ({sample_sticky})"
+    else:
+        observed_desc = "observed scroll motion (non-sticky parallax/reveal)"
     if has_scroll_entry:
         return [
             CheckResult(
                 "scroll-spec-coverage",
                 "pass",
-                f"✓ {len(sticky)} sticky element(s) + scroll-engine signal — "
+                f"✓ {observed_desc} + scroll-motion evidence — "
                 "transition-spec has scroll-trigger entries.",
             )
         ]
-    sample_sticky = ", ".join(
-        (e.get("className") or e.get("cls") or e.get("tag") or "?")
-        for e in sticky[:3]
-        if isinstance(e, dict)
-    )
-    signals = ", ".join(
-        f"{k}({(detected[k] or {}).get('matches')})"
-        for k in ("motion", "useScroll", "scrollYProgress", "IntersectionObserver")
-        if isinstance(detected.get(k), dict)
-        and (detected[k].get("matches") or 0) > 0
-    )
     return [
         CheckResult(
             "scroll-spec-coverage",
             "fail",
-            f"❌ {len(sticky)} sticky element(s) detected ({sample_sticky}) "
-            f"+ scroll engine signals ({signals}), but transition-spec.json "
-            "has ZERO scroll-trigger entries. Pin / scroll-scrub motion "
+            f"❌ {observed_desc} detected "
+            "+ scroll-motion evidence (scroll-engine / bundles / sdk / plan / "
+            "observed motion), but transition-spec.json "
+            "has ZERO scroll-trigger entries. Pin / scroll-scrub / parallax / "
+            "reveal motion "
             "will be unverified. Add transition-spec entries with "
             '`"trigger": "scroll"` or `"mechanism": "scroll-scrub"` for '
-            "each animated sticky region.",
+            "each animated region.",
             fix="Re-run scripts/extract/generation-plan.sh then enrich "
             "transition-spec.json with scroll-triggered entries per "
             "sticky-elements.json; consult animation-detection.md Phase B.",

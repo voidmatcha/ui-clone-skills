@@ -29,9 +29,14 @@ python3 - "$REF_DIR" "$OUT" <<'PY'
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import sys
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import unquote, urlparse
+from urllib.request import Request, urlopen
 
 ref_dir = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
@@ -62,6 +67,179 @@ font_parity = load("font-parity.json", {})
 canvas_webgl = load("canvas-webgl-detection.json", {})
 
 
+CSS_MODULE_CLASS_RE = re.compile(r"\b[A-Za-z][\w-]*__[A-Za-z0-9_-]{4,}\b")
+CSS_MODULE_FORENSIC_MIN_SIGNATURES = 10
+CSS_MODULE_STRONG_SIGNATURES_WITH_MISSING_CSS = 25
+CSS_FORENSIC_MIN_BYTES = 10_000
+CSS_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
+CSS_DOWNLOAD_TIMEOUT_SECONDS = 20
+
+
+def walk_values(value):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from walk_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_values(child)
+    elif isinstance(value, str):
+        yield value
+
+
+def css_bytes_and_files() -> tuple[int, list[str]]:
+    css_dir = ref_dir / "css"
+    if not css_dir.is_dir():
+        return 0, []
+    files = sorted(p for p in css_dir.glob("*.css") if p.is_file())
+    total = sum(p.stat().st_size for p in files)
+    return total, [str(p.relative_to(ref_dir)) for p in files]
+
+
+def parse_jsonish(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def stylesheet_urls_from_artifact(value) -> list[str]:
+    value = parse_jsonish(value)
+    urls: list[str] = []
+    candidates = []
+    if isinstance(value, dict):
+        candidates.append(value)
+        head = parse_jsonish(value.get("head"))
+        if isinstance(head, dict):
+            candidates.append(head)
+    for artifact in candidates:
+        links = artifact.get("links")
+        if not isinstance(links, list):
+            continue
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            rel = str(link.get("rel") or "").lower()
+            href = str(link.get("href") or "").strip()
+            if href and "stylesheet" in rel:
+                urls.append(href)
+    # Preserve order while de-duplicating.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            unique.append(url)
+    return unique
+
+
+def stylesheet_url_allowed(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme == "http" and os.environ.get("UI_CLONE_CSS_DOWNLOAD_ALLOW_HTTP") == "1":
+        return parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    if parsed.scheme == "file" and os.environ.get("UI_CLONE_CSS_DOWNLOAD_ALLOW_FILE") == "1":
+        return True
+    return False
+
+
+def css_filename_for_url(url: str, used: set[str]) -> str:
+    parsed = urlparse(url)
+    name = Path(unquote(parsed.path)).name
+    if not name or not name.lower().endswith(".css"):
+        name = f"{hashlib.sha256(url.encode()).hexdigest()[:12]}.css"
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    if name not in used:
+        used.add(name)
+        return name
+    stem = name[:-4] if name.lower().endswith(".css") else name
+    suffix = hashlib.sha256(url.encode()).hexdigest()[:8]
+    deduped = f"{stem}-{suffix}.css"
+    used.add(deduped)
+    return deduped
+
+
+def recover_linked_css_artifacts() -> None:
+    """Download stylesheet links discovered during head extraction.
+
+    Step 2.5 says CSS download is mandatory, but some host runs reach
+    generation-plan with only head.json/extracted.json stylesheet URLs. Recover
+    those CSS artifacts here before deciding whether forensic preservation is
+    possible; otherwise CSS-module-heavy pages get misrouted to freehand rebuilds.
+    """
+    urls = stylesheet_urls_from_artifact(load("head.json", {}))
+    urls.extend(stylesheet_urls_from_artifact(load("extracted.json", {})))
+    seen: set[str] = set()
+    urls = [u for u in urls if not (u in seen or seen.add(u))]
+    if not urls:
+        return
+
+    css_dir = ref_dir / "css"
+    css_dir.mkdir(parents=True, exist_ok=True)
+    used_names = {p.name for p in css_dir.glob("*.css")}
+    log_rows: list[dict] = []
+    for url in urls:
+        row = {"url": url, "status": "skipped", "file": None, "bytes": 0}
+        if not stylesheet_url_allowed(url):
+            row["error"] = "unsupported-or-unsafe-url-scheme"
+            log_rows.append(row)
+            continue
+        filename = css_filename_for_url(url, used_names)
+        target = css_dir / filename
+        row["file"] = str(target.relative_to(ref_dir))
+        if target.is_file() and target.stat().st_size > 500:
+            row["status"] = "exists"
+            row["bytes"] = target.stat().st_size
+            log_rows.append(row)
+            continue
+        try:
+            request_or_url = (
+                Request(url, headers={"User-Agent": "ui-clone-skills/forensic-css"})
+                if urlparse(url).scheme in {"http", "https"}
+                else url
+            )
+            with urlopen(request_or_url, timeout=CSS_DOWNLOAD_TIMEOUT_SECONDS) as resp:
+                data = resp.read(CSS_DOWNLOAD_MAX_BYTES + 1)
+            if len(data) > CSS_DOWNLOAD_MAX_BYTES:
+                row["status"] = "failed"
+                row["error"] = "css-file-too-large"
+            elif len(data) < 100 or b"{" not in data:
+                row["status"] = "failed"
+                row["error"] = "not-css-or-empty-response"
+            else:
+                target.write_bytes(data)
+                row["status"] = "downloaded"
+                row["bytes"] = len(data)
+        except (HTTPError, URLError, OSError, TimeoutError) as exc:
+            row["status"] = "failed"
+            row["error"] = str(exc)[:240]
+        log_rows.append(row)
+    try:
+        (css_dir / "download-log.json").write_text(
+            json.dumps(log_rows, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def class_signature_count(*artifacts) -> int:
+    found: set[str] = set()
+    for artifact in artifacts:
+        for text in walk_values(artifact):
+            found.update(CSS_MODULE_CLASS_RE.findall(text))
+    css_dir = ref_dir / "css"
+    if css_dir.is_dir():
+        for css_file in css_dir.glob("*.css"):
+            try:
+                found.update(CSS_MODULE_CLASS_RE.findall(css_file.read_text(errors="ignore")))
+            except OSError:
+                continue
+    return len(found)
+
+
 # ── Component list ──────────────────────────────────────────────
 # Each top-level section (post jumbo-main descent) becomes a component.
 # section-map.json has two known shapes:
@@ -75,6 +253,50 @@ else:
     sections = []
 if not isinstance(sections, list):
     sections = []
+
+recover_linked_css_artifacts()
+css_bytes, css_files = css_bytes_and_files()
+css_module_signature_count = class_signature_count(section_map, load("structure.json", {}), load("dom-scaffold.json", {}))
+css_artifacts_complete = bool(css_files) and css_bytes >= CSS_FORENSIC_MIN_BYTES
+css_artifacts_missing = css_module_signature_count >= CSS_MODULE_FORENSIC_MIN_SIGNATURES and not css_artifacts_complete
+forensic_required = css_module_signature_count >= CSS_MODULE_FORENSIC_MIN_SIGNATURES and (
+    css_artifacts_complete
+    or css_module_signature_count >= CSS_MODULE_STRONG_SIGNATURES_WITH_MISSING_CSS
+)
+css_artifact_status = (
+    "present"
+    if css_artifacts_complete
+    else "missing"
+    if css_artifacts_missing
+    else "not-applicable"
+)
+forensic_rules = [
+    "copy ref css/*.css into impl/src/ref-css and import them before overrides",
+    "translate dom-scaffold tree to JSX instead of freehanding new layout",
+    "preserve original CSS-module className tokens",
+    "preserve visible DOM hierarchy, media elements, and asset paths",
+    "do not load reference JS bundles, proxy upstream HTML, or use screenshots as assets",
+    "add transitions as local React/CSS/runtime controllers on top of the preserved scaffold",
+]
+if forensic_required and css_artifact_status == "missing":
+    forensic_rules.insert(
+        0,
+        "CSS-module signatures are strong but ref css artifacts are missing/incomplete; "
+        "rerun CSS capture or recover bundle CSS before generation and do not use "
+        "standard-react-rebuild as a fallback",
+    )
+forensic_preservation = {
+    "required": forensic_required,
+    "strategy": "ref-derived-jsx-with-local-css" if forensic_required else "standard-react-rebuild",
+    "classSignatureCount": css_module_signature_count,
+    "cssBytes": css_bytes,
+    "cssFiles": css_files,
+    "cssArtifactStatus": css_artifact_status,
+    "missingCssArtifacts": forensic_required and css_artifact_status == "missing",
+    "blockedUntilCssArtifacts": forensic_required and css_artifact_status == "missing",
+    "copyCssTo": "src/ref-css" if forensic_required else None,
+    "rules": forensic_rules,
+}
 
 # Build a quick lookup of initial-state values by selector.
 init_by_selector: dict[str, dict] = {}
@@ -328,6 +550,7 @@ plan = {
     "scrollListener": scroll_listener_plan,
     "introAnimation": intro_plan,
     "signatureEffects": signature_effects,
+    "forensicPreservation": forensic_preservation,
     "assetSubstitution": asset_sub_plan,
     "canvas": canvas_plan,
     "paidFeatures": paid_plan,

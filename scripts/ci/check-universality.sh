@@ -67,6 +67,11 @@ EXCL=(
   --exclude-dir=.claude
   --exclude-dir=.codex-plugin
   --exclude-dir=.claude-plugin
+  # .omx/ — Codex/OMX runtime state (subagent task transcripts, hud-state.json).
+  # Gitignored, never committed, but contains absolute paths and finding labels
+  # from in-flight rescue sessions. Excluding here keeps the guard focused on
+  # the actual source tree.
+  --exclude-dir=.omx
   --exclude=CHANGELOG.md
   --exclude=handover
   --exclude=check-universality.sh

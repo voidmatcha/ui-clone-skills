@@ -5,11 +5,13 @@
   },
   {
     "query": "compare original vs clone — take screenshots of both and show me the differences",
-    "should_trigger": true
+    "should_trigger": false,
+    "note": "Existing-implementation diff/diagnosis belongs to visual-debug; ui-capture only gathers reference/transition evidence."
   },
   {
     "query": "I need a visual diff between https://stripe.com and my localhost:3000 implementation",
-    "should_trigger": true
+    "should_trigger": false,
+    "note": "Existing-implementation diff/diagnosis belongs to visual-debug; ui-capture only gathers reference/transition evidence."
   },
   {
     "query": "take baseline screenshots of this reference site before I start cloning",
@@ -17,7 +19,8 @@
   },
   {
     "query": "verify visual match — capture the original and my implementation side by side",
-    "should_trigger": true
+    "should_trigger": false,
+    "note": "Existing-implementation diff/diagnosis belongs to visual-debug; ui-capture only gathers reference/transition evidence."
   },
   {
     "query": "record the scroll transitions on https://linear.app so I can replicate them",
@@ -29,7 +32,8 @@
   },
   {
     "query": "generate a comparison page showing original vs clone screenshots and transition videos",
-    "should_trigger": true
+    "should_trigger": false,
+    "note": "Existing-implementation diff/diagnosis belongs to visual-debug; ui-capture only gathers reference/transition evidence."
   },
   {
     "query": "ui capture https://vercel.com — I need the full page baseline plus transition regions",
@@ -85,7 +89,7 @@
   {
     "query": "the implementation doesn't match — run a visual diff",
     "should_trigger": false,
-    "note": "This is visual-debug — user wants automated diff of existing impl, not new capture"
+    "note": "Existing-implementation diff/diagnosis belongs to visual-debug; ui-capture only gathers reference/transition evidence."
   },
   {
     "query": "batch compare all scroll positions between original and localhost",

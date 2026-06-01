@@ -149,6 +149,11 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
         # reveal" patterns that visually show empty space where
         # ref has content). Must stay strict.
         "reveal-trigger",
+        # transition-fires — the RUNTIME source-of-truth for motion
+        # fidelity. Each transition-spec entry must produce a measured
+        # runtime delta when its trigger is driven; class-name presence
+        # is not motion. Anti-gaming, so it must never downgrade.
+        "transition-fires",
     }
 
     out: list[CheckResult] = []
@@ -400,6 +405,7 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
             "hydration-check", "transition-spec-coverage",
             "spec-implementation-coverage", "runtime-spec-coverage",
             "tree-diff", "scroll-end-completion", "reveal-trigger",
+            "transition-fires",
             "boundary",
             "tailwind-transform-conflict", "proxy-mirror-check",
             "lottie-runtime", "bundle-impl-coverage", "scroll-coverage",

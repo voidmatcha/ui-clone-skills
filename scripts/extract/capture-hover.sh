@@ -60,7 +60,7 @@ if [ "$REUSE_SESSION" = "true" ]; then
   HOVER_SESSION="$SESSION"
 fi
 
-OUTDIR="$REF_DIR/states/hover"
+OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/hover"
 mkdir -p "$OUTDIR"
 
 # Open page in the derived session unless reusing the caller's session.

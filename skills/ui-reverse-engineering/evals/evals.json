@@ -52,10 +52,10 @@
     {
       "id": 4,
       "prompt": "I have a screenshot of a pricing page design (attached). There's no live URL — just this image. Turn it into a React + Tailwind component that matches the layout as closely as possible.",
-      "expected_output": "A React + Tailwind component generated from Claude Vision analysis of the screenshot, with approximate colors, spacing, and typography documented as approximations.",
+      "expected_output": "A React + Tailwind component generated from host vision-model analysis of the screenshot, with approximate colors, spacing, and typography documented as approximations.",
       "files": [],
       "expectations": [
-        "Screenshot was analyzed via Claude Vision (not agent-browser)",
+        "Screenshot was analyzed via host vision-model (not agent-browser)",
         "extracted.json exists with approximate values clearly marked as approximations",
         "A .tsx component file was generated using Tailwind utility classes",
         "Component includes comments noting values are Vision-approximated, not computed",
@@ -191,10 +191,10 @@
     {
       "id": 14,
       "prompt": "I recorded my screen showing how this page works — it has a sidebar that slides in on mobile, cards that flip on hover, and a sticky header that shrinks on scroll. Here's the video recording. No URL available, the site is behind a VPN.",
-      "expected_output": "A React component generated from Claude Vision analysis of the video, with state changes identified per visible frame and approximate timing documented.",
+      "expected_output": "A React component generated from host vision-model analysis of the video, with state changes identified per visible frame and approximate timing documented.",
       "files": [],
       "expectations": [
-        "Video was analyzed via Claude Vision (not agent-browser, since no URL)",
+        "Video was analyzed via host vision-model (not agent-browser, since no URL)",
         "State changes identified per visible frame (sidebar slide, card flip, header shrink)",
         "extracted.json includes interaction descriptions with approximate timing from video",
         "Generated component implements all three interactions (sidebar, card hover, sticky header)",

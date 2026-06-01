@@ -2,13 +2,17 @@
 # check-converged.sh — canonical convergence detector for staged clone loops.
 #
 # Exit codes:
-#   0  converged   : last `**Result: ...**` line in <ref>/sections/result.txt shows 0 FAIL
-#   1  not yet    : Result line found, FAIL > 0
+#   0  converged   : last `**Result: ...**` line shows 0 FAIL AND >=1 genuine PASS
+#   1  not yet    : Result line found with FAIL > 0, OR 0 genuine PASS (pure
+#                   STRUCTURAL_ONLY / empty — the gaming vector)
 #   2  setup error: missing args, missing ref dir, missing result.txt, no Result line,
 #                   or invalid --stage value
 #
-# STRUCTURAL_ONLY rows are counted as PASS upstream (briefing §2C), so only the
-# FAIL field gates convergence. SKIP doesn't gate either.
+# Phase 2 (genuine-fidelity convergence): convergence requires >=1 genuine pixel
+# PASS, not just 0 FAIL. Since commit 33a7f8f the footer PASS field counts real
+# ✅ pixel passes only (STRUCTURAL_ONLY is a separate field). STRUCTURAL_ONLY rows
+# remain allowed *alongside* genuine passes but cannot by themselves make a ref
+# "converged". SKIP doesn't gate.
 #
 # Usage:
 #   bash scripts/verify/check-converged.sh <ref-dir> [--write-stamp] [--stage A|B|C|D]
@@ -28,6 +32,12 @@
 # (briefing §4: don't add new gates).
 
 set -u
+
+# macOS host shells may inherit Linux-only C.UTF-8 settings; Perl-backed
+# shasum can panic under that locale and return an empty checksum. Use the
+# portable C locale for subprocesses while keeping output stable.
+export LC_ALL=C
+export LANG=C
 
 write_stamp=0
 stage=""
@@ -109,9 +119,32 @@ fi
 
 # Extract the FAIL count: ", N FAIL,"
 fail_count="$(printf '%s\n' "$last_result" | sed -E 's/^.*, ([0-9]+) FAIL,.*$/\1/')"
+# Extract the genuine PASS count: "Result: N PASS,". Since commit 33a7f8f the
+# footer PASS field counts real pixel passes only (STRUCTURAL_ONLY is its own
+# field), so pass_count is the genuine-fidelity signal.
+pass_count="$(printf '%s\n' "$last_result" | sed -E 's/^.*Result: ([0-9]+) PASS,.*$/\1/')"
 
 if [[ "$fail_count" -ne 0 ]]; then
   printf 'not converged: %s\n' "$last_result"
+  exit 1
+fi
+
+# Phase 2 — require at least one GENUINE pixel PASS. The footer PASS field is
+# only trustworthy for result.txt written since commit 33a7f8f; legacy files
+# inflated it by folding STRUCTURAL_ONLY into PASS. So when a real status table
+# is present, count genuine ✅ ROWS; fall back to the footer PASS count only when
+# no table exists (early-exit footers / minimal callers). A 0-FAIL result with
+# 0 genuine passes (pure STRUCTURAL_ONLY, all-FAIL, or empty) is the gaming
+# vector and must NOT count as converged.
+genuine_rows="$(grep -cE '\| ✅ \|' "$result_file" 2>/dev/null || true)"
+table_rows="$(grep -cE '✅|❌|🌑|🔁|⚠️' "$result_file" 2>/dev/null || true)"
+if [[ "$table_rows" -gt 0 ]]; then
+  if [[ "$genuine_rows" -lt 1 ]]; then
+    printf 'not converged (0 genuine ✅ rows — STRUCTURAL_ONLY/all-FAIL table): %s\n' "$last_result"
+    exit 1
+  fi
+elif [[ "$pass_count" -lt 1 ]]; then
+  printf 'not converged (0 genuine PASS — empty/early-exit footer): %s\n' "$last_result"
   exit 1
 fi
 

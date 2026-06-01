@@ -23,6 +23,7 @@ from .pre_generate_checks import (
     _check_section_counts,  # noqa: F401
     _check_transition_coverage,  # noqa: F401
     _check_webflow,  # noqa: F401
+    _scroll_motion_signals,  # noqa: F401
 )
 
 if TYPE_CHECKING:

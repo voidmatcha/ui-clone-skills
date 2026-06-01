@@ -1001,9 +1001,10 @@ def test_goal_check_done_ignores_result_footer_fail_substring(tmp_path: Path) ->
 
 def test_codex_default_prompt_mentions_goal_card_and_stop_condition() -> None:
     plugin_path = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
-    prompt = "\n".join(
-        json.loads(plugin_path.read_text(encoding="utf-8"))["interface"]["defaultPrompt"]
-    )
+    prompts = json.loads(plugin_path.read_text(encoding="utf-8"))["interface"]["defaultPrompt"]
+    assert len(prompts) <= 3
+    assert all(len(item) <= 128 for item in prompts)
+    prompt = "\n".join(prompts)
 
     assert "goal card" in prompt.lower()
     assert "python -m ui_clone.goal <ref-dir>" in prompt

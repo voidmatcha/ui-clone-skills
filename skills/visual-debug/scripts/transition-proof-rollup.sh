@@ -114,6 +114,17 @@ def measure_transition_coverage(d: dict | None) -> tuple[bool, str]:
     if d is None:
         return True, "not produced (no transition-spec entries to probe)"
     elements = d.get("animatedElements") or []
+    # animatedElements may be a list of selector strings (Phase 6d ref-side
+    # extraction) or a list of per-element dicts (runtime probe). Normalize
+    # bare strings to {"selector": s} so the .get() calls below never hit a
+    # str. Robustness fix only — string entries carry no samples, so they fall
+    # through to the same runtime-proof requirement as dict entries without
+    # samples; pass/fail semantics are unchanged.
+    elements = [
+        {"selector": el} if isinstance(el, str) else el
+        for el in elements
+        if isinstance(el, (str, dict))
+    ]
     if not elements:
         return False, "probe ran but found 0 animated elements (URL or hydration issue)"
     # transition-coverage.json may be produced by Phase 6d as ref-side
@@ -181,6 +192,29 @@ def measure_keyframes(d: dict | None) -> tuple[bool, str]:
         return False, f"{len(only_ref)} ref-only keyframes, {len(diff_steps)} step diffs"
     return True, "keyframes parity"
 
+def measure_transition_fires(d: dict | None) -> tuple[bool, str]:
+    if d is None:
+        if "transition-fires.json" in expected:
+            return False, "transition-fires expected by verification-plan but artifact missing"
+        return True, "not produced (runtime fire check not required)"
+    if d.get("status") == "skip":
+        return True, "skipped"
+    if d.get("status") != "pass":
+        return False, f"status={d.get('status')}"
+    total = int(d.get("total", 0) or 0)
+    failed = int(d.get("failed", 0) or 0)
+    fired = int(d.get("fired", 0) or 0)
+    known_skip = int(d.get("known_skip", 0) or 0)
+    unmeasurable = int(d.get("unmeasurable", 0) or 0)
+    if failed > 0:
+        return False, f"{failed}/{total} transition(s) did not fire"
+    if total > 0 and fired + known_skip + unmeasurable < total:
+        return False, (
+            f"only {fired}+{known_skip} known-skip+{unmeasurable} "
+            f"unmeasurable out of {total} transition(s)"
+        )
+    return True, f"{fired}/{total} fired ({unmeasurable} unmeasurable)"
+
 def measure_video_motion(path: Path) -> tuple[bool, str]:
     if not path.exists():
         if VIDEO_MOTION_PRODUCES in expected:
@@ -227,9 +261,48 @@ def measure_transition_compare(path: Path) -> tuple[bool, str]:
         return False, f"transition compare: {passed} pass / {failed} fail"
     return True, f"transition compare: {passed} pass / 0 fail"
 
+def _text_has_hover(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(_text_has_hover(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_text_has_hover(v) for v in value)
+    return "hover" in str(value).lower()
+
+def transition_compare_can_prove_runtime() -> bool:
+    """transition-compare is valid runtime proof only for hover-like specs."""
+    spec = read_json_safe(spec_path)
+    if spec:
+        for row in spec.get("transitions") or spec.get("entries") or []:
+            if isinstance(row, dict) and _text_has_hover(
+                {
+                    "id": row.get("id"),
+                    "trigger": row.get("trigger"),
+                    "type": row.get("type"),
+                    "animation": row.get("animation"),
+                }
+            ):
+                return True
+    coverage = read_json_safe(ref_dir / "transition-coverage.json")
+    if coverage:
+        for row in coverage.get("animatedElements") or []:
+            if isinstance(row, dict) and _text_has_hover(
+                {
+                    "id": row.get("id"),
+                    "trigger": row.get("trigger"),
+                    "transition": row.get("transition"),
+                    "selector": row.get("selector"),
+                }
+            ):
+                return True
+    return False
+
 
 def runtime_proof_sources() -> list[str]:
     sources: list[str] = []
+    fires = read_json_safe(ref_dir / "transition-fires.json")
+    ok, note = measure_transition_fires(fires)
+    if ok and fires and note.startswith(tuple(str(i) for i in range(10))):
+        sources.append("transition-fires")
     reveal = read_json_safe(ref_dir / "reveal-trigger.json")
     if reveal and reveal.get("status") == "pass":
         sources.append("reveal-trigger")
@@ -246,7 +319,11 @@ def runtime_proof_sources() -> list[str]:
             sources.append("video-motion")
     transition_compare_path = ref_dir / "transitions" / "result.txt"
     ok, note = measure_transition_compare(transition_compare_path)
-    if ok and note.startswith("transition compare:"):
+    if (
+        ok
+        and note.startswith("transition compare:")
+        and transition_compare_can_prove_runtime()
+    ):
         sources.append("transition-compare")
     return sources
 
@@ -257,6 +334,7 @@ specs = [
     ("transition-spec-coverage.json", "Tier 3 static", measure_spec_coverage),
     ("spec-implementation-coverage.json", "Tier 3 static", measure_spec_impl),
     ("transition-coverage.json", "Tier 3 runtime", measure_transition_coverage),
+    ("transition-fires.json", "Tier 3 runtime", measure_transition_fires),
     ("reveal-trigger.json", "Tier 3 runtime", measure_reveal),
     ("scroll-completion.json", "Tier 3 runtime", measure_scroll_end),
     ("keyframes-diff.json", "Tier 3 keyframes", measure_keyframes),
@@ -320,6 +398,24 @@ entry = {
 if not ok:
     overall_fail = True
 components.append(entry)
+
+# transition-compare is also plain text. If verification-plan required it
+# (standard tier) OR the artifact exists, transition-proof must compose its
+# verdict instead of allowing static/spec runtime probes to mask a hover/timing
+# mismatch (.btn-arrow/card-image/swiper-wrapper failures).
+tc_path = ref_dir / "transitions" / "result.txt"
+if tc_path.exists() or "transitions/result.txt" in expected:
+    ok, note = measure_transition_compare(tc_path)
+    entry = {
+        "artifact": "transitions/result.txt",
+        "tier": "Tier 3 transition compare",
+        "present": tc_path.exists(),
+        "valid": ok,
+        "note": note,
+    }
+    if not ok:
+        overall_fail = True
+    components.append(entry)
 
 if overall_fail:
     composite = "fail"

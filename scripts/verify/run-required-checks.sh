@@ -72,6 +72,7 @@ RUN_UUID=$(date +%s%N | tail -c 8)
 SESSION="${SESSION}-${RUN_UUID}"
 DERIVED_SESSIONS=()
 
+# shellcheck disable=SC2329 # Invoked via trap.
 cleanup_browser_sessions() {
   [ "${#DERIVED_SESSIONS[@]}" -eq 0 ] && return 0
   for s in "${DERIVED_SESSIONS[@]}"; do
@@ -176,6 +177,9 @@ SIGNATURES = {
     "monolithic-impl-check.sh": "{ref_dir} {impl_root}",
     "motion-coverage-check.sh": "{ref_dir} {impl_root}",
     "scroll-engine-parity-check.sh": "{ref_dir} {impl_root}",
+    "forced-state-class-check.sh": "{ref_dir} {impl_root}",
+    "lottie-scroll-scrub-check.sh": "{ref_dir} {impl_root} {ref_url} {impl_url} {session}-lottie",
+    "swiper-runtime-check.sh": "{ref_dir} {impl_root}",
     "css-mirror-check.sh": "{ref_dir} {impl_root}",
     "scaffold-warn-check.sh": "{ref_dir} {impl_root}",
     "invalidation-check.sh": "{ref_dir}",
@@ -187,9 +191,7 @@ SIGNATURES = {
     "asset-placement-check.sh": "{ref_dir} {impl_root}",
     "image-fidelity-check.sh": "{ref_dir} {impl_src}",
     "proxy-mirror-check.sh": "{ref_dir}",
-    "class-signature-preservation-check.sh": "{ref_dir} {impl_root}",
     "bundle-paste-check.sh": "{ref_dir} {impl_root}",
-    "class-signature-css-coverage-check.sh": "{ref_dir} {impl_root}",
     "transition-spec-coverage.sh": "{ref_dir} {impl_src}",
     "spec-implementation-coverage.sh": "{ref_dir} {impl_src}",
     "runtime-spec-coverage.sh": "{ref_dir} {impl_src}",
@@ -213,6 +215,11 @@ SIGNATURES = {
     # script EXPECTS once the writer is added.
     "reveal-trigger-check.sh":
         "ENV:REF_DIR={ref_dir} -- {session}-reveal {impl_url}",
+    # transition-fires drives each transition-spec entry's trigger in a real
+    # browser and asserts a MEASURED runtime delta. Positional args:
+    # <session> <impl-url> <ref-dir>; writes <ref-dir>/transition-fires.json.
+    "transition-fires-check.sh":
+        "{session}-fires {impl_url} {ref_dir}",
     # 2026-05-22: header-state-runtime gate fires unconditionally — proves
     # the impl header is a runtime state machine (mutates className on
     # scroll) when the ref's header is stateful. Args: session ref-url
@@ -270,6 +277,7 @@ SIGNATURES = {
     "runtime-frame-proof-check.sh":
         "{session}-rfp {impl_url} {ref_dir}",
     "scroll-end-completion-check.sh": "{session}-sec {impl_url} {ref_dir}",
+    "scroll-state-machine-check.sh": "{session}-ssm {ref_url} {impl_url} {ref_dir}",
     "font-parity-check.sh": "{session}-fp {ref_url} {impl_url} {ref_dir}",
     "breakpoint-collision-check.sh":
         "ENV:REF_DIR={ref_dir} -- {session}-bound {impl_url}",

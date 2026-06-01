@@ -315,6 +315,14 @@ class TestPreBashBenchmarkCommands:
         subprocess.run(
             ["git", "-C", str(tmp_path), "config", "user.name", "t"], check=True
         )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "commit.gpgSign", "false"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "tag.gpgSign", "false"],
+            check=True,
+        )
         (tmp_path / "README").write_text("test", encoding="utf-8")
         subprocess.run(
             ["git", "-C", str(tmp_path), "add", "README"], check=True

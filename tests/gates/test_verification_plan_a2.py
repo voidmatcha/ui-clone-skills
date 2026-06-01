@@ -146,7 +146,7 @@ def test_verification_plan_omits_runtime_spec_coverage_when_dump_absent(tmp_path
 def test_verification_plan_emits_spec_implementation_coverage_when_spec_present(tmp_path: Path) -> None:
     """transition-spec.json present → spec-implementation-coverage row required.
 
-    Catches the silent-killer "selector matched but no motion declared" gap:
+    Catches the "selector matched but no motion declared" gap:
     transition-spec-coverage answers "does the impl mention this entry?", but
     spec-implementation-coverage answers "and does the impl actually animate
     it?". Both rows must dispatch when transition-spec.json exists so the
@@ -169,10 +169,10 @@ def test_verification_plan_emits_spec_implementation_coverage_when_spec_present(
 
 
 
-def test_verification_plan_emits_transition_compare_when_spec_present_without_hover(
+def test_verification_plan_uses_motion_proof_for_scroll_spec_without_hover(
     tmp_path: Path,
 ) -> None:
-    """A transition spec requires runtime comparison even when hover is absent."""
+    """Scroll specs require motion proof, not hover/end-state comparison."""
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "transition-spec.json").write_text(json.dumps({
@@ -182,17 +182,20 @@ def test_verification_plan_emits_transition_compare_when_spec_present_without_ho
     plan = _run_verification_plan(ref)
     ids = [c["id"] for c in plan["requiredChecks"]]
 
-    assert "transition-compare" in ids, (
-        "transition-compare must be required for transition-spec.json, not only "
-        f"hover signals: {ids}"
+    assert "transition-compare" not in ids, (
+        "transition-compare is hover/end-state evidence and must not be a "
+        f"fallback for scroll-only specs: {ids}"
     )
+    assert "video-motion-compare" in ids
+    assert "transition-fires" in ids
+    assert "transition-proof" in ids
 
 
 
 def test_verification_plan_spec_implementation_coverage_tier_is_standard(tmp_path: Path) -> None:
     """spec-implementation-coverage must be tagged tier=standard.
 
-    The row is meaningful only after the agent has generated impl source — at
+    The row is meaningful only after implementation source exists — at
     quick tier (inner iteration loop, often before generation), it would
     silently warn on every entry. Standard tier is the first level where the
     declaration check pays off. Locking the tier here prevents a future
@@ -229,9 +232,9 @@ def test_verification_plan_quick_tier_filters_to_static_checks(tmp_path: Path) -
 
     Static-only set (with all signals firing): hydration-check,
     tailwind-transform-conflict, transition-spec-coverage, runtime-spec-coverage,
-    plus the Fix 8 anti-fabrication gates (text-fidelity-check, dom-mirror-check)
+    plus the static mirror-detection gates (text-fidelity-check, dom-mirror-check)
     and proxy-mirror-check, which blocks original-runtime proxy/cache mirrors;
-    plus the loop-9 ref-screenshot-asset anti-cheat (static filesystem scan +
+    plus the ref-screenshot-asset guard (static filesystem scan +
     sha256 fingerprint of impl tree vs ref's captured screenshot dirs);
     which are pure static AST/tree comparison — no browser, no LLM, no IO.
     Everything else (one-shot browser + 60fps video) must be filtered out.
@@ -251,57 +254,50 @@ def test_verification_plan_quick_tier_filters_to_static_checks(tmp_path: Path) -
         "dom-mirror-check",
         "proxy-mirror-check",
         "ref-screenshot-asset",
-        # Universal anti-cheat — class-signature preservation (L62 root cause):
-        "class-signature-preservation",
-        # Universal anti-cheat — bundle-paste (L41/L44 wholesale-paste cheat):
+        # Bundle-paste detection:
         "bundle-paste",
-        # Universal anti-cheat — class-signature CSS coverage (L64 metric/visual decoupling):
-        "class-signature-css-coverage",
-        # Loop-9 family A1/A2/A3 anti-cheat (static):
+        # Static source-coherence checks:
         "entry-coherence",
         "scaffold-residue",
         "html-paste",
-        # Loop-9 family A5 (static CSS mirror):
+        # Static CSS mirror detection:
         "css-mirror",
-        # Loop-9 fix #4 — explicit invalidation stamp:
+        # Explicit invalidation stamp:
         "invalidation",
-        # Signal 1 — scaffold-warn placeholders:
+        # Scaffold-warn placeholders:
         "scaffold-warn",
         # ui-capture handoff contract — regions with triggerType must enumerate
         # concrete ref clip/video artifacts. Pure JSON + file stat.
         "capture-artifact-inventory",
-        # Diagnosis B — required-media coverage (dispatched
-        # unconditionally; script self-skips when ref has no required
-        # video/Lottie/SVG):
+        # Required-media coverage self-skips when ref has no required
+        # video/Lottie/SVG.
         "required-media-coverage",
-        # Codex-2 findings — monolithic-impl + motion-coverage:
+        # Monolithic implementation and motion coverage:
         "monolithic-impl",
         "motion-coverage",
         # scroll-engine-parity — engine class match (Lenis / GSAP
         # ScrollTrigger / scroll-scrub / scroll-pin):
         "scroll-engine-parity",
-        # 2026-05-22 retune (user direction A) — hero-composite spot-check
-        # replaces dom-mirror's structural-enforcement role. Verifies the
-        # 4-element hero pattern (video + button + h1/h2 + label) which
-        # LLMs consistently flatten away. Pure static (regex over impl
+        # Hero-composite spot-check verifies the 4-element hero pattern
+        # (video + button + h1/h2 + label). Pure static (regex over impl
         # source + structure.json walk), so tier=quick.
         "hero-composite-check",
-        # 2026-05-22 codex-rescue (a125b997) — composite roll-ups +
-        # ref-js-loader anti-cheat. All three are pure file IO (rollups
-        # read existing artifacts; loader does static grep on impl
+        # Composite roll-ups + ref-js-loader. All three are pure file IO
+        # (rollups read existing artifacts; loader does static grep on impl
         # source) so they belong in tier=quick.
         "runtime-proof",
         "transition-proof",
         "ref-js-loader",
-        # 2026-05-22 user observation (gate-cheat block) — impl-scope
-        # guard runs `git diff` only, no browser. tier=quick.
+        # Implementation-scope guard runs `git diff` only, no browser.
         "impl-scope",
-        # 2026-05-22 codex-rescue grounding audit — color-token diff
-        # against ref palette. Pure regex + math, no browser → quick.
+        # Color-token diff against ref palette. Pure regex + math, no browser.
         "color-token-grounding",
-        # 2026-05-22 user request — duration/easing grounding. Pure
-        # source scan, no browser → quick.
+        # Duration/easing grounding. Pure source scan, no browser.
         "duration-easing-grounding",
+        # Dynamic-state guard — static impl scan for forced final-state
+        # classes/styles; script self-skips when the reference has no dynamic
+        # state signal.
+        "forced-state-class",
     }, f"quick tier emitted unexpected ids: {ids}"
     # Every emitted check must be tagged tier=quick.
     tiers = {c["tier"] for c in plan["requiredChecks"]}
@@ -386,9 +382,8 @@ def test_verification_plan_rejects_invalid_tier(tmp_path: Path) -> None:
 
 def test_verification_plan_emits_image_fidelity_when_visible_images_present(tmp_path: Path) -> None:
     """verification-plan.sh must add the image-fidelity + asset-transfer rows when
-    visible-images.json exists. Both block-severity (severity upgraded from
-    warn after the realfood.gov benchmark showed the agent reliably skips
-    actual download — see CHANGELOG entry on `asset-transfer-check.sh`).
+    visible-images.json exists. Both are block-severity so visible assets must
+    be downloaded and referenced instead of replaced with placeholders.
     """
     ref = tmp_path / "ref"
     ref.mkdir()
@@ -399,9 +394,7 @@ def test_verification_plan_emits_image_fidelity_when_visible_images_present(tmp_
     rows = {c["id"]: c for c in plan["requiredChecks"]}
     assert "image-fidelity" in rows
     assert rows["image-fidelity"]["severity"] == "block"
-    # min_tier dropped standard → quick in HEAD after 077d8c3 — the agent set
-    # tier=quick to silently drop these rows; making them quick-tier ensures
-    # they fire at every cost-tier (cheap file-existence + grep checks).
+    # Keep this quick-tier so image checks cannot be skipped by tier selection.
     assert rows["image-fidelity"]["tier"] == "quick"
     assert rows["image-fidelity"]["produces"] == "image-fidelity.json"
     # Asset-transfer is the companion check — code refs vs actual files in impl/public/.
@@ -413,8 +406,9 @@ def test_verification_plan_emits_image_fidelity_when_visible_images_present(tmp_
 
 
 def test_verification_plan_emits_asset_utilization_when_visible_images_present(tmp_path: Path) -> None:
-    """Regression — c9b638d shipped 45 downloaded images with only 2 referenced
-    in src (95% orphan). New `asset-utilization` row requires ≥60% referenced.
+    """Downloaded visible assets must be referenced by implementation source.
+
+    The `asset-utilization` row requires at least 60% referenced assets.
     """
     ref = tmp_path / "ref"
     ref.mkdir()
@@ -484,14 +478,13 @@ def test_verification_plan_emits_lottie_runtime_when_lottie_detected(tmp_path: P
     assert rows["lottie-runtime"]["produces"] == "lottie-runtime.json"
 
 
-# ── codex juanmora review fixes (2026-05-25) ─────────────────────────
+# ── states-derived signal regressions ─────────────────────────────────
 
 
 def test_verification_plan_derives_hasSplash_from_states_summary(tmp_path: Path) -> None:
-    """Codex juanmora review: Phase A `states/splash/summary.json` polls > 1
+    """Phase A `states/splash/summary.json` polls > 1
     must set HAS_SPLASH=true even when upstream interactions/dom-state-diff
-    didn't flag it. Prevents juanmora-style false-negative where capture-
-    states.sh found 2+ transitions but plan still had hasSplash:false."""
+    didn't flag it."""
     ref = tmp_path / "ref"
     ref.mkdir()
     splash = ref / "states" / "splash"
@@ -517,9 +510,7 @@ def test_verification_plan_derives_hasSplash_from_states_summary(tmp_path: Path)
 
 
 def test_verification_plan_derives_hasHover_from_states_manifest(tmp_path: Path) -> None:
-    """Codex juanmora review: Phase C `states/hover/manifest.json` with
-    entries must set HAS_HOVER=true. Capture-hover.sh finds 13 candidates
-    but plan stays hasHover:false → silent miss of hover transition checks."""
+    """Phase C `states/hover/manifest.json` entries must set HAS_HOVER=true."""
     ref = tmp_path / "ref"
     ref.mkdir()
     hover = ref / "states" / "hover"
@@ -541,17 +532,18 @@ def test_verification_plan_derives_hasHover_from_states_manifest(tmp_path: Path)
 
 
 def test_verification_plan_emits_runtime_spec_coverage_when_anim_dump_alone(tmp_path: Path) -> None:
-    """Codex juanmora review: drop the `&& transition-spec.json` guard.
+    """Runtime coverage must not depend on transition-spec.json.
+
     runtime-spec-coverage must register when animation-runtime-dump.json
-    exists EVEN IF transition-spec.json absent — that's the gap the gate
-    is supposed to surface (runtime motion but no spec)."""
+    exists even if transition-spec.json is absent.
+    """
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "animation-runtime-dump.json").write_text(json.dumps({
         "scrollTrigger": [{"id": "st1", "start": "top 80%", "end": "bottom"}],
         "tweens": [{"duration": 0.8}],
     }))
-    # NOTE: no transition-spec.json planted.
+    # NOTE: no transition-spec.json is written.
     plan = _run_verification_plan(ref)
     rows = {c["id"]: c for c in plan["requiredChecks"]}
     assert "runtime-spec-coverage" in rows, (

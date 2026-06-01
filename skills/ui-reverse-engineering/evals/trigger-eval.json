@@ -9,7 +9,8 @@
   },
   {
     "query": "replicate this UI (attached screenshot of a pricing page) — turn it into a working React component with the card hover animations",
-    "should_trigger": true
+    "should_trigger": false,
+    "note": "Screenshot-only input is a host vision approximation path, not the live-URL extraction workflow."
   },
   {
     "query": "I recorded my screen showing how this carousel works on https://vercel.com — can you copy the transition timing and make it work the same way in my project?",
@@ -25,7 +26,8 @@
   },
   {
     "query": "I need to turn this Figma mockup screenshot into a pixel-perfect React component. Here's the screenshot (attached). Get as close as possible to the original design.",
-    "should_trigger": true
+    "should_trigger": false,
+    "note": "Screenshot-only input is a host vision approximation path, not the live-URL extraction workflow."
   },
   {
     "query": "clone the CSS animation on this button — when you hover it does a scale + shadow transition over 300ms with some kind of ease-out curve. URL: https://ui.shadcn.com",
@@ -33,7 +35,8 @@
   },
   {
     "query": "I have multiple screenshots of a mobile app UI at different screen sizes. Can you turn these into a responsive React component?",
-    "should_trigger": true
+    "should_trigger": false,
+    "note": "Screenshot-only input is a host vision approximation path, not the live-URL extraction workflow."
   },
   {
     "query": "reverse-engineer the footer from https://github.com — I need the exact column layout, link styles, and the responsive stacking behavior",

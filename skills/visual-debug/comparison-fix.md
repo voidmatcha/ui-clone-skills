@@ -321,7 +321,7 @@ After AE + DSSIM complete, the LLM reads **every position's** ref+impl pair. Thi
 
 Phase E reads ~22 PNG pairs (~44K vision tokens). **Run it in a delegated subagent context** so the vision tokens never enter the main context, and only the verdict markdown table returns.
 
-Claude Code-style example:
+Claude Code-style example (Codex should use native subagents or an equivalent delegated worker when available):
 
 ```
 Agent({
@@ -331,7 +331,7 @@ Agent({
 })
 ```
 
-`visual-debug-reviewer` is a plugin sub-agent pinned to `model: opus` (see `.claude-plugin/agents/visual-debug-reviewer.md`), so the vision verdict stays high-quality regardless of the parent agent's model. Falling back to `subagent_type: "general-purpose"` is acceptable on hosts that don't expose plugin agents (e.g. Codex inline), but on Claude Code the explicit form is preferred — `general-purpose` inherits the parent model and silently degrades when a sonnet-tier parent dispatches Phase E.
+`visual-debug-reviewer` is a plugin sub-agent pinned to `model: opus` on Claude Code (see `.claude-plugin/agents/visual-debug-reviewer.md`) and a Codex native subagent backed by `.codex/agents/visual-debug-reviewer.toml` on Codex/OMX. Use the host-native role first so the vision verdict stays high-quality regardless of the parent agent's model. Falling back to `subagent_type: "general-purpose"` or an inline fallback is acceptable only on hosts that do not expose role-specific agents; on Claude Code the explicit form is preferred because `general-purpose` inherits the parent model and silently degrades when a sonnet-tier parent dispatches Phase E.
 
 The subagent has its own context, reads every pair, returns the table. Main context cost: ~500 tokens (the table) instead of ~44K. Do **not** run Phase E inline, because that defeats the entire visual-debug "near-zero vision tokens" guarantee for any session that reaches this step.
 

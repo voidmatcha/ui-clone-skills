@@ -158,9 +158,10 @@ import re
 import sys
 
 expected = {"ui-reverse-engineering", "ui-capture", "visual-debug"}
-# Internal-only skills (maintainer tooling). Allowed on the filesystem under
-# skills/ but MUST NOT be registered in .claude-plugin/plugin.json `skills`
-# or referenced from .codex-plugin defaultPrompt — that would publish them.
+# Internal-only skills (maintainer tooling). Allowed on the development
+# filesystem under skills/ but MUST NOT be registered in Claude's public
+# manifest, referenced from Codex defaultPrompt, or copied into the Codex
+# install projection's public skills directory.
 internal_skills = {"benchmark"}
 errors = []
 
@@ -198,13 +199,34 @@ if internal_in_public:
 
 codex = json.loads(pathlib.Path(".codex-plugin/plugin.json").read_text())
 interface = codex.get("interface", {})
-prompt = interface.get("defaultPrompt", "")
-if isinstance(prompt, list):
-    prompt = "\n".join(str(item) for item in prompt)
+prompt_value = interface.get("defaultPrompt", "")
+if not isinstance(prompt_value, list):
+    errors.append(".codex-plugin/plugin.json interface.defaultPrompt must be a list")
+    prompt = str(prompt_value)
+else:
+    if len(prompt_value) > 3:
+        errors.append("Codex defaultPrompt has more than 3 entries (Codex ignores extras)")
+    long_items = [idx + 1 for idx, item in enumerate(prompt_value) if len(str(item)) > 128]
+    if long_items:
+        errors.append(f"Codex defaultPrompt entries exceed 128 chars: {long_items}")
+    prompt = "\n".join(str(item) for item in prompt_value)
 codex_text = f"{interface.get('longDescription', '')}\n{prompt}"
 missing_codex = sorted(skill for skill in expected if skill not in codex_text)
 if missing_codex:
     errors.append(f"Codex prompt/description missing public skill mentions: {missing_codex}")
+codex_internal_mentions = sorted(skill for skill in internal_skills if skill in prompt)
+if codex_internal_mentions:
+    errors.append(f".codex-plugin defaultPrompt leaks internal skills: {codex_internal_mentions}")
+
+install_text = pathlib.Path("install.sh").read_text(encoding="utf-8")
+if re.search(r"for item in [^\n]*\bskills\b", install_text):
+    errors.append("install.sh Codex projection still symlinks the whole skills/ directory")
+for skill in expected:
+    if skill not in install_text:
+        errors.append(f"install.sh CODEX_PUBLIC_SKILLS missing public skill: {skill}")
+for skill in internal_skills:
+    if f"skills/{skill}" in install_text and "maintainer-only" not in install_text:
+        errors.append(f"install.sh may copy internal skill into Codex projection: {skill}")
 
 if errors:
     for error in errors:
@@ -314,6 +336,41 @@ if [ "$KW1" -gt 0 ] && [ "$KW2" -gt 0 ] && [ "$KW3" -gt 0 ]; then
   ok "all 3 scripts use kwMap pattern"
 else
   err "section name detection not using kwMap in all 3 scripts"
+fi
+
+# ── 6a. Trigger eval fixture boundaries ──
+section "Trigger fixtures"
+
+if python3 - <<'PY'
+import json
+import pathlib
+import sys
+
+errors: list[str] = []
+
+reverse = json.loads(pathlib.Path("skills/ui-reverse-engineering/evals/trigger-eval.json").read_text())
+for item in reverse:
+    query = item.get("query", "").lower()
+    if any(token in query for token in ("attached screenshot", "figma mockup screenshot", "multiple screenshots")):
+        if item.get("should_trigger") is not False:
+            errors.append(f"ui-reverse screenshot-only prompt should not trigger: {item.get('query')}")
+
+capture = json.loads(pathlib.Path("skills/ui-capture/evals/trigger-eval.json").read_text())
+for item in capture:
+    query = item.get("query", "").lower()
+    if any(token in query for token in ("visual diff", "verify visual match", "show me the differences", "comparison page showing original vs clone")):
+        if item.get("should_trigger") is not False:
+            errors.append(f"ui-capture diff/diagnosis prompt should route to visual-debug: {item.get('query')}")
+
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  ok "trigger fixtures preserve public skill boundaries"
+else
+  err "trigger fixture boundary drift detected"
 fi
 
 # ── 7. README accuracy ──

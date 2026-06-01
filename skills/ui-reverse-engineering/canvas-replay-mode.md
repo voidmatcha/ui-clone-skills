@@ -5,6 +5,127 @@
 > scroll-driven plates, custom shader walls). Not automatic — must be
 > explicitly enabled per ref dir.
 
+---
+
+## Automatic canvas-replay routing (the AUTO fallback)
+
+> The sections below ("Problem this solves" onward) describe the **manual
+> closeout policy** — operator attestation that releases the Stop hook. That
+> path still exists for license/permission sign-off. What follows here is the
+> **automatic technical path**: detection → capture → generation routing,
+> which runs without an operator deciding anything. The only thing that stays
+> manual is the license attestation (`canvas-replay-attestation.json`); the
+> engineering — deciding a hero is unreproducible, recording the reference's
+> own motion, and emitting the replay — is now automatic.
+
+When a hosted WebGL/canvas hero **cannot be re-embedded** in the clone, the
+pipeline auto-reproduces it by recording the **reference's own rendered canvas
+output** to a short looped video and emitting a `<video>` replay — instead of
+shipping a blank hero. Honesty-first: this is the ref's own pixels in motion
+(like recording a video background), **declared** as a substituted asset.
+
+### 1. Detection — `scripts/extract/canvas-replay-plan.sh`
+
+Routes a hero/section to canvas-replay when **both** hold:
+
+- The ref is canvas-driven: `canvas-webgl-detection.json` shows
+  `primaryRenderType: webgl|canvas` or `canvasCount > 0`.
+- A live re-embed is impossible, via either trigger:
+  - **`origin-lock`** — the canvas-driving scene src is served from a
+    ref-bound CDN (`*.b-cdn.net`, `*.website-files.com`, `*.webflow.io`) or a
+    cross-origin fetch of the scene returns a blocking status (403/401/CORS).
+  - **`blank`** — the impl renders **0 canvases** where the ref renders a
+    WebGL/canvas surface (SDK not bundled / init failed).
+
+The decision is deterministic and unit-tested in
+`ui_clone/policies/canvas_replay_auto.py`
+(`needs_canvas_replay`, `reembed_blocked_from_status`, `build_replay_plan`).
+It writes **`canvas-replay-plan.json`**:
+
+```json
+{
+  "schemaVersion": 1,
+  "decision": "canvas-replay",
+  "reason": "origin-lock",
+  "url": "https://www.raviklaassens.com/",
+  "sections": [
+    {
+      "section": "sec-2",
+      "refCanvasSelector": "canvas",
+      "region": { "x": 0, "y": 0, "width": 1440, "height": 900 },
+      "reason": "origin-lock",
+      "replayAsset": "public/canvas-replay/hero.webm",
+      "poster": "public/canvas-replay/hero-poster.png"
+    }
+  ]
+}
+```
+
+It also merges a `canvasReplay[]` declaration into `asset-substitution.json`
+so **anti-cheat understands the asset**: the replay is the ref's OWN recorded
+motion, a declared substituted asset — NOT a static screenshot used as a CSS
+background. (`ref-screenshot-asset` anti-cheat targets static section
+screenshots; a moving, declared hero video is a different, legitimate asset.)
+
+### 2. Capture — `scripts/extract/canvas-replay-capture.sh`
+
+Records the reference's hero canvas region against the **live ref URL** via
+`agent-browser record start/stop` (WebM), then crops to the hero region and
+re-encodes with `ffmpeg` to a web-friendly looped `hero.webm` (+ `hero.mp4`
+fallback) and a `hero-poster.png`. Writes to `<ref-dir>/static/canvas-replay/`
+and mirrors to the impl `public/canvas-replay/`.
+
+### 3. Generation routing — emit the `<video>` replay
+
+For each `canvas-replay-plan.json` section with `decision: "canvas-replay"`,
+generation emits a replay surface **instead of** a re-embed that 403s:
+
+```jsx
+<video
+  className="hero-canvas-replay"
+  autoPlay loop muted playsInline
+  poster="/canvas-replay/hero-poster.png"
+>
+  <source src="/canvas-replay/hero.webm" type="video/webm" />
+  <source src="/canvas-replay/hero.mp4" type="video/mp4" />
+</video>
+```
+
+`autoPlay loop muted playsInline` is required for the video to play on load
+without user interaction (muted is mandatory for autoplay).
+
+### 4. Gate coherence
+
+A `<video>` replay that plays (currentTime advances, non-blank pixels)
+**satisfies** the non-blank-hero gates:
+
+- **`runtime-frame-proof-check.sh`** (Fix 39) samples `<video>` currentTime
+  before/after. When `canvas-replay-plan.json` declares the section AND a
+  `<video>` advanced, the 0-canvas blank-hero fail becomes a **pass**
+  (`replay_satisfies_blank_hero`). A bare `<video>` with no declared plan, or
+  a stalled video, does NOT silence the gate.
+- **`hero-composite-check.sh`** (Fix 2a) treats the declared `<video>` replay
+  as substituting the ref's `<canvas>` kind, so the missing-`canvas` kind no
+  longer fails the composite (`canvasReplaySubstituted`).
+
+### Scope of what is automated vs. still manual
+
+| Step | Automated? |
+| --- | --- |
+| Detect origin-lock / blank | ✅ `canvas-replay-plan.sh` + tested policy |
+| Record ref canvas → video | ✅ `canvas-replay-capture.sh` |
+| Declare substituted asset | ✅ merged into `asset-substitution.json` |
+| Emit `<video>` replay in generation | ✅ per-trigger pattern above |
+| Gate coherence (frame-proof / hero-composite) | ✅ |
+| **License / permission attestation** | ❌ **stays manual** — see below |
+
+The automatic path NEVER applies to static, reproducible sections — it only
+fires for genuinely-unreproducible WebGL/canvas heroes where a re-embed is
+impossible. Static sections still use real reproduction; no AE/SSIM threshold
+is loosened by the auto path.
+
+---
+
 ## Problem this solves
 
 The default canonical closeout policy requires `section-compare` to pass —

@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from ui_clone.gate import Gate
 
 from ._helpers import (
@@ -136,6 +138,187 @@ def test_verification_plan_missing_fails_post_implement(tmp_path: Path) -> None:
     assert any(r.label == "verification-plan.json" for r in failures)
 
 
+def test_post_implement_enforces_forensic_preservation_when_required(tmp_path: Path) -> None:
+    """CSS-module-heavy refs must not pass with a freehand class system."""
+    loop = tmp_path / "loop"
+    ref = loop / "tmp" / "ref" / "realfood"
+    ref.mkdir(parents=True)
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "html-paste",
+                        "produces": "html-paste.json",
+                        "reason": "Universal anti-cheat",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "html-paste.json").write_text(json.dumps({"status": "pass"}), encoding="utf-8")
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "forensicPreservation": {
+                    "required": True,
+                    "strategy": "ref-derived-jsx-with-local-css",
+                    "classSignatureCount": 120,
+                    "copyCssTo": "src/ref-css",
+                    "rules": [
+                        "copy ref css/*.css into impl/src/ref-css and import them before overrides",
+                        "preserve original CSS-module className tokens",
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    impl = loop / "impl"
+    (impl / "src").mkdir(parents=True)
+    (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / "html-paste.json").write_text(
+        json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
+    )
+    (impl / "src" / "main.tsx").write_text(
+        "export function App(){return <main className='hero stats pyramid'>Hi</main>}\n",
+        encoding="utf-8",
+    )
+
+    results = Gate(ref).gate_post_implement()
+    failures = [r for r in results if r.status == "fail"]
+
+    assert any(r.label == "forensic-preservation-compliance" for r in failures)
+    assert any("CSS-module" in r.message and "src/ref-css" in r.message for r in failures)
+
+
+def test_post_implement_accepts_ref_css_and_preserved_class_tokens(tmp_path: Path) -> None:
+    """A ref-derived JSX path satisfies the forensic preservation gate."""
+    loop = tmp_path / "loop"
+    ref = loop / "tmp" / "ref" / "realfood"
+    ref.mkdir(parents=True)
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "html-paste",
+                        "produces": "html-paste.json",
+                        "reason": "Universal anti-cheat",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "html-paste.json").write_text(json.dumps({"status": "pass"}), encoding="utf-8")
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "forensicPreservation": {
+                    "required": True,
+                    "strategy": "ref-derived-jsx-with-local-css",
+                    "classSignatureCount": 40,
+                    "copyCssTo": "src/ref-css",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    impl = loop / "impl"
+    (impl / "src" / "ref-css").mkdir(parents=True)
+    (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / "html-paste.json").write_text(
+        json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
+    )
+    (impl / "src" / "ref-css" / "app.css").write_text(
+        ".dga_section__aaaa{} .dga_hero__bbbb{}\n", encoding="utf-8"
+    )
+    tokens = " ".join(f"dga_part{i}__abcd{i:02d}" for i in range(12))
+    (impl / "src" / "main.tsx").write_text(
+        "import './ref-css/app.css';\n"
+        f"export function App(){{return <main className=\"{tokens}\">Hi</main>}}\n",
+        encoding="utf-8",
+    )
+
+    results = Gate(ref).gate_post_implement()
+
+    failures = [r for r in results if r.status == "fail"]
+    assert not failures, f"expected forensic preservation path to pass: {failures}"
+
+
+def test_post_implement_blocks_forensic_mode_when_ref_css_artifacts_missing(
+    tmp_path: Path,
+) -> None:
+    """Missing ref CSS artifacts must not be bypassed with handwritten local CSS."""
+    loop = tmp_path / "loop"
+    ref = loop / "tmp" / "ref" / "realfood"
+    ref.mkdir(parents=True)
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "html-paste",
+                        "produces": "html-paste.json",
+                        "reason": "Universal anti-cheat",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    impl = loop / "impl"
+    (impl / "src" / "ref-css").mkdir(parents=True)
+    (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / "html-paste.json").write_text(
+        json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
+    )
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "forensicPreservation": {
+                    "required": True,
+                    "strategy": "ref-derived-jsx-with-local-css",
+                    "classSignatureCount": 80,
+                    "cssBytes": 0,
+                    "cssFiles": [],
+                    "cssArtifactStatus": "missing",
+                    "missingCssArtifacts": True,
+                    "blockedUntilCssArtifacts": True,
+                    "copyCssTo": "src/ref-css",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (impl / "src" / "ref-css" / "app.css").write_text(
+        ".dga_section__aaaa{} .dga_hero__bbbb{}\n", encoding="utf-8"
+    )
+    tokens = " ".join(f"dga_part{i}__abcd{i:02d}" for i in range(25))
+    (impl / "src" / "main.tsx").write_text(
+        "import './ref-css/app.css';\n"
+        f"export function App(){{return <main className=\"{tokens}\">Hi</main>}}\n",
+        encoding="utf-8",
+    )
+
+    results = Gate(ref).gate_post_implement()
+    failures = [r for r in results if r.status == "fail"]
+
+    assert any(r.label == "forensic-preservation-compliance" for r in failures)
+    assert any("ref CSS artifacts" in r.message and "missing" in r.message for r in failures)
+
+
 def test_sections_result_zero_pass_fails_post_implement(tmp_path: Path) -> None:
     """Loop-23 paradox: aux gates pass while sections/result.txt is 0 PASS / 12 FAIL.
 
@@ -204,6 +387,51 @@ def test_sections_result_one_pass_does_not_block(tmp_path: Path) -> None:
     failures = [r for r in results if r.status == "fail"]
     assert not any("sections/result.txt visual health" in r.label for r in failures), (
         f"≥1 PASS must not trigger the new aggregate check: "
+        f"{[(r.label, r.status) for r in results]}"
+    )
+
+
+def test_sections_result_structural_only_blocks(tmp_path: Path) -> None:
+    """Phase 2 (genuine-fidelity convergence): a pure-substitution result with
+    0 genuine pixel PASS — even at 0 FAIL — is the STRUCTURAL_ONLY gaming vector
+    (footer 'N PASS' built entirely of substituted rows). Convergence requires
+    >=1 genuine pixel ✅, so post-implement MUST block 0-genuine-PASS results."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    sections = ref / "sections"
+    sections.mkdir(exist_ok=True)
+    (sections / "result.txt").write_text(
+        "**Result: 0 PASS, 0 FAIL, 0 SKIP, 12 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    gate = Gate(ref)
+    results = gate.gate_post_implement()
+    failures = [r for r in results if r.status == "fail"]
+    assert any("sections/result.txt visual health" in r.label for r in failures), (
+        f"0 genuine PASS (pure STRUCTURAL_ONLY) must block post-implement: "
+        f"{[(r.label, r.status) for r in results]}"
+    )
+
+
+def test_sections_result_genuine_pass_with_substitution_does_not_block(tmp_path: Path) -> None:
+    """Counterpart to the Phase-2 block: >=1 genuine pixel PASS alongside
+    legitimate substitution (commercial fonts / CDN media) is fine. Phase 2
+    blocks only 0-genuine results, not all substitution."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    sections = ref / "sections"
+    sections.mkdir(exist_ok=True)
+    (sections / "result.txt").write_text(
+        "**Result: 3 PASS, 0 FAIL, 0 SKIP, 5 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    gate = Gate(ref)
+    results = gate.gate_post_implement()
+    failures = [r for r in results if r.status == "fail"]
+    assert not any("sections/result.txt visual health" in r.label for r in failures), (
+        f">=1 genuine PASS must not block even with substitution present: "
         f"{[(r.label, r.status) for r in results]}"
     )
 
@@ -322,6 +550,116 @@ def test_visual_debug_stamp_passed_false_blocks(tmp_path: Path) -> None:
     assert failures, "stamp with passed=false must trigger fail"
 
 
+def test_visual_debug_stamp_orphaned_provisional_blocks(
+    tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    """Provisional stamp WITHOUT matching env var = crashed auto-verify; reject.
+
+    Stamp-race fix (codex review 2026-05-27): a previous auto-verify.sh run
+    crashed mid-execution after writing the provisional stamp (`passed=true,
+    provisional=true`) but before writing the final verdict. Without this
+    guard, the next post-implement check would falsely trust the stale
+    provisional and grant pass. The env var `UI_RE_AUTOVERIFY_INFLIGHT` is
+    NOT set (no auto-verify in flight), so the gate must reject.
+    """
+    monkeypatch.delenv("UI_RE_AUTOVERIFY_INFLIGHT", raising=False)
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "visual-debug-stamp.json").write_text(
+        json.dumps({
+            "schemaVersion": 2,
+            "passed": True,
+            "exitCode": 0,
+            "totalChecks": 0,
+            "totalFail": 0,
+            "phaseE": False,
+            "provisional": True,
+            "invocationId": "stale-from-crashed-run",
+        }),
+        encoding="utf-8",
+    )
+    gate = Gate(ref)
+    results = gate.gate_post_implement()
+    failures = [r for r in results if r.status == "fail" and "visual-debug-stamp" in r.label]
+    assert failures, "orphaned provisional stamp must be rejected"
+    assert any("provisional" in (r.message or "").lower() for r in failures), (
+        "failure message should explain provisional cause"
+    )
+
+
+def test_visual_debug_stamp_inflight_provisional_accepted(
+    tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    """Provisional stamp WITH matching env var = current auto-verify run; trust.
+
+    During auto-verify's own execution, it writes a provisional stamp and
+    then calls the post-implement gate. Both the stamp's invocationId and
+    the env var are set to the same uuid for this run, so the gate accepts
+    the provisional verdict — otherwise auto-verify could never clear its
+    own gate (chicken-and-egg).
+    """
+    invocation_id = "00000000-1111-2222-3333-444444444444"
+    monkeypatch.setenv("UI_RE_AUTOVERIFY_INFLIGHT", invocation_id)
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "visual-debug-stamp.json").write_text(
+        json.dumps({
+            "schemaVersion": 2,
+            "passed": True,
+            "exitCode": 0,
+            "totalChecks": 0,
+            "totalFail": 0,
+            "phaseE": False,
+            "provisional": True,
+            "invocationId": invocation_id,
+        }),
+        encoding="utf-8",
+    )
+    gate = Gate(ref)
+    results = gate.gate_post_implement()
+    failures = [r for r in results if r.status == "fail" and "visual-debug-stamp" in r.label]
+    assert not failures, (
+        f"in-flight provisional stamp (matching env var) must clear: "
+        f"{[(r.label, r.status, r.message) for r in results]}"
+    )
+
+
+def test_visual_debug_stamp_mismatched_invocation_id_blocks(
+    tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    """Provisional stamp with WRONG invocationId vs env var = stale; reject.
+
+    Failure mode: a prior auto-verify run wrote its provisional stamp,
+    crashed, and left it on disk. A new auto-verify run starts (exporting a
+    NEW invocationId env var) but somehow fails to overwrite the stale
+    stamp before the gate check fires. The mismatch must be detected and
+    treated as if no env var was set.
+    """
+    monkeypatch.setenv("UI_RE_AUTOVERIFY_INFLIGHT", "new-run-id-aaa")
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "visual-debug-stamp.json").write_text(
+        json.dumps({
+            "schemaVersion": 2,
+            "passed": True,
+            "exitCode": 0,
+            "totalChecks": 0,
+            "totalFail": 0,
+            "phaseE": False,
+            "provisional": True,
+            "invocationId": "old-run-id-bbb",
+        }),
+        encoding="utf-8",
+    )
+    gate = Gate(ref)
+    results = gate.gate_post_implement()
+    failures = [r for r in results if r.status == "fail" and "visual-debug-stamp" in r.label]
+    assert failures, "mismatched invocationId must be rejected even with env var set"
+
+
 def test_phase_e_result_passed_false_blocks(tmp_path: Path) -> None:
     """phase-e-result.json with passed=false (LLM rejected) blocks the gate."""
     ref = tmp_path / "ref"
@@ -354,15 +692,63 @@ def test_phase_e_result_absent_silent(tmp_path: Path) -> None:
 def test_transitions_result_missing_fails_post_implement_when_spec_has_transitions(
     tmp_path: Path,
 ) -> None:
-    """Regression: post-implement must not pass when transition-compare was skipped."""
+    """Regression: post-implement must not pass when required transition-compare was skipped."""
     ref = tmp_path / "ref"
     ref.mkdir()
     _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "transition-compare",
+                        "produces": "transitions/result.txt",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     (ref / "transitions" / "result.txt").unlink()
 
     failures = [r for r in Gate(ref).gate_post_implement() if r.status == "fail"]
 
     assert any(r.label == "transitions/result.txt visual health" for r in failures)
+
+
+def test_transitions_result_missing_is_not_required_for_scroll_only_motion(
+    tmp_path: Path,
+) -> None:
+    """Scroll/splash motion is proven by video/transition-proof, not hover compare."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "transition-proof",
+                        "produces": "transition-proof.json",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "transition-proof.json").write_text(
+        json.dumps({"schemaVersion": 1, "status": "pass"}),
+        encoding="utf-8",
+    )
+    (ref / "transitions" / "result.txt").unlink()
+
+    failures = [r for r in Gate(ref).gate_post_implement() if r.status == "fail"]
+
+    assert not any(r.label == "transitions/result.txt visual health" for r in failures)
 
 
 # ── anti-cheat pattern detection (F1 — claude fidelity analysis 2026-05-25) ──

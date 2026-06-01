@@ -263,6 +263,36 @@ def _check_scroll_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
     if summary.get("static") is True:
         # Page fits in viewport — scroll check is N/A.
         return None
+    # Fix 3 reframed (codex review 2026-05-27): infiniteScroll signal is
+    # captured by capture-scroll.sh into summary.json but was previously
+    # not surfaced anywhere. Emit a non-blocking policy-recommendation
+    # warn so the iteration loop sees the unclonable-shape hint EARLY
+    # (before exhausting 10 post-implement iterations on a ref whose
+    # dynamic height growth can never be matched by a static clone).
+    # This is the "policy recommendation, not a new gate" path codex
+    # recommended — auth-gated/DRM go through `record_unclonable`
+    # separately, this one is partial-unclonable.
+    if summary.get("infiniteScroll") is True:
+        return CheckResult(
+            "state-coverage scroll",
+            "warn",
+            (
+                "states/scroll/summary.json marks ref as infiniteScroll "
+                "(finalScrollHeight > initialScrollHeight × threshold). A "
+                "static clone cannot match unbounded height growth; "
+                "post-implement video-motion / layout-health gates will "
+                "drift and likely consume the 10-iteration hard cap before "
+                "converging."
+            ),
+            fix=(
+                "Switch closeoutPolicy to 'structural-only' (declare an "
+                "asset-substitution.json with the lazy-loaded sections), or "
+                "use 'canvas-replay' if the page is canvas/scroll-driven. "
+                "Set via: jq '.closeoutPolicy=\"structural-only\"' "
+                "<ref_dir>/pipeline-state.json > /tmp/s.json && "
+                "mv /tmp/s.json <ref_dir>/pipeline-state.json"
+            ),
+        )
     # Page is scrollable. Require at least one scroll-state primitive.
     matched: list[str] = []
     for primitive in _SCROLL_PRIMITIVES:
@@ -391,6 +421,51 @@ def gate_state_coverage(self: Gate) -> list[CheckResult]:
                 "no states/ directory — multi-snapshot capture not run (skip; ref is not motion-rich)",
             )
         ]
+
+    # Fix 2 (codex review 2026-05-27): partial-capture detector for
+    # motion-rich refs. states/ exists (so the "states/ absent" branch
+    # above did not fire) but one or more required phase artifacts is
+    # missing — e.g. capture-states.sh ran but capture-scroll.sh
+    # crashed, leaving `states/splash/` but no `states/scroll/`. Without
+    # this detector, the sub-checks below each return None for the
+    # missing phase and the empty-results fallback at the end of this
+    # function emits a "no signal" PASS, which masks the gap. Motion-rich
+    # refs must FAIL when any phase artifact is missing — fidelity ground
+    # truth cannot be inferred from a partial capture.
+    if motion_rich:
+        required = {
+            "splash (states/splash/summary.json + trajectory.json)": (
+                (states_root / "splash" / "summary.json").is_file()
+                and (states_root / "splash" / "trajectory.json").is_file()
+            ),
+            "scroll (states/scroll/summary.json)": (
+                (states_root / "scroll" / "summary.json").is_file()
+            ),
+            "hover (states/hover/manifest.json)": (
+                (states_root / "hover" / "manifest.json").is_file()
+            ),
+        }
+        missing = [phase for phase, present in required.items() if not present]
+        if missing:
+            return [
+                CheckResult(
+                    "state-coverage",
+                    "fail",
+                    (
+                        f"states/ exists but motion-rich ref is missing required "
+                        f"phase artifact(s): {', '.join(missing)}. Capture started "
+                        "but did not finish — a partial capture leaves the sub-"
+                        "checks reporting 'no signal' instead of failing, which "
+                        "masks transition-fidelity gaps."
+                    ),
+                    fix=(
+                        "Re-run all three capture phases: "
+                        "bash scripts/extract/capture-states.sh <url> <session> <ref_dir> && "
+                        "bash scripts/extract/capture-scroll.sh <url> <session> <ref_dir> && "
+                        "bash scripts/extract/capture-hover.sh <url> <session> <ref_dir>"
+                    ),
+                )
+            ]
 
     impl_root = self._find_impl_root()
     if impl_root is None:

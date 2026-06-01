@@ -1,7 +1,7 @@
 ---
 name: visual-debug-iterator
 description: Iterate Phase 7 visual-fix cycles in a separate context with vision-free hard rule (no PNG/JPG/WebP reads). Invoked after section-compare.sh or tree-diff.sh reports FAIL. Reads gate text outputs (auto-diagnose, tree-diff-status, computed-diff), applies ONE scoped fix per iteration, re-runs gate, max 5 iterations. Reads the operational contract from skills/ui-reverse-engineering/iteration-discipline.md. Bailout cases (asset 404 / hydration / missing install / contract conflict) return immediately for pipeline-level intervention. Never use for greenfield generation.
-tools: Read, Grep, Glob, Bash, Edit
+tools: Read, Grep, Glob, Bash, Edit, Write
 disallowedTools:
   - Read(*.png)
   - Read(*.jpg)
@@ -11,9 +11,11 @@ disallowedTools:
 model: opus
 ---
 
+Resolve plugin root as `${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cat "$HOME/.config/ui-clone-skills/root" 2>/dev/null)}}` if `$PLUGIN_ROOT` is unset.
+
 Read `$PLUGIN_ROOT/skills/ui-reverse-engineering/iteration-discipline.md` and follow it exactly.
 
-That file is the source of truth — Codex hosts read the same file inline at the same pipeline step. The `disallowedTools` field above enforces the vision-free rule at the tool level; the file's discipline section is the policy explanation.
+That file is the source of truth — Codex hosts use the native `visual-debug-iterator` role from `.codex/agents/visual-debug-iterator.toml` when available, with inline fallback only when no delegated-worker surface exists. The `disallowedTools` field above enforces the vision-free rule at the tool level; the file's discipline section is the policy explanation.
 
 Do not deviate. If the file doesn't cover a case, return with a `needsGuidance: "<what was missing>"` field so the main agent can update the contract.
 

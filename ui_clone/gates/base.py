@@ -270,6 +270,20 @@ class Gate:
         """Load a JSON artifact from ref_dir. Returns None if missing, malformed, or not an object."""
         return _load_json_safe(self.ref_dir / filename)
 
+    def _load_json_any(self, filename: str) -> Any:
+        """Load a JSON artifact, preserving a top-level list OR dict.
+
+        Unlike `_load_json` (which coerces non-dict roots to None),
+        sticky-elements.json and several bundle/sdk artifacts are top-level
+        lists. Returns None when missing or malformed."""
+        path = self.ref_dir / filename
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
     def _check_artifact_provenance(self) -> list[CheckResult]:
         """Require evidence-backed provenance for high-risk extraction artifacts."""
         path = self.ref_dir / "artifact-provenance.json"
@@ -444,6 +458,8 @@ class Gate:
     def _check_detection_artifact_integrity(  # type: ignore[empty-body]
         self,
     ) -> list[CheckResult]: ...
+
+    def _scroll_motion_signals(self) -> bool: ...  # type: ignore[empty-body]
 
     def _check_scroll_spec_coverage(  # type: ignore[empty-body]
         self, spec: Any

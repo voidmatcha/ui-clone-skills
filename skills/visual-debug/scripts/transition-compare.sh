@@ -438,17 +438,68 @@ for ref_el in ref_els:
         report.append(entry)
         continue
 
-    # Compare transition timing
-    ref_durs = ref_el['transition']['durations']
-    impl_durs = impl_el['transition']['durations']
-    ref_ease = ref_el['transition']['easings']
-    impl_ease = impl_el['transition']['easings']
+    # Compare transition timing PER PROPERTY (not whole-list equality).
+    # getComputedStyle returns transition-property / -duration /
+    # -timing-function as comma-joined parallel lists, but cubic-bezier()/
+    # steps() carry internal commas, so the timing-function list is over-split
+    # — regroup by paren balance before zipping. Then match each property the
+    # REF actually animates against the impl's value for that same property,
+    # ignoring extra inert properties the ref does not animate (an added
+    # 'transform', a reordered list, or 'transition: all'). A wrong duration/
+    # easing on an animated property, or a property the ref animates but the
+    # impl omits, still FAILs — this is a tightening-compatible correction.
+    def regroup_paren(tokens):
+        out, buf, depth = [], '', 0
+        for tok in tokens:
+            buf = tok if not buf else buf + ', ' + tok
+            depth += tok.count('(') - tok.count(')')
+            if depth <= 0:
+                out.append(buf)
+                buf, depth = '', 0
+        if buf:
+            out.append(buf)
+        return out
 
-    if ref_durs != impl_durs:
-        entry['issues'].append(f'DURATION_MISMATCH: ref={ref_durs}, impl={impl_durs}')
+    def prop_timing_map(trans):
+        props = [p.strip() for p in (trans.get('properties') or [])]
+        durs = trans.get('durations') or []
+        eases = regroup_paren(trans.get('easings') or [])
+        m = {}
+        for i, prop in enumerate(props):
+            if not prop or prop == 'none':
+                continue
+            dur = durs[i % len(durs)] if durs else ''
+            eas = eases[i % len(eases)] if eases else ''
+            m[prop] = (dur, eas)  # last declaration wins, matching CSS cascade
+        return m
 
-    if ref_ease != impl_ease:
-        entry['issues'].append(f'EASING_MISMATCH: ref={ref_ease}, impl={impl_ease}')
+    ref_map = prop_timing_map(ref_el['transition'])
+    impl_map = prop_timing_map(impl_el['transition'])
+
+    def lookup_timing(prop, m):
+        if prop in m:
+            return m[prop]
+        if 'all' in m:  # impl 'transition: all <t>' covers any property
+            return m['all']
+        return None
+
+    for prop, (ref_dur, ref_eas) in ref_map.items():
+        impl_timing = lookup_timing(prop, impl_map)
+        if impl_timing is None:
+            entry['issues'].append(
+                f'MISSING_TRANSITION: ref animates {prop} '
+                f'(dur={ref_dur}, ease={ref_eas}), impl has no matching transition'
+            )
+            continue
+        impl_dur, impl_eas = impl_timing
+        if ref_dur != impl_dur:
+            entry['issues'].append(
+                f'DURATION_MISMATCH: prop={prop} ref={ref_dur} impl={impl_dur}'
+            )
+        if ref_eas != impl_eas:
+            entry['issues'].append(
+                f'EASING_MISMATCH: prop={prop} ref={ref_eas} impl={impl_eas}'
+            )
 
     # Compare idle styles
     def normalize_transform(v):

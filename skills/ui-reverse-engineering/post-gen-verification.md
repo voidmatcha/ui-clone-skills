@@ -574,7 +574,7 @@ bash "$SCRIPTS_DIR/transition-compare.sh" <original-url> <impl-url> <session> tm
   "selector": ".product-card-img",
   "status": "FAIL",
   "issues": [
-    "EASING_MISMATCH: ref=[cubic-bezier(0.32, 0.72, 0, 1)], impl=[ease]",
+    "EASING_MISMATCH: prop=transform ref=cubic-bezier(0.32, 0.72, 0, 1) impl=ease",
     "HOVER_TRANSFORM_NOT_APPLIED: ref changes transform on hover, impl stays same"
   ]
 }
@@ -583,8 +583,12 @@ bash "$SCRIPTS_DIR/transition-compare.sh" <original-url> <impl-url> <session> tm
 ### Gate
 
 - ALL elements with transitions in ref must have matching transitions in impl
+- Timing is compared **per property**: each property the ref animates must have a
+  matching duration + easing in the impl (or be covered by an impl `transition: all`).
+  Extra inert properties the ref does not animate (e.g. an added `transform`) are
+  ignored, but a property the ref animates but the impl omits is a `MISSING_TRANSITION`.
 - `HOVER_*_NOT_APPLIED` is a **hard blocker** — the effect is missing entirely
-- `EASING_MISMATCH` and `DURATION_MISMATCH` must be fixed to match ref values
+- `EASING_MISMATCH`, `DURATION_MISMATCH`, and `MISSING_TRANSITION` must be fixed to match ref values
 
 ### Why this catches what Loop 4 misses
 

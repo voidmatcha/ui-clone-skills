@@ -19,6 +19,9 @@ class TestPreGenerate:
     def _tool_input(self, file_path: str) -> str:
         return json.dumps({"tool_name": "Write", "tool_input": {"file_path": file_path}})
 
+    def _patch_input(self, patch: str) -> str:
+        return json.dumps({"tool_name": "apply_patch", "tool_input": {"patch": patch}})
+
     def test_no_wip_marker_runs_gate_and_blocks_on_missing_artifacts(self, tmp_path: Path) -> None:
         """No WIP marker + incomplete artifacts → gate runs, blocks. Marker is the
         side-effect of a passing gate, not a precondition for enforcement."""
@@ -38,6 +41,35 @@ class TestPreGenerate:
         data = json.loads(out)
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         # Marker not created when gate failed — activation only happens on pass.
+        assert not (ref_dir / ".ui-re-active").is_file()
+
+    def test_apply_patch_payload_runs_gate_and_blocks_component_write(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex apply_patch payloads may only expose a patch body, not file_path."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        write_extracted_json(ref_dir)  # incomplete pre-generate artifacts
+
+        patch = (
+            "*** Begin Patch\n"
+            f"*** Update File: {tmp_path / 'src/components/Hero.tsx'}\n"
+            "@@\n"
+            "-export const Hero = () => null\n"
+            "+export const Hero = () => <section />\n"
+            "*** End Patch\n"
+        )
+        result = run_hook(
+            self.MODULE,
+            stdin_data=self._patch_input(patch),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"Expected deny JSON, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert not (ref_dir / ".ui-re-active").is_file()
 
     def test_no_wip_marker_gate_passes_creates_marker_and_prints_activation(self, tmp_path: Path) -> None:
@@ -151,4 +183,3 @@ class TestPreGenerate:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
-

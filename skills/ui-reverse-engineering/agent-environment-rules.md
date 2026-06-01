@@ -88,9 +88,9 @@ tmp/ref/<component>/
 └── responsive/         ← boundary-collisions.json, sizing-expressions.json
 ```
 
-Gate validators look for `tmp/ref/<c>/static/ref/`, NOT `tmp/ref/<c>/capture/static/ref/`. The `capture/` parent only exists in standalone `/ui-capture` runs without a `<component>` arg.
+Gate validators look for `tmp/ref/<c>/static/ref/`, NOT `tmp/ref/<c>/capture/static/ref/`. The `capture/` parent only exists in standalone `ui-capture` runs without a `<component>` arg.
 
-**Always invoke `/ui-capture` with the 3rd `[component]` arg** so it writes to `tmp/ref/<c>/` directly — `/ui-capture <url> "" <component>`. Pass `""` for the local-url slot when you only need ref capture.
+**Always invoke `ui-capture` with the 3rd `[component]` arg** so it writes to `tmp/ref/<c>/` directly — `ui-capture <url> "" <component>` (Claude slash command: `/ui-capture <url> "" <component>`). Pass `""` for the local-url slot when you only need ref capture.
 
 `tmp/ref/` lives **inside the project root** that owns the component, not under `~/`. If you've `cd`'d to `~/Documents/<repo>/apps/<app>/`, that's where `tmp/ref/` should be. Verify with `pwd && ls tmp/ref/<c>/` before each gate run — gates have no opinion about which directory is "the right one"; they validate the path you pass in.
 

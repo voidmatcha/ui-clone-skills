@@ -142,8 +142,6 @@ def test_run_required_checks_has_anti_cheat_signatures() -> None:
     root = _project_root()
     text = (root / "scripts" / "verify" / "run-required-checks.sh").read_text()
     for script in (
-        "class-signature-preservation-check.sh",
         "bundle-paste-check.sh",
-        "class-signature-css-coverage-check.sh",
     ):
         assert f'"{script}"' in text, f"{script} missing from dispatcher SIGNATURES"

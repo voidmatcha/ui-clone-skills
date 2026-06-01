@@ -243,6 +243,7 @@ ref_kinds = {
     "button": any_subtree_has(is_tag("button")),
     "h1OrH2": any_subtree_has(is_headline),
     "label": any_subtree_has(is_tag("span")),
+    "canvas": any_subtree_has(is_tag("canvas")),
 }
 
 
@@ -296,7 +297,7 @@ if not hero_files:
         "schemaVersion": 1,
         "status": "fail",
         "ref": ref_kinds,
-        "impl": {"video": False, "button": False, "h1OrH2": False, "label": False},
+        "impl": {"video": False, "button": False, "h1OrH2": False, "label": False, "canvas": False},
         "missingInImpl": ["hero-component-file"],
         "implCandidateFiles": [],
         "rule": (
@@ -317,6 +318,7 @@ VIDEO_RE = re.compile(r"<\s*video\b", re.IGNORECASE)
 BUTTON_RE = re.compile(r"<\s*button\b", re.IGNORECASE)
 HEADLINE_RE = re.compile(r"<\s*h[12]\b", re.IGNORECASE)
 SPAN_RE = re.compile(r"<\s*span\b", re.IGNORECASE)
+CANVAS_RE = re.compile(r"<\s*canvas\b", re.IGNORECASE)
 BUTTON_VIDEO_PROXIMITY = 500  # chars
 
 
@@ -335,7 +337,7 @@ def has_button_near_video(text: str) -> bool:
     return False
 
 
-impl_kinds = {"video": False, "button": False, "h1OrH2": False, "label": False}
+impl_kinds = {"video": False, "button": False, "h1OrH2": False, "label": False, "canvas": False}
 for p in hero_files:
     text = file_text(p)
     if VIDEO_RE.search(text):
@@ -346,10 +348,29 @@ for p in hero_files:
         impl_kinds["h1OrH2"] = True
     if SPAN_RE.search(text):
         impl_kinds["label"] = True
+    if CANVAS_RE.search(text):
+        impl_kinds["canvas"] = True
     if all(impl_kinds.values()):
         break
 
 missing = [k for k, v in ref_kinds.items() if v and not impl_kinds[k]]
+
+# Canvas-replay coherence: when canvas-replay-plan.json declares this hero a
+# replay (origin-locked / blank WebGL re-embed) and the impl emits a <video>
+# replay, the <video> substitutes the ref's <canvas> kind — the hero renders
+# the ref's OWN recorded motion. Drop "canvas" from missing in that case.
+def _canvas_replay_declared() -> bool:
+    try:
+        plan = json.loads((ref_dir / "canvas-replay-plan.json").read_text(encoding="utf-8"))
+        return isinstance(plan, dict) and plan.get("decision") == "canvas-replay"
+    except Exception:
+        return False
+
+canvas_replay_substituted = False
+if "canvas" in missing and impl_kinds.get("video") and _canvas_replay_declared():
+    missing = [k for k in missing if k != "canvas"]
+    canvas_replay_substituted = True
+
 status = "pass" if not missing else "fail"
 
 artifact = {
@@ -358,6 +379,7 @@ artifact = {
     "ref": ref_kinds,
     "impl": impl_kinds,
     "missingInImpl": missing,
+    "canvasReplaySubstituted": canvas_replay_substituted,
     "implCandidateFiles": [
         str(p.relative_to(impl_dir)) for p in hero_files[:10]
     ],

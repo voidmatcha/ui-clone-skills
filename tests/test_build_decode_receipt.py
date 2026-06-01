@@ -48,14 +48,6 @@ def test_gate_verdicts_render(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "pipeline-state.json").write_text(json.dumps({"targetUrl": "https://x.test"}))
-    (ref / "class-signature-preservation.json").write_text(json.dumps({
-        "status": "pass",
-        "reason": "44/128 preserved",
-        "refSignatureCount": 128,
-        "implSignatureCount": 48,
-        "preservedCount": 44,
-        "coverage": 0.34,
-    }))
     (ref / "bundle-paste-check.json").write_text(json.dumps({
         "status": "pass",
         "reason": "no bundle paste detected",
@@ -69,15 +61,10 @@ def test_gate_verdicts_render(tmp_path: Path) -> None:
     proc = _run(ref, out)
     assert proc.returncode == 0
     body = out.read_text()
-    assert "class-signature-preservation" in body
-    assert "44/128 preserved" in body
     assert "no bundle paste" in body
     assert "structural similarity 78%" in body
     assert "v-fail" in body  # CSS class for fail status
     assert "v-pass" in body
-    # coverage summary block surfaces (use floor for float-formatting safety)
-    coverage_pct = f"{int(0.34 * 100)}"
-    assert coverage_pct in body, f"expected coverage % {coverage_pct}% in body"
 
 
 def test_unclonable_reasons_render_with_fallbacks(tmp_path: Path) -> None:
@@ -134,9 +121,9 @@ def test_html_special_chars_escaped(tmp_path: Path) -> None:
     (ref / "pipeline-state.json").write_text(json.dumps({
         "targetUrl": "https://x.test/<script>alert(1)</script>",
     }))
-    (ref / "class-signature-preservation.json").write_text(json.dumps({
+    (ref / "bundle-paste-check.json").write_text(json.dumps({
         "status": "fail",
-        "reason": "no preserved <iframe> signatures & 0 < threshold",
+        "reason": "pasted <iframe> bundle & 0 < threshold",
     }))
     out = tmp_path / "receipt.html"
     proc = _run(ref, out)

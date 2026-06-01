@@ -61,7 +61,7 @@ def _make_fake_agent_browser(
     fake = bin_dir / "agent-browser"
     fake.write_text(
         "#!/usr/bin/env bash\n"
-        f"echo \"$@\" >> '{tmp_path / "calls.log"}'\n"
+        f"echo \"$@\" >> '{tmp_path / 'calls.log'}'\n"
         "shift 2  # consume --session NAME\n"
         'if [ "$1" = "open" ]; then\n'
         f"  exit {open_returncode}\n"
@@ -80,6 +80,10 @@ def _run_capture_hover(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    # Keep the fake bash-backed agent-browser from emitting host locale
+    # warnings into stdout/stderr that the capture script parses as JSON.
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
     args = [str(SCRIPT), "https://example.test", "sess1", str(ref_dir)]
     if reuse_session:
         args.append("--reuse-session")

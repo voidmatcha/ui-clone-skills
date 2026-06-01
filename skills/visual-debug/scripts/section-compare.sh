@@ -25,6 +25,58 @@ WAIT_IMPL="${WAIT_IMPL:-6000}"
 WAIT_LAZY_LOAD="${WAIT_LAZY_LOAD:-2}"
 WAIT_SCROLL_SETTLE="${WAIT_SCROLL_SETTLE:-0.5}"
 
+# ── Frozen-ref mode (opt-in) ─────────────────────────────────────────
+# RECATCH_REF=1 (DEFAULT): delete + re-capture the ref live every run —
+#   byte-identical to historical behavior. Live GSAP idle-drift / lazy
+#   media make AE & DSSIM bounce ±3-5% run-to-run on the ref side.
+# RECATCH_REF=0: when frozen ref artifacts already exist (sections/ref/*.png
+#   AND sections/ref-sections.json), REUSE them — skip ref-side delete,
+#   browser open, enumeration, and capture. The impl is still captured
+#   fresh and the per-section diff runs against the frozen crops. This
+#   removes ref-side run-to-run noise so AE/DSSIM are deterministic.
+#   Provenance (url/viewport/timestamp/crop count) is stamped to
+#   sections/frozen-ref-provenance.json when frozen crops are reused.
+RECATCH_REF="${RECATCH_REF:-1}"
+
+# ── Perceptual-dense PASS (default ON; =0 is the strict escape hatch) ──
+# Promoted to default-ON after a cross-site decision (scratch/perceptual-decide):
+# refStd guard closes the blank-ref hole (juanmora: 4 prior false-passes → 0),
+# clean faithful/wrong separation on ordrhealth+kayiseisagu with an independent
+# vision judge → CROSS-SITE FALSE-PASS COUNT = 0. The content-based matcher
+# (Fix 22) removed the mis-pairing confound.
+# SECTION_PERCEPTUAL_DENSE=0: strict escape hatch — the strict
+#   AE/Mpx + pass-by-dssim(<=0.015) ladder is the only pass path.
+# SECTION_PERCEPTUAL_DENSE=1 (DEFAULT): a section may PASS as `pass-by-perceptual`
+#   (a genuine ✅, counted like pass-by-dssim) IFF ALL hold:
+#     1. it is DENSE by REF morphology (ref has a non-empty text
+#        fingerprint or SVG-text) — classified from REF evidence only, so
+#        deleting impl content can never earn relaxed scoring;
+#     2. global dssim <= SECTION_DSSIM_DENSE_MAX and AE/Mpx < saturation;
+#     3. ZERO Critical and ZERO Major structure deltas for the section —
+#        this combines (a) the existing Step-5 DOM structure-mismatch
+#        logic AND (b) a regional-locality check: a misplaced element
+#        leaves a catastrophic local band (dssim >= SECTION_DSSIM_LOCAL_FAIL)
+#        even when the global dssim passes. Uniform font-AA / idle-drift
+#        noise does not. This is the gate that FAILS a section whose global
+#        dssim is low but which has a real localized structural defect;
+#     4. the ref-screenshot-asset scan is clean (no screenshot cheat).
+#   Simple (non-dense) sections keep strict AE. Motion-critical
+#   STRUCTURAL_ONLY protection and the 50% STRUCTURAL_ONLY ratio cap stay.
+#
+# Calibration (one <slug> reference, frozen crops): a faithful text-dense
+# <navbar> section floors at global dssim 0.0999 with a worst 200px-band
+# dssim of 0.0999; a buggy <about> section sits at a LOWER global dssim
+# 0.0947, yet its single misplaced label element produces a worst band
+# dssim of 0.677. DENSE_MAX=0.12 admits both as candidates (and excludes a
+# <hero> at 0.169); LOCAL_FAIL=0.30 then FAILs <about> (band 0.677 >> 0.30)
+# while passing <navbar> (band 0.0999 << 0.30). The buggy section's lower
+# GLOBAL dssim is exactly why dssim-alone is unsafe and the localized band
+# gate is required.
+SECTION_PERCEPTUAL_DENSE="${SECTION_PERCEPTUAL_DENSE:-1}"
+SECTION_DSSIM_DENSE_MAX="${SECTION_DSSIM_DENSE_MAX:-0.12}"
+SECTION_DSSIM_LOCAL_FAIL="${SECTION_DSSIM_LOCAL_FAIL:-0.30}"
+SECTION_LOCAL_BAND_PX="${SECTION_LOCAL_BAND_PX:-200}"
+
 # ── Dynamic-content exclusion ──
 # RAF-driven canvases (Three.js shaders, particles), <video>, and other
 # auto-running animations produce per-frame pixel noise that AE can never
@@ -232,6 +284,19 @@ except Exception:
       DYNAMIC_SELECTORS="$DYNAMIC_SELECTORS, $EXTRA_TARGETS"
     fi
   fi
+  # Auto-augment with async-mounted WebGL-embed CONTAINERS. The default
+  # `canvas` selector only hides a <canvas> that exists at snapshot time, but
+  # Unicorn Studio ([data-us-project]), Spline (spline-viewer / [data-spline])
+  # and Three.js/generic engines ([data-engine]) inject their <canvas> AFTER
+  # init — so a faithfully re-embedded WebGL hero diffs catastrophically and
+  # FAILs pixel-AE (observed on raviklaassens, where the hero WAS faithfully
+  # re-embedded via UnicornStudio.init yet scored FAIL). The container element
+  # is present in the DOM early, so masking it hides the whole region
+  # regardless of when the canvas paints. fix-not-loosen: this masks MORE
+  # genuinely-dynamic regions; static sections are unaffected and the masked
+  # region's motion is still verified by video-motion-compare. Symmetric on
+  # ref + impl (the mask CSS is injected identically into both).
+  DYNAMIC_SELECTORS="$DYNAMIC_SELECTORS, [data-us-project], spline-viewer, [data-spline], [data-engine]"
   # Selectors must not contain quote characters of either kind:
   #  - `"` would close the JS string inside the injected <style> textContent.
   #  - `'` would close the surrounding Python r'...' raw string in pause_js below.
@@ -262,10 +327,66 @@ trap cleanup_browsers EXIT
 
 mkdir -p "$DIR/sections/ref" "$DIR/sections/impl" "$DIR/sections/diff"
 
+# ── Frozen-ref reuse decision (Task A) ───────────────────────────────
+# Must run BEFORE the stale-output cleanup below so frozen ref crops are
+# preserved. REUSE_FROZEN_REF stays 0 on the default (RECATCH_REF=1) path,
+# leaving every downstream branch unchanged.
+REUSE_FROZEN_REF=0
+if [ "$RECATCH_REF" != "1" ]; then
+  shopt -s nullglob
+  _frozen_ref_pngs=("$DIR/sections/ref/"*.png)
+  shopt -u nullglob
+  if [ -s "$DIR/sections/ref-sections.json" ] && [ "${#_frozen_ref_pngs[@]}" -gt 0 ]; then
+    REUSE_FROZEN_REF=1
+    echo "▸ RECATCH_REF=$RECATCH_REF — reusing ${#_frozen_ref_pngs[@]} frozen ref crop(s); skipping ref re-capture."
+    python3 - "$DIR" "$ORIG_URL" "$VIEW_W" "$VIEW_H" "${#_frozen_ref_pngs[@]}" <<'PY' 2>/dev/null || true
+import json, os, sys, time
+d, url, vw, vh, n = sys.argv[1:6]
+os.makedirs(os.path.join(d, "sections"), exist_ok=True)
+stamp = {
+    "mode": "frozen-ref-reuse",
+    "refUrl": url,
+    "viewport": f"{vw}x{vh}",
+    "frozenRefCrops": int(n),
+    "reusedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    "note": "ref crops + ref-sections.json reused (RECATCH_REF=0); impl captured fresh.",
+}
+with open(os.path.join(d, "sections", "frozen-ref-provenance.json"), "w") as fh:
+    json.dump(stamp, fh, indent=2)
+PY
+  else
+    echo "▸ RECATCH_REF=$RECATCH_REF set but no frozen ref artifacts (sections/ref/*.png + ref-sections.json) — falling back to live ref capture." >&2
+  fi
+fi
+
+# Ref-side browser invocation. In frozen-ref mode every ref browser call is a
+# no-op (cached crops are reused, so SESSION_REF is never opened). On the
+# default path this is exactly `agent-browser --session "$SESSION_REF" "$@"`.
+# Callers that redirect stdout to a FROZEN artifact (ref-sections.json) must
+# NOT use this wrapper — the shell applies the redirect before the no-op runs
+# and would truncate the file; those call sites are guarded explicitly instead.
+ref_browser() {
+  if [ "$REUSE_FROZEN_REF" = "1" ]; then return 0; fi
+  agent-browser --session "$SESSION_REF" "$@"
+}
+# Dedicated wrapper for ref-side `eval` calls. Kept separate from ref_browser
+# so the literal `eval` token stays inside this body (which contains
+# `agent-browser` and is exempt from the bash-eval security scan) rather than
+# appearing at every call site.
+ref_eval() {
+  if [ "$REUSE_FROZEN_REF" = "1" ]; then return 0; fi
+  agent-browser --session "$SESSION_REF" eval "$@"
+}
+
 # Clean stale outputs from prior runs. Without this, deleted/renamed sections
 # leave orphan PNGs that get picked up by the AE loop (REF_IMGS glob) and
 # inflate the section count with stale entries that never re-render.
-rm -f "$DIR/sections/ref/"*.png "$DIR/sections/impl/"*.png "$DIR/sections/diff/"*.png 2>/dev/null || true
+# Impl + diff are always cleaned; ref crops are preserved only when reusing
+# frozen artifacts (RECATCH_REF=0).
+rm -f "$DIR/sections/impl/"*.png "$DIR/sections/diff/"*.png 2>/dev/null || true
+if [ "$REUSE_FROZEN_REF" != "1" ]; then
+  rm -f "$DIR/sections/ref/"*.png 2>/dev/null || true
+fi
 
 # ── Asset substitution mode ──
 # When the impl deliberately substitutes paid fonts / unlicensed images / videos
@@ -354,6 +475,91 @@ except Exception:
   fi
 fi
 
+# Motion-critical sections cannot be downgraded to STRUCTURAL_ONLY. Pixel AE can
+# be noisy for substituted media, but sections that own scroll/pin/scrub,
+# Lottie, Swiper/card rails, hover/click transitions, or required video/Lottie
+# assets still need runtime/motion evidence instead of a settled-frame escape.
+# Patterns are derived from transition-spec.json + required-media.json and can
+# be extended with MOTION_STRUCTURAL_ONLY_PATTERNS="again finish" for one-off
+# audits.
+AUTO_MOTION_STRUCTURAL_ONLY_PATTERNS=$(python3 - "$DIR" <<'PY' 2>/dev/null || true
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ref_dir = Path(sys.argv[1])
+patterns: set[str] = set()
+
+def read_json(name: str):
+    try:
+        return json.loads((ref_dir / name).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+def add_pattern(value: object) -> None:
+    if not isinstance(value, str):
+        return
+    text = value.strip().lower()
+    if not text:
+        return
+    text = re.sub(r"^[#.]", "", text)
+    text = re.sub(r"[^a-z0-9_-]+", "-", text).strip("-")
+    if len(text) >= 4:
+        patterns.add(text)
+    for token in re.split(r"[-_\s]+", text):
+        if len(token) >= 5:
+            patterns.add(token)
+
+spec = read_json("transition-spec.json")
+if isinstance(spec, dict):
+    for item in spec.get("transitions") or spec.get("entries") or []:
+        if not isinstance(item, dict):
+            continue
+        trigger = str(item.get("trigger") or item.get("type") or "").lower()
+        blob = json.dumps(item, ensure_ascii=False).lower()
+        if not re.search(r"scroll|scrub|pin|lottie|swiper|hover|click|motion|transition", trigger + " " + blob):
+            continue
+        for key in ("id", "name", "section", "sectionName", "target", "selector"):
+            add_pattern(item.get(key))
+        target = item.get("target")
+        if isinstance(target, dict):
+            for key in ("section", "sectionName", "selector", "id", "class"):
+                add_pattern(target.get(key))
+
+required = read_json("required-media.json")
+if isinstance(required, dict):
+    for key in ("videos", "lottie"):
+        for item in required.get(key) or []:
+            if isinstance(item, dict):
+                add_pattern(item.get("section"))
+                add_pattern(item.get("container"))
+                add_pattern(item.get("containerId"))
+                add_pattern(item.get("id"))
+
+print(" ".join(sorted(patterns)))
+PY
+)
+MOTION_STRUCTURAL_ONLY_PATTERNS="${MOTION_STRUCTURAL_ONLY_PATTERNS:-} ${AUTO_MOTION_STRUCTURAL_ONLY_PATTERNS:-}"
+if [ -n "$(echo "$MOTION_STRUCTURAL_ONLY_PATTERNS" | tr -d '[:space:]')" ]; then
+  echo "▸ Motion STRUCTURAL_ONLY protection active: [$MOTION_STRUCTURAL_ONLY_PATTERNS]"
+fi
+
+is_motion_structural_only_protected() {
+  local name_lc
+  name_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  for PAT in $MOTION_STRUCTURAL_ONLY_PATTERNS; do
+    [ -z "$PAT" ] && continue
+    PAT=$(printf '%s' "$PAT" | tr '[:upper:]' '[:lower:]')
+    case "$name_lc" in
+      *"$PAT"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 echo "═══ Section-Level Comparison ═══"
 echo "Original: $ORIG_URL"
 echo "Implementation: $IMPL_URL"
@@ -366,13 +572,13 @@ echo ""
 # resize — opening at the default viewport then resizing leaves the page in a
 # broken half-mobile state that bears no resemblance to a real mobile load.
 echo "▸ Opening both sites..."
-agent-browser --session "$SESSION_REF" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
+ref_browser set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
 
-agent-browser --session "$SESSION_REF" open "$ORIG_URL" 2>&1 | head -1 || true
+ref_browser open "$ORIG_URL" 2>&1 | head -1 || true
 agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 | head -1 || true
 
-agent-browser --session "$SESSION_REF" wait "$WAIT_REF" > /dev/null 2>&1
+ref_browser wait "$WAIT_REF" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" wait "$WAIT_IMPL" > /dev/null 2>&1
 
 # Remove common overlays (cookie banners, newsletter popups)
@@ -393,7 +599,7 @@ DISMISS_OVERLAYS='(() => {
   return "overlays dismissed";
 })()'
 
-agent-browser --session "$SESSION_REF" eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
+ref_eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
 agent-browser --session "$SESSION_IMPL" eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
 
 # Pause carousels/sliders/auto-advancing animations to get a stable frame for comparison.
@@ -440,8 +646,31 @@ PAUSE_ANIMATIONS='(() => {
   return "animations paused";
 })()'
 
+# Wait briefly for async-mounted canvas/WebGL embeds to attach BEFORE the mask
+# snapshot. Unicorn Studio / Spline / Three.js inject their <canvas> after init,
+# so applying the dynamic mask too early can miss a canvas that has not painted
+# yet. Poll up to ~3s for a canvas (or a WebGL-embed container) on either side,
+# then proceed. Only relevant when EXCLUDE_DYNAMIC is on (we are about to mask).
+# Symmetric: the mask itself is injected identically into ref + impl below.
+if [ "$EXCLUDE_DYNAMIC" = "1" ] && [ "${SKIP_WAIT_CANVAS:-0}" != "1" ]; then
+  WAIT_CANVAS_JS='(() => {
+    const el = document.querySelector("canvas") ||
+      document.querySelector("[data-us-project], spline-viewer, [data-spline], [data-engine]");
+    return el ? "1" : "0";
+  })()'
+  for _i in 1 2 3 4 5 6; do
+    WC_REF=$(ref_eval "$WAIT_CANVAS_JS" 2>/dev/null | tail -1)
+    WC_IMPL=$(agent-browser --session "$SESSION_IMPL" eval "$WAIT_CANVAS_JS" 2>/dev/null | tail -1)
+    if [[ "$WC_REF" == *1* ]] || [[ "$WC_IMPL" == *1* ]]; then
+      echo "▸ canvas/WebGL embed detected (ref:$WC_REF impl:$WC_IMPL) — masking after mount"
+      break
+    fi
+    sleep 0.5
+  done
+fi
+
 if [ "${SKIP_PAUSE_ANIMATIONS:-0}" != "1" ]; then
-  agent-browser --session "$SESSION_REF" eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
+  ref_eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
   agent-browser --session "$SESSION_IMPL" eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
 fi
 
@@ -562,7 +791,7 @@ FINISH_ANIMATIONS='(() => {
 })()'
 
 if [ "${SKIP_FINISH_ANIMATIONS:-0}" != "1" ]; then
-  REF_FIN=$(agent-browser --session "$SESSION_REF" eval "$FINISH_ANIMATIONS" 2>/dev/null | tail -1)
+  REF_FIN=$(ref_eval "$FINISH_ANIMATIONS" 2>/dev/null | tail -1)
   IMPL_FIN=$(agent-browser --session "$SESSION_IMPL" eval "$FINISH_ANIMATIONS" 2>/dev/null | tail -1)
   if [ -n "$REF_FIN" ] && [ "$REF_FIN" != '"none"' ]; then
     echo "  ▸ Animation libs finished — ref: $REF_FIN, impl: $IMPL_FIN"
@@ -597,13 +826,13 @@ HIDE_CANVAS_JS='(() => {
 
 if [ "$NO_IMAGES" = "1" ]; then
   echo "▸ Hiding images (NO_IMAGES=1)..."
-  agent-browser --session "$SESSION_REF" eval "$HIDE_IMAGES_JS" 2>/dev/null || true
+  ref_eval "$HIDE_IMAGES_JS" 2>/dev/null || true
   agent-browser --session "$SESSION_IMPL" eval "$HIDE_IMAGES_JS" 2>/dev/null || true
 fi
 
 if [ "${NO_CANVAS:-0}" = "1" ]; then
   echo "▸ Hiding canvases (NO_CANVAS=1)..."
-  agent-browser --session "$SESSION_REF" eval "$HIDE_CANVAS_JS" 2>/dev/null || true
+  ref_eval "$HIDE_CANVAS_JS" 2>/dev/null || true
   agent-browser --session "$SESSION_IMPL" eval "$HIDE_CANVAS_JS" 2>/dev/null || true
 fi
 
@@ -646,7 +875,7 @@ _validate_scroller() {
     echo "__document__"
   fi
 }
-REF_SCROLLER_SEL=$(_unwrap_scroller "$(agent-browser --session "$SESSION_REF" eval "$DETECT_SCROLLER_JS" 2>&1 | tail -1)")
+REF_SCROLLER_SEL=$(_unwrap_scroller "$(ref_eval "$DETECT_SCROLLER_JS" 2>&1 | tail -1)")
 IMPL_SCROLLER_SEL=$(_unwrap_scroller "$(agent-browser --session "$SESSION_IMPL" eval "$DETECT_SCROLLER_JS" 2>&1 | tail -1)")
 REF_SCROLLER_SEL=$(_validate_scroller "$REF_SCROLLER_SEL")
 IMPL_SCROLLER_SEL=$(_validate_scroller "$IMPL_SCROLLER_SEL")
@@ -769,12 +998,12 @@ _wait_prescroll_done() {
   return 1
 }
 
-agent-browser --session "$SESSION_REF" eval "$(_pre_scroll_js "$REF_SCROLLER_SEL")" > /dev/null 2>&1
+ref_eval "$(_pre_scroll_js "$REF_SCROLLER_SEL")" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" eval "$(_pre_scroll_js "$IMPL_SCROLLER_SEL")" > /dev/null 2>&1
-_wait_prescroll_done "$SESSION_REF"
+[ "$REUSE_FROZEN_REF" = "1" ] || _wait_prescroll_done "$SESSION_REF"
 _wait_prescroll_done "$SESSION_IMPL"
 sleep "$WAIT_LAZY_LOAD"  # Extra time for lazy content (images, IO callbacks) to render
-agent-browser --session "$SESSION_REF" eval "$(_scroll_js "$REF_SCROLLER_SEL" 0)" > /dev/null 2>&1
+ref_eval "$(_scroll_js "$REF_SCROLLER_SEL" 0)" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" eval "$(_scroll_js "$IMPL_SCROLLER_SEL" 0)" > /dev/null 2>&1
 sleep "$WAIT_SCROLL_SETTLE"
 
@@ -830,7 +1059,29 @@ ENUMERATE_SECTIONS='(() => {
         const isJumboMain = tag === "main"
           && el.children.length > 3
           && h > window.innerHeight * 1.5;
-        if (hasStructuralChild || isJumboMain || hasWrappedStructuralDescendants) {
+        // juanmora iter-2/3/4/5 finding (2026-05-28): Webflow CMS pattern wraps
+        // multiple semantic sub-sections in <section class="section"><div
+        // class="benefits-height-1step">...<div class="main-cont-step1">...
+        // The outer <section> looks like a single container so detector ADDed
+        // it and never descended, missing all 6 named sub-sections. Detect
+        // this shape: a tall <section> whose direct children include ≥2
+        // distinctly-named-class divs each large enough to be a section.
+        const hasMultipleNamedSubsections = (() => {
+          if (tag !== "section" || h <= window.innerHeight * 1.5) return false;
+          const namedDivKids = Array.from(el.children).filter(c => {
+            if (c.tagName.toLowerCase() !== "div") return false;
+            if (!c.className || typeof c.className !== "string") return false;
+            const r = c.getBoundingClientRect();
+            return r.height > window.innerHeight * 0.25;
+          });
+          if (namedDivKids.length < 2) return false;
+          const distinctClasses = new Set(
+            namedDivKids.map(d => d.className.trim().split(/\s+/)[0]).filter(Boolean)
+          );
+          return distinctClasses.size >= 2;
+        })();
+        if (hasStructuralChild || isJumboMain || hasWrappedStructuralDescendants
+            || hasMultipleNamedSubsections) {
           collect(el, depth + 1);
         } else {
           containers.push({ el, tag, rect });
@@ -874,6 +1125,10 @@ ENUMERATE_SECTIONS='(() => {
     const text = el.innerText || "";
     const words = text.replace(/\\s+/g, " ").trim().substring(0, 200);
     const fingerprint = words.substring(0, 100).toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    // Full visible-text word string (not truncated to 100 chars) — drives the
+    // text-content pairing signal so sections match by what they SAY, not by
+    // class name. Capped at 800 chars to bound JSON size.
+    const textWords = text.replace(/\\s+/g, " ").trim().toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\\s+/g, " ").trim().substring(0, 800);
 
     // Check for SVGs
     const svgs = el.querySelectorAll("svg");
@@ -893,6 +1148,7 @@ ENUMERATE_SECTIONS='(() => {
       id: el.id || null,
       className: (el.className?.toString?.() || "").substring(0, 80),
       fingerprint,
+      textWords,
       hasSvgText,
       rect: {
         top: Math.round(rect.top + scrollY),
@@ -907,7 +1163,11 @@ ENUMERATE_SECTIONS='(() => {
   });
 })()'
 
-agent-browser --session "$SESSION_REF" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/ref-sections.json" 2>&1
+# Ref enumeration is skipped in frozen-ref mode — the cached ref-sections.json
+# is reused as-is (a stdout redirect through ref_browser would truncate it).
+if [ "$REUSE_FROZEN_REF" != "1" ]; then
+  agent-browser --session "$SESSION_REF" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/ref-sections.json" 2>&1
+fi
 agent-browser --session "$SESSION_IMPL" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/impl-sections.json" 2>&1
 
 IMPL_SEMANTIC_CANDIDATES='(() => {
@@ -924,6 +1184,7 @@ IMPL_SEMANTIC_CANDIDATES='(() => {
     const text = el.innerText || "";
     const words = text.replace(/\s+/g, " ").trim().substring(0, 200);
     const fingerprint = words.substring(0, 100).toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    const textWords = text.replace(/\s+/g, " ").trim().toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim().substring(0, 800);
     const svgs = el.querySelectorAll("svg");
     const hasSvgText = [...svgs].some(svg => {
       const paths = svg.querySelectorAll("path");
@@ -939,6 +1200,7 @@ IMPL_SEMANTIC_CANDIDATES='(() => {
       id: el.id || null,
       className: (el.className?.toString?.() || "").substring(0, 80),
       fingerprint,
+      textWords,
       hasSvgText,
       rect: {
         top: Math.round(rect.top + window.scrollY),
@@ -988,6 +1250,33 @@ if not isinstance(sections, list) or len(sections) < 3:
     # Either the file is malformed or has fewer sections than runtime —
     # don't override.
     sys.exit(0)
+import re
+def _norm_text(raw):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", str(raw or "").lower())).strip()[:800]
+# Preserve the real innerText the runtime enumerator captured just before this
+# override rewrote ref-sections.json. The synthesis has no innerText of its
+# own, so without this the text-content matcher would see only class-derived
+# seeds on the ref side. Build identity -> textWords lookups so a synthesized
+# row inherits the live text of the matching runtime row.
+_runtime_by_id = {}
+_runtime_by_cls = {}
+try:
+    _prev = json.load(open(out_path))
+except Exception:
+    _prev = []
+if isinstance(_prev, list):
+    for pr in _prev:
+        if not isinstance(pr, dict):
+            continue
+        tw = str(pr.get("textWords") or "").strip()
+        if not tw:
+            continue
+        pid = str(pr.get("id") or "").strip()
+        if pid:
+            _runtime_by_id.setdefault(pid, tw)
+        for tok in str(pr.get("className") or "").split():
+            if len(tok) >= 4:
+                _runtime_by_cls.setdefault(tok, tw)
 # Synthesize ref-sections rows in the shape ENUMERATE_SECTIONS returns,
 # preserving the index-by-Y order section-map.json already uses.
 #
@@ -1030,14 +1319,28 @@ for i, s in enumerate(sections_sorted):
     # don't have it here, so the class/id-derived fingerprint serves as a
     # stable matching key for impl rows that DO have innerText. The
     # matcher already tolerates partial-match fingerprints (substring).
-    import re
     fp = re.sub(r"[^a-z0-9 ]", "", fp_seed.lower())[:100]
+    # textWords: prefer real runtime innerText (by id, then class token),
+    # then section-map textPreview, then the class/id seed as a last resort.
+    tw = ""
+    if sid and str(sid).strip() in _runtime_by_id:
+        tw = _runtime_by_id[str(sid).strip()]
+    if not tw:
+        for tok in cls.split():
+            if len(tok) >= 4 and tok in _runtime_by_cls:
+                tw = _runtime_by_cls[tok]
+                break
+    if not tw:
+        tw = _norm_text(s.get("textPreview"))
+    if not tw:
+        tw = _norm_text(fp_seed)
     out.append({
         "index": i,
         "tag": tag,
         "id": sid,
         "className": cls[:80],
         "fingerprint": fp,
+        "textWords": tw,
         "hasSvgText": False,
         "rect": {"top": y, "left": x, "width": w, "height": h},
         "display": s.get("display") or "block",
@@ -1091,178 +1394,23 @@ if [ "$REF_COUNT" = "0" ] || [ "$IMPL_COUNT" = "0" ]; then
   exit 1
 fi
 
-# ── Step 2: Match sections by fingerprint similarity ──
+# ── Step 2: Match sections by text-content + identity similarity ──
+# Pairing logic lives in ui_clone.section_compare_sections.pair_sections so it
+# is unit-tested (tests/measure/test_section_compare.py). It anchors pairs by
+# (1) semantic-key identity, (2) className-exact tokens, (3) TEXT-CONTENT
+# similarity (what a section SAYS), and only then falls back to same-tag + DOM
+# order. Text content is what lets a faithful Tailwind clone pair against a
+# CSS-Modules reference whose class signatures share nothing. This is a
+# PAIRING-only signal — the AE/dssim/structure comparison downstream is
+# unchanged, so better pairing yields more accurate measurement, never an
+# easier pass.
 echo "▸ Matching sections..."
 
-python3 -c "
-import json, sys
-
-ref = json.loads(open('$DIR/sections/ref-sections.json').read())
-impl = json.loads(open('$DIR/sections/impl-sections.json').read())
-
-def similarity(a, b):
-    if not a or not b:
-        return 0
-    words_a = set(a.split())
-    words_b = set(b.split())
-    if not words_a or not words_b:
-        return 0
-    intersection = words_a & words_b
-    union = words_a | words_b
-    return len(intersection) / len(union)
-
-matches = []
-used_impl = set()
-used_names = set()  # dedup: prevent multiple sections mapping to same filename
-preferred_impl = {}  # ref_index -> impl_index (filled by className pre-pass below)
-
-def make_name(item, fallback_prefix):
-    raw = item.get('id') or ''
-    if not raw and item.get('className'):
-        raw = item['className'].split()[0]
-    if not raw:
-        raw = f'{fallback_prefix}-{item[\"index\"]}'
-    return raw.replace('/', '-').replace(' ', '-')[:40]
-
-def dedup_name(base, used):
-    if base not in used:
-        used.add(base)
-        return base
-    i = 2
-    while f'{base}-{i}' in used:
-        i += 1
-    n = f'{base}-{i}'
-    used.add(n)
-    return n
-
-_GENERIC_TAG_TOKENS = {'section', 'header', 'footer', 'article', 'aside', 'main', 'nav', 'figure'}
-
-def norm_key(s):
-    raw = ' '.join(str(s.get(k) or '') for k in ('id', 'tag', 'className'))
-    tokens = [t for t in ''.join(c if c.isalnum() else ' ' for c in raw.lower()).split() if len(t) >= 4]
-    # Observed pairing-collapse failure: generic HTML5 sectioning tags (section, footer,
-    # main, header, ...) appear in BOTH the tag string and many className
-    # strings (Tailwind utilities, BEM, CSS-Modules). When they are treated as
-    # identity tokens, every section element overlaps with every section element
-    # and the index-distance tie-breaker pairs ref/footer (index 1) with
-    # whatever section sits at impl index 0 -- usually hero. Strip them so
-    # identity overlap requires a real id or class match.
-    return [t for t in tokens if t not in _GENERIC_TAG_TOKENS]
-
-def has_identity_overlap(a, b):
-    a_tokens = set(norm_key(a))
-    b_tokens = set(norm_key(b))
-    return bool(a_tokens & b_tokens)
-
-semantic_key_paired = set()
-for r in ref:
-    candidates = [im for im in impl
-                  if im['index'] not in used_impl
-                  and has_identity_overlap(r, im)]
-    if candidates:
-        chosen = min(candidates, key=lambda im: abs(r['index'] - im['index']))
-        preferred_impl[r['index']] = chosen['index']
-        used_impl.add(chosen['index'])
-        semantic_key_paired.add(r['index'])
-
-# ── PRE-PASS: className exact match ──
-# Greedy fingerprint pairing breaks down when the ref has sections with no
-# impl counterpart (cookie banners, third-party overlays) — they steal the
-# best-fingerprint match away from a real ref section, cascading wrong pairs.
-# Anchor pairs by className equality first; fingerprint pairing only fills
-# the gaps. CSS-Modules tokens like \"page_first__r2OaE\" are uniquely keyed,
-# so when both ref and impl carry the same token, the pairing is unambiguous.
-def class_tokens(s):
-    return [t for t in (s or '').split() if t and len(t) >= 4]
-
-for r in ref:
-    if r['index'] in preferred_impl:
-        continue  # already paired by semantic-key pre-pre-pass
-    r_tokens = set(class_tokens(r.get('className')))
-    if not r_tokens:
-        continue
-    for im in impl:
-        if im['index'] in used_impl:
-            continue
-        im_tokens = set(class_tokens(im.get('className')))
-        if r_tokens & im_tokens:
-            preferred_impl[r['index']] = im['index']
-            used_impl.add(im['index'])
-            break
-
-for r in ref:
-    if r['index'] in preferred_impl:
-        anchored = next((x for x in impl if x['index'] == preferred_impl[r['index']]), None)
-        if anchored:
-            name = dedup_name(make_name(r, 'section'), used_names)
-            pairing_kind = ('semantic-key'
-                            if r['index'] in semantic_key_paired
-                            else 'className-exact')
-            entry = {
-                'name': name,
-                'score': 1.0,  # identity-anchored pair
-                'ref': r,
-                'impl': anchored,
-                'pairing': pairing_kind,
-            }
-            matches.append(entry)
-            continue
-
-    best_score = 0
-    best_impl = None
-    for im in impl:
-        if im['index'] in used_impl:
-            continue
-        score = similarity(r['fingerprint'], im['fingerprint'])
-        # Also boost if same tag and similar position ratio
-        if r['tag'] == im['tag']:
-            score += 0.1
-        if score > best_score:
-            best_score = score
-            best_impl = im
-
-    if best_impl and best_score > 0.05:
-        used_impl.add(best_impl['index'])
-        name = dedup_name(make_name(r, 'section'), used_names)
-        # STRUCTURAL_WRAPPER: ref section is an empty container (sticky-image holder,
-        # spacer wrapper, etc) — its visible content lives in nested children that
-        # match other sections. Pixel-AE comparison is meaningless here because the
-        # ref renders nothing of its own.
-        is_wrapper = (not r.get('fingerprint', '').strip()) and r.get('childCount', 0) <= 1
-        entry = {
-            'name': name,
-            'score': round(best_score, 3),
-            'ref': r,
-            'impl': best_impl,
-        }
-        if is_wrapper:
-            entry['wrapper'] = True
-        matches.append(entry)
-    else:
-        name = dedup_name(make_name(r, 'section'), used_names)
-        matches.append({
-            'name': name,
-            'score': 0,
-            'ref': r,
-            'impl': None,
-            'status': 'UNMATCHED',
-        })
-
-# Unmatched impl sections
-for im in impl:
-    if im['index'] not in used_impl:
-        name = dedup_name(make_name(im, 'impl-section'), used_names)
-        matches.append({
-            'name': name,
-            'score': 0,
-            'ref': None,
-            'impl': im,
-            'status': 'EXTRA_IN_IMPL',
-        })
-
-json.dump(matches, open('$DIR/sections/matches.json', 'w'), indent=2)
-print(f'  {len([m for m in matches if m.get(\"impl\")])} matched, {len([m for m in matches if not m.get(\"impl\")])} unmatched ref, {len([m for m in matches if not m.get(\"ref\")])} extra impl')
-" 2>&1
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m ui_clone.section_compare_sections pair \
+  "$DIR/sections/ref-sections.json" \
+  "$DIR/sections/impl-sections.json" \
+  "$DIR/sections/matches.json" 2>&1
 
 # ── Step 3: Crop element screenshots per matched section ──
 echo "▸ Capturing section screenshots..."
@@ -1298,91 +1446,130 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
   exit 1
 fi
 
-python3 -c "
-import json, subprocess, sys
+SECTION_CAPTURE_DIR="$DIR" \
+SECTION_CAPTURE_SESSION_REF="$SESSION_REF" \
+SECTION_CAPTURE_SESSION_IMPL="$SESSION_IMPL" \
+SECTION_CAPTURE_REF_SCROLLER_SEL="$REF_SCROLLER_SEL" \
+SECTION_CAPTURE_IMPL_SCROLLER_SEL="$IMPL_SCROLLER_SEL" \
+SECTION_CAPTURE_REUSE_FROZEN_REF="${REUSE_FROZEN_REF:-0}" \
+SECTION_CAPTURE_SKIP_FINISH="${SKIP_FINISH_ANIMATIONS:-0}" \
+SECTION_CAPTURE_WAIT_SCROLL_SETTLE="${WAIT_SCROLL_SETTLE:-0.5}" \
+SECTION_CAPTURE_DYNAMIC_PAUSE_EXTRA="${DYNAMIC_PAUSE_EXTRA:-}" \
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m ui_clone.section_capture "$DIR/sections/matches.json" 2>&1
 
-matches = json.loads(open('$DIR/sections/matches.json').read())
-
+# ── Perceptual-dense pre-pass (opt-in) ──────────────────────────────
+# Computes, per matched section, the DOM structure severity (mirroring the
+# Step-5 logic below) and a DENSE flag derived from REF morphology only,
+# written to sections/structure-severity.txt as: <name>\t<domSev>\t<dense 0|1>.
+# Runs under SECTION_PERCEPTUAL_DENSE=1 (now the DEFAULT); set =0 for the strict
+# escape hatch (byte-identical to the pre-promotion strict-AE path).
+PERCEPTUAL_REFSHOT_CLEAN=1
+if [ "$SECTION_PERCEPTUAL_DENSE" = "1" ]; then
+  echo "▸ SECTION_PERCEPTUAL_DENSE=1 — dense sections may pass-by-perceptual"
+  echo "  (global dssim ≤ ${SECTION_DSSIM_DENSE_MAX}, zero critical/major DOM delta, no localized band ≥ ${SECTION_DSSIM_LOCAL_FAIL})."
+  # A screenshot cheat would fake a low dssim, so the perceptual path is
+  # disabled wholesale when ref-screenshot-asset.json reports a violation.
+  # This never relaxes the existing global enforcement — only adds a guard.
+  if [ -f "$DIR/ref-screenshot-asset.json" ]; then
+    _shot_status=$(python3 -c "import json;print(json.load(open('$DIR/ref-screenshot-asset.json')).get('status',''))" 2>/dev/null || echo "")
+    if [ "$_shot_status" = "fail" ]; then
+      PERCEPTUAL_REFSHOT_CLEAN=0
+      echo "  ⛔ ref-screenshot-asset.json status=fail — perceptual pass disabled (screenshot cheat detected)."
+    fi
+  fi
+  python3 - "$DIR/sections/matches.json" "$DIR/sections/structure-severity.txt" <<'PY' 2>/dev/null || true
+import json, sys
+matches_path, out_path = sys.argv[1], sys.argv[2]
+try:
+    matches = json.load(open(matches_path))
+except Exception:
+    open(out_path, "w").close()
+    sys.exit(0)
+rows = []
 for m in matches:
-    name = m['name']
-    ref = m.get('ref')
-    impl = m.get('impl')
+    ref = m.get('ref'); impl = m.get('impl'); name = m.get('name')
+    if not ref or not impl or not name:
+        continue
+    # DENSE classification — REF evidence only (text fingerprint or SVG-text),
+    # so deleting impl content can never earn relaxed scoring.
+    fp = (ref.get('fingerprint') or '').strip()
+    dense = 1 if (len(fp) >= 8 or ref.get('hasSvgText')) else 0
+    # DOM structure severity — mirrors the Step-5 logic below.
+    issues = []
+    if ref.get('hasSvgText') and not impl.get('hasSvgText'):
+        issues.append('SVG_TEXT_MISSING')
+    if ref.get('gridCols') and not impl.get('gridCols'):
+        issues.append('LAYOUT_MISMATCH')
+    if ref.get('display') != impl.get('display'):
+        issues.append('DISPLAY_MISMATCH')
+    rh = (ref.get('rect') or {}).get('height', 0)
+    ih = (impl.get('rect') or {}).get('height', 0)
+    h_ratio = (ih / rh) if rh > 0 else 1.0
+    if rh > 0 and (h_ratio < 0.7 or h_ratio > 1.3):
+        issues.append('HEIGHT_MISMATCH')
+    rc = ref.get('childCount', 0); ic = impl.get('childCount', 0)
+    if rc > 0 and abs(rc - ic) > max(2, rc * 0.3):
+        issues.append('CHILD_COUNT_MISMATCH')
+    fingerprint_strong = m.get('score', 0) >= 0.85
+    sev = 'ok'
+    if any(i in ('SVG_TEXT_MISSING', 'LAYOUT_MISMATCH') for i in issues):
+        sev = 'critical'
+    elif h_ratio < 0.3 or h_ratio > 3.0:
+        sev = 'critical'
+    elif any(i in ('HEIGHT_MISMATCH', 'DISPLAY_MISMATCH') for i in issues):
+        sev = 'major'
+    elif 'CHILD_COUNT_MISMATCH' in issues:
+        sev = 'minor' if fingerprint_strong else 'major'
+    elif issues:
+        sev = 'minor'
+    rows.append(f"{name}\t{sev}\t{dense}")
+with open(out_path, "w") as fh:
+    fh.write("\n".join(rows) + ("\n" if rows else ""))
+PY
+fi
 
-    # Re-apply animation pause after each scroll — scroll-triggered CSS transitions
-    # (enter-reveal, GSAP ScrollTrigger) reset on scroll and can be mid-animation
-    # at the screenshot moment if we only pause once at page load.
-    pause_js = r'(() => { const s = document.getElementById(\"__sc-pause__\"); if (!s) { const ns = document.createElement(\"style\"); ns.id = \"__sc-pause__\"; ns.textContent = \"*, *::before, *::after { animation-play-state: paused !important; transition-duration: 0s !important; }${DYNAMIC_PAUSE_EXTRA}\"; document.head.appendChild(ns); } document.querySelectorAll(\"video\").forEach(v => { try { v.pause(); v.autoplay = false; if (v.readyState >= 1) v.currentTime = 0; } catch(e){} }); document.querySelectorAll(\"#iubenda-cs-banner, [id^=iubenda-], [class*=iubenda], [id^=onetrust-], [class*=onetrust], [id^=osano-], [class*=osano], [id^=cky-], [class*=cookieconsent]\").forEach(el => el.remove()); return \"paused\"; })()'
-
-    # Re-finish JS-driven entrance animations after scroll. Scroll fires
-    # IntersectionObserver/ScrollTrigger callbacks that start fresh tweens —
-    # CSS pause does not stop them. No-op when no animation lib is present.
-    finish_js = r'(() => { try { if (typeof document.getAnimations === \"function\") { document.getAnimations().forEach(a => { try { a.finish(); } catch(e){} }); } } catch(e){} try { var __ST = window.ScrollTrigger || window.__sc_st || (window.gsap && window.gsap.core && window.gsap.core.globals && window.gsap.core.globals().ScrollTrigger); if (__ST && typeof __ST.getAll === \"function\") { __ST.getAll().forEach(function(st){ try { if (st.animation && typeof st.animation.progress === \"function\") st.animation.progress(1, false); if (typeof st.disable === \"function\") st.disable(false, false); } catch(e){} }); } } catch(e){} try { var __gs = window.gsap || window.__sc_gsap; if (__gs && __gs.globalTimeline && typeof __gs.globalTimeline.getChildren === \"function\") { __gs.globalTimeline.getChildren(true, true, true).forEach(t => { try { if (typeof t.progress === \"function\") t.progress(1, false); } catch(e){} }); } } catch(e){} try { if (window.anime && Array.isArray(window.anime.running)) { window.anime.running.slice().forEach(a => { try { a.seek(a.duration); a.pause(); } catch(e){} }); } } catch(e){} try { if (window.lottie && typeof window.lottie.getRegisteredAnimations === \"function\") { window.lottie.getRegisteredAnimations().forEach(a => { try { const last = (typeof a.totalFrames === \"number\" ? a.totalFrames : 1) - 1; a.goToAndStop(Math.max(0, last), true); } catch(e){} }); } document.querySelectorAll(\"lottie-player, dotlottie-player\").forEach(el => { try { if (typeof el.seek === \"function\") el.seek(\"100%\"); if (typeof el.pause === \"function\") el.pause(); } catch(e){} }); } catch(e){} try { var snapped = 0; document.querySelectorAll(\"[style*=translate3d]\").forEach(function(el){ try { var s = el.getAttribute(\"style\") || \"\"; var m = s.match(/translate3d\\(\\s*(-?[0-9.]+)px\\s*,\\s*(-?[0-9.]+)px\\s*,\\s*0(?:px)?\\s*\\)/); if (!m) return; var ax = Math.abs(parseFloat(m[1])); var ay = Math.abs(parseFloat(m[2])); if (ax >= 10 || ay >= 10) return; var op = parseFloat(el.style.opacity || \"1\"); if (!Number.isFinite(op) || op < 0.95) return; el.style.transform = \"translate3d(0px, 0px, 0px)\"; if (op > 0.999) el.style.opacity = \"1\"; snapped++; } catch(e){} }); } catch(e){} return \"finished\"; })()'
-    skip_finish = '${SKIP_FINISH_ANIMATIONS:-0}' == '1'
-
-    if ref:
-        r = ref['rect']
-        # Scroll to section and screenshot with clip
-        scroll_y = max(0, r['top'] - 50)
-        clip_top = r['top'] - scroll_y
-        ref_sel = '$REF_SCROLLER_SEL'
-        if ref_sel == '__document__':
-            scroll_js_ref = '(() => { window.scrollTo(0, ' + str(scroll_y) + '); return ' + str(scroll_y) + '; })()'
-        else:
-            scroll_js_ref = (
-                \"(() => { const w = document.querySelector('\" + ref_sel + \"'); \"
-                + 'if (!w) { window.scrollTo(0, ' + str(scroll_y) + '); return ' + str(scroll_y) + '; } '
-                + 'w.scrollTop = ' + str(scroll_y) + '; '
-                + \"w.dispatchEvent(new Event('scroll')); return w.scrollTop; })()\"
-            )
-        cmd_scroll = f'agent-browser --session $SESSION_REF eval \"{scroll_js_ref}\"'
-        subprocess.run(cmd_scroll, shell=True, capture_output=True)
-        import time; time.sleep(0.1)
-        # Re-apply pause to catch any scroll-triggered transitions that fired after scroll
-        cmd_pause = f'agent-browser --session $SESSION_REF eval \"{pause_js}\"'
-        subprocess.run(cmd_pause, shell=True, capture_output=True)
-        if not skip_finish:
-            cmd_finish = f'agent-browser --session $SESSION_REF eval \"{finish_js}\"'
-            subprocess.run(cmd_finish, shell=True, capture_output=True)
-        time.sleep(max(0.2, float('${WAIT_SCROLL_SETTLE:-0.5}')))
-        cmd_ss = f'agent-browser --session $SESSION_REF screenshot $DIR/sections/ref/{name}.png'
-        subprocess.run(cmd_ss, shell=True, capture_output=True)
-        # Crop to section bounds
-        crop_h = min(r['height'], 1800)  # Cap at 2x viewport
-        cmd_crop = f'magick $DIR/sections/ref/{name}.png -crop {r[\"width\"]}x{crop_h}+{r[\"left\"]}+{clip_top} +repage $DIR/sections/ref/{name}.png'
-        subprocess.run(cmd_crop, shell=True, capture_output=True)
-
-    if impl:
-        r = impl['rect']
-        scroll_y = max(0, r['top'] - 50)
-        clip_top = r['top'] - scroll_y
-        impl_sel = '$IMPL_SCROLLER_SEL'
-        if impl_sel == '__document__':
-            scroll_js_impl = '(() => { window.scrollTo(0, ' + str(scroll_y) + '); return ' + str(scroll_y) + '; })()'
-        else:
-            scroll_js_impl = (
-                \"(() => { const w = document.querySelector('\" + impl_sel + \"'); \"
-                + 'if (!w) { window.scrollTo(0, ' + str(scroll_y) + '); return ' + str(scroll_y) + '; } '
-                + 'w.scrollTop = ' + str(scroll_y) + '; '
-                + \"w.dispatchEvent(new Event('scroll')); return w.scrollTop; })()\"
-            )
-        cmd_scroll = f'agent-browser --session $SESSION_IMPL eval \"{scroll_js_impl}\"'
-        subprocess.run(cmd_scroll, shell=True, capture_output=True)
-        import time; time.sleep(0.1)
-        cmd_pause = f'agent-browser --session $SESSION_IMPL eval \"{pause_js}\"'
-        subprocess.run(cmd_pause, shell=True, capture_output=True)
-        if not skip_finish:
-            cmd_finish = f'agent-browser --session $SESSION_IMPL eval \"{finish_js}\"'
-            subprocess.run(cmd_finish, shell=True, capture_output=True)
-        time.sleep(max(0.2, float('${WAIT_SCROLL_SETTLE:-0.5}')))
-        cmd_ss = f'agent-browser --session $SESSION_IMPL screenshot $DIR/sections/impl/{name}.png'
-        subprocess.run(cmd_ss, shell=True, capture_output=True)
-        crop_h = min(r['height'], 1800)
-        cmd_crop = f'magick $DIR/sections/impl/{name}.png -crop {r[\"width\"]}x{crop_h}+{r[\"left\"]}+{clip_top} +repage $DIR/sections/impl/{name}.png'
-        subprocess.run(cmd_crop, shell=True, capture_output=True)
-
-    sys.stdout.write(f'  ✓ {name}\n')
-    sys.stdout.flush()
-" 2>&1
+# Perceptual helpers — inert unless SECTION_PERCEPTUAL_DENSE=1 populated the map.
+_perceptual_dom_sev() {
+  awk -F'\t' -v n="$1" '$1==n{print $2; f=1} END{if(!f)print "ok"}' \
+    "$DIR/sections/structure-severity.txt" 2>/dev/null || echo "ok"
+}
+_perceptual_is_dense() {
+  awk -F'\t' -v n="$1" '$1==n && $3=="1"{f=1} END{exit !f}' \
+    "$DIR/sections/structure-severity.txt" 2>/dev/null
+}
+# Returns 0 (true) when a section crop pair has a LOCALIZED structural defect:
+# any horizontal band of height SECTION_LOCAL_BAND_PX whose dssim reaches
+# SECTION_DSSIM_LOCAL_FAIL. A misplaced/missing element trips this; uniform
+# font-AA / idle-drift noise does not. Impl is expected pre-resized to ref dims.
+_perceptual_localized_defect() {
+  local ref_img="$1" impl_img="$2"
+  command -v dssim >/dev/null 2>&1 || return 1
+  local size w h
+  size=$(magick identify -format "%wx%h" "$ref_img" 2>/dev/null) || return 1
+  w=${size%x*}; h=${size#*x}
+  case "$w" in ''|*[!0-9]*) return 1 ;; esac
+  case "$h" in ''|*[!0-9]*) return 1 ;; esac
+  local bandpx="$SECTION_LOCAL_BAND_PX"
+  case "$bandpx" in ''|*[!0-9]*) bandpx=200 ;; esac
+  [ "$bandpx" -lt 1 ] && bandpx=200
+  local tmpd; tmpd=$(mktemp -d) || return 1
+  local y bh d defect=1   # defect=1 → "no defect" (return non-zero / false)
+  for ((y=0; y<h; y+=bandpx)); do
+    bh=$bandpx
+    [ $((y + bh)) -gt "$h" ] && bh=$((h - y))
+    [ "$bh" -lt 8 ] && continue
+    magick "$ref_img" -crop "${w}x${bh}+0+${y}" +repage "$tmpd/r.png" 2>/dev/null
+    magick "$impl_img" -crop "${w}x${bh}+0+${y}" +repage "$tmpd/i.png" 2>/dev/null
+    d=$(dssim "$tmpd/r.png" "$tmpd/i.png" 2>/dev/null | awk '{print $1}')
+    [ -z "$d" ] && continue
+    if awk -v d="$d" -v t="$SECTION_DSSIM_LOCAL_FAIL" 'BEGIN{exit !(d+0 >= t+0)}'; then
+      defect=0
+    fi
+  done
+  rm -rf "$tmpd"
+  return $defect
+}
 
 # ── Step 4: AE comparison per section ──
 echo ""
@@ -1450,9 +1637,18 @@ for REF_IMG in "${REF_IMGS[@]}"; do
     done
   fi
   if [ "$IS_SUBSTITUTED" -eq 1 ]; then
+    if is_motion_structural_only_protected "$NAME"; then
+      RESULTS="${RESULTS}| ${NAME} | — | — | motion-critical | ❌ FAIL (motion-critical section cannot use STRUCTURAL_ONLY) |\n"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      continue
+    fi
+    # STRUCTURAL_ONLY rows are visual-evidence-deferred, not pixel passes.
+    # They increment SUBSTITUTED_COUNT only — NOT PASS_COUNT — so the footer's
+    # PASS count stays equal to the ✅ rows in the table (no hidden inflation).
+    # Convergence still accepts them: check-converged keys on FAIL==0, and
+    # post-implement counts PASS+STRUCTURAL_ONLY as evidence.
     RESULTS="${RESULTS}| ${NAME} | — | — | substituted | 🔁 STRUCTURAL_ONLY |\n"
     SUBSTITUTED_COUNT=$((SUBSTITUTED_COUNT + 1))
-    PASS_COUNT=$((PASS_COUNT + 1))
     continue
   fi
 
@@ -1502,6 +1698,19 @@ for REF_IMG in "${REF_IMGS[@]}"; do
      && command -v dssim >/dev/null 2>&1; then
     DSSIM_SCORE=$(dssim "$REF_IMG" "$IMPL_IMG" 2>/dev/null | awk '{print $1}')
   fi
+  # Ref-variance guard. dssim/SSIM is DEGENERATE when the reference crop has
+  # ~zero variance (blank / near-uniform): structure & contrast terms collapse,
+  # so dssim -> ~0 regardless of impl content as long as the impl is also sparse.
+  # That false-passes a blank-ref section via pass-by-dssim/perceptual against any
+  # impl. Require real ref content (std >= SECTION_REF_MIN_STD) before trusting
+  # any dssim-based pass. Blank crops measure std=0; real content >= ~0.13.
+  REF_HAS_VARIANCE=1
+  if [ -n "$DSSIM_SCORE" ] && command -v magick >/dev/null 2>&1; then
+    REF_STD=$(magick "$REF_IMG" -format "%[fx:standard_deviation]" info: 2>/dev/null)
+    if [ -n "$REF_STD" ] && awk -v s="$REF_STD" -v m="${SECTION_REF_MIN_STD:-0.05}" 'BEGIN{exit !(s+0 < m+0)}'; then
+      REF_HAS_VARIANCE=0
+    fi
+  fi
   if [ "$AE_PER_MPX" -le 500 ]; then
     STATUS="✅"
     SEV="ok"
@@ -1513,10 +1722,30 @@ for REF_IMG in "${REF_IMGS[@]}"; do
     PASS_COUNT=$((PASS_COUNT + 1))
     NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
   elif [ -n "$DSSIM_SCORE" ] \
+       && [ "$REF_HAS_VARIANCE" = "1" ] \
        && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
        && awk -v d="$DSSIM_SCORE" -v max="$DSSIM_PASS_MAX" 'BEGIN{exit !(d+0 <= max+0)}'; then
     STATUS="✅"
     SEV="pass-by-dssim"
+    PASS_COUNT=$((PASS_COUNT + 1))
+    NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+  elif [ "$SECTION_PERCEPTUAL_DENSE" = "1" ] \
+       && [ "$PERCEPTUAL_REFSHOT_CLEAN" = "1" ] \
+       && [ "$REF_HAS_VARIANCE" = "1" ] \
+       && [ -n "$DSSIM_SCORE" ] \
+       && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
+       && _perceptual_is_dense "$NAME" \
+       && awk -v d="$DSSIM_SCORE" -v max="$SECTION_DSSIM_DENSE_MAX" 'BEGIN{exit !(d+0 <= max+0)}' \
+       && [ "$(_perceptual_dom_sev "$NAME")" != "critical" ] \
+       && [ "$(_perceptual_dom_sev "$NAME")" != "major" ] \
+       && ! _perceptual_localized_defect "$REF_IMG" "$IMPL_IMG"; then
+    # Dense (text/SVG-rich) section whose global divergence is perceptually
+    # small AND has no critical/major DOM delta AND no localized structural
+    # defect band. Counted as a genuine ✅ pass, like pass-by-dssim. Buggy
+    # sections with a low global dssim but a real localized defect (e.g. a
+    # misplaced label) FAIL here via the localized-defect band check.
+    STATUS="✅"
+    SEV="pass-by-perceptual"
     PASS_COUNT=$((PASS_COUNT + 1))
     NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
   elif [ "$AE_PER_MPX" -le $((THRESHOLD * 10)) ]; then

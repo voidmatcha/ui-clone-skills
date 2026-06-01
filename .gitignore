@@ -1,10 +1,10 @@
 tmp/
 .DS_Store
 ui-skills-workspace/
-docs/
 .superpowers/
 .sisyphus/
 .serena/
+.omx/
 .claude/
 __pycache__/
 *.pyc
@@ -46,6 +46,11 @@ research/
 
 # Outbox / handoff drops — per-session outbound artifacts
 outbox/
+
+# Local docs review artifacts — keep curated docs trackable while hiding
+# per-run clone reviews and single-site E1 audit drops.
+docs/clone-reviews/
+docs/*-E1.md
 
 # Convenience symlinks to scratch impl roots — created so pipeline.verify
 # (which expects <repo>/impl) can locate a non-canonical impl path.

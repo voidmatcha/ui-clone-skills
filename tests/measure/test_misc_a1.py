@@ -258,6 +258,106 @@ def test_text_fidelity_check_ignores_script_style_noscript_template_text(tmp_pat
     assert artifact["missing_count"] == 0
 
 
+def test_text_fidelity_check_flags_degenerate_empty_scaffold(tmp_path: Path) -> None:
+    """A JS-heavy reference site can extract a dom-scaffold with
+    structure but ZERO text leaves. Generation then has nothing to transcribe
+    verbatim and fabricates the body copy. The bidirectional check is vacuous
+    here — scaffold requires nothing (0 missing), and if the fabricated strings
+    happen to be in the element-roles allowlist there are 0 fabrications too —
+    so the gate FALSE-PASSES a clone built on no text ground truth. The
+    degenerate-scaffold guard must fail loudly instead (same class as the
+    blank-ref refStd guard for the perceptual section gate).
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    # Scaffold: structure only, NO text leaves (mimics the failed extraction).
+    (ref / "dom-scaffold.json").write_text(json.dumps({
+        "tree": {
+            "tag": "main",
+            "children": [
+                {"tag": "section", "children": [{"tag": "div", "children": []}]},
+                {"tag": "section", "children": [{"tag": "div", "children": []}]},
+            ],
+        },
+    }))
+    impl_lines = [
+        "Whole foods nourish the body every day",
+        "Ultra processed products harm long term health",
+        "America returns to real food choices",
+        "The dietary guidelines were carefully reviewed",
+        "Eat real food and spread the word",
+        "Designed and engineered in the capital",
+    ]
+    # element-roles allowlist contains every impl string → 0 fabrications, so
+    # without the guard the gate would PASS (0 missing + 0 fabrications).
+    (ref / "element-roles.json").write_text(json.dumps({
+        "elements": [{"tag": "p", "text": s} for s in impl_lines],
+    }))
+    body = "".join(f"<p>{s}</p>" for s in impl_lines)
+    (src / "App.tsx").write_text(
+        f"export default function App() {{ return <main>{body}</main>; }}\n"
+    )
+
+    out = ref / "text-fidelity-check.json"
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "text-fidelity-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 1, (
+        "degenerate (0-text) scaffold must fail, not false-pass: "
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    artifact = json.loads(out.read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["degenerate_scaffold"] is True
+    assert artifact["required_meaningful_strings"] == 0
+    assert artifact["fabrications_count"] == 0  # proves it's the guard, not fabrication, that failed it
+
+
+def test_text_fidelity_check_healthy_scaffold_not_degenerate(tmp_path: Path) -> None:
+    """Guard the guard: a healthy scaffold with real text must NOT trip the
+    degenerate-scaffold guard (no false-positive on legitimate clones).
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "dom-scaffold.json").write_text(json.dumps({
+        "tree": {
+            "tag": "main",
+            "children": [
+                {"tag": "h1", "text": "Real Food Wins", "children": []},
+                {"tag": "p", "text": "America is the greatest country on Earth", "children": []},
+            ],
+        },
+    }))
+    (src / "App.tsx").write_text(
+        "export default function App() { return <main>"
+        "<h1>Real Food Wins</h1>"
+        "<p>America is the greatest country on Earth</p>"
+        "</main>; }\n"
+    )
+    out = ref / "text-fidelity-check.json"
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "text-fidelity-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert proc.returncode == 0, f"healthy scaffold must pass: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads(out.read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["degenerate_scaffold"] is False
+
 
 def test_header_state_runtime_check_script_present() -> None:
     """2026-05-22 user direction: "Header는 정적 HTML이 아니라 state machine입니다."

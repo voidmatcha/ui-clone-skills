@@ -243,6 +243,7 @@ SCROLL_SCRUB_STATIC=0
 INTERSECTION_STATIC=0
 TRIGGER_STATIC=0
 MARKER_ONLY=0
+MISSING_ENTIRELY=0
 TOTAL=0
 
 echo "| # | id | trigger | type | matched file(s) | motion |"
@@ -294,11 +295,14 @@ $found"
   matched_files=$(echo "$matched_files" | sort -u | grep -v '^$' || true)
 
   if [ -z "$matched_files" ]; then
-    # Not matched at all — transition-spec-coverage handles this case.
-    # This script is specifically the "matched but unanimated" gate, so
-    # missing-entirely entries get a separate icon to make that visible
-    # without double-counting against this script's exit code.
-    echo "| $i | ⚠️ $id | $trigger | $type | (none — see transition-spec-coverage) | — |"
+    # Not matched at all. A transition-spec entry with zero impl presence is
+    # a real coverage gap — the transition was never implemented — not an
+    # exemption. Count it against this gate's exit code so a missing-entirely
+    # entry can never pass silently while transition-spec-coverage is the only
+    # thing watching it.
+    echo "| $i | ❌ $id | $trigger | $type | (none — entry not implemented) | — |"
+    MISSING_ENTIRELY=$((MISSING_ENTIRELY + 1))
+    UNCOVERED=$((UNCOVERED + 1))
     i=$((i + 1))
     continue
   fi
@@ -411,7 +415,8 @@ cat > "$COMP_DIR/spec-implementation-coverage.json" <<JSON
   "scrollScrubStatic": $SCROLL_SCRUB_STATIC,
   "intersectionStatic": $INTERSECTION_STATIC,
   "triggerStatic": $TRIGGER_STATIC,
-  "markerOnly": $MARKER_ONLY
+  "markerOnly": $MARKER_ONLY,
+  "missingEntirely": $MISSING_ENTIRELY
 }
 JSON
 

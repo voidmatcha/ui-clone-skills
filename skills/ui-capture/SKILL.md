@@ -20,7 +20,7 @@ metadata:
   priority: 85
 ---
 
-# /ui-capture - Visual Capture & Reference
+# ui-capture - Visual Capture & Reference
 
 Capture reference screenshots and transition videos, detect transition types, and optionally capture matching implementation clips as downstream verification evidence.
 
@@ -61,7 +61,7 @@ agent-browser --session <s> eval "(() => ({sections: [...]}))()" > data.json
 
 ## When to use
 
-- **Standalone**: `/ui-capture <reference-url> [local-url] [component]`
+- **Standalone**: invoke `ui-capture <reference-url> [local-url] [component]` (Claude slash command: `/ui-capture ...`)
 - **From ui-reverse-engineering**: Phase A (reference), Phase 4 (verification) — `<component>` MUST be passed so output lands in `tmp/ref/<component>/` where the pipeline gates look
 - **From orchestration workflows**: when SPEC.md has `reference_url`
 
@@ -69,7 +69,46 @@ agent-browser --session <s> eval "(() => ({sections: [...]}))()" > data.json
 - `<component>` provided → `tmp/ref/<component>/` (matches `ui_clone.gate` expectations — flat, no `capture/` parent)
 - `<component>` omitted → `tmp/ref/capture/` (standalone usage; not gated)
 
-The slash command translates positional args to env vars before the pipeline runs:
+**Evidence pack handoff:** after capture and extraction artifacts exist, generate
+compact worker briefs from the ref dir so downstream skills do not re-read raw
+DOM, screenshots, bundle maps, or transition JSON by default:
+
+```bash
+uv run python -m ui_clone.evidence_pack "$OUT_DIR" --out-dir "$OUT_DIR/brief"
+```
+
+This does not replace JS bundle analysis, transition spec generation, or any
+gate artifact. It only rolls up existing paths such as `bundle-map.json`,
+`external-sdks.json`, `transition-spec.json`, state summaries, and section
+results into a compact handoff. Downstream skills should read
+`brief/WORKER_BRIEF.md`, `brief/REFERENCE_BRIEF.md`, and
+`brief/CURRENT_STATE.json` first, drilling into raw artifacts only by path.
+
+**Element evidence probe:** when the user, a mismatch report, or a DOM search
+names a concrete target, capture that element without a browser extension.
+Do not assume friendly semantic class names; `$TARGET_SELECTOR` can be any
+valid CSS selector, including `#id`, `[data-*]`, `[role=...]`, or a generated
+`:nth-of-type()` path from prior DOM evidence.
+
+```bash
+TARGET_SELECTOR='<css-selector-from-dom-evidence>'
+bash scripts/extract/element-evidence.sh "$SESSION" "$TARGET_SELECTOR" "$OUT_DIR/element-target.json"
+```
+
+The output includes the provided selector plus selector candidates derived from
+id/data/role attributes and DOM `:nth-of-type()` fallback. Add the element JSON
+path to follow-up notes or regenerate the brief from the ref dir. This is an
+element-level probe only; still run the normal bundle, transition, state, and
+verification captures for full clone fidelity.
+
+**Scroll state-machine evidence:** when bundle/spec evidence contains
+`window.scrollTo`, `scrollYProgress`, `setTimeout`, `velocity` / `getVelocity`,
+or a guard ref around scroll-stop behavior, capture settle/return artifacts in
+addition to the active scroll frame. The required proof shape is
+`initial → active/expanded → settled/returned`; downstream skills must not infer
+the returned phase from a single endpoint frame.
+
+The host skill invocation translates positional args to env vars before the pipeline runs:
 
 ```bash
 REF_URL="$1"
@@ -83,22 +122,22 @@ OUT_DIR="tmp/ref/${COMPONENT:-capture}"
 ```
 A URL is required. Use the following format:
 
-/ui-capture <reference-url> [local-url] [component]
+ui-capture <reference-url> [local-url] [component]
 
-Example: /ui-capture https://example.com http://localhost:3000 example-main
+Example: ui-capture https://example.com http://localhost:3000 example-main
 ```
 
 Do NOT proceed to any capture phase until `<reference-url>` is provided.
 
 ## Dependencies — preflight (run once per session)
 
-`npx skills add` installs the SKILL files but skips system tooling. Run this check at session start; if anything is missing, halt and surface the bootstrap one-liner to the user (do **not** auto-execute `curl | bash` on their behalf).
+`npx skills add` installs the SKILL files but skips system tooling. Run this check at session start; if anything is missing, halt and surface the bootstrap one-liner to the user (do **not** auto-execute a remote installer on their behalf).
 
 ```bash
 miss=""
 for c in agent-browser ffmpeg; do command -v "$c" >/dev/null 2>&1 || miss+=" $c"; done
 if [ -n "$miss" ]; then
-  printf 'Missing system deps:%s\n\nFastest fix:\n  curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh | bash\n\nOr install manually:\n  brew install ffmpeg   # macOS  (Linux: apt install ffmpeg)\n  npm i -g agent-browser\n' "$miss"
+  printf 'Missing system deps:%s\n\nFastest fix:\n  tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"\n\nOr install manually:\n  brew install ffmpeg   # macOS  (Linux: apt install ffmpeg)\n  npm i -g agent-browser\n' "$miss"
   exit 1
 fi
 ```
@@ -188,7 +227,10 @@ they do not infer filenames from `name` or `triggerType`. Run
 after Phase 2B-2E and fix any missing files before handing off.
 
 **Phase 2B–2E** (`capture-transitions.md`), per type:
-- **2B** scroll — exploration video → clip verification (before/mid/after)
+- **2B** scroll — exploration video → clip verification (before/mid/after); for
+  scroll-stop controllers (`window.scrollTo`, `scrollYProgress`, `setTimeout`,
+  `velocity`, guard ref), include settle/return artifacts for
+  `initial → active/expanded → settled/returned`
 - **2C** interactive — `css-hover`/`js-class` → eval + clip (idle+active); `intersection` → classList + clip. **No video.**
 - **2D** mousemove — raster-path sweep (10×10 grid, single video)
 - **2E** auto-timer — video for 2–3 full cycles
