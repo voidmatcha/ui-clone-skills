@@ -183,3 +183,21 @@ Verify original URLs before adding images:
 ```bash
 curl -I "https://cdn.example.com/image.jpg" | grep -i "http\|content-type"
 ```
+
+## Irreproducible from a static scaffold (do not mistake for bugs)
+
+A static capture + deterministic transpile reproduces structure, assets, CSS,
+and spec-grounded motion. The following classes are **genuinely irreproducible**
+without runtime data and must not be "fixed" by guessing or by downgrading
+anti-cheat-protected sections:
+
+| Class | Why irreproducible | What IS reproduced instead |
+|---|---|---|
+| Stat-bar fill widths / count-up values | Set by JS at runtime (CSS vars / state); final values exist only in a `runtime-text.json` capture | Count-up text via runtime-text injection when the artifact exists; bar tracks render at captured geometry |
+| Interactive widgets (e.g. clickable pyramid) | Event-handler behavior lives in app JS the pipeline never executes | Static layout, assets, and hover CSS of the widget |
+| Live scroll-scrub composition (motion-critical sections) | Continuous scrub state is a function of live scroll physics; section-compare anti-cheat intentionally blocks downgrading these | Spec-grounded entrance/state motion (whileInView, state-fade, stroke-draw) with the ref's real duration/ease |
+| Third-party runtime style injection (toast/notification libs) | Keyframes injected by library JS at runtime, absent from shipped CSS | Page-authored keyframes via copied ref CSS (keyframes-diff verifies) |
+
+When a gate flags one of these, the correct action is to verify the
+deterministic part is present, then record the entry in the run's notes —
+not to synthesize fake values or bypass the gate.

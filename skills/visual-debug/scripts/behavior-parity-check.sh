@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # behavior-parity-check.sh — JSON-level ref↔impl behavior diff.
 #
-# Codex 2026-05-28 design (Option 3): the existing pipeline captures
+# Behavior-parity design: the existing pipeline captures
 # Phase A/B/C only from the REF URL and verifies impl via pixel-diff
 # (section-compare AE/Mpx). Dynamic / behavioral mismatches (hover
 # handler count, scroll engine choice, splash sequence timing) are
@@ -18,12 +18,12 @@
 # Usage:
 #   behavior-parity-check.sh <ref-dir> [--tier quick|standard|comprehensive]
 #
-# Tiers (per codex tier-mapping recommendation):
+# Tiers:
 #   quick         — schema/existence only, no value comparison
 #   standard      — count-level diff (DEFAULT for iterations)
 #   comprehensive — per-entry selector + trajectory hash diff
 #
-# Verdict rules (codex blocking/advisory recommendation):
+# Verdict rules:
 #   FAIL  (blocking)  — missing hover targets, missing splash transitions,
 #                       timed-out stabilization on impl, scrollHeight
 #                       divergence >50%, missing required artifacts
@@ -155,8 +155,8 @@ if tier in ("standard", "comprehensive") and impl_root.is_dir():
         r_engine = ref_scroll.get("scrollEngine", "native")
         i_engine = impl_scroll.get("scrollEngine", "native")
         if r_engine != i_engine:
-            # Codex advisory rule: scroll engine mismatch is impl choice,
-            # not observable failure → warn, not fail.
+            # Advisory rule: scroll engine mismatch is an implementation choice,
+            # not an observable failure → warn, not fail.
             add(
                 "warn",
                 "scroll-engine-mismatch",

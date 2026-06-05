@@ -24,7 +24,22 @@ if [ -z "$REF_DIR" ] || [ ! -d "$REF_DIR" ]; then
 fi
 REF_DIR="$(cd "$REF_DIR" && pwd)"
 
-python3 - "$REF_DIR" <<'PY'
+# Avoid version-manager shim startup on every resolver call. The test suite and
+# visual gates invoke this helper many times; pyenv/asdf `python3` shims can add
+# seconds per invocation on macOS. Prefer an explicit caller-provided Python,
+# then an active/repo virtualenv, then fall back to PATH.
+if [ -z "${PYTHON_BIN:-}" ]; then
+  REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python3" ]; then
+    PYTHON_BIN="$VIRTUAL_ENV/bin/python3"
+  elif [ -x "$REPO_ROOT/.venv/bin/python3" ]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python3"
+  else
+    PYTHON_BIN="$(command -v python3)"
+  fi
+fi
+
+"$PYTHON_BIN" - "$REF_DIR" <<'PY'
 # Python 3.9 compat for PEP 604 unions used below — defer
 # annotation evaluation so `X | Y` is parsed as a string.
 from __future__ import annotations
@@ -85,6 +100,31 @@ candidates.append(ref_dir.parent.parent / "apps" / ref_dir.name)
 candidates.append(ref_dir.parent.parent / "apps" / ref_dir.name / "app")
 if len(ref_dir.parents) >= 3:
     candidates.append(ref_dir.parents[2] / "impl")  # nested workspace impl (3-up sibling)
+
+
+def is_valid_convention(p: Path) -> bool:
+    """Convention candidates (impl/, apps/<comp>/, <workspace>/impl/) are
+    canonical locations — accept on src/ or app/ presence alone. Requiring
+    package.json here would break legacy back-compat where the impl scaffold
+    is checked in piecemeal.
+    """
+    if not p.is_dir():
+        return False
+    return (p / "src").is_dir() or (p / "app").is_dir()
+
+
+# Fast path: if an explicit/convention location exists, do not run the
+# structural heuristic. In pytest temp dirs, walking the grandparent can scan a
+# huge shared /private/var/... tree and turn a resolver call into a multi-second
+# operation even though the sibling impl/ is already present.
+for c in candidates:
+    if is_valid_convention(c):
+        impl_src = c / "src" if (c / "src").is_dir() else c / "app"
+        impl_pkg = c / "package.json"
+        print(str(c))
+        print(str(impl_src))
+        print(str(impl_pkg))
+        sys.exit(0)
 
 # Structural heuristic — find ANY directory that looks like an impl
 # tree (package.json + src/ or app/ or pages/ with .tsx/.jsx/.vue/
@@ -160,20 +200,38 @@ def walk_for_impls(root: Path, depth: int) -> None:
 # (preserves prior behavior), then walk repo root for cross-located
 # layouts (ref at <repo>/tmp/ref/ + impl at <repo>/scratch/.../impl/).
 search_roots: list[Path] = []
-if len(ref_dir.parents) >= 3:
+is_pytest_tmp = any(
+    p.name.startswith("pytest-") or p.name.startswith("pytest-of-")
+    for p in ref_dir.parents
+)
+is_pipeline_ref = (
+    len(ref_dir.parents) >= 3
+    and ref_dir.parent.name == "ref"
+    and ref_dir.parent.parent.name == "tmp"
+)
+if is_pipeline_ref:
+    search_roots.append(ref_dir.parents[2])  # loop_root for tmp/ref/<component>
+elif is_pytest_tmp:
+    # Pytest creates many sibling temp directories under one shared
+    # /private/var/.../pytest-N root. Walking that grandparent makes each
+    # resolver call scan unrelated tests. A test fixture's impl, when present,
+    # lives under the fixture directory itself, so keep the heuristic local.
+    search_roots.append(ref_dir.parent)
+elif len(ref_dir.parents) >= 3:
     search_roots.append(ref_dir.parents[2])  # loop_root (if nested)
 # Repo root candidate: walk up from ref until we hit a dir with a
 # .git or package.json (typical repo markers); cap at 6 hops.
 cur = ref_dir
-for _ in range(6):
-    if cur in search_roots:
-        break
-    if (cur / ".git").exists() or (cur / "package.json").is_file():
-        search_roots.append(cur)
-        break
-    if cur.parent == cur:
-        break
-    cur = cur.parent
+if not is_pytest_tmp:
+    for _ in range(6):
+        if cur in search_roots:
+            break
+        if (cur / ".git").exists() or (cur / "package.json").is_file():
+            search_roots.append(cur)
+            break
+        if cur.parent == cur:
+            break
+        cur = cur.parent
 
 seen_roots: set[Path] = set()
 for sr in search_roots:
@@ -185,17 +243,6 @@ for sr in search_roots:
         continue
     seen_roots.add(sr_resolved)
     walk_for_impls(sr_resolved, depth=3)
-
-
-def is_valid_convention(p: Path) -> bool:
-    """Convention candidates (impl/, apps/<comp>/, <workspace>/impl/) are
-    canonical locations — accept on src/ or app/ presence alone. Requiring
-    package.json here would break legacy back-compat where the impl scaffold
-    is checked in piecemeal.
-    """
-    if not p.is_dir():
-        return False
-    return (p / "src").is_dir() or (p / "app").is_dir()
 
 
 # Prefer convention candidates first.

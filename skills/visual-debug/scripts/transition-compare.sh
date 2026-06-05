@@ -204,8 +204,12 @@ EXCLUDE_SELECTORS_JSON=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[
 DETECT_TRANSITIONS="${DETECT_TRANSITIONS/\$\{MAX_TRANSITIONS\}/$MAX_TRANSITIONS}"
 DETECT_TRANSITIONS="${DETECT_TRANSITIONS/\$\{EXCLUDE_SELECTORS_JSON\}/$EXCLUDE_SELECTORS_JSON}"
 
-agent-browser --session "$SESSION_REF" eval "$DETECT_TRANSITIONS" > "$DIR/transitions/ref-elements.json" 2>&1
-agent-browser --session "$SESSION_IMPL" eval "$DETECT_TRANSITIONS" > "$DIR/transitions/impl-elements.json" 2>&1
+agent-browser --session "$SESSION_REF" eval "$DETECT_TRANSITIONS" \
+  > "$DIR/transitions/ref-elements.json" \
+  2> "$DIR/transitions/ref-elements.stderr.log"
+agent-browser --session "$SESSION_IMPL" eval "$DETECT_TRANSITIONS" \
+  > "$DIR/transitions/impl-elements.json" \
+  2> "$DIR/transitions/impl-elements.stderr.log"
 
 REF_TRANS=$(python3 -c "import json; print(len(json.loads(open('$DIR/transitions/ref-elements.json').read())))" 2>/dev/null || echo "0")
 IMPL_TRANS=$(python3 -c "import json; print(len(json.loads(open('$DIR/transitions/impl-elements.json').read())))" 2>/dev/null || echo "0")
@@ -240,7 +244,11 @@ echo "▸ Capturing idle + hover states..."
 
 # Write hover capture script to a tmpfile — avoids bash quoting issues when
 # embedding Python code with single-quotes inside a double-quoted -c argument.
-_TC_PY=$(mktemp /tmp/tc-hover-XXXXXX.py)
+# Trailing X's only — BSD/macOS mktemp does not substitute X's that precede a
+# suffix (e.g. `-XXXXXX.py`); it would create a literal `tc-hover-XXXXXX.py`
+# and then fail with "File exists" on every later run. python3 runs the file
+# regardless of extension, so the `.py` suffix is unnecessary.
+_TC_PY=$(mktemp /tmp/tc-hover-XXXXXX)
 
 cat > "$_TC_PY" << 'PYEOF'
 import json, re, subprocess, sys, time, os

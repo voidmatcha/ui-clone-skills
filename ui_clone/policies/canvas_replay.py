@@ -7,7 +7,7 @@ section-map.json. The Stop-hook half of the policy (stamp enforcement,
 tamper detection) lives in `ui_clone.hooks.section_gate`; this module
 holds the modifier predicates that gates consult when running.
 
-Boundary (codex review applied to foundation commit e903334):
+Boundary:
   - Relief applies to canvas pixels ONLY. Text fidelity, font parity,
     runtime-DOM parity, transition-compare are unaffected.
   - All 3 conditions must hold per section: closeoutPolicy="canvas-replay"
@@ -27,11 +27,11 @@ CRITICAL_AE_PER_MPX = 20000
 
 # Relief multiplier. Canvas pixels diverge from CSS approximation by design;
 # 2x widens the critical band to (20000, 40000] for canvas-tagged sections.
-# Picked because the kayiseisagu / juanmora canvas-driven refs that motivated
-# this policy land at AE/Mpx 25k-40k after exhausting CSS replication — 2x
-# captures that envelope without admitting cases where AE/Mpx > 40k (those
-# stay critical even under relief, because at that magnitude the canvas
-# approximation has diverged beyond perceptual acceptance).
+# Calibrated against high-AE canvas-heavy references where CSS replication was
+# exhausted but the remaining canvas-pixel delta stayed in the 25k-40k AE/Mpx
+# band. A 2x multiplier captures that envelope without admitting cases above
+# 40k AE/Mpx, where the approximation has diverged beyond perceptual
+# acceptance.
 AE_RELIEF_MULTIPLIER = 2.0
 
 _ATTESTATION_FILENAME = "canvas-replay-attestation.json"
@@ -66,8 +66,8 @@ def is_policy_active(ref_dir: Path) -> bool:
     """True iff closeoutPolicy=="canvas-replay" AND attestation file exists.
 
     Both halves must hold — policy alone (no attestation) MUST NOT relax
-    any gate (codex finding [3] from foundation: absent attestation =
-    mode disabled even if the policy field is set). This makes the
+    any gate. Absent attestation means the mode is disabled even if the
+    policy field is set. This makes the
     "wrote policy, forgot attestation" mistake fail-closed.
     """
     if _load_state_policy(ref_dir) != "canvas-replay":

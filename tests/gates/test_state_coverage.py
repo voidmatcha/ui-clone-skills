@@ -1,6 +1,6 @@
 """Tests for ui_clone.gates.state_coverage — the gate that fails when ref
 has multi-snapshot capture artifacts (states/splash, states/scroll,
-states/hover) but the impl source doesn't reference the corresponding
+states/hover, states/click) but the impl source doesn't reference the corresponding
 class hooks / scroll listeners / hover handlers.
 
 Pattern: build a synthetic ref_dir + impl_root, write the artifacts the
@@ -84,6 +84,17 @@ def _write_hover(ref_dir: Path, manifest: dict, summary: dict) -> None:
     )
     (hover / "summary.json").write_text(
         json.dumps(summary), encoding="utf-8",
+    )
+
+
+def _write_click(ref_dir: Path, manifest: dict, summary: dict | None = None) -> None:
+    click = ref_dir / "states" / "click"
+    click.mkdir(parents=True, exist_ok=True)
+    (click / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8",
+    )
+    (click / "summary.json").write_text(
+        json.dumps(summary or {"checked": True}), encoding="utf-8",
     )
 
 
@@ -175,6 +186,38 @@ def test_splash_transitions_no_class_hooks_fail(
     # knows which selectors to add.
     msg = splash_fails[0].message.lower()
     assert "is-loading" in msg or "is-loaded" in msg
+
+
+def test_splash_class_substring_does_not_falsematch_longer_class(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Captured splash class `is-loaded` must NOT be considered referenced
+    when impl/src only contains a different, longer class that happens to
+    embed it as a substring (`is-loaded-overlay`). Naive `in` matching
+    false-passes here; the gate must use a class-boundary match."""
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "hash": 1, "bodyClass": "", "htmlClass": ""},
+            {"ts_ms": 800, "hash": 2, "bodyClass": "is-loaded", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2, "reason": "stable-2s"},
+    )
+    _write_impl_src(impl_root, {
+        "App.tsx": (
+            "export function App() {\n"
+            "  return <div className={styles['is-loaded-overlay']} />;\n"
+            "}\n"
+        ),
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    splash_fails = [
+        r for r in results if r.status == "fail" and "splash" in r.label.lower()
+    ]
+    assert splash_fails, (
+        "expected splash fail (is-loaded-overlay must not satisfy is-loaded), "
+        f"got: {[(r.label, r.status, r.message) for r in results]}"
+    )
 
 
 def test_splash_no_transitions_no_check(ref_dir: Path, impl_root: Path) -> None:
@@ -720,3 +763,87 @@ def test_url_double_slash_not_stripped_as_comment(
         "URL with `//` must not be stripped; active is-loaded/is-loading "
         f"must be detected; got: {[(r.label, r.status) for r in results]}"
     )
+
+
+def test_click_state_entries_require_impl_click_handler(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Same-page click mutations from capture-click.sh require a runtime
+    click handler in impl source; static markup alone must fail."""
+    _write_click(ref_dir, {
+        "entries": [
+            {
+                "id": "modal",
+                "file": "click-modal.json",
+                "selector": "button.modal",
+                "triggerType": "click-toggle",
+                "navigationType": "same-page",
+                "navigationOnly": False,
+                "changedCount": 1,
+            }
+        ],
+    })
+    _write_impl_src(impl_root, {
+        "App.tsx": "export function App(){ return <button className='modal'>Open</button>; }",
+    })
+
+    results = Gate(ref_dir).gate_state_coverage()
+    assert any(
+        r.status == "fail" and "click" in r.label.lower()
+        for r in results
+    ), [(r.label, r.status, r.message) for r in results]
+
+
+def test_click_state_entries_pass_with_impl_click_handler(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    _write_click(ref_dir, {
+        "entries": [
+            {
+                "id": "modal",
+                "file": "click-modal.json",
+                "selector": "button.modal",
+                "triggerType": "click-toggle",
+                "navigationType": "same-page",
+                "navigationOnly": False,
+                "changedCount": 1,
+            }
+        ],
+    })
+    _write_impl_src(impl_root, {
+        "App.tsx": (
+            "export function App(){ return <button aria-expanded={open} "
+            "onClick={() => setOpen(!open)}>Open</button>; }"
+        ),
+    })
+
+    results = Gate(ref_dir).gate_state_coverage()
+    assert any(
+        r.status == "pass" and "click" in r.label.lower()
+        for r in results
+    ), [(r.label, r.status, r.message) for r in results]
+
+
+def test_external_click_navigation_does_not_require_click_state_handler(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Off-site clicks are link/navigation evidence, not same-page state."""
+    _write_click(ref_dir, {
+        "entries": [
+            {
+                "id": "external",
+                "file": "click-external.json",
+                "selector": "a.external",
+                "triggerType": "click-navigation",
+                "navigationType": "external",
+                "navigationOnly": True,
+                "changedCount": 0,
+            }
+        ],
+    })
+    _write_impl_src(impl_root, {
+        "App.tsx": "export function App(){ return <a href='https://outside.test'>Out</a>; }",
+    })
+
+    results = Gate(ref_dir).gate_state_coverage()
+    assert not [r for r in results if "click" in r.label.lower()]

@@ -62,7 +62,7 @@ Gate.run = _dispatch_mod.run  # type: ignore[method-assign]
 
 # Rebind per-gate methods.
 #
-# Mock-patch gotcha (Codex Item-5 follow-up): `Gate.gate_spec` etc. are
+# Mock-patch gotcha: `Gate.gate_spec` etc. are
 # bound to the per-area function objects AT IMPORT TIME of this module.
 # Tests that want to patch a gate must target the class attribute, not
 # the per-area module:
@@ -126,7 +126,7 @@ Gate.gate_section_compare = section_compare.gate_section_compare  # type: ignore
 # moment a gate is added to GATE_ORDER without a corresponding
 # implementation (or vice versa), with no runtime overhead.
 #
-# Codex Item-5 follow-up: extend the check to ALL stubs declared on Gate
+# Stub-binding follow-up: extend the check to ALL stubs declared on Gate
 # (gate_* methods, helper _check_* methods, dispatch/render/run, etc.) —
 # the original validator only covered gate_* names from GATE_ORDER, so a
 # helper stub like _check_verification_plan that never got rebound would

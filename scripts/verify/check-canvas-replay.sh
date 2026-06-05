@@ -15,7 +15,7 @@
 # Usage:
 #   bash scripts/verify/check-canvas-replay.sh <ref-dir> [--write-stamp]
 #
-# Attestation contract (codex review 2026-05-25 item [2]):
+# Attestation contract (review 2026-05-25 item [2]):
 #   <ref-dir>/canvas-replay-attestation.json must be operator-written before
 #   this script runs. Required fields:
 #     - license:           URL or text of source's license / owner permission
@@ -24,12 +24,12 @@
 #     - attestedAt:        ISO 8601 UTC timestamp
 #     - ref_canvas_sources: Non-empty array of canvas-driving JS URLs
 #
-# Stamp contract (codex review item [5]):
+# Stamp contract (review item [5]):
 #   <ref-dir>/canvas-replay-stamp.json carries sha256(attestation) so the
 #   Stop hook detects tampering with the license/disclaimer/ref_canvas_sources
 #   after the stamp was written.
 #
-# Scope boundary (codex review item [8]):
+# Scope boundary (review item [8]):
 #   Canvas-replay is for <canvas> pixel-fidelity only. WebAudio output, video
 #   replay, DOM replay, and non-canvas asset bypasses are explicitly OUT of
 #   scope. See skills/ui-reverse-engineering/canvas-replay-mode.md.
@@ -102,7 +102,7 @@ if not sources:
     )
     sys.exit(1)
 
-# Scope guard (codex review item [8]): refuse attestations that declare
+# Scope guard (review item [8]): refuse attestations that declare
 # non-canvas sources. Heuristic — looking for media-type indicators in URLs.
 # Operators can still attest legitimate sources by avoiding misleading suffixes.
 banned_substrings = (

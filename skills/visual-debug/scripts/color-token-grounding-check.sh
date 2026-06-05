@@ -97,8 +97,7 @@ def rgb_to_oklab(r: int, g: int, b: int) -> tuple[float, float, float]:
     return (L, a, b_lab)
 
 def color_distance(h1: str, h2: str) -> float:
-    """2026-05-22 codex-rescue audit (ab62e254 E): OKLab perceptual
-    distance replaces previous Euclidean RGB. Two RGB-close-but-
+    """OKLab perceptual distance replaces previous Euclidean RGB. Two RGB-close-but-
     perceptually-distant colors (#ffeb00 yellow vs #ffaa00 orange,
     RGB-distance ~75 but visually obviously different) get a larger
     OKLab distance; two perceptually-close colors get smaller distance.
@@ -153,7 +152,8 @@ def extract_colors_from_text(text: str) -> set[str]:
 
 # ── Collect ref colors ────────────────────────────────────────────────
 ref_colors: set[str] = set()
-for name in ("styles.json", "extracted.json", "design-tokens.json"):
+for name in ("styles.json", "extracted.json", "design-tokens.json",
+             "css/variables.txt", "section-html/_colors.json"):
     p = ref_p / name
     if not p.exists():
         continue

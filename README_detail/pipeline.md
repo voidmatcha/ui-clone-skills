@@ -2,7 +2,7 @@
 
 ## Pipeline hooks (automatic)
 
-Hooks register automatically through the host manifest when supported: `hooks/hooks.json` for Claude Code and `hooks/codex-hooks.json` for Codex. All hooks route through a single `hooks/shim.sh` that fast-skips when no `tmp/ref/` directory exists.
+Hooks register through `hooks/hooks.json` for Claude Code (plugin manifest) and, for Codex, via `install.sh` merging `hooks/codex-hooks.json` into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` manifest path). All hooks route through a single `hooks/shim.sh` that fast-skips when no `tmp/ref/` directory exists.
 
 | Hook module | Event | Purpose |
 |------|-------|---------|
@@ -42,7 +42,8 @@ The `ui-reverse-engineering` skill is auto-loaded so the prompt does not need to
 # ~/.codex/config.toml — enable once, restart Codex
 [features]
 goals = true
-plugin_hooks = true
+# (Gate hooks load from ~/.codex/hooks.json via install.sh — plugin_hooks was
+#  removed in codex-cli 0.137 and is no longer used.)
 ```
 
 In the Codex REPL, run a one-line `/goal` invocation (the `ui-reverse-engineering` skill ships an `AGENTS.md` block that Codex auto-loads, so the goal prompt doesn't re-embed the full pipeline briefing): `/goal Drive the ui-clone-skills pipeline for tmp/ref/<component> until python -m ui_clone.goal tmp/ref/<component> --check-done exits 0. Never declare completion until the exit code is 0.` Use `/goal pause` to narrow scope mid-run, `/goal resume` to continue.

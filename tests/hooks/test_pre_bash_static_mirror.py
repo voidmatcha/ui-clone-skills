@@ -143,6 +143,44 @@ class TestPreBashPipelineStateStaticMirror:
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "post-implement" in reason
 
+    def test_static_server_blocked_at_state_coverage_points_to_gate_not_source(
+        self, tmp_path: Path
+    ) -> None:
+        """RealFood JSONL: agents inspected hook internals after server block.
+        The denial should point at the next gate command instead.
+        """
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="realfood")
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps({
+                "component": "realfood",
+                "completed_steps": [
+                    "reference", "extraction", "bundle",
+                    "paid-features", "spec", "pre-generate",
+                ],
+                "current_gate": "state-coverage",
+                "gate_fail_counts": {},
+                "unclonable_reasons": [],
+            })
+        )
+        server = tmp_path / "scratch" / "loop-state-coverage" / "impl" / "server.js"
+        server.parent.mkdir(parents=True)
+        server.write_text("require('node:http').createServer().listen(3062)")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(f"node {server}"),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout.strip())
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "python -m ui_clone.gate" in reason
+        assert "state-coverage" in reason
+        assert "Do not inspect hook or gate source" in reason
+
     def test_dev_server_allowed_after_pre_generate_passes(self, tmp_path: Path) -> None:
         """After current_gate=post-implement, dev-server commands are normal verification."""
         search_root = make_search_root(tmp_path)

@@ -106,6 +106,21 @@ if command -v jq >/dev/null 2>&1; then
   HAS_JQ=1
 fi
 
+# Resolve the concrete Python interpreter once. Version-manager shims (pyenv,
+# asdf, etc.) can add seconds to every tiny `python3 -c` call; this script runs
+# several JSON probes, so repeated shim startup makes even the quick tier slow
+# enough to trip CI smoke timeouts. Callers such as bench-verification.sh may
+# export PYTHON_BIN to avoid even this one resolution call.
+if [ -z "${PYTHON_BIN:-}" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN=$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || command -v python3)
+  else
+    echo "ERROR: python3 required for verification-plan JSON probes" >&2
+    exit 2
+  fi
+fi
+[ -n "$PYTHON_BIN" ] || { echo "ERROR: cannot resolve python3 executable" >&2; exit 2; }
+
 # Read a JSON path safely; return empty string if file or path missing.
 # shellcheck disable=SC2329 # Kept as a local helper for plan extensions.
 read_json() {
@@ -174,7 +189,7 @@ ELEMENT_TRACKING="$REF_DIR/element-tracking.json"
 # expensive motion checks never falsely dispatch.
 observed_motion_signal() {
   local mode="$1"
-  python3 - "$mode" "$TRANSITION_COVERAGE" "$ANIMATIONS_DETECTED" "$ELEMENT_TRACKING" <<'PY'
+  "$PYTHON_BIN" - "$mode" "$TRANSITION_COVERAGE" "$ANIMATIONS_DETECTED" "$ELEMENT_TRACKING" <<'PY'
 import json, re, sys
 
 mode = sys.argv[1]
@@ -363,6 +378,17 @@ elif mode == "carousel":
     result = animations_detected_carousel()
 elif mode == "vector":
     result = animations_detected_vector() or element_tracking_vector()
+elif mode == "all":
+    values = (
+        transition_coverage_scroll()
+        or animations_detected_scroll()
+        or element_tracking_scroll(),
+        animations_detected_reveal() or element_tracking_reveal(),
+        animations_detected_carousel(),
+        animations_detected_vector() or element_tracking_vector(),
+    )
+    print(" ".join("true" if v else "false" for v in values))
+    sys.exit(0)
 else:
     result = False
 
@@ -370,15 +396,33 @@ print("true" if result else "false")
 PY
 }
 
+OBSERVED_MOTION_FIELDS=$(observed_motion_signal all 2>/dev/null || echo "false false false false")
+# shellcheck disable=SC2086 # split the four fixed boolean fields.
+set -- $OBSERVED_MOTION_FIELDS
+OBSERVED_SCROLL_SIGNAL="${1:-false}"
+OBSERVED_REVEAL_SIGNAL="${2:-false}"
+OBSERVED_CAROUSEL_SIGNAL="${3:-false}"
+OBSERVED_VECTOR_SIGNAL="${4:-false}"
+
+observed_motion_signal() {
+  case "$1" in
+    scroll) echo "$OBSERVED_SCROLL_SIGNAL" ;;
+    reveal) echo "$OBSERVED_REVEAL_SIGNAL" ;;
+    carousel) echo "$OBSERVED_CAROUSEL_SIGNAL" ;;
+    vector) echo "$OBSERVED_VECTOR_SIGNAL" ;;
+    *) echo "false" ;;
+  esac
+}
+
 file_mtime_epoch() {
   local path="$1"
   stat -f %m "$path" 2>/dev/null \
     || stat -c %Y "$path" 2>/dev/null \
-    || python3 -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$path"
+    || "$PYTHON_BIN" -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$path"
 }
 
 plan_generated_epoch() {
-  python3 - "$1" <<'PY'
+  "$PYTHON_BIN" - "$1" <<'PY'
 import datetime
 import json
 import sys
@@ -398,10 +442,10 @@ PY
 PLAN_PATH="$REF_DIR/verification-plan.json"
 if [ -f "$PLAN_PATH" ]; then
   NEWEST_EXTRACTION_MTIME=0
-  # Codex juanmora review (2026-05-25): expand staleness inputs to include
+  # Motion-site review: expand staleness inputs to include
   # the v0.7.0 multi-snapshot capture artifacts AND the Phase 0 runtime
-  # dump. Without these, juanmora-style runs regenerated states/*/ AND
-  # animation-runtime-dump.json post-plan but the plan stayed stale →
+  # dump. Without these, motion-rich runs can regenerate states/*/ AND
+  # animation-runtime-dump.json post-plan while the plan stays stale →
   # hasSplash/hasHover false-negatives + runtime-spec-coverage never
   # added. Listing them here forces re-derivation whenever they refresh.
   for EXTRACTION_ARTIFACT in \
@@ -409,6 +453,7 @@ if [ -f "$PLAN_PATH" ]; then
     "$REF_DIR/structure.json" \
     "$TRANSITION_SPEC" \
     "$REF_DIR/animation-runtime-dump.json" \
+    "$REF_DIR/state-structure-spec.json" \
     "$REF_DIR/states/splash/summary.json" \
     "$REF_DIR/states/scroll/summary.json" \
     "$REF_DIR/states/hover/summary.json"; do
@@ -488,7 +533,7 @@ fi
 # "whileHover", etc.). interaction-detection.md / transition-spec-rules.md
 # do not pin a single canonical string, so the regex must be lenient.
 #
-# Codex juanmora review (2026-05-25): also derive from Phase C capture
+# Motion-site review: also derive from Phase C capture
 # (states/hover/manifest.json) — that artifact records actual hover
 # candidates discovered at runtime. Without this, hover plan flag stayed
 # false even when capture-hover.sh found 13 candidates.
@@ -502,7 +547,7 @@ if contains_pattern "$INTERACTIONS" '"trigger":\s*"[^"]*[Hh]over[^"]*"' \
 elif [ -f "$HOVER_MANIFEST" ]; then
   # entries length > 0 means capture-hover.sh found at least one hover
   # target — set HAS_HOVER even if upstream extraction missed it.
-  HOVER_ENTRIES=$(python3 -c "
+  HOVER_ENTRIES=$("$PYTHON_BIN" -c "
 import json, sys
 try:
     data = json.loads(open('$HOVER_MANIFEST').read())
@@ -521,10 +566,10 @@ fi
 # splash-extraction artifacts in case the agent set hasPreloader=false but
 # splash-extraction.md still produced output.
 #
-# Codex juanmora review (2026-05-25): also derive from Phase A capture
+# Motion-site review: also derive from Phase A capture
 # (states/splash/summary.json polls > 1). Without this, splash plan flag
 # stayed false even when capture-states.sh found 2+ transitions —
-# juanmora's GSAP splash never reached hasSplash:true → no splash check
+# some GSAP splash signatures never set hasSplash:true, so no splash check
 # was scheduled. Fall-through to transition-spec entries with page-load
 # trigger keeps a third signal path.
 DOM_STATE_DIFF="$REF_DIR/dom-state-diff.json"
@@ -537,7 +582,7 @@ if contains_pattern "$INTERACTIONS" '"hasPreloader":\s*true' \
 elif [ -f "$SPLASH_SUMMARY" ]; then
   # polls > 1 = capture-states.sh recorded at least one class transition
   # during the splash window (loading → loaded). Treat as splash present.
-  SPLASH_POLLS=$(python3 -c "
+  SPLASH_POLLS=$("$PYTHON_BIN" -c "
 import json, sys
 try:
     data = json.loads(open('$SPLASH_SUMMARY').read())
@@ -582,9 +627,11 @@ fi
 # whether click-state-compare.sh is required.
 HAS_CLICK_STATE="false"
 REGIONS_JSON="$REF_DIR/regions.json"
+STATE_STRUCTURE_SPEC="$REF_DIR/state-structure-spec.json"
 if contains_pattern "$REGIONS_JSON" '"triggerType":\s*"click-' \
    || contains_pattern "$INTERACTIONS" '"trigger":\s*"click"' \
    || contains_pattern "$INTERACTIONS" '"type":\s*"click-' \
+   || contains_pattern "$STATE_STRUCTURE_SPEC" '"phase":\s*"click"' \
    || contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"click"'; then
   HAS_CLICK_STATE="true"
 fi
@@ -692,9 +739,8 @@ add_check() {
 # scripts/verify/run-required-checks.sh only cascades skips for deps
 # that have already failed (in array iteration order). So runtime-env
 # must run before its dependents — registering it here ensures it gets
-# dispatched first. Codex ecosystem review (2026-05-24 ultrathink)
-# identified the prior bottom-of-file placement as a silent no-op for
-# the dependsOn cascade.
+# dispatched first. A prior bottom-of-file placement made the dependsOn
+# cascade a silent no-op.
 add_check "runtime-env" \
           "skills/visual-debug/scripts/runtime-env-check.sh" \
           "runtime-env.json" \
@@ -749,8 +795,8 @@ add_check "proxy-mirror-check" \
           "block" \
           "quick"
 
-# Universal — bundle-paste anti-cheat. Catches the L41/L44 cheat shape where
-# impl bulk-pastes the ref's compiled CSS bundles into public/css/ (or any
+# Universal — bundle-paste anti-cheat. Catches the cheat shape where impl
+# bulk-pastes the ref's compiled CSS bundles into public/css/ (or any
 # hex-hash-filename dir), mirrors the ref's _next/static/ runtime, or imports
 # the ref's rendered HTML via Vite ?raw + dangerouslySetInnerHTML. Pure
 # filesystem + regex (no browser), so tier=quick.
@@ -773,8 +819,8 @@ add_check "text-fidelity-check" \
           "block" \
           "quick"
 
-# 17-iteration measurement (2026-05-22): every codex/claude clone produced
-# 80%+ tag-multiset divergence — LLMs collapse ref's deeply-nested div soup
+# Cross-run measurement: LLM-generated clones often produced 80%+
+# tag-multiset divergence by collapsing ref's deeply-nested div soup
 # (~1063 nodes) into clean React components (~200 nodes). The signal is
 # real (catches eviscerated impls) but the strict threshold made block
 # severity unreachable for legitimate React component patterns. Downgraded
@@ -812,6 +858,19 @@ if [ "$HAS_LOTTIE" = "true" ]; then
             "block" \
             "quick"
 fi
+
+# Unconditional.
+# Tier=standard: geometry-sanity renders the impl at the CAPTURE viewport and
+# compares docH + major-section heights against the ref capture geometry
+# (orig-layout totalHeight + section-map heights). Catches the class pixel
+# metrics structurally miss: a build scoring its best dSSIM while the document
+# is 2x the ref height (ballooned/collapsed pages). One-shot browser measure.
+add_check "geometry-sanity" \
+          "skills/visual-debug/scripts/geometry-sanity-check.sh" \
+          "geometry-sanity.json" \
+          "rendered docH + major section heights must track the ref capture (docH >15% or any major section >25% off = fail; warn band below)" \
+          "block" \
+          "standard"
 
 # Conditional.
 # Tier=standard: scroll-end-completion opens ref + impl in agent-browser,
@@ -859,8 +918,7 @@ add_check "svg-provenance" \
           "standard" \
           "runtime-env"
 
-# 2026-05-22 SKILL.md Tier 1-5 composite enforcement (codex-rescue
-# a125b997): runtime-proof.json is a roll-up validator over every
+# Tier 1-5 composite enforcement: runtime-proof.json is a roll-up validator over every
 # existing runtime-measurement artifact. Does NOT run new probes —
 # instead checks that each constituent gate produced an artifact AND
 # the artifact contains real measurement (not a measurement-free
@@ -872,8 +930,7 @@ add_check "runtime-proof" \
           "block" \
           "quick"
 
-# 2026-05-22 SKILL.md Tier 3 composite (codex-rescue a125b997):
-# transition-proof.json rolls up spec-coverage + spec-implementation +
+# Tier 3 composite: transition-proof.json rolls up spec-coverage + spec-implementation +
 # transition-coverage runtime probe + reveal + scroll-end + keyframes +
 # video-motion. Fails on partial coverage and empty runtime probes that
 # the individual gates didn't themselves fail.
@@ -913,8 +970,7 @@ if [ "$HAS_SWIPER" = "true" ]; then
             "quick"
 fi
 
-# 2026-05-22 SKILL.md Tier 5 (codex-rescue a125b997): the existing
-# anti-cheat gates catch screenshot/HTML cheats; this catches the
+# Tier 5 anti-cheat: the existing gates catch screenshot/HTML cheats; this catches the
 # remaining big cheat — loading ref's compiled JS bundle directly via
 # <script src>, dynamic import(), or fetch() from impl source or
 # runtime. Scans impl source tree for ref-host references and (with
@@ -1059,6 +1115,45 @@ fi
 # splash, IO, and click arcs are covered by transition-fires plus their
 # dedicated temporal gates.
 # Tier=quick: file-presence + grep over generated source — no browser.
+# Deterministically-detected signature effects (per-character scroll scrub,
+# etc.) declared in generation-plan.signatureEffects must be wired in impl.
+# Dispatched when signatureEffects is a non-empty list OR scrollScrub declares a
+# scale band (the #3 zoom): a scrollScrub-only ref has empty signatureEffects but
+# still must wire the scroll-bound scale, so keying on signatureEffects alone left
+# the scrub-scale contract silently unenforced. Mirror signature-effects-coverage-
+# check.sh's scrub_has_scale logic so registration and validation agree.
+if [ -f "$REF_DIR/generation-plan.json" ] && python3 -c "import json,sys
+d=json.load(open('$REF_DIR/generation-plan.json'))
+se=d.get('signatureEffects')
+ss=d.get('scrollScrub') if isinstance(d.get('scrollScrub'), dict) else {}
+has_se=isinstance(se, list) and bool(se)
+scrub_scale=bool(ss.get('required')) and any(
+    (t.get('property') or '').startswith('scale')
+    for s in (ss.get('sites') or []) if isinstance(s, dict)
+    for t in (s.get('transforms') or []) if isinstance(t, dict))
+sys.exit(0 if (has_se or scrub_scale) else 1)" 2>/dev/null; then
+  add_check "signature-effects-coverage" \
+            "skills/visual-debug/scripts/signature-effects-coverage-check.sh" \
+            "signature-effects-coverage.json" \
+            "Declared signatureEffects + scrollScrub scale must be wired in impl (scroll binding + per-character split + scroll-bound scale)" \
+            "block" \
+            "quick"
+fi
+
+# Mobile responsiveness density (ADVISORY/warn): a responsive ref needs a
+# responsive impl. The browser mobile-viewport-parity gate only checks overflow,
+# so a generic non-responsive rebuild (≈no media queries / fluid sizing) passes
+# it while looking broken on mobile. Warn-only — surfaces the gap without
+# blocking convergence. Dispatched only when the ref has detected breakpoints.
+if [ -f "$REF_DIR/detected-breakpoints.json" ]; then
+  add_check "mobile-responsive-coverage" \
+            "skills/visual-debug/scripts/mobile-responsive-coverage-check.sh" \
+            "mobile-responsive-coverage.json" \
+            "Impl should carry responsive CSS proportional to the responsive ref (advisory)" \
+            "warn" \
+            "quick"
+fi
+
 if [ -f "$TRANSITION_SPEC" ]; then
   add_check "transition-spec-coverage" \
             "skills/visual-debug/scripts/transition-spec-coverage.sh" \
@@ -1104,9 +1199,9 @@ fi
 # 30 ScrollTrigger animations. With this row wired, that mismatch fails the
 # post-implement gate.
 #
-# Codex juanmora review (2026-05-25): drop the `&& -f TRANSITION_SPEC`
-# guard. juanmora's transition-spec was stale (6 entries) while the runtime
-# dump captured 35 ScrollTrigger entries — both files existed, but more
+# Motion-site review: drop the `&& -f TRANSITION_SPEC`
+# guard. A stale transition-spec can under-report runtime ScrollTrigger
+# entries — both files may exist, but more
 # critically the gap is REAL when runtime-dump exists but transition-spec
 # is empty/missing. The check script handles both branches; gating its
 # REGISTRATION on transition-spec presence let agents silence the gap by
@@ -1368,14 +1463,14 @@ add_check "tree-diff" \
 # scroll-coverage — revives the previously-orphan batch-scroll + batch-compare
 # pair as a dispatchable check. Catches the "section-compare collapsed to N
 # sections" coverage gap (d19e28d benchmark only matched 2 of 16 sections)
-# by sweeping AE every 10% of page scroll on both sides — orthogonal to
-# the DOM-section enumeration.
+# by sweeping section-aligned anchors (plus sticky/scroll-transition phase
+# probes) on both sides; legacy every-10% scroll capture remains a fallback.
 REGIONS_JSON="$REF_DIR/regions.json"
 if [ -f "$REGIONS_JSON" ]; then
   add_check "scroll-coverage" \
             "skills/visual-debug/scripts/scroll-coverage-check.sh" \
             "scroll-coverage.json" \
-            "≥70% of sampled scroll positions must match within AE/Mpx threshold (catches section-compare's enumeration blind spots)" \
+            "≥70% of section-aligned scroll/sticky probes must match within AE/Mpx threshold (fallback: percent scroll probes)" \
             "warn" \
             "standard"
 fi

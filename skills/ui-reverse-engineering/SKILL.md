@@ -60,6 +60,7 @@ contract file.
 Role → contract mapping:
 
 - `bundle-analyzer` → `js-animation-extraction.md`
+- `source-forensics` → `source-forensics.md`
 - `generation-planner` → `enrichment.md`
 - `mismatch-diagnoser` → `diagnosis.md`
 - `visual-debug-iterator` → `iteration-discipline.md`
@@ -297,6 +298,8 @@ Follow this path in order: **Inputs → First action → Pipeline → Validation
 > **Compaction-survival rule:** post-compact, any "ref shows X / impl shows Y at scroll N" claim is *unverified*. Re-capture both ref and impl at that scroll position BEFORE implementing a fix — compaction flattens earlier evidence into a confident summary that may already be stale. Detail under Context management.
 >
 > **Evidence-pack rule:** when `tmp/ref/<component>/brief/WORKER_BRIEF.md` exists, read that compact brief before raw artifacts. Treat the evidence pack as a path-indexed rollup, not a new source of truth and never as a substitute for JS bundle analysis. Do not skip `bundle-map.json`, `external-sdks.json`, `scroll-engine.json`, or `transition-spec.json`; use the brief to find the right paths without pasting full DOM/style/screenshot JSON into context.
+>
+> **Raw HTML/CSS/JS fallback rule:** the main agent reads distilled artifacts first, including `state-structure-spec.json` for browser-observed splash/scroll/hover/click state. If a fix would require loading raw `bundles/*.js`, large `css/*.css`, captured HTML dumps, or full DOM/style JSON mid-loop, dispatch the host-neutral `source-forensics` subagent instead. The worker writes `tmp/ref/<component>/source-forensics.json` (and optionally `brief/source-forensics-<slug>.md`); the main agent consumes that compact artifact before making scoped implementation edits. Inline raw-source reads are allowed only when no delegated-worker surface exists, and must be grep/line-bounded.
 
 ## Core principles
 
@@ -471,10 +474,10 @@ of dumping JSON yourself.
 | | 5b | If new interactive elements found → re-run `ui-capture` Phase 2B–2E |
 | | 5c-a | `bundle-analysis.md` — Download ALL JS chunks → `scroll-engine.json`. If custom scroll detected → `js-animation-extraction.md` → `scroll-library.json`. ⛔ Gate: `bundle` |
 | | 5c-b | `bundle-verification.md` — Numerical comparison of impl vs spec for auto-rotating / scroll-driven / timer-based animations (screenshots are unreliable for these). |
-| | 5c-c | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/paid-features-detect.sh" "$(pwd)/tmp/ref/<component>"` ⛔ Gate: `paid-features`. Static-greps downloaded `bundles/`, `css/`, `fonts.json`, `head.json`, `external-sdks.json` for paid font CDN hosts (Adobe Typekit, Monotype, Hoefler/Cloud.typography, Linotype, FONTPLUS / TypeSquare in Japan). Writes `paid-features.json` with `decision: null` for each finding. Edit each entry to set `decision` to one of `use` / `substitute` / `skip` BEFORE Step 7 — generation is wasted effort if you discover a paid font dependency at section-compare time and every text-bearing section reports 100% mismatch. **Note:** GSAP plugins are no longer flagged here — GSAP became 100% free following the Webflow acquisition. |
+| | 5c-c | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/paid-features-detect.sh" "$(pwd)/tmp/ref/<component>"` ⛔ Gate: `paid-features`. Static-greps downloaded `bundles/`, `css/`, `fonts.json`, `head.json`, `external-sdks.json` for paid font CDN hosts (Adobe Typekit, Monotype, Hoefler/Cloud.typography, Linotype, FONTPLUS / TypeSquare in Japan). Writes `paid-features.json` with `decision: null` for each finding. Edit each entry to set `decision` to one of `use` / `substitute` / `skip` BEFORE Step 7 — generation is wasted effort if you discover a paid font dependency at section-compare time and every text-bearing section reports 100% mismatch. The detector only flags dependency families listed in its current paid-host/plugin table; update that table when licensing changes. |
 | | 5d | `bundle-map.json`, `transition-spec.json` (DRAFT), `external-sdks.json`. After writing those, run `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/verification-plan.sh" "$(pwd)/tmp/ref/<component>"` → `verification-plan.json` (universal `hydration-check` row + signal-derived rows for scroll-scrub / IO-reveal / hover / paid-font sites). ⛔ Gate: `spec` — refuses to pass until `verification-plan.json` exists; downstream `post-implement` enforces each declared check. **If `bundle-map.json` shows detected libraries but `transition-spec.json.transitions` is empty / under-populated, dispatch the host-neutral `bundle-analyzer` subagent role. Prompt: "Read tmp/ref/<component>/bundles/*.js + bundle-map.json, extract Lenis/GSAP/Framer/Anime/Webflow-IX2 construction sites with parameters into tmp/ref/<component>/bundle-extraction.json." Re-run this gate only after the extraction artifact exists.** |
 | | 5e | Handoff to `ui-capture` Phase 4A for capture verification when transition/video evidence is needed; on pass resume here at Step 6, on fail hand mismatch diagnosis to `visual-debug` before resuming. |
-| | 6 | `animation-detection.md`. ALL 3 phases: A (idle 10s), B (scroll), C (per-element). Canvas/WebGL → `canvas-webgl-extraction.md`. |
+| | 6 | `animation-detection.md`. ALL browser-state captures run through live `agent-browser` sessions: A (idle/splash), B (scroll), C (hover/per-element), C-click (`capture-click.sh` when click candidates exist). The capture post-pass writes `state-structure-spec.json`; read `state-structure-spec.md` before generation when splash/scroll/hover/click structure changes are present. Canvas/WebGL → `canvas-webgl-extraction.md`. |
 | | 6b | Assemble `extracted.json` |
 | | 6b-bis | `bash "$PLUGIN_ROOT/scripts/extract/required-media.sh" "$(pwd)/tmp/ref/<component>"` → `required-media.json`. Promotes `<video>` / `<source>` URLs from per-section `html/<name>.json.media[]` AND Lottie/bodymovin `loadAnimation({path:...})` URLs from `bundles/*.js` to required-asset status. Closes the div-soup-site family blind spot where `visible-images.json` only catalogues `<img>` so the impl ships zero `.mp4` + zero Lottie .json while every asset gate passes. This extractor is mandatory even when it emits zero entries; `required-media-coverage` fails a missing `required-media.json` because absence means the media inventory was never proven. The coverage gate enforces: every entry must be downloaded to `impl/public/` AND referenced in impl source, and Lottie URLs require a Lottie runtime package in `impl/package.json`. Asset download must extend `impl/public/` to include each `videos[*].src` and each `lottie[*].path` before Step 7 ends. |
 | | 6c | `section-audit.md` — → `element-roles.json`, `element-groups.json`, `layout-decisions.json`, `component-map.json`. **Never skip.** |
@@ -489,8 +492,8 @@ of dumping JSON yourself.
 | | 8-pre-batch | ⛔ **RECOMMENDED — replaces the per-gate invocations above for comprehensive tier**. `bash "$PLUGIN_ROOT/scripts/verify/run-required-checks.sh" <session> <ref-url> <impl-url> "$(pwd)/tmp/ref/<component>"` reads `verification-plan.json` and dispatches every `requiredCheck` whose artifact is missing (or stale vs newest impl source) in a single shell call. Closes the failure mode where the 10-consecutive-Bash circuit breaker tripped before the agent could invoke the 25+ runtime/static checks declared by the comprehensive plan one at a time. Skips checks whose artifact already exists with `status: "pass"`. Exit 0 = every dispatched check passed; exit 1 = at least one failed (run `gate.py post-implement` for the canonical verdict). New gates must be added to the script's `SIGNATURES` table — diff `verification-plan.sh add_check` rows against the table on every PR. |
 | | 8 | `bash "$PLUGIN_ROOT/scripts/verify/auto-verify.sh" <session> <orig-url> <impl-url> "$(pwd)/tmp/ref/<component>"`. ⛔ MANDATORY — must run before 8b. |
 | | 8b-pre | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/font-parity-check.sh" <session>-fp <ref-url> <impl-url> "$(pwd)/tmp/ref/<component>"` ⛔ MANDATORY before the `font-parity` gate fires. Writes `font-parity.json`. If `parity == "mismatch"` and the substitution is intentional (commercial font → free variable font, etc.), declare it in `tmp/ref/<component>/asset-substitution.json` per `asset-substitution.md` schema. Gate refuses to pass when fonts diverge but no `fonts[]` entry acknowledges it. Without this gate, section-compare reports 100% FAIL forever and the agent thrashes. |
-| | 8b | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/section-compare.sh" <orig-url> <impl-url> <session> "$(pwd)/tmp/ref/<component>"` ⛔ MANDATORY — runs IN ADDITION to Step 8, not instead. 4th arg required for Stop gate. Reads `asset-substitution.json` if present and switches matching sections to structural-only diff, but motion-critical sections derived from `transition-spec.json` / `required-media.json` cannot use `STRUCTURAL_ONLY`; they must produce pixel/runtime evidence. **Re-runs:** set `ONLY_IF_CHANGED=1 IMPL_SRC_DIR=<impl-src-root>` to short-circuit when the impl source hash is unchanged (reuses prior `sections/result.txt`); see `../visual-debug/SKILL.md` ONLY_IF_CHANGED. **On FAIL (`FAIL_COUNT > 0` or `INCOMPLETE`):** dispatch the host-neutral `visual-debug-iterator` subagent role instead of editing impl files directly. Prompt: "Read tmp/ref/<component>/sections/result.txt + matches.json + diff metadata, apply ONE scoped fix per iteration without reading PNG/JPG/WebP/GIF files, re-run section-compare.sh, max 5 iterations, return verdict." The subagent isolates the fix loop from the main agent. Bailout cases (asset 404 / hydration / missing install) return to main agent for pipeline-level intervention. |
-| | 8c-pre | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/transition-spec-coverage.sh" "$(pwd)/tmp/ref/<component>" <impl-src-dir>` and `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/spec-implementation-coverage.sh" "$(pwd)/tmp/ref/<component>" <impl-src-dir>` ⛔ MANDATORY before 8c if `transition-spec.json` exists. Static coverage checks that every spec entry's `id` / `selector` / type-derived hooks are present; implementation coverage checks trigger-specific runtime wiring. Hidden marker spans, `data-*` hook strings, or generic motion words do not count as implementations. This catches the "hover transitions matched while intersection/scroll/click entries were never wired" failure class that `transition-compare.sh` can't see (it only verifies idle↔hover diffs). |
+| | 8b | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/section-compare.sh" <orig-url> <impl-url> <session> "$(pwd)/tmp/ref/<component>"` ⛔ MANDATORY — runs IN ADDITION to Step 8, not instead. 4th arg required for Stop gate. Reads `asset-substitution.json` if present and switches matching sections to structural-only diff, but motion-critical sections derived from `transition-spec.json` / `required-media.json` cannot use `STRUCTURAL_ONLY`; they must produce pixel/runtime evidence. **Re-runs:** set `ONLY_IF_CHANGED=1 IMPL_SRC_DIR=<impl-src-root>` to short-circuit when the impl source hash is unchanged (reuses prior `sections/result.txt`); see `../visual-debug/SKILL.md` ONLY_IF_CHANGED. **On FAIL (`FAIL_COUNT > 0` or `INCOMPLETE`):** dispatch the host-neutral `visual-debug-iterator` subagent role instead of editing impl files directly. Prompt: "Read tmp/ref/<component>/sections/result.txt + matches.json + diff metadata, apply ONE scoped fix per iteration without reading PNG/JPG/WebP/GIF files or raw bundles/CSS/HTML dumps, re-run section-compare.sh, max 5 iterations, return verdict. If two scoped iterations do not reduce AE or the next fix requires raw reference HTML/CSS/JS, return `bailout-source-forensics` with the failing section/selectors/questions." The subagent isolates the fix loop from the main agent. Bailout cases (asset 404 / hydration / missing install / source-forensics-required) return to main agent for pipeline-level intervention; for `bailout-source-forensics`, dispatch `source-forensics` and then apply a scoped fix from `source-forensics.json`. |
+| | 8c-pre | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/transition-spec-coverage.sh" "$(pwd)/tmp/ref/<component>" <impl-src-dir>` and `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/spec-implementation-coverage.sh" "$(pwd)/tmp/ref/<component>" <impl-src-dir>` ⛔ MANDATORY before 8c if `transition-spec.json` exists. Static coverage checks that every spec entry's `id` / `selector` / type-derived hooks are present; implementation coverage checks trigger-specific runtime wiring. Hidden marker spans, `data-*` hook strings, or generic motion words do not count as implementations. This catches the "hover transitions matched while intersection/scroll/click entries were never wired" failure class that `transition-compare.sh` can't see (it only verifies idle↔hover diffs). If static coverage passes but runtime transition proof/fires still fail and the reason is not visible in compact artifacts, dispatch `source-forensics` before editing so raw source analysis stays out of the main context. |
 | | 8c | `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/transition-compare.sh" <orig-url> <impl-url> <session>` ⛔ MANDATORY if `interactions-detected.json` exists. |
 | | 8c-scroll | When `verification-plan.json` includes `scroll-state-machine`, run `scroll-state-machine-check.sh`: scroll-driven `window.scrollTo` / `scrollYProgress` / `setTimeout` / `velocity` / guard ref logic, plus ScrollTrigger pin/scrub sections, must prove `initial → active/expanded → settled/returned`, not just the active endpoint. |
 | | 9 | Test every interaction. Dispatch `mouseenter` for JS hovers. 100% ✅. |
@@ -647,18 +650,47 @@ This skill is auto-loaded into Claude Code (with `--plugin-dir`) and Codex sessi
   defaults, or harness metadata instead.
 - **Natural prompt closeout guard:** even when the visible request is terse,
   a clone/same-as-original request cannot be reported as done until the agent
-  runs both `bash scripts/verify/completion-report.sh <ref-dir> <impl-root>`
-  and `python -m ui_clone.goal <ref-dir> --check-done`. If either command
-  reports missing artifacts, failed section rows, missing runtime/transition
-  proofs, or a non-zero exit, the response must start with `INCOMPLETE` and
-  list the blockers. Manual screenshots, build success, HTTP 200, a page title,
-  local smoke checks, or implementation-only runtime checks are supplementary
-  evidence only; they never substitute for the completion report and goal exit
-  code.
+  runs both `bash scripts/verify/completion-report.sh --check <ref-dir>
+  <impl-root>` and `python -m ui_clone.goal <ref-dir> --check-done`. If either
+  command reports missing artifacts, failed section rows, missing runtime /
+  transition proofs, `current_gate != "done"`, or a non-zero exit, the response
+  must start with a standalone `INCOMPLETE` line and list the blockers.
+  Manual screenshots, build success, HTTP 200, a page title, local smoke
+  checks, implementation-only runtime checks, CLI `task_complete`, "Worked for",
+  "Total cost", or a closed tab are supplementary evidence only; they never
+  substitute for the completion report and goal exit code.
+- **Machine-readable loop closeout:** unattended drivers may count a run as
+  success only when the final response begins with a standalone `DONE` line
+  after both closeout commands above exit 0. When either command is missing or
+  non-zero, first line must be `INCOMPLETE`; include `current_gate`, the failing
+  artifact/gate, and the next command to run. Do not lead with `Implemented`,
+  `Finished`, `functional clone`, `known limitation`, a dev-server URL, HTTP
+  200, build success, or smoke-check bullets when `current_gate != "done"` or
+  any section / transition / runtime proof is failing. Required visual/runtime
+  gate failures are blockers, not limitations.
+- **Do not turn parent-repo WIP into a user choice.** `impl-scope` snapshots
+  files that were already dirty at the iteration baseline and ignores them
+  only while their content is unchanged. If `impl-scope` still fails, report
+  `INCOMPLETE` with the changed paths and fix/revert clone-caused edits inside
+  the iteration; do not ask the user to stash, revert, or approve unrelated
+  working-tree cleanup just to satisfy a clone gate.
 - If a natural prompt run creates a local preview for the user, bind it to
   `0.0.0.0` when the dev server supports it. A preview bound only to
   `127.0.0.1` is local-only evidence and should not be presented as an
   externally reachable preview.
+- **Unattended no-choice contract:** in any non-interactive or pre-authorized
+  automation context, do not ask the user to choose between approaches, approve
+  a retry, or pick a blocker. The run has already granted permission for safe
+  reversible work. If multiple paths are viable, choose the
+  one most directly supported by current artifacts and gate output, then verify.
+  Default priority is: recover missing canonical artifacts; fix runtime-env /
+  no-cheat blockers; fix asset/font/media blockers; run section/sticky/transition
+  comparisons; then make the smallest measured implementation edit. If a gate is
+  structurally blocked by parent-repo state or unstable live-reference motion,
+  record that evidence and continue with the next clone-local, measurable gate;
+  do not emit "your call", "tell me which", "need a decision", or equivalent
+  choice prompts. Stop only for destructive/external actions (credentials, paid
+  licenses, deleting unrelated user work) or a documented unclonable condition.
 - **Claude Code:** open with `claude --plugin-dir "$(pwd)"`, then prompt: `Drive the ui-clone-skills pipeline for <ref-dir> until python -m ui_clone.goal <ref-dir> --check-done exits 0.`
 - **Codex (interactive):** in the REPL (Codex CLI ≥ 0.128.0, `[features] goals = true` in `~/.codex/config.toml`), run `/goal Drive the ui-clone-skills pipeline for <ref-dir> until python -m ui_clone.goal <ref-dir> --check-done exits 0.` Codex Goal handles plan → execute → verify → repeat natively against AGENTS.md context.
 - **Unattended / headless / CI:** `python -m ui_clone.benchmark_harness <ref-dir> --orig-url <url> --impl-url <url> ...` wraps `claude --print` per-iter with focused prompts and Python-side stop checks.

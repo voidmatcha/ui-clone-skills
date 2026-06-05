@@ -14,9 +14,9 @@ if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
 
 
-# Codex Fix 3 (2026-05-28): unclonable-preflight thresholds. Tuned to
-# avoid false-positives on real product pages — juanmora's 613-element
-# DOM has 0 password inputs / 0 canvases (correctly NOT flagged).
+# Unclonable-preflight thresholds. Require corroborating structural signals so
+# large ordinary product pages do not trip the auth-gated or DRM-canvas
+# shortcuts.
 _AUTH_GATED_REQUIRES_FORM = True       # require <form> wrapping the password input
 _DRM_CANVAS_AREA_RATIO = 0.5           # canvas must cover >=50% of a 1440x900 ref viewport
 _DRM_CANVAS_TEXT_CHARS_MAX = 200       # body text < 200 chars → DOM-poor
@@ -27,7 +27,7 @@ def _check_unclonable_preflight(self: Gate) -> CheckResult | None:
     """Detect terminal-unclonable shapes from structure.json and short-circuit
     via `record_unclonable` BEFORE the pipeline burns iterations.
 
-    Per codex 2026-05-27 architectural review: this is a SUBCHECK inside the
+    Per the fail-closed architecture review: this is a SUBCHECK inside the
     existing extraction gate, NOT a new GATE_ORDER entry — adding a gate
     would fragment the closeout-policy logic (canonical / structural-only /
     canvas-replay) that is centralized around `record_unclonable`.
@@ -233,7 +233,7 @@ def gate_extraction(self: Gate) -> list[CheckResult]:
                 )
             )
 
-    # Codex Fix 3 (2026-05-28): early unclonable preflight. Detects auth-
+    # Unclonable-preflight fix: early unclonable preflight. Detects auth-
     # gated and DRM-canvas shapes from structure.json so the pipeline
     # short-circuits to a canonical unclonable_reason entry instead of
     # burning iterations on a structurally-unmatchable target.

@@ -46,12 +46,18 @@ from .static_mirror import (
 
 
 def _emit_block(reason: str) -> None:
+    # Dual-emit so the deny ENFORCES on both hosts: codex-cli 0.137 honors the
+    # top-level decision/reason (exit 0), Claude Code honors the nested
+    # hookSpecificOutput.permissionDecision. Each host ignores the other's
+    # sibling fields. (Emitting only the Claude shape let codex run the command.)
     payload = {
+        "decision": "block",
+        "reason": reason,
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
-        }
+        },
     }
     print(json.dumps(payload, ensure_ascii=False))
 
@@ -181,12 +187,30 @@ def _guard_static_server(
     if ref_dir is not None and not _state_before_gate(ref_dir, "post-implement"):
         return None
     gate = "missing" if ref_dir is None else PipelineState.load(ref_dir).current_gate
+    if ref_dir is None:
+        next_action = (
+            "Locate the active tmp/ref/<component> first, then advance the "
+            "pipeline to post-implement before starting a server."
+        )
+    elif gate == "state-coverage":
+        next_action = (
+            f"Run `python -m ui_clone.gate {ref_dir} state-coverage` and "
+            "follow that gate's next-action (usually state/scroll/hover "
+            "capture or source wiring). Do not inspect hook or gate source "
+            "to bypass this ordering."
+        )
+    else:
+        next_action = (
+            f"Advance the pipeline for {ref_dir} until current_gate is "
+            "`post-implement`; use `python -m ui_clone.goal "
+            f"{ref_dir}` for the next required step. Do not inspect hook or "
+            "gate source to bypass this ordering."
+        )
     return (
         "⛔ UI-RE static server blocked before post-implement: "
         f"current gate is {gate}. A local server is verification "
-        "surface, not an implementation shortcut. Run the pipeline "
-        "through pre-generate and write the React/Tailwind source "
-        "before starting a dev/static server."
+        "surface, not an implementation shortcut. "
+        f"{next_action}"
     )
 
 

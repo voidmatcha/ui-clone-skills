@@ -6,27 +6,31 @@ Unlike click-toggle (show/hide a panel) or click-cycle (switch between tabs), co
 
 **Detection signal:** Clicking an element changes the URL (pushState), changes column count, or replaces >50% of visible images.
 
+**Safety rule:** trigger clicks with `agent-browser click <selector>`, not
+`document.querySelector(...).click()`, when capturing user-observable behavior.
+Use an isolated session per candidate. Skip non-HTTP schemes (`mailto:`,
+`tel:`, `javascript:`, `data:`), downloads, and `_blank` targets as declared
+navigation; they are not safe same-page state evidence. If a safe click
+navigates away (external origin, same-origin route, or hash jump), record it as
+navigation and restore with `agent-browser back`; if origin or path restore
+fails, reopen the reference URL. Do not claim same-page DOM mutation for
+navigation-only clicks.
+
 ## Capture sequence
 
 ```bash
 # 1. Record video of the full transition
 agent-browser --session <project> record start $OUT_DIR/transitions/ref/content-swap-<name>.webm
 agent-browser --session <project> wait 500
-agent-browser --session <project> eval "(() => {
-  document.querySelector('<click-target>').click();
-  return 'clicked';
-})()"
+agent-browser --session <project> click "<click-target>"
 agent-browser --session <project> wait 5000
 agent-browser --session <project> record stop
 
 # 2. Extract transition DOM structure at 100ms after click
 #    This is the CRITICAL step — determines implementation architecture
 agent-browser --session <project> eval "(() => {
-  // Re-do: click again from fresh state (or use a different element)
-  // Set up structure capture BEFORE clicking
   window.__swapStructure = null;
-  document.querySelector('<click-target-2>').click();
-  setTimeout(() => {
+  window.__captureSwapStructure = () => setTimeout(() => {
     const panes = document.querySelectorAll('[class*=pane]');
     window.__swapStructure = {
       paneCount: panes.length,
@@ -46,10 +50,16 @@ agent-browser --session <project> eval "(() => {
       }),
     };
   }, 100);
-  return 'capturing';
+  return 'ready';
 })()"
+# Re-do from fresh state (or use a different element), but trigger the user
+# action through agent-browser rather than synthetic DOM click.
+agent-browser --session <project> eval "(() => { window.__captureSwapStructure?.(); return 'armed'; })()"
+agent-browser --session <project> click "<click-target-2>"
 agent-browser --session <project> wait 500
 agent-browser --session <project> eval "(() => JSON.stringify(window.__swapStructure, null, 2))()"
+agent-browser --session <project> get url
+# If URL changed, run `agent-browser --session <project> back`; if still off-site, reopen the reference URL.
 ```
 
 **Save to:** `$OUT_DIR/transitions/ref/content-swap-<name>-structure.json`

@@ -3,7 +3,7 @@
 Single entry point that invokes the bash measurement scripts with
 hardcoded defaults so agents cannot route around them via env vars.
 
-Closes the failure class observed across multiple benchmark runs:
+Closes the failure class observed across repeated automated runs:
 
 - An agent ran section-compare with default `EXCLUDE_DYNAMIC=0`,
   letting `<video>` first-frame variance balloon AE to 1M+ on sections

@@ -63,7 +63,7 @@ fi
 
 # In-page scroll sweep. Single eval — no CLI round-trip per stop.
 #
-# Codex review (2026-05-25):
+# Capture review:
 #   (a) Detect Lenis/Locomotive wrapper scroll — `window.scrollY` may not
 #       reflect engine-driven scroll position. Use engine API when present.
 #   (b) Stability loop per stop — 500ms floor + up to 3 × 200ms hash-stable
@@ -143,17 +143,15 @@ EVAL_JS='(async () => {
     return out;
   };
 
-  // Codex item (a): detect wrapper-scroll engines and use their API for scrolling.
+  // Review item (a): detect wrapper-scroll engines and use their API for scrolling.
   // Returns the engine name used and the actual scroll position read from the engine.
   //
-  // juanmora false-negative fix (2026-05-28). Original detector only
-  // checked window globals (window.lenis / window.Lenis as object). Lenis
-  // module-loaded mode does NOT expose its instance on window.lenis by
-  // default; it intercepts wheel events and translates to transform,
-  // leaving window.scroll* untouched. Fix: also probe DOM markers (Lenis
-  // adds class "lenis" on <html>; Locomotive adds "has-scroll-init") and
-  // fall through on Lenis class being loaded. Instance-less paths return
-  // null so downstream performScroll/readScrollY fall back to native API.
+  // Wrapper-scroll false-negative fix. Checking only window globals
+  // (window.lenis / window.Lenis as object) misses module-loaded engines that
+  // do not expose their instance globally. Also probe DOM markers (Lenis adds
+  // class "lenis" on <html>; Locomotive adds "has-scroll-init") and fall
+  // through on class presence. Instance-less paths return null so downstream
+  // performScroll/readScrollY fall back to native API.
   // NOTE: this JS lives inside a single-quoted shell string upstream; no
   // ASCII apostrophes allowed in comments or string literals here.
   const detectScrollEngine = () => {
@@ -211,7 +209,7 @@ EVAL_JS='(async () => {
     return Math.round(window.scrollY);
   };
 
-  // Codex item (b): per-stop stability loop after the 500ms floor.
+  // Review item (b): per-stop stability loop after the 500ms floor.
   const stabilityWait = async () => {
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, SETTLE_FLOOR_MS)));
     let lastHash = cheapHash(fingerprintTopElements());
@@ -247,7 +245,7 @@ EVAL_JS='(async () => {
   }
 
   const finalScrollHeight = document.documentElement.scrollHeight;
-  // Codex item (d): looser threshold + always expose delta percentage.
+  // Review item (d): looser threshold + always expose delta percentage.
   const scrollHeightDeltaPct = initialScrollHeight > 0
     ? Math.round(((finalScrollHeight - initialScrollHeight) / initialScrollHeight) * 100)
     : 0;
@@ -369,3 +367,8 @@ for s in stops:
 
 print(f"capture-scroll: wrote {len(trajectory)} stop(s) to {outdir}/", file=sys.stderr)
 PY
+
+SPEC_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/state-structure-spec.py"
+if [ "${STATE_STRUCTURE_SPEC:-1}" != "0" ] && [ -f "$SPEC_PY" ]; then
+  python3 "$SPEC_PY" "$REF_DIR" >/dev/null
+fi

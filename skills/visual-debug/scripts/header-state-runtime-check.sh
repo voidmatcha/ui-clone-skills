@@ -92,10 +92,34 @@ PROBE_JS='
         dataAttrs[a.name] = a.value;
       }
     }
+    // Computed geometry trajectory: a header can be a state machine purely
+    // via layout (height 100->64, padding shrink, transform translateY,
+    // position fixed->absolute) WITHOUT toggling any class. Sample both
+    // getComputedStyle (quantized props) and getBoundingClientRect (rect
+    // height) on the SAME root so class + geometry verdicts describe one
+    // element. scrollY is recorded so the Python side can skip the
+    // geo-diff when scroll never advanced (Lenis / virtual scroll).
+    let geo = null;
+    try {
+      const cs = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      geo = {
+        height: Math.round((rect.height || 0) * 100) / 100,
+        paddingTop: cs.paddingTop || "",
+        paddingBottom: cs.paddingBottom || "",
+        transform: cs.transform || "none",
+        position: cs.position || "",
+        top: cs.top || "",
+        scrollY: Math.round(window.scrollY || window.pageYOffset || 0),
+      };
+    } catch (e) {
+      geo = null;
+    }
     return {
       tag: el.tagName.toLowerCase(),
       cls: el.className || "",
       attrs: dataAttrs,
+      geo,
       childTagClasses: Array.from(el.querySelectorAll("*"))
         .slice(0, 40)
         .map(c => c.tagName.toLowerCase() + ":" + (c.className || "")),
@@ -226,6 +250,10 @@ ref_mutates = False
 impl_mutates = False
 ref_classes_toggled: set[str] = set()
 impl_classes_toggled: set[str] = set()
+ref_geo_changes = False
+impl_geo_changes = False
+ref_geo_samples: list = []
+impl_geo_samples: list = []
 
 def any_sample_mutates(probe: dict) -> tuple[bool, set]:
     """2026-05-22 universality audit: check mutation against ALL sample
@@ -278,6 +306,70 @@ def body_or_root_mutates(probe: dict) -> tuple[bool, list]:
             mutated_roots.append(name)
     return bool(mutated_roots), mutated_roots
 
+HEIGHT_THRESHOLD = 4.0  # px; sub-pixel/AA jitter wobbles <1px between settles
+
+def geo_changes(probe: dict) -> tuple[bool, list]:
+    """Detect a GEOMETRIC header state machine: does the header root move
+    its computed geometry across the scroll probes? A class-less header
+    that animates height/padding/transform/position/top on scroll is the
+    real visible behaviour the class comparator is blind to.
+
+    Returns (changed, samples) where samples is a list of
+    [prop, scrollTop, from_value, to_value] for every property that moved
+    relative to the scroll=0 baseline.
+
+    Rules:
+      - height: numeric, >= 4px delta to count (AA jitter guard).
+      - paddingTop/paddingBottom/transform/position/top: exact string
+        compare (these props are quantized → safe to compare verbatim).
+      - Lenis / virtual-scroll guard: if scrollY never advanced past the
+        baseline across any sample, return (False, []) so we don't flag an
+        impl as "static" when the scroll itself never fired.
+    """
+    at0 = probe.get("at0") or {}
+    base = (at0.get("geo") or {}) if isinstance(at0, dict) else {}
+    if not base:
+        return False, []
+    samples = probe.get("samples") or []
+    base_scroll = base.get("scrollY", 0)
+    scroll_moved = False
+    changed: list = []
+    seen: set = set()
+    str_props = ("paddingTop", "paddingBottom", "transform", "position", "top")
+    for s in samples:
+        snap = s.get("snapshot") or {}
+        if not isinstance(snap, dict):
+            continue
+        geo = snap.get("geo") or {}
+        if not geo:
+            continue
+        s_scroll = geo.get("scrollY", s.get("top", 0))
+        if isinstance(s_scroll, (int, float)) and s_scroll > base_scroll:
+            scroll_moved = True
+        # height: numeric delta with threshold
+        try:
+            h0 = float(base.get("height"))
+            hn = float(geo.get("height"))
+            if abs(hn - h0) >= HEIGHT_THRESHOLD and ("height", h0, hn) not in seen:
+                changed.append(["height", s_scroll, h0, hn])
+                seen.add(("height", h0, hn))
+        except (TypeError, ValueError):
+            pass
+        # quantized string props: exact compare
+        for prop in str_props:
+            v0 = base.get(prop)
+            vn = geo.get(prop)
+            if v0 is None or vn is None:
+                continue
+            if v0 != vn and (prop, v0, vn) not in seen:
+                changed.append([prop, s_scroll, v0, vn])
+                seen.add((prop, v0, vn))
+    if not scroll_moved:
+        # scroll never advanced (Lenis / virtual scroll didn't move) —
+        # geometry diff is unreliable; do not flag either side.
+        return False, []
+    return bool(changed), changed
+
 if not ref_probe.get("found"):
     status = "skip"
     reasons.append(f"ref probe: no header/nav root found ({ref_probe.get('error','no-root')})")
@@ -292,11 +384,20 @@ else:
         c0 = set(re.split(r"\s+", (ref_probe.get("at0") or {}).get("cls", "")))
         c6 = set(re.split(r"\s+", (ref_probe.get("at600") or {}).get("cls", "")))
         ref_classes_toggled = (c0 ^ c6) - {""}
+    # Geometric state machine: a header can change height/padding/transform/
+    # position on scroll with NO class toggle. Fold geometry into the ref's
+    # "is this a state machine" verdict so class-less geometric headers stop
+    # self-skipping (the realfood-gov 100->64 blind spot).
+    ref_geo_changes, ref_geo_samples = geo_changes(ref_probe)
 
-if not ref_mutates:
+# A header is a verifiable state machine if it mutates class/attrs OR moves
+# its geometry on scroll. Either makes impl parity mandatory.
+ref_state = ref_mutates or ref_geo_changes
+
+if not ref_state:
     status = "skip" if ref_probe.get("found") else "skip"
     if ref_probe.get("found") and not reasons:
-        reasons.append("ref header does not mutate on scroll — no state machine to verify")
+        reasons.append("ref header does not mutate or move on scroll — no state machine to verify")
 else:
     if not impl_probe.get("found"):
         status = "fail"
@@ -311,17 +412,33 @@ else:
             c0 = set(re.split(r"\s+", (impl_probe.get("at0") or {}).get("cls", "")))
             c6 = set(re.split(r"\s+", (impl_probe.get("at600") or {}).get("cls", "")))
             impl_classes_toggled = (c0 ^ c6) - {""}
+        impl_geo_changes, impl_geo_samples = geo_changes(impl_probe)
 
-        if not impl_mutates:
+        if ref_geo_changes and not impl_geo_changes:
+            # The suppressor case: ref header animates its geometry on
+            # scroll (height/padding/transform/position) but impl header is
+            # frozen — e.g. overrides.css pinned it with
+            # position:absolute!important; transform:none!important. The
+            # class comparator alone is blind to this; the geometry
+            # trajectory catches it. This fails even when classes match.
+            status = "fail"
+            moved = ", ".join(sorted({s[0] for s in ref_geo_samples}))
+            reasons.append(
+                "ref header animates its geometry on scroll (" + moved + ") but the "
+                "impl header geometry is frozen — impl is missing the runtime "
+                "controller (likely a static header or an overrides.css "
+                "position/transform suppressor)."
+            )
+        elif not impl_mutates and not impl_geo_changes:
             status = "fail"
             reasons.append(
                 "ref header mutates className/data-* on scroll but impl header is static — "
                 "impl is missing the runtime controller (likely shipped captured HTML)."
             )
         else:
-            # Both mutate. Warn (still pass) if ref toggles a class family
-            # the impl never toggles — typical asymmetry: ref does
-            # is-hide+thema-* while impl only does a single -scrolled.
+            # Both are state machines. Warn (still pass) if ref toggles a
+            # class family the impl never toggles — typical asymmetry: ref
+            # does is-hide+thema-* while impl only does a single -scrolled.
             ref_only = ref_classes_toggled - impl_classes_toggled
             if ref_only:
                 status = "pass"
@@ -340,28 +457,37 @@ payload = {
         "found": ref_probe.get("found", False),
         "mutates": ref_mutates,
         "classesToggled": sorted(ref_classes_toggled),
+        "geoChanges": ref_geo_changes,
+        "geoSamples": ref_geo_samples,
     },
     "impl": {
         "url": impl_url,
         "found": impl_probe.get("found", False),
         "mutates": impl_mutates,
         "classesToggled": sorted(impl_classes_toggled),
+        "geoChanges": impl_geo_changes,
+        "geoSamples": impl_geo_samples,
     },
     "reasons": reasons,
     "nextAction": (
-        "Implement a scroll-listener (or IntersectionObserver) that toggles "
-        "header className (is-hide, thema-*, scroll classes, etc.) based on "
-        "scroll position. The ref header is a state machine; impl serializing "
-        "one snapshot of the HTML is a documented Tier 5 cheat. See the ref's "
-        "compiled JS bundle for the exact class names and toggle conditions."
+        "Implement a scroll-listener (or IntersectionObserver) that reproduces the "
+        "ref header's runtime behaviour on scroll — toggling className "
+        "(is-hide, thema-*, scroll classes, etc.) AND/OR animating its geometry "
+        "(height, padding, transform, position) to match the ref trajectory. The "
+        "ref header is a state machine; impl serializing one snapshot of the HTML "
+        "(or pinning the header with an overrides.css position/transform suppressor) "
+        "is a documented Tier 5 cheat. See the ref's compiled JS bundle for the exact "
+        "class names, toggle conditions, and geometry keyframes."
         if (status == "fail") else "header state machine parity verified"
     ),
     "rule": (
-        "If the ref header mutates className or data-* attributes between scroll=0 "
-        "and scroll=600 (state machine present), the impl header must mutate too. "
-        "Missing mutation proves the impl shipped a captured-HTML paste of one scroll "
-        "state with no runtime controller (is-hide, thema-*, scroll classes, etc.). "
-        "When the ref header is static, the gate skips."
+        "If the ref header is a state machine on scroll — it mutates className/data-* "
+        "attributes OR it animates its geometry (height, paddingTop/Bottom, transform, "
+        "position, top) between scroll=0 and the deep probes — the impl header must "
+        "reproduce that behaviour. A frozen impl geometry while the ref geometry moves "
+        "proves the impl shipped a captured-HTML paste or an overrides.css "
+        "position:absolute!important; transform:none!important suppressor with no "
+        "runtime controller. When the ref header neither mutates nor moves, the gate skips."
     ),
 }
 

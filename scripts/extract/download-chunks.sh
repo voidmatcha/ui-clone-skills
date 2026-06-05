@@ -154,6 +154,20 @@ CHUNKS=$(echo "$ANALYSIS" | jq '[.[] | select((.libraries | type == "array" and 
 jq -n --argjson chunks "$CHUNKS" '{chunks: $chunks}' > "$DIR/bundle-map.json"
 echo -e "${GREEN}✅ Saved bundle-map.json (skeleton — review and enrich manually)${NC}"
 
+# Deterministic signature-effect candidates (e.g. per-character scroll-scrub).
+# Elevates high-signal scroll effects into a structured artifact that
+# generation-plan.sh populates signatureEffects[] from. Best-effort.
+python3 "$(dirname "$0")/_signature_effects.py" "$DIR" "$DIR/signature-effects-candidates.json" 2>/dev/null \
+  && echo -e "${GREEN}✅ Saved signature-effects-candidates.json${NC}" || true
+
+# Deterministic bundle-parameter extraction (Lenis/GSAP/Framer scroll-scrub
+# tables, etc.). generation-plan.sh reads bundle-extraction.json to surface the
+# scrollScrub contract (the scroll-driven background scale/zoom). Produced here
+# unconditionally so the artifact always exists when bundles are present — the
+# Phase-5d bundle-analyzer subagent (conditional) only enriches on top. Best-effort.
+python3 "$(dirname "$0")/_bundle_extraction.py" "$DIR" "$DIR/bundle-extraction.json" 2>/dev/null \
+  && echo -e "${GREEN}✅ Saved bundle-extraction.json${NC}" || true
+
 echo "" >&2
 echo "Next: Review bundle-map.json and create transition-spec.json" >&2
 

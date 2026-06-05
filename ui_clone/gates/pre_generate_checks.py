@@ -155,7 +155,7 @@ def _check_section_counts(self: Gate, section_map: dict[str, Any], component_map
 
 def _check_audit_artifacts(self: Gate) -> list[CheckResult]:
     """Check that all 6c audit JSON artifacts are present AND that
-    their content cross-references the section-map (Codex audit review:
+    their content cross-references the section-map (artifact cross-reference review:
     agent had been satisfying gates by writing canonical filenames
     with low-content or fabricated bodies — e.g. interactions-detected
     with 0 entries while the ref clearly has FAQ accordions + hover
@@ -264,11 +264,10 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
         rules = hover_rules.get("rules") or hover_rules.get("entries")
         if isinstance(rules, list) and rules:
             upstream_signals.append(f"hover-css-rules.json.rules[{len(rules)}]")
-    # juanmora-iter-10 finding (2026-05-28): regions.json schema migrated
-    # from bare list to `{"regions": [...]}` dict-wrap (per
-    # _capture_artifacts.write_regions_json). The old `isinstance(list)`
-    # branch silently never fired against new captures, masking any
-    # hover/click upstream signal regions.json carried. Accept both shapes.
+    # Backward compatibility: regions.json migrated from a bare list to the
+    # `{"regions": [...]}` wrapper emitted by _capture_artifacts.write_regions_json.
+    # Accept both shapes so older and newer captures both surface hover/click
+    # upstream signals.
     regions_raw = self._load_json("regions.json")
     region_list: list = []
     if isinstance(regions_raw, list):
@@ -405,7 +404,7 @@ def _scroll_motion_signals(self: Gate) -> bool:
 
 
 def _check_scroll_spec_coverage(self: Gate, spec: Any) -> list[CheckResult]:
-    """Detect the audit incident / Codex audit issue 5 escape: upstream artifacts
+    """Detect a prior audit escape: upstream artifacts
     show sticky elements + scroll-motion evidence (framer-motion,
     IntersectionObserver, scrollYProgress, or GSAP ScrollTrigger / scroll-scrub /
     pin tokens in the bundles / plan / sdk) but transition-spec.json has zero

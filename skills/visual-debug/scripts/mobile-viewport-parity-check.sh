@@ -168,7 +168,7 @@ else:
                 "outside 0.7–1.3 tolerance. Either content is missing or stacked "
                 "incorrectly at mobile."
             )
-    # Section/landmark count parity (added per codex-rescue audit): a
+    # Section/landmark count parity: a
     # severely-broken mobile layout often loses sections entirely while
     # remaining within height tolerance. Compare top-level <section> +
     # role=region counts; FAIL if impl has <50% of ref's count.

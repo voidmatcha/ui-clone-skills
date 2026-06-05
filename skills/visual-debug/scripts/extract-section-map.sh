@@ -99,7 +99,8 @@ EVAL_JS=$(cat <<'JSEOF'
     !containers.some((other, j) => j !== i && other.contains(el))
   );
   unique.sort((a, b) =>
-    a.getBoundingClientRect().top - b.getBoundingClientRect().top
+    (a.getBoundingClientRect().top + window.scrollY) -
+    (b.getBoundingClientRect().top + window.scrollY)
   );
 
   const isFooter = (el) =>

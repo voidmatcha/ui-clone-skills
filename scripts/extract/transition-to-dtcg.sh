@@ -9,7 +9,7 @@
 # designlang / Figma Variables / shadcn / Tailwind theme consumers can
 # read our motion language verbatim.
 #
-# Not strategic per codex review — designlang already owns the DTCG
+# Not strategic here — designlang already owns the DTCG
 # format. We emit it as a compatibility surface so cross-tool interop
 # is possible, but our value is the exact-values + verification layer
 # under it.

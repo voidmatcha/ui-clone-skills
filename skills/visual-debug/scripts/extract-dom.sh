@@ -95,13 +95,20 @@ EXTRACT_JS=$(cat <<'JSEOF'
   const directText = (el) => {
     let t = '';
     for (const n of el.childNodes) {
-      if (n.nodeType === 3) t += n.textContent;
+      // Text nodes: collapse all whitespace (incl. source-format newlines) to
+      // a single space so only real <br> elements become line breaks.
+      if (n.nodeType === 3) t += n.textContent.replace(/\s+/g, ' ');
+      else if (n.nodeType === 1 && n.tagName === 'BR') t += '\n';
     }
-    return t.trim().replace(/\s+/g, ' ').slice(0, 300);
+    return t.replace(/[ \t]*\n[ \t]*/g, '\n').replace(/[ \t]{2,}/g, ' ').trim().slice(0, 2000);
   };
   const LAYOUT_PROPS = [
     'display','position','top','left','right','bottom',
     'width','height','min-width','max-width','min-height','max-height',
+    // Fix 93 (B3) — aspect-ratio round-trips losslessly: getComputedStyle returns
+    // it as an author ratio (e.g. "16 / 9"), NOT px-resolved, so capturing it
+    // preserves intrinsic sizing without any relativity inference.
+    'aspect-ratio',
     'padding','margin','border-radius','border',
     'background-color','background-image','background-size','background-position',
     'color','font-family','font-size','font-weight','line-height','letter-spacing',
@@ -159,7 +166,7 @@ EXTRACT_JS=$(cat <<'JSEOF'
           const decls = {};
           for (const p of LAYOUT_PROPS) {
             const v = rule.style.getPropertyValue(p);
-            if (v && !NOISE.has(v)) decls[p] = v.slice(0, 200);
+            if (v && !NOISE.has(v)) decls[p] = v.slice(0, 800);
           }
           if (Object.keys(decls).length) out.push({ cls, decls });
         }
@@ -195,7 +202,7 @@ EXTRACT_JS=$(cat <<'JSEOF'
     const out = { content };
     for (const p of LAYOUT_PROPS) {
       const v = ps.getPropertyValue(p);
-      if (v && !NOISE.has(v)) out[p] = v.slice(0, 200);
+      if (v && !NOISE.has(v)) out[p] = v.slice(0, 800);
     }
     return out;
   };
@@ -237,23 +244,49 @@ EXTRACT_JS=$(cat <<'JSEOF'
     return SVG_TAGS.has(tag);
   };
 
+  const MEDIA_TAGS = new Set(['img','source','picture','video','audio','track']);
+  const DEPTH_CAP_BONUS = 8;  // #6 — bounded extra descent past the cap for content
   const extract = (el, depth = 0, insideSvg = false) => {
     const elIsSvg = insideSvg || isSvgNode(el);
     const cap = elIsSvg ? SVG_DEPTH_CAP : HTML_DEPTH_CAP;
-    if (depth > cap) return null;
+    // U1 / #6 — past the depth cap keep only media leaves and subtrees that
+    // still carry text. Deep React/Tailwind trees push a <picture> to the cap
+    // depth (its <source>/<img> sit one level deeper → zero-image clones), and
+    // nest real copy + split-text word spans past depth 10 (clone text 6521 vs
+    // ref 8202). Empty wrapper subtrees past the cap are still dropped so the
+    // bloat stays bounded; a hard bonus bound caps pathological depth.
+    if (depth > cap) {
+      const tagLc = (el.tagName || '').toLowerCase();
+      const keepsContent = MEDIA_TAGS.has(tagLc) || ((el.textContent || '').trim().length > 0);
+      if (!keepsContent || depth > cap + DEPTH_CAP_BONUS) return null;
+    }
     const s = getComputedStyle(el);
     const text = directText(el);
     const styles = {};
     for (const p of LAYOUT_PROPS) {
       const v = s.getPropertyValue(p);
-      if (v && !NOISE.has(v)) styles[p] = v.slice(0, 200);
+      if (v && !NOISE.has(v)) styles[p] = v.slice(0, 800);
+    }
+    // Fix 22 — build children while recording inter-element whitespace. A
+    // whitespace-only text node between two element siblings renders as a space
+    // for inline content (word-split spans: <span>For</span> <span>the</span>).
+    // directText collapses that text node into the parent and trims it away, so
+    // without this flag the transpiler runs the words together ("Forthe").
+    const kids = [];
+    for (const c of Array.from(el.children)) {
+      const k = extract(c, depth + 1, elIsSvg);
+      if (!k) continue;
+      let sib = c.nextSibling;
+      while (sib && sib.nodeType === 3 && sib.textContent === '') sib = sib.nextSibling;
+      if (sib && sib.nodeType === 3 && /^\s+$/.test(sib.textContent)) k.wsAfter = true;
+      kids.push(k);
     }
     const out = {
       tag: el.tagName.toLowerCase(),
-      class: (typeof el.className === 'string' ? el.className : el.className?.baseVal || '').slice(0, 80),
+      class: (typeof el.className === 'string' ? el.className : el.className?.baseVal || '').slice(0, 300),
       display: s.display,
       position: s.position,
-      children: Array.from(el.children).map(c => extract(c, depth + 1, elIsSvg)).filter(Boolean),
+      children: kids,
     };
     if (elIsSvg) out.svg = true;
     if (text) out.text = text;
@@ -273,13 +306,13 @@ EXTRACT_JS=$(cat <<'JSEOF'
     // <video poster>, etc. Without these the scaffold renders empty
     // placeholder boxes for every media element, which inflates section-compare
     // AE by ~700k per image-heavy section.
-    const ATTR_KEYS = ['src','href','alt','poster','srcset','sizes','type','target','rel','aria-label','title','role','data-src','data-poster'];
+    const ATTR_KEYS = ['id','src','href','alt','poster','srcset','sizes','type','target','rel','aria-label','title','role','data-src','data-poster','data-srcset','data-lazy-src','data-original','data-lazy'];
     const keys = elIsSvg ? ATTR_KEYS.concat(SVG_ATTR_KEYS) : ATTR_KEYS;
     for (const k of keys) {
       const v = el.getAttribute ? el.getAttribute(k) : null;
       if (v && v.length < 2000) out[k] = v;
     }
-    // Codex universality audit HIGH FN: SVG attr whitelist drops
+    // Universality audit HIGH FN: SVG attr whitelist drops
     // unfamiliar icon-system attrs silently. For SVG nodes, capture
     // EVERY attribute (subject to the same length cap), then the
     // JSX emitter can apply the kebab→camel rename to whatever it

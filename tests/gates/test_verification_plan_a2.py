@@ -531,6 +531,29 @@ def test_verification_plan_derives_hasHover_from_states_manifest(tmp_path: Path)
     )
 
 
+def test_verification_plan_regenerates_when_state_structure_spec_newer(
+    tmp_path: Path,
+) -> None:
+    """state-structure-spec.json is a compact state rollup; refreshing it
+    after a plan must invalidate the old plan just like states/* summaries."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "generatedAt": "2000-01-01T00:00:00Z",
+        "requiredChecks": [],
+        "signals": {},
+    }))
+    (ref / "state-structure-spec.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "events": [{"phase": "click", "trigger": "click"}],
+    }))
+
+    plan = _run_verification_plan(ref)
+    assert plan["generatedAt"] != "2000-01-01T00:00:00Z"
+    assert plan["signals"]["hasClickStateTransition"] is True
+
+
 def test_verification_plan_emits_runtime_spec_coverage_when_anim_dump_alone(tmp_path: Path) -> None:
     """Runtime coverage must not depend on transition-spec.json.
 

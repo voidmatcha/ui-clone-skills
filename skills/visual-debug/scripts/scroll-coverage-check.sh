@@ -6,10 +6,10 @@
 #   `section-compare.sh` matches sections by DOM enumeration → on sites whose
 #   ref `<main>` contains only `<div>` children it collapses to 1 container
 #   (the whole page). Coverage drops to 2 sections vs the 16+ that section-
-#   map.json finds at extraction time. This wrapper captures screenshots
-#   every 10% of the page scroll on BOTH sides and AE-diffs each pair —
-#   an orthogonal coverage check that exercises every depth of the page
-#   regardless of section enumeration robustness.
+#   map.json finds at extraction time. This wrapper captures section-aligned
+#   anchors first (ref section N ↔ impl section N), including sticky/pinned
+#   entry/mid/exit probes; it falls back to every-10%-of-scroll only when
+#   semantic anchor planning cannot produce enough pairs.
 #
 # Why the prior scripts went unused:
 #   `batch-scroll.sh` + `batch-compare.sh` already exist but were never
@@ -23,9 +23,9 @@
 #   session         agent-browser session (defaults `scroll-coverage-check`)
 #
 # Writes:
-#   <ref-dir>/scroll-coverage.json  — schemaVersion 1, status, points, fail_count
-#   <ref-dir>/static/{ref,impl}/<pct>pct.png  (batch-scroll output)
-#   <ref-dir>/static/<pct>pct-result.txt        (batch-compare output)
+#   <ref-dir>/scroll-coverage.json      — schemaVersion 1, status, points, fail_count
+#   <ref-dir>/static/scroll-anchors.json — section/sticky anchor plan when available
+#   <ref-dir>/static/{ref,impl}/*.png    — section-anchor or fallback pct captures
 #
 # Pass criteria:
 #   pass  — fewer than 30% of sampled points exceed AE/Mpx threshold
@@ -126,14 +126,34 @@ fi
 # Drive the pair
 SCRIPT_DIR="$_SCRIPT_DIR"
 echo "▸ scroll-coverage: capture (batch-scroll.sh)..."
-bash "$SCRIPT_DIR/batch-scroll.sh" "$ORIG_URL" "$IMPL_URL" "$SESSION" "$REF_DIR" 2>&1 | tail -10
+BS_OUT=$(bash "$SCRIPT_DIR/batch-scroll.sh" "$ORIG_URL" "$IMPL_URL" "$SESSION" "$REF_DIR" 2>&1)
+BS_RC=$?
+echo "$BS_OUT" | tail -10
+if [ "$BS_RC" -ne 0 ]; then
+  write_status fail 0 0 "batch-scroll capture failed or produced missing screenshots"
+  echo "✗ scroll-coverage: FAIL (batch-scroll capture failed)" >&2
+  exit 1
+fi
 echo "▸ scroll-coverage: compare (batch-compare.sh)..."
 BC_OUT=$(bash "$SCRIPT_DIR/batch-compare.sh" "$REF_DIR" "$THRESHOLD" 2>&1)
 echo "$BC_OUT" | tail -25
 
-# Parse batch-compare table: count points + fails
-POINTS=$(echo "$BC_OUT" | grep -cE '^\| *[0-9]+pct' || true)
-FAILED=$(echo "$BC_OUT" | grep -cE '^\| *[0-9]+pct.*❌' || true)
+# Parse batch-compare table: count data rows + fails. Rows may be legacy
+# "25pct" names or section/sticky anchor names such as "hero__mid".
+POINTS=$(echo "$BC_OUT" | awk -F'|' '
+  /^\|/ && $2 !~ /Position/ && $2 !~ /---/ {
+    status=$5
+    if (status ~ /✅|❌|⚠️/) count++
+  }
+  END { print count + 0 }
+' || true)
+FAILED=$(echo "$BC_OUT" | awk -F'|' '
+  /^\|/ && $2 !~ /Position/ && $2 !~ /---/ {
+    status=$5
+    if (status ~ /❌|⚠️/) count++
+  }
+  END { print count + 0 }
+' || true)
 
 if [ "${POINTS:-0}" -eq 0 ]; then
   write_status skip 0 0 "batch-compare produced no rows — capture failed?"

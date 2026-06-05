@@ -22,7 +22,7 @@ cd "$REPO_ROOT" || {
 PASS=0
 FAIL=0
 #
-# Entry-time recovery (Codex review #4 followup): if a PRIOR interrupted run
+# Entry-time recovery: if a prior interrupted run
 # left mutations in the tree, this run would mutate-on-mutation and the cleanup
 # would only restore the mid-stream state. Hard-reset the known-mutated files
 # from git HEAD before doing anything else. Use `git checkout` not `git restore`

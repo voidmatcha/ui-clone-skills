@@ -109,10 +109,13 @@ rows = []
 for t in spec.get("transitions") or []:
     if not isinstance(t, dict):
         continue
+    anim = t.get("animation")
+    prop = str(anim.get("property", "")) if isinstance(anim, dict) else ""
     rows.append({
         "id": str(t.get("id", "")),
         "kind": classify(t),
         "target": str(t.get("target", "")) or "body",
+        "prop": prop,
     })
 sys.stdout.write(base64.b64encode(json.dumps(rows).encode()).decode())
 PY
@@ -134,6 +137,7 @@ function snap(el, e){
   if (e.kind === 'webgl') { const ci = canvasInfo(el); s.canvasCount = ci.count; s.canvasNonBlank = ci.nonBlank; }
   if (e.kind === 'hover') { s.color = cs.color; s.backgroundColor = cs.backgroundColor; s.borderColor = cs.borderColor; }
   if (e.kind === 'click' || e.kind === 'reveal' || e.kind === 'splash') { var ch = el.querySelectorAll('span,div,em,b,i,p,a'); var t = ''; var lim = Math.min(ch.length, 16); for (var ci2 = 0; ci2 < lim; ci2++){ var cc = getComputedStyle(ch[ci2]); t += cc.transform + '|' + cc.opacity + ';'; } s.childSig = t; }
+  if (e.kind === 'reveal' || e.kind === 'splash') { var sp = document.querySelector('[data-tf-stroke-for=\"' + e.id + '\"]') || ((el.tagName && el.tagName.toLowerCase() === 'path') ? el : (el.querySelector('path[data-stroke-draw]') || el.querySelector('path[stroke-dasharray]'))); if (!sp && (e.prop || '').toLowerCase().replace(/-/g, '').indexOf('strokedashoffset') >= 0) { sp = document.querySelector('path[data-stroke-draw]') || document.querySelector('path[stroke-dasharray]'); } if (sp) { s.strokeDashoffset = getComputedStyle(sp).strokeDashoffset; } }
   return s;
 }
 function canvasInfo(el){
@@ -183,7 +187,51 @@ PHASE1="(() => {
     const e = ENTRIES[i];
     let el = null;
     try { el = document.querySelector(e.target); } catch (_) {}
+    // Fix 78 — CSS-module impls hash class tokens (cta_button__bFacv), so a
+    // spec selector's bare class (.cta_button) never matches. Retry each
+    // comma-alternative with .token converted to [class*=token].
+    if (!el && e.target && e.target.indexOf('.') >= 0) {
+      const alts = e.target.split(',');
+      for (let a2 = 0; a2 < alts.length && !el; a2++) {
+        try { el = document.querySelector(alts[a2].trim().replace(/\.([A-Za-z0-9_-]+)/g, '[class*=\"\$1\"]')); } catch (_) {}
+      }
+    }
     if (!el && e.kind === 'smooth-scroll') el = document.scrollingElement || document.body;
+    // Fix 79 — prose reveal targets ('section content blocks, headings, cards')
+    // resolve nothing on a regenerated build. The deterministic emitters stamp
+    // their targets: state-fade elements carry data-scroll-fade and the emitted
+    // ScrollReveal wrapper carries data-scroll-reveal. Prefer a BELOW-FOLD
+    // instance so the drive (scrollIntoView) is what triggers the motion.
+    if (!el && e.kind === 'reveal') {
+      const hint = ((e.id || '') + ' ' + (e.target || '')).toLowerCase();
+      const prefer = hint.indexOf('state') >= 0 || hint.indexOf('progress') >= 0
+        ? '[data-scroll-fade]' : '[data-scroll-reveal]';
+      const other = prefer === '[data-scroll-fade]' ? '[data-scroll-reveal]' : '[data-scroll-fade]';
+      let cands = Array.prototype.slice.call(document.querySelectorAll(prefer));
+      if (!cands.length) cands = Array.prototype.slice.call(document.querySelectorAll(other));
+      el = cands.find(function(c){ return c.getBoundingClientRect().top > window.innerHeight; }) || cands[0] || null;
+    }
+    // Fix 78 — stroke-draw entries: spec targets are prose ('decorative SVG
+    // strokes'), and draw paths often live in boxless <mask>/<defs>. Resolve to
+    // the element whose viewport entry TRIGGERS the draw: the mask-referencing
+    // element of a STAMPED path (a static dasharray path measures 0 -> 0),
+    // else the path's boxed svg ancestor, else the path itself.
+    const isStroke = (e.prop || '').toLowerCase().replace(/-/g, '').indexOf('strokedashoffset') >= 0;
+    if (isStroke) {
+      // Prefer an UNDRAWN stamped path: a trigger in view at load draws at
+      // mount, so the first path reads 0 -> 0 even though the motion fired.
+      // Pin the chosen path with a marker so both phases measure the same one.
+      const paths = Array.prototype.slice.call(document.querySelectorAll('path[data-stroke-draw]'));
+      let p = paths.find(function (x) { return Math.abs(parseFloat(getComputedStyle(x).strokeDashoffset) || 0) > 0.5; })
+        || paths[0] || document.querySelector('path[stroke-dasharray]');
+      if (p) {
+        p.setAttribute('data-tf-stroke-for', e.id);
+        let t2 = null;
+        const holder = p.closest('mask, defs');
+        if (holder && holder.id) t2 = document.querySelector('[mask*=\"#' + holder.id + '\"], [style*=\"#' + holder.id + '\"]');
+        el = t2 || p.closest('svg') || p;
+      }
+    }
     if (!el) { out[i] = { found: false }; continue; }
     el.setAttribute('data-tf-idx', String(i));
     out[i] = { found: true, before: snap(el, e) };

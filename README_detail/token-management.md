@@ -7,7 +7,7 @@ UI cloning sessions are token-intensive — DOM trees, computed styles, and JS b
 | Strategy | How |
 |---|---|
 | Zero vision tokens for verification | AE/SSIM CLI tools diff screenshots. LLM only reads a single diff image on FAIL |
-| Progressive-disclosure sub-docs | SKILL.md ~6K tokens. 48 sub-docs load only when their step runs |
+| Progressive-disclosure sub-docs | SKILL.md ~6K tokens. 51 sub-docs load only when their step runs |
 | Pipe-to-file rule | Large `eval` output goes to `tmp/ref/*.json`, then `Read`/`Grep` specific lines |
 | Single source of truth | `transition-spec.json` produced once — implementation reads it, never re-greps bundles |
 | Bash loop breaker | After 10+ consecutive Bash calls, stop and analyze before continuing |

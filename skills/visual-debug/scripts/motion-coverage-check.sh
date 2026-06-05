@@ -156,8 +156,8 @@ if isinstance(es, dict):
 # transition-categorize.sh is a high-confidence single-hit signal.
 # A site declaring a real motion feel (springy / scrubbed / snappy /
 # gentle) demands impl coverage regardless of the accumulated
-# signal_strength score. Catches the codex-review gap where a site
-# has only external-sdk evidence (weight +1) below the >=3 threshold
+# signal_strength score. Catches the gap where a site has only external-sdk
+# evidence (weight +1) below the >=3 threshold
 # but still has substantive motion the impl skipped.
 strong_feel = False
 strong_feel_label = ""

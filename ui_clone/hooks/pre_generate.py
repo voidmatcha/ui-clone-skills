@@ -36,12 +36,18 @@ def _run_gate(ref_dir: Path) -> dict[str, object]:
 
 
 def _emit_block(reason: str) -> None:
+    # Dual-emit so the deny ENFORCES on both hosts: codex-cli 0.137 honors the
+    # top-level decision/reason (exit 0), Claude Code honors the nested
+    # hookSpecificOutput.permissionDecision. Each host ignores the other's
+    # sibling fields. (Emitting only the Claude shape let codex run the command.)
     payload = {
+        "decision": "block",
+        "reason": reason,
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
-        }
+        },
     }
     print(json.dumps(payload, ensure_ascii=False))
 

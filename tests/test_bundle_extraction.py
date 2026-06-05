@@ -135,3 +135,35 @@ def test_parse_bundles_integration(fixture_ref_dir: Path) -> None:
     assert "webflowIX2" in libs
     ix2 = plan["extractions"]["webflowIX2"]
     assert ix2["totalActions"] == 2
+
+
+def test_extract_framer_minified_scroll_scrub(tmp_path: Path) -> None:
+    """Minified Framer useScroll/useTransform (mangled hook names) must still be
+    extracted by anchoring on stable API literals, and the bound property must be
+    resolved through a useSpring hop — the signature of a scroll-scrubbed scale
+    (background zoom). Mirrors the real realfood minified shape."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    # Mangled identifiers: useScroll=(0,o.L), useTransform=(0,s.G), useSpring=(0,l.z)
+    (bundles / "page.js").write_text(
+        'function eZ(){let F=(0,i.useRef)(null),'
+        '{scrollYProgress:C}=(0,o.L)({target:F,offset:["start end","end start"]}),'
+        'E=(0,s.G)(C,k?[0,.05,.75,.9]:[0,.1,.75,.9],[.9,1,1,1]),'
+        'S=(0,l.z)(E,{stiffness:120,damping:30}),'
+        'h=(0,s.G)(C,[0,.3],[.4,1]);'
+        'return(0,n.jsx)(d.P.div,{style:{scale:S,opacity:h}})}'
+    )
+    plan = mod.parse_bundles(tmp_path)
+    fm = plan["extractions"]["framerMotion"]
+    scroll_sites = [x for x in fm if x["kind"] == "useScroll"]
+    assert len(scroll_sites) == 1
+    site = scroll_sites[0]
+    assert site["target"] == "F"
+    assert site["offset"] == '["start end","end start"]'
+    props = {t["property"] for t in site["transforms"]}
+    # scale resolved through the useSpring hop; opacity resolved directly
+    assert "scale" in props
+    assert "opacity" in props
+    scale_t = next(t for t in site["transforms"] if t["property"] == "scale")
+    assert scale_t["output"] == "[.9,1,1,1]"  # band straddling 1.0 = the zoom

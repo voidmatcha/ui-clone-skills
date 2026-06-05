@@ -22,6 +22,30 @@ class CheckResult:
     status: Literal["pass", "fail", "warn"]
     message: str
     fix: str = ""
+    # Stale-artifact class: the FAIL is bookkeeping (artifact older than the
+    # current impl / recorded against another impl tree), not a visual or
+    # structural defect. Still fails fast — never auto-regenerated, since that
+    # can mask nondeterminism — but reported apart so agents refresh artifacts
+    # instead of debugging phantom bugs.
+    stale: bool = False
+
+
+def partition_failures(results: list[CheckResult]) -> tuple[list[CheckResult], list[CheckResult]]:
+    """Split failing results into (real, stale) for partitioned reporting."""
+    fails = [r for r in results if r.status == "fail"]
+    return [r for r in fails if not r.stale], [r for r in fails if r.stale]
+
+
+def stale_refresh_hint(stale: list[CheckResult]) -> str:
+    """One-line refresh hint for the stale class (empty when none)."""
+    if not stale:
+        return ""
+    names = ", ".join(r.label for r in stale)
+    return (
+        f"STALE artifacts (refresh, not code bugs): {names} — run "
+        "scripts/verify/run-required-checks.sh <session> <ref-url> <impl-url> "
+        "<ref-dir> to refresh."
+    )
 
 
 # Valid `verifiedBy` values for known-artifacts.json entries. Entries with

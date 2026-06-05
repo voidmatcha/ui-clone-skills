@@ -11,8 +11,7 @@
 # count summary) lives in scripts/extract/_capture_artifacts.py so it's
 # unit-testable. agent-browser orchestration (open/eval/record/screenshot)
 # stays in this shell wrapper because tests would need a real browser
-# regardless. Per codex review (agentId a541f8a835d9e8569, verdict
-# partial_migrate).
+# regardless.
 #
 # Usage: capture.sh <url> <session> <ref_dir>
 #

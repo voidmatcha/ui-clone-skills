@@ -366,6 +366,20 @@ Judge each pair:
 
 **Final gate:** Every position must be PASS or PARTIAL (with documented reason). Any FAIL blocks completion.
 
+#### Advisory deductions (optional detail, never gating)
+
+For each PARTIAL or FAIL position, also record the concrete defects as deduction entries in `phase-e-review.json` (see the reviewer agent contract). Each deduction is `{location, reason, penalty, label}`:
+
+- `label` — one of three semantic categories that pixel metrics cannot classify:
+  - `completeness` — element missing/extra, clipped, squashed, broken image, duplicated
+  - `visual-effect` — shadow / border-radius / opacity / gradient presence or strength differs
+  - `icon-variant` — same icon category but different variant (outline vs filled), weight, or asset
+- `penalty` — anchored severity bands: large defect −25 to −40, medium −10 to −20, small −3 to −8
+- `location` — region/element the defect sits in (e.g. "hero CTA row, right icon")
+- `reason` — one line, observable fact only
+
+Deductions are **advisory forensic detail**: they refine the `observations` field into a structured fix-list and let the main agent prioritize fixes by penalty. They do NOT change the PASS/PARTIAL/FAIL verdict, do not feed any gate, and a PASS position simply has `deductions: []`. Severity language stays anchored to the bands above so penalties are comparable across runs.
+
 #### What LLM catches that metrics miss
 
 - Empty background where content should be (DSSIM=0.19 on same-color bg)

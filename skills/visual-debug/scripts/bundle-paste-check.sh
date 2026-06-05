@@ -3,7 +3,7 @@
 # CSS bundles, Next.js compiled chunks, or rendered HTML into its own
 # public/src tree.
 #
-# Failure mode this catches (observed L41/L44):
+# Failure mode this catches:
 #   Agent skips extraction + component synthesis, downloads the ref's
 #   compiled CSS bundle filenames into impl/public/css/ (or any wrapper
 #   directory), pastes the ref's _next/static/ chunks into impl/public/,

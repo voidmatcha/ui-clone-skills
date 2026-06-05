@@ -4,8 +4,7 @@
 # Usage:
 #   transition-proof-rollup.sh <ref-dir>
 #
-# 2026-05-22 SKILL.md Tier 3 + codex-rescue audit (a125b997): roll-up
-# validator that confirms every transition-spec entry has BOTH static
+# Roll-up validator that confirms every transition-spec entry has BOTH static
 # coverage (impl file references the spec id / selector / type) AND
 # runtime evidence (browser actually triggered the transition).
 #
@@ -261,6 +260,53 @@ def measure_transition_compare(path: Path) -> tuple[bool, str]:
         return False, f"transition compare: {passed} pass / {failed} fail"
     return True, f"transition compare: {passed} pass / 0 fail"
 
+HOVER_STATE_PRODUCES = "transitions/hover-state-result.txt"
+
+
+def measure_hover_state(path: Path) -> tuple[bool, str]:
+    # Only enforced when the verification-plan demanded the hover row.
+    plan_required = HOVER_STATE_PRODUCES in expected
+    if not path.exists():
+        if plan_required:
+            return False, "hover-state expected by verification-plan but artifact missing"
+        return True, "not produced (no hover signal)"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return False, "hover-state-result.txt unreadable"
+    # The "no hover regions" / "no regions.json" / "nothing to compare" exit is a
+    # SILENT SKIP. It is only valid when the plan did NOT require hover. When the
+    # plan required hover (hover row present) but the gate found nothing to
+    # compare, the hover signal sources disagree (the plan's hover signal came
+    # from interactions/hoverDelta/states-hover-manifest, but regions.json
+    # triggerType carried no hover entries) and the motion-arc check never ran —
+    # invalid.
+    if (
+        "no hover regions found" in text
+        or "no regions.json" in text
+        or "nothing to compare" in text
+        or "hover-state compare skipped" in text
+    ):
+        if plan_required:
+            return False, (
+                "plan required hover-state-compare but hover-state-compare found "
+                "0 hover regions in regions.json — hover motion-arc check silently "
+                "skipped (regions.json triggerType lacks the hover entries the "
+                "plan's hover signal implied)"
+            )
+        return True, "no hover regions (plan did not require hover)"
+    # Real run: parse the summary tally lines hover-state-compare.sh writes.
+    m = re.search(r"(\d+)/(\d+)\s+hover target-run\(s\)\s+diverged", text)
+    if m:
+        return False, f"hover-state: {m.group(1)}/{m.group(2)} target-run(s) diverged"
+    m = re.search(r"all\s+(\d+)\s+hover target-run\(s\)\s+within SSIM threshold", text)
+    if m:
+        if int(m.group(1)) == 0:
+            return False, "vacuous: 0 hover target-runs executed"
+        return True, f"hover-state: {m.group(1)} target-run(s) clean"
+    return False, "no PASS/FAIL summary in hover-state-result.txt"
+
+
 def _text_has_hover(value: object) -> bool:
     if isinstance(value, dict):
         return any(_text_has_hover(v) for v in value.values())
@@ -410,6 +456,25 @@ if tc_path.exists() or "transitions/result.txt" in expected:
         "artifact": "transitions/result.txt",
         "tier": "Tier 3 transition compare",
         "present": tc_path.exists(),
+        "valid": ok,
+        "note": note,
+    }
+    if not ok:
+        overall_fail = True
+    components.append(entry)
+
+# hover-state-compare result is plain text. When the verification-plan required
+# the hover row (comprehensive tier) OR the artifact exists, transition-proof
+# must validate it — a `no hover regions found ... nothing to compare` silent
+# skip while the plan demanded hover means the hover motion-arc check never ran
+# and must NOT compose to PASS.
+hs_path = ref_dir / "transitions" / "hover-state-result.txt"
+if hs_path.exists() or HOVER_STATE_PRODUCES in expected:
+    ok, note = measure_hover_state(hs_path)
+    entry = {
+        "artifact": HOVER_STATE_PRODUCES,
+        "tier": "Tier 3 hover-state",
+        "present": hs_path.exists(),
         "valid": ok,
         "note": note,
     }

@@ -139,7 +139,7 @@ INVENTORY_JS='(() => {
         }
       } catch (e) { /* ignore */ }
     });
-    // Codex universality audit HIGH FP: section name was synthesized
+    // Universality audit HIGH FP: section name was synthesized
     // from tag/id/class, so impls that legitimately re-classed
     // would appear missing. Emit geometry (top, height, index) so
     // the Python comparator can match by bbox/order rather than
@@ -303,7 +303,7 @@ if (
         ),
     })
 
-# Rule 3: per-section dropout — Codex universality audit HIGH FP fix.
+# Rule 3: per-section dropout — Universality audit HIGH FP fix.
 # Section matching is now bbox/order-based: walk ref + impl section
 # lists in document order, pair by index; if the impl has fewer
 # sections, the unmatched tail counts as missing. For the matched

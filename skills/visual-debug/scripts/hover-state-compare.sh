@@ -91,6 +91,40 @@ OUT_DIR="$REF_DIR/transitions/hover-state"
 mkdir -p "$OUT_DIR"
 RESULT="$REF_DIR/transitions/hover-state-result.txt"
 
+# Scheduling-signal artifacts. verification-plan.sh adds this gate with
+# severity=block whenever .signals.hasHover=true, but the realfood/Lenis
+# regions.json producer emits a single full-page region with no triggerType,
+# so the triggerType jq below finds nothing. Without a cross-check the gate
+# would self-certify PASS while the site ships hover motion completely
+# unverified. These artifacts independently prove hover exists and also carry
+# real selectors we can synthesize targets from.
+PLAN="$REF_DIR/verification-plan.json"
+HOVER_CSS="$REF_DIR/hover-css-rules.json"
+HOVER_CAND="$REF_DIR/hover-candidates.json"
+HOVER_MANIFEST="$REF_DIR/states/hover/manifest.json"
+
+# hover_expected — true when the scheduling signal (or any non-empty hover
+# artifact) says hover is present, so an empty target list is a real failure
+# rather than a legitimate "nothing to compare" skip. On hosts without jq we
+# cannot read the JSON, so we return non-zero (no FAIL) — the gate's own
+# measurement-row guard is the backstop there.
+hover_expected() {
+  command -v jq >/dev/null 2>&1 || return 1
+  if [ -f "$PLAN" ]; then
+    [ "$(jq -r '.signals.hasHover // false' "$PLAN" 2>/dev/null)" = "true" ] && return 0
+  fi
+  if [ -f "$HOVER_CSS" ]; then
+    [ "$(jq -r 'if type=="array" then length else (.rules // [] | length) end' "$HOVER_CSS" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null && return 0
+  fi
+  if [ -f "$HOVER_CAND" ]; then
+    [ "$(jq -r 'if type=="array" then length else (.candidates // [] | length) end' "$HOVER_CAND" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null && return 0
+  fi
+  if [ -f "$HOVER_MANIFEST" ]; then
+    [ "$(jq -r '.entries // [] | length' "$HOVER_MANIFEST" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null && return 0
+  fi
+  return 1
+}
+
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 {
   echo "# hover-state-compare"
@@ -101,6 +135,11 @@ NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 } > "$RESULT"
 
 if [ ! -f "$REGIONS" ]; then
+  if hover_expected; then
+    echo "❌ regions.json missing but signals.hasHover=true / hover artifacts present — hover motion UNVERIFIED" >> "$RESULT"
+    echo "Wrote $RESULT"
+    exit 1
+  fi
   echo "✅ no regions.json — hover-state compare skipped (verification-plan should not have required this row)" >> "$RESULT"
   echo "Wrote $RESULT"
   exit 0
@@ -122,8 +161,45 @@ if command -v jq >/dev/null 2>&1; then
   ' "$REGIONS" > "$TARGETS_FILE" 2>/dev/null || true
 fi
 
+# regions.json carried no triggerType-tagged hover entries (realfood/Lenis
+# full-page-only shape). Try to recover real hover targets from the richer
+# hover artifacts before deciding this is a skip. Priority: hover-css-rules
+# (pure CSS selectors — agent-browser hover accepts them directly) →
+# hover-candidates (carry .text/.rect but selectors may be Playwright-syntax
+# like `button:text(...)`) → states/hover/manifest. Each branch caps at
+# MAX_HOVER_TARGETS and emits the same `name<TAB>triggerType<TAB>selector`
+# tuple the run loop below reads.
+if [ ! -s "$TARGETS_FILE" ] && command -v jq >/dev/null 2>&1; then
+  if [ -f "$HOVER_CSS" ]; then
+    # [{selector:".a:hover .b", css, media}]. Reduce ".x:hover .y" /
+    # ".x:focus-visible, .x:hover" → first hoverable base selector ".x"
+    # (split on first comma, then first colon).
+    jq -r '(if type=="array" then . else (.rules // []) end)
+      | map(.selector | split(",")[0] | split(":")[0] | gsub("^\\s+|\\s+$";""))
+      | map(select(length>0)) | unique | .[0:'"$MAX_HOVER_TARGETS"'] | .[]
+      | "\(.)\tsynth-hover-css\t\(.)"' "$HOVER_CSS" 2>/dev/null >> "$TARGETS_FILE" || true
+  fi
+  if [ ! -s "$TARGETS_FILE" ] && [ -f "$HOVER_CAND" ]; then
+    jq -r '(if type=="array" then . else (.candidates // []) end)
+      | map(select(.selector!=null)) | unique_by(.selector)
+      | .[0:'"$MAX_HOVER_TARGETS"'] | .[]
+      | "\((.text // .selector)|gsub("[\\t\\n]";" "))\tsynth-hover-candidate\t\(.selector)"' \
+      "$HOVER_CAND" 2>/dev/null >> "$TARGETS_FILE" || true
+  fi
+  if [ ! -s "$TARGETS_FILE" ] && [ -f "$HOVER_MANIFEST" ]; then
+    jq -r '(.entries // []) | map(select(.selector!=null)) | unique_by(.selector)
+      | .[0:'"$MAX_HOVER_TARGETS"'] | .[]
+      | "\(.selector)\tsynth-hover-manifest\t\(.selector)"' "$HOVER_MANIFEST" 2>/dev/null >> "$TARGETS_FILE" || true
+  fi
+fi
+
 if [ ! -s "$TARGETS_FILE" ]; then
-  echo "✅ no hover regions found in regions.json — nothing to compare" >> "$RESULT"
+  if hover_expected; then
+    echo "❌ hover expected (signals.hasHover=true / non-empty hover-css-rules.json / hover-candidates.json) but no hover targets resolvable from regions.json or hover artifacts — hover motion UNVERIFIED" >> "$RESULT"
+    echo "Wrote $RESULT"
+    exit 1
+  fi
+  echo "✅ no hover regions found and no hasHover signal — nothing to compare" >> "$RESULT"
   echo "Wrote $RESULT"
   exit 0
 fi

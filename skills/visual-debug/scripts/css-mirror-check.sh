@@ -182,7 +182,7 @@ for path in impl_files:
     rel = str(path.relative_to(impl_root))
 
     # Signal 1 — @import against ref hosts / filenames.
-    # Codex universality audit HIGH FP: basename-only match would
+    # Universality audit HIGH FP: basename-only match would
     # flag any unrelated `style.css` / `main.css` / `app.css` import
     # since these names collide across the entire web. Only flag
     # basename matches when paired with EITHER (a) the ref host or

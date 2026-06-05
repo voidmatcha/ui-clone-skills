@@ -49,7 +49,7 @@ These are the decisions that shape how the plugin is structured. They aim to kee
 
 - **Real values, not guesses.** Every number — font-size, easing curve, scroll offset, stagger delay — comes from `getComputedStyle`, raw CSS, or a JS bundle grep. The plugin refuses to ship approximations.
 - **Near-zero vision tokens for comparison.** AE and SSIM CLI tools handle pixel diff — the LLM never reads ref vs impl screenshots side-by-side. Vision tokens are only used when: (1) reading a single diff image on AE/SSIM failure, (2) Phase E final semantic review (~44K tokens, mandatory).
-- **Progressive-disclosure sub-docs.** Each SKILL.md contains only the pipeline and core rules (~5.9K tokens total across 3 skills). Detailed procedures live in 49 focused sub-docs loaded only when that step runs. Common paths stay lean; specialized paths expand on demand.
+- **Progressive-disclosure sub-docs.** Each SKILL.md contains only the pipeline and core rules (~5.9K tokens total across 3 skills). Detailed procedures live in 51 focused sub-docs loaded only when that step runs. Common paths stay lean; specialized paths expand on demand.
 - **Single source of truth for transitions.** `transition-spec.json` is produced once from bundle analysis. Implementation reads the spec, never re-greps the bundle — avoiding wasted work and the risk of picking the wrong conditional branch.
 - **Automation over introspection.** Python gates (`python -m ui_clone.gate`, `python -m ui_clone.pipeline`, `scripts/verify/auto-verify.sh`) decide whether a step is complete. Agents don't self-certify "looks good enough."
 - **No judgment, data only.** Every decision must be backed by extracted data, captured screenshots, or script output. "Probably", "close enough", and "just a content difference" are forbidden — each has a documented failure case.
@@ -74,9 +74,9 @@ The public surface stays small: Claude Code and Codex expose the same three skil
 tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"
 ```
 
-The default install registers **both** Claude Code and Codex marketplaces in one pass; each registration is skipped silently if that host's CLI is not on PATH. Inside Claude Code: `/plugin install ui-clone-skills@voidmatcha`. For Codex: launch with `codex --enable plugin_hooks` after the installer runs.
+The default install registers **both** Claude Code and Codex marketplaces in one pass; each registration is skipped silently if that host's CLI is not on PATH. Inside Claude Code: `/plugin install ui-clone-skills@voidmatcha`. For Codex, the installer also merges the gate hooks into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` feature, so plugin-manifest hooks no longer load) — accept the one-time hook-trust prompt on the next Codex session.
 
-For one-host installs, the manual git-clone path, the SKILL.md-only no-hooks copy, and the manual system-deps recipe, see [`README_detail/install.md`](./README_detail/install.md).
+For one-host installs, using a local development checkout as the Codex plugin source, the manual git-clone path, the SKILL.md-only no-hooks copy, and the manual system-deps recipe, see [`README_detail/install.md`](./README_detail/install.md).
 
 ## Requirements
 
@@ -90,7 +90,7 @@ For one-host installs, the manual git-clone path, the SKILL.md-only no-hooks cop
 | `ffmpeg` | Video capture + frame extraction |
 | `uv` + Python 3.11+ | Gate / hook system (`ui_clone/`) |
 
-Pipeline hooks register automatically through `hooks/hooks.json` (Claude Code) and `hooks/codex-hooks.json` (Codex). For the full hook table, the goal-driven continuation pattern, and the gate-system CLI, see [`README_detail/pipeline.md`](./README_detail/pipeline.md).
+Pipeline hooks register through `hooks/hooks.json` for Claude Code (plugin manifest) and, for Codex, via `install.sh` merging `hooks/codex-hooks.json` into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` manifest path). For the full hook table, the goal-driven continuation pattern, and the gate-system CLI, see [`README_detail/pipeline.md`](./README_detail/pipeline.md).
 
 ## Quickstart
 
@@ -111,7 +111,7 @@ The pipeline runs automatically. `python -m ui_clone.pipeline` detects the curre
 
 If verification fails, the pipeline iterates up to 3 rounds (Phase H self-healing loop) before asking for human review.
 
-**Hooks are already registered** on install through the host manifest. Both Claude Code and Codex route through `hooks/shim.sh`, so premature write blocks and unverified completion warnings stay shared. In Codex, also confirm `features.plugin_hooks = true` or launch with `codex --enable plugin_hooks`; without that, validation runs are docs-only.
+**Hooks are registered on install** and both Claude Code and Codex route through `hooks/shim.sh`, so premature write blocks and unverified-completion warnings stay shared. Claude Code loads them from the plugin manifest (`hooks/hooks.json`). Codex loads them from `~/.codex/hooks.json`, into which `install.sh` merges the gate entries (idempotently) — `plugin_hooks` was removed in codex-cli 0.137 and is no longer used. Re-run `install.sh` after pulling hook-registration changes; plain script-logic edits are picked up live via the install marker on the next session.
 
 ## Skill deep dives
 

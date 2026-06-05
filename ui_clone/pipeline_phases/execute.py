@@ -1,6 +1,6 @@
 """execute_phases — deterministic Phase 0A-2 executor.
 
-Codex review v0.8 → v1.0: hook policy closed the negative space
+Hook-policy hardening: hook policy closed the negative space
 (ad-hoc artifact writes denied), but the natural-prompt nested agent
 got stuck in Phase 1 because hooks can't force forward progress.
 This driver does the forward push: each phase invokes the canonical
@@ -8,7 +8,7 @@ script, then runs the existing check_phase_* validators to confirm
 the artifacts appeared. On any failure, abort with a clear message
 — no silent fallback to ad-hoc dumping.
 
-Initial coverage is Phase 0A → 1 → 2 (Codex's 4-hour scope).
+Initial coverage is Phase 0A → 1 → 2 (the initial deterministic scope).
 Phase 3+ stays under check-only / SKILL.md guidance for now;
 extending coverage is `--phases 3-5` follow-up work.
 """
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,41 @@ from ui_clone.hooks._common import GREEN as _GREEN
 from ui_clone.hooks._common import NC as _NC
 from ui_clone.hooks._common import RED as _RED
 from ui_clone.hooks._common import YELLOW as _YELLOW
+
+
+def _resolve_impl_root(
+    plugin_root: str,
+    cwd: Path,
+    env: Mapping[str, str],
+    existing_state_root: str = "",
+) -> str:
+    """Resolve where the implementation lives for THIS run. Always returns a
+    path (never empty) so a marker can be written and the agent told where to
+    scaffold.
+
+    Priority: UI_CLONE_IMPL_ROOT env > existing pipeline-state.impl_root >
+    an already-scaffolded impl/ > default <cwd>/impl.
+
+    Crucially, a loop working dir (cwd != plugin_root) is anchored at
+    <cwd>/impl and never adopts the plugin/repo-root impl/. That prevents the
+    failure where a clone loop scaffolds into the repo root's impl/ and every
+    round clobbers the same shared directory.
+    """
+    env_root = (env.get("UI_CLONE_IMPL_ROOT") or "").strip()
+    if env_root:
+        return str(Path(env_root).resolve())
+    if existing_state_root:
+        return existing_state_root
+    cwd = Path(cwd)
+    candidates = [cwd / "impl"]
+    # Only consider the plugin/repo-root impl/ when cwd IS that root
+    # (normal single-shot use); from a loop dir it must be off-limits.
+    if Path(plugin_root).resolve() == cwd.resolve():
+        candidates.append(Path(plugin_root) / "impl")
+    for cand in candidates:
+        if cand.is_dir() and (cand / "package.json").is_file():
+            return str(cand.resolve())
+    return str((cwd / "impl").resolve())
 
 if TYPE_CHECKING:
     from ui_clone.pipeline import Pipeline
@@ -61,20 +97,10 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
     # canonical guess (<plugin_root>/impl OR <cwd>/impl).
     from ui_clone.state import PipelineState as _PS
     _state = _PS.load(pipeline.ref_dir)
-    impl_root_resolved = (
-        os.environ.get("UI_CLONE_IMPL_ROOT", "").strip()
-        or _state.impl_root
-        or ""
+    impl_root_resolved = _resolve_impl_root(
+        plugin_root, Path.cwd(), os.environ, _state.impl_root or "",
     )
-    if not impl_root_resolved:
-        for cand in (
-            Path(plugin_root) / "impl",
-            Path.cwd() / "impl",
-        ):
-            if cand.is_dir() and (cand / "package.json").is_file():
-                impl_root_resolved = str(cand.resolve())
-                break
-    if impl_root_resolved and _state.impl_root != impl_root_resolved:
+    if _state.impl_root != impl_root_resolved:
         _state.impl_root = impl_root_resolved
         try:
             _state.save(pipeline.ref_dir)
@@ -84,6 +110,13 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
             )
         except OSError:
             pass
+    # Tell the agent — in-band — exactly where to scaffold so it does not
+    # default to the repo/plugin root it can see via --add-dir.
+    print(
+        f"{_BOLD}== impl root: {impl_root_resolved}{_NC}\n"
+        "  Create and edit the implementation ONLY under this path "
+        "(it is this loop's impl/, not the repository root)."
+    )
 
     def _run(cmd: list[str], label: str) -> bool:
         print(f"\n{_BOLD}== execute: {label}{_NC}")
@@ -153,7 +186,7 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
             # artifacts (structure.json + styles.json + section-map.json),
             # so Phase 2 produces all three before scaffolding.
             #
-            # Loop-13 fresh-only diagnosis: extract-dom.sh wrote only
+            # Fresh-capture diagnosis: extract-dom.sh wrote only
             # structure.json; the other two were documented in
             # skills/ui-reverse-engineering/dom-extraction.md as manual
             # agent-browser evals, which made the pipeline depend on

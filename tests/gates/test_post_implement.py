@@ -254,6 +254,127 @@ def test_post_implement_accepts_ref_css_and_preserved_class_tokens(tmp_path: Pat
     assert not failures, f"expected forensic preservation path to pass: {failures}"
 
 
+def test_post_implement_forensic_threshold_uses_dom_class_count(tmp_path: Path) -> None:
+    """The forensic token threshold must be a fraction of the classes that
+    actually appear on the ref DOM (domClassSignatureCount), not of every class
+    DEFINED in the stylesheets (classSignatureCount). Otherwise the gate is
+    unreachable: a high CSS-definition count demands more tokens than the DOM
+    even contains. Here 25%*classSignatureCount(599)=149 would block, but
+    25%*domClassSignatureCount(140)=35 is satisfied by 36 preserved tokens."""
+    loop = tmp_path / "loop"
+    ref = loop / "tmp" / "ref" / "realfood"
+    ref.mkdir(parents=True)
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "requiredChecks": [{
+                "id": "html-paste",
+                "produces": "html-paste.json",
+                "reason": "Universal anti-cheat",
+                "severity": "block",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    impl = loop / "impl"
+    (impl / "src" / "ref-css").mkdir(parents=True)
+    (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / "html-paste.json").write_text(
+        json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
+    )
+    (ref / "generation-plan.json").write_text(
+        json.dumps({
+            "forensicPreservation": {
+                "required": True,
+                "strategy": "ref-derived-jsx-with-local-css",
+                "classSignatureCount": 599,
+                "domClassSignatureCount": 140,
+                "copyCssTo": "src/ref-css",
+            }
+        }),
+        encoding="utf-8",
+    )
+    (impl / "src" / "ref-css" / "app.css").write_text(
+        ".dga_section__aaaa{} .dga_hero__bbbb{}\n", encoding="utf-8"
+    )
+    tokens = " ".join(f"dga_part{i}__abcd{i:02d}" for i in range(36))
+    (impl / "src" / "main.tsx").write_text(
+        "import './ref-css/app.css';\n"
+        f"export function App(){{return <main className=\"{tokens}\">Hi</main>}}\n",
+        encoding="utf-8",
+    )
+
+    results = Gate(ref).gate_post_implement()
+
+    forensic = [
+        r for r in results
+        if r.status == "fail" and "className token" in (r.message or "")
+    ]
+    assert not forensic, (
+        f"DOM-count threshold (35) should accept 36 tokens; got: {forensic}"
+    )
+
+
+def test_post_implement_forensic_counts_only_classname_attrs(tmp_path: Path) -> None:
+    """Codex MED (c): forensic class-token count must come ONLY from class/
+    className attributes — CSS-module tokens in comments or string literals must
+    not pad the count (a cheat). Here 30 real className tokens (< required 35)
+    plus 20 in a comment previously passed (50>=35); now it must FAIL."""
+    loop = tmp_path / "loop"
+    ref = loop / "tmp" / "ref" / "realfood"
+    ref.mkdir(parents=True)
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "requiredChecks": [{
+                "id": "html-paste", "produces": "html-paste.json",
+                "reason": "Universal anti-cheat", "severity": "block",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    impl = loop / "impl"
+    (impl / "src" / "ref-css").mkdir(parents=True)
+    (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / "html-paste.json").write_text(
+        json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
+    )
+    (ref / "generation-plan.json").write_text(
+        json.dumps({
+            "forensicPreservation": {
+                "required": True,
+                "strategy": "ref-derived-jsx-with-local-css",
+                "classSignatureCount": 599,
+                "domClassSignatureCount": 140,
+                "copyCssTo": "src/ref-css",
+            }
+        }),
+        encoding="utf-8",
+    )
+    (impl / "src" / "ref-css" / "app.css").write_text(
+        ".dga_section__aaaa{} .dga_hero__bbbb{}\n", encoding="utf-8"
+    )
+    real = " ".join(f"dga_real{i}__abcd{i:02d}" for i in range(30))  # < required 35
+    comment_tokens = " ".join(f"dga_fake{i}__wxyz{i:02d}" for i in range(20))
+    (impl / "src" / "main.tsx").write_text(
+        "import './ref-css/app.css';\n"
+        f"// padding {comment_tokens}\n"
+        f'const s = "{comment_tokens}";\n'
+        f'export function App(){{return <main className="{real}">Hi</main>}}\n',
+        encoding="utf-8",
+    )
+
+    results = Gate(ref).gate_post_implement()
+
+    forensic = [
+        r for r in results
+        if r.status == "fail" and "className token" in (r.message or "")
+    ]
+    assert forensic, "comment/string CSS-module tokens must NOT count — 30 real < 35 required must FAIL"
+
+
 def test_post_implement_blocks_forensic_mode_when_ref_css_artifacts_missing(
     tmp_path: Path,
 ) -> None:

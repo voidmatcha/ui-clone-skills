@@ -98,7 +98,7 @@ out_p = Path(out_path)
 # the cheat-detection rule — operator has signed proof that the impl is
 # allowed to load these specific bundles for canvas fidelity. Other
 # imports from the same ref host still fail (exact URL equality, not
-# origin allowlist — codex review Q3). Allowlist disabled if either the
+# origin allowlist — review Q3). Allowlist disabled if either the
 # policy field is absent/canonical OR the attestation file is missing.
 canvas_replay_allowlist: set[str] = set()
 state_p = ref_dir_p / "pipeline-state.json"
@@ -127,6 +127,10 @@ def add_host(url_or_host: str | None) -> None:
         return
     s = url_or_host.strip()
     if not s:
+        return
+    # Non-network schemes are not ref hosts — `mailto:`, `tel:`, etc. would
+    # otherwise be collected as bare hosts and flag legitimate impl links.
+    if s.split(":", 1)[0].lower() in {"mailto", "tel", "sms", "javascript", "data", "blob"}:
         return
     if "://" in s:
         try:
@@ -253,6 +257,14 @@ def classify_line(snippet: str) -> tuple[bool, str]:
     an image/font/video asset reference.
     """
     s = snippet.lower()
+    # Comments and non-network/non-executable links never load ref JS.
+    if snippet.strip().startswith(("//", "/*", "*")):
+        return False, "comment — allowed"
+    if "mailto:" in s or "tel:" in s:
+        return False, "mailto/tel link — allowed"
+    _NON_EXEC_DOC = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip", ".csv")
+    if any(ext in s for ext in _NON_EXEC_DOC) and not any(d in s for d in DENY_MARKERS):
+        return False, "non-executable document link — allowed"
     # If the URL in the snippet ends in an allowed asset extension, it's
     # almost certainly an asset reference, not a bundle drop.
     for ext in ALLOWED_ASSET_EXT:
@@ -354,7 +366,7 @@ for entry in runtime_resources:
     # attested ref_canvas_sources[]. Trailing-slash / query-string drift
     # is intentionally NOT smoothed: the attestation is operator-signed
     # text; a mismatch is a reviewable attestation update, not a silent
-    # bypass (codex Q3).
+    # bypass.
     if canvas_replay_allowlist and url in canvas_replay_allowlist:
         continue
     runtime_violations.append({"host": rhost, "url": url[:200]})

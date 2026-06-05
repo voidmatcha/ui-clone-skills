@@ -87,7 +87,7 @@ def read_safe(p: Path) -> str:
 
 
 # Pick candidate entry files across all common frameworks.
-# Codex universality audit HIGH FN: prior version only checked Next
+# Universality audit HIGH FN: prior version only checked Next
 # App Router + Pages Router + raw index.html. Remix, Astro, Svelte,
 # Vue, Solid, plain webpack/parcel React all have their own entries
 # that can carry pasted ref markup.
@@ -292,7 +292,7 @@ for path in candidates:
                     })
 
     # 2. Script theft.
-    # Codex universality audit HIGH FP: bare basename matches like
+    # Universality audit HIGH FP: bare basename matches like
     # `main.js` / `app.js` / `vendor.js` collide across virtually
     # every site, so a legit clone with its own main.js would
     # false-trigger this. Require non-generic basename OR a host

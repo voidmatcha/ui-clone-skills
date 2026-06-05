@@ -68,7 +68,7 @@ from pathlib import Path
 impl_root = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
 
-# Codex universality audit MEDIUM: scaffold-residue only knows about
+# Universality audit MEDIUM: scaffold-residue only knows about
 # React. For Vue/Svelte/Astro impls there's no PascalCase "component"
 # in the React sense — every legitimate clone would falsely PASS
 # (no orphans found because no components found). Detect stack from

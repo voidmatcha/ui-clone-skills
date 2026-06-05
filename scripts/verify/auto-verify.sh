@@ -252,8 +252,8 @@ fi
 # canonical stamp, while auto-verify is the command that writes it. This
 # provisional stamp is overwritten with the real verdict below.
 #
-# Crash safety (Fix 1, codex 2026-05-27 architectural review): the
-# provisional stamp carries an `invocationId` matching the exported env var
+# Crash safety: the provisional stamp carries an `invocationId` matching
+# the exported env var
 # `UI_RE_AUTOVERIFY_INFLIGHT`. The gate accepts a provisional stamp ONLY
 # when both ids match — so a crashed/orphaned prior run leaves a provisional
 # stamp whose id does NOT match the current process env, and the gate

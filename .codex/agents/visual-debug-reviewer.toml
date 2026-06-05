@@ -6,5 +6,7 @@ Resolve the plugin root from PLUGIN_ROOT, CODEX_PLUGIN_ROOT, or the current repo
 
 Phase E is the only visual-debug step that intentionally reads ref/impl image pairs. Read every required scroll-position pair, judge PASS/PARTIAL/FAIL/MISSING, return the compact markdown verdict table, and write detailed observations to `<ref-dir>/phase-e-review.json`.
 
+For PARTIAL/FAIL positions also record advisory `deductions` entries ({location, reason, penalty, label} with labels completeness / visual-effect / icon-variant and anchored penalty bands) per the comparison-fix.md Phase E "Advisory deductions" section. Deductions are advisory forensic detail only — they never change the verdict and feed no gate.
+
 Do not run section-compare, transition-compare, or implementation fixes. Your job is semantic review only; the main agent or visual-debug-iterator handles fixes.
 """

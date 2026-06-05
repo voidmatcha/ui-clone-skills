@@ -9,7 +9,9 @@
 # This gate runs in two modes:
 #   1. If <ref-dir>/iteration-baseline-sha.txt exists, diff HEAD
 #      against the baseline and fail if any file outside the allowed
-#      iteration scope changed.
+#      iteration scope changed. Files that were already dirty when the
+#      baseline was created are ignored only while their content is
+#      unchanged.
 #   2. If no baseline file exists, write the current HEAD SHA as the
 #      baseline and pass with status=initialized. The next invocation
 #      will diff against it.
@@ -27,6 +29,7 @@
 # Writes:
 #   <ref-dir>/impl-scope.json
 #   <ref-dir>/iteration-baseline-sha.txt (first invocation)
+#   <ref-dir>/iteration-baseline-dirty.json (first invocation)
 #
 # Exit 0 on pass/initialized, 1 on tooling-scope violation, 2 on
 # setup error.
@@ -41,6 +44,7 @@ IMPL_ROOT="${2:?impl-root required}"
 
 OUT="$REF_DIR/impl-scope.json"
 BASELINE_FILE="$REF_DIR/iteration-baseline-sha.txt"
+BASELINE_DIRTY_FILE="$REF_DIR/iteration-baseline-dirty.json"
 
 # Repo root (canonical, walk up from impl-root)
 REPO_ROOT=$(cd "$IMPL_ROOT" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || echo "")
@@ -62,8 +66,7 @@ if [ ! -f "$BASELINE_FILE" ]; then
     exit 2
   fi
   printf '%s\n' "$CURRENT_SHA" > "$BASELINE_FILE"
-  # Fix 4 constrained (codex 2026-05-27): snapshot the .impl-scope-exceptions
-  # blob hash at baseline time. Subsequent runs verify the file hasn't been
+  # Snapshot the .impl-scope-exceptions blob hash at baseline time. Subsequent runs verify the file hasn't been
   # modified since baseline — same-turn self-whitelist produces a hash
   # mismatch and is rejected. If the file doesn't exist at baseline time,
   # snapshot "absent" sentinel so adding the file later also mismatches.
@@ -73,18 +76,77 @@ if [ ! -f "$BASELINE_FILE" ]; then
   else
     printf '%s\n' "absent" > "$EXCEPTIONS_BLOB_FILE"
   fi
-  python3 - "$OUT" "$CURRENT_SHA" <<'PY'
-import json, sys
+  python3 - "$OUT" "$CURRENT_SHA" "$BASELINE_DIRTY_FILE" <<'PY'
+import hashlib
+import json
+import subprocess
+import sys
 from pathlib import Path
-out_path, sha = sys.argv[1:3]
+
+out_path, sha, dirty_path = sys.argv[1:4]
+
+
+def file_fingerprint(path):
+    p = Path(path)
+    if p.is_file():
+        return {
+            "exists": True,
+            "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+        }
+    return {"exists": False, "sha256": None}
+
+
+def parse_status_path(line):
+    # `git status --porcelain=v1` prefixes paths with two status chars
+    # plus a separating space. Rename/copy entries use "old -> new";
+    # snapshot the destination path because that is what future diffs
+    # report as changed.
+    path = line[3:].strip() if len(line) > 3 else ""
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path or None
+
+
+def snapshot_dirty():
+    proc = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    records = []
+    for line in proc.stdout.splitlines():
+        path = parse_status_path(line)
+        if not path:
+            continue
+        record = {
+            "path": path,
+            "status": line[:2],
+            **file_fingerprint(path),
+        }
+        records.append(record)
+    return records
+
+
+dirty_records = snapshot_dirty()
+Path(dirty_path).write_text(
+    json.dumps({
+        "schemaVersion": 1,
+        "baselineSha": sha,
+        "records": dirty_records,
+    }, indent=2, ensure_ascii=False) + "\n"
+)
 payload = {
     "schemaVersion": 1,
     "status": "initialized",
     "baselineSha": sha,
+    "baselineDirtyCount": len(dirty_records),
     "violations": [],
     "reasons": [
         f"baseline SHA written to iteration-baseline-sha.txt ({sha}). "
-        "Subsequent invocations will diff HEAD against this SHA."
+        "Subsequent invocations will diff HEAD against this SHA. "
+        "Pre-existing dirty files are snapshotted and ignored only while "
+        "their content remains unchanged."
     ],
     "rule": (
         "Impl iteration must only modify files under the impl root. "
@@ -158,13 +220,14 @@ ALL_CHANGES=$(printf '%s\n%s\n%s\n' "$COMMITTED" "$UNCOMMITTED" "$UNTRACKED" | g
 # env var so the Python block still sees the shell-computed list without
 # requiring variable interpolation inside the body.
 export ALL_CHANGES
-python3 - "$OUT" "$BASELINE" "$IMPL_REL" <<'PY'
+python3 - "$OUT" "$BASELINE" "$IMPL_REL" "$BASELINE_DIRTY_FILE" <<'PY'
+import hashlib
 import json
 import os
 import sys
 from pathlib import Path
 
-out_path, baseline, impl_rel = sys.argv[1:4]
+out_path, baseline, impl_rel, baseline_dirty_path = sys.argv[1:5]
 all_changes = os.environ.get("ALL_CHANGES", "").strip().splitlines()
 all_changes = [p for p in all_changes if p]
 
@@ -189,7 +252,51 @@ exception_status = os.environ.get("EXCEPTION_STATUS", "none")
 violations: list = []
 allowed: list = []
 
+
+def file_fingerprint(path):
+    p = Path(path)
+    if p.is_file():
+        return {
+            "exists": True,
+            "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+        }
+    return {"exists": False, "sha256": None}
+
+
+def load_baseline_dirty(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        return {}
+    records = data.get("records", [])
+    if not isinstance(records, list):
+        return {}
+    return {
+        str(record.get("path")): record
+        for record in records
+        if isinstance(record, dict) and record.get("path")
+    }
+
+
+baseline_dirty = load_baseline_dirty(baseline_dirty_path)
+
+
+def unchanged_baseline_dirty(path):
+    record = baseline_dirty.get(path)
+    if not record:
+        return False
+    current = file_fingerprint(path)
+    return (
+        current.get("exists") == record.get("exists")
+        and current.get("sha256") == record.get("sha256")
+    )
+
 for path in all_changes:
+    if unchanged_baseline_dirty(path):
+        allowed.append({"path": path, "reason": "pre-existing-dirty-baseline"})
+        continue
     if path in allowed_literal:
         allowed.append({"path": path, "reason": "literal-allowlist"})
         continue
@@ -201,6 +308,12 @@ for path in all_changes:
             "path": path,
             "reason": "impl-scope-exception (.impl-scope-exceptions, blob-hash-verified)",
         })
+        continue
+    # Reference-capture summary sidecars (<component>-clean/html/_summary.json)
+    # are produced by the capture pipeline, not the agent's impl edits — they
+    # must not be counted as out-of-scope writes.
+    if path.endswith("/html/_summary.json") and "-clean/" in path:
+        allowed.append({"path": path, "reason": "reference-capture-summary"})
         continue
     # Reject everything else — including skills/, scripts/, ui_clone/,
     # tests/, hooks/, pyproject.toml, etc.
@@ -220,7 +333,12 @@ if violations:
         "If the change is a legitimate plugin fix (not a gate-cheat), "
         "land it in a separate commit BEFORE the iteration starts. The "
         "iteration baseline can then be reset by deleting "
-        "iteration-baseline-sha.txt."
+        "iteration-baseline-sha.txt and iteration-baseline-dirty.json."
+    )
+    reasons.append(
+        "Unchanged files that were already dirty at baseline are ignored. "
+        "A listed outside-scope file is new or changed since the iteration "
+        "baseline."
     )
 
 payload = {
@@ -231,6 +349,7 @@ payload = {
     "filesChecked": len(all_changes),
     "violations": violations[:50],
     "allowed": allowed[:50],
+    "baselineDirtyCount": len(baseline_dirty),
     "exceptionStatus": exception_status,
     "trustedExceptionCount": len(trusted_exceptions),
     "reasons": reasons,
@@ -238,7 +357,8 @@ payload = {
         "Revert all changes outside the impl tree. Use `git checkout " + baseline + " -- "
         "<violating-path>` per file, OR if the change is a legitimate plugin "
         "fix, commit it BEFORE starting the iteration and delete "
-        "iteration-baseline-sha.txt to reset the baseline."
+        "iteration-baseline-sha.txt plus iteration-baseline-dirty.json to "
+        "reset the baseline."
         if violations else "iteration scope clean"
     ),
     "rule": (

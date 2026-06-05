@@ -12,15 +12,56 @@ Inside Claude Code, after the installer finishes:
 /plugin install ui-clone-skills@voidmatcha
 ```
 
-For Codex: the installer creates a lightweight personal plugin source at `~/plugins/ui-clone-skills`, writes `~/.agents/plugins/marketplace.json`, and runs `codex plugin add ui-clone-skills@local`. That projection includes only the three public skills, so maintainer-only skills such as `skills/benchmark` do not appear in Codex. Verify `codex plugin list` shows `ui-clone-skills@local (installed)`, then launch Codex with plugin hooks enabled:
+For Codex: the installer creates a lightweight personal plugin source at `~/plugins/ui-clone-skills` (skills), writes `~/.agents/plugins/marketplace.json`, runs `codex plugin add ui-clone-skills@local`, **and merges the gate hooks into `~/.codex/hooks.json`**. That projection includes only the three public skills, so maintainer-only skills such as `skills/benchmark` do not appear in Codex. Verify the plugin with `codex plugin list | grep 'ui-clone-skills@local (installed)'` and the hooks with `grep -q ui_clone.hooks ~/.codex/hooks.json && echo gate-hooks OK`.
 
-```bash
-codex --enable plugin_hooks
-```
-
-If your Codex build does not support trusted plugin hooks yet, the skills may load without the hook gate chain. Treat that as docs-only mode for validation: it can guide the agent, but it cannot block bypasses.
+codex-cli 0.137 removed the `plugin_hooks` feature, so plugin-manifest hooks no longer load — that is why the installer merges the gate entries into the stable `~/.codex/hooks.json` instead (idempotently, preserving your existing hooks). Accept the one-time hook-trust prompt on the next Codex session. If you skip the merge (e.g. a docs-only `npx skills add`), the skills still load but the hook gate chain does not run: it can guide the agent but cannot block bypasses.
 
 The installer is idempotent: it bootstraps shared dependencies, registers the local checkout for whichever host(s) are present, and skips anything already installed.
+
+## Use a development checkout as the Codex plugin source
+
+When you want Codex to use a specific local checkout (for example
+`~/Documents/ui-skills`) instead of the curl-installed checkout under
+`~/.local/share/ui-clone-skills`, run the installer from that checkout:
+
+```bash
+cd ~/Documents/ui-skills
+./install.sh --codex-only --no-deps
+```
+
+This does **not** clone a second copy. It treats the current directory as the
+source of truth, then recreates the Codex projection at
+`~/plugins/ui-clone-skills` with symlinks back to the checkout:
+
+```text
+~/plugins/ui-clone-skills/.codex-plugin -> ~/Documents/ui-skills/.codex-plugin
+~/plugins/ui-clone-skills/hooks         -> ~/Documents/ui-skills/hooks
+~/plugins/ui-clone-skills/ui_clone      -> ~/Documents/ui-skills/ui_clone
+~/plugins/ui-clone-skills/scripts       -> ~/Documents/ui-skills/scripts
+~/plugins/ui-clone-skills/skills/<public-skill>
+    -> ~/Documents/ui-skills/skills/<public-skill>
+```
+
+Codex still lists the plugin as `ui-clone-skills@local` with path
+`~/plugins/ui-clone-skills`; that is expected. The projection is intentionally
+smaller than the full checkout so Codex sees only the public skills
+(`ui-reverse-engineering`, `ui-capture`, and `visual-debug`) and not
+maintainer-only directories such as `skills/benchmark`, scratch runs, caches, or
+virtualenvs.
+
+Re-run the same command whenever you want to re-point Codex at a different
+checkout or refresh the projection after moving the checkout:
+
+```bash
+cd /path/to/the/checkout/Codex/should/use
+./install.sh --codex-only --no-deps
+```
+
+The installer also writes the fallback marker
+`~/.config/ui-clone-skills/root` to the current checkout. Hook commands normally
+receive `CODEX_PLUGIN_ROOT` from the plugin host, but standalone scripts and
+inline skill snippets use that marker when no host-provided plugin root is
+available.
 
 ## Install only one host
 

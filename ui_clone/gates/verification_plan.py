@@ -154,6 +154,11 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
         # runtime delta when its trigger is driven; class-name presence
         # is not motion. Anti-gaming, so it must never downgrade.
         "transition-fires",
+        # signature-effects-coverage — a declared signatureEffect or a
+        # scrollScrub scale band (the #3 zoom) must be wired in impl;
+        # declaring it then shipping it static is the gap this closes, so
+        # it must keep blocking even in rapid phase.
+        "signature-effects-coverage",
     }
 
     out: list[CheckResult] = []
@@ -368,7 +373,7 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
                             f"impl_root is {impl_root}. Run the check "
                             "against the active loop's impl tree."
                         )
-                        out.append(CheckResult(label, "fail", msg, fix=fix))
+                        out.append(CheckResult(label, "fail", msg, fix=fix, stale=True))
                         continue
                 # Stale-relative check — artifact in-tree but older than
                 try:
@@ -393,9 +398,10 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
                                 f"{produces} mtime is older than "
                                 "newest impl source/public file by "
                                 f"{newest_impl - artifact_mtime:.0f}s. "
-                                "Re-run the check against the current impl."
+                                "Run scripts/verify/run-required-checks.sh "
+                                "to refresh."
                             )
-                            out.append(CheckResult(label, "fail", msg, fix=fix))
+                            out.append(CheckResult(label, "fail", msg, fix=fix, stale=True))
                             continue
                 except OSError:
                     pass

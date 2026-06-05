@@ -3,7 +3,7 @@
 # contract" output from existing artifacts.
 #
 # Usage:
-#   completion-report.sh <ref-dir> <impl-root>
+#   completion-report.sh [--check] <ref-dir> <impl-root>
 #
 # 2026-05-22 SKILL.md "Hard Done Criteria" mandates a completion
 # report with specific fields (modified files, ref-JS dependency,
@@ -15,21 +15,32 @@
 # done. If any required artifact is missing or status≠pass, the
 # report explicitly marks INCOMPLETE for that section.
 #
-# Exit 0 always — this is a report builder, not a gate. The report's
-# content tells the agent / user whether the iteration is genuinely
-# done.
+# Default mode exits 0 as a report builder. `--check` exits 1 when the
+# assembled report is incomplete, making closeout machine-checkable for
+# unattended loops.
 
 set -uo pipefail
 
-REF_DIR="${1:?Usage: completion-report.sh <ref-dir> <impl-root>}"
-IMPL_ROOT="${2:?impl-root required}"
+CHECK_MODE=0
+if [[ "${1:-}" == "--check" ]]; then
+  CHECK_MODE=1
+  shift
+fi
+
+if [[ $# -ne 2 ]]; then
+  echo "Usage: completion-report.sh [--check] <ref-dir> <impl-root>" >&2
+  exit 2
+fi
+
+REF_DIR="$1"
+IMPL_ROOT="$2"
 
 [ -d "$REF_DIR" ]   || { echo "ref-dir not found: $REF_DIR" >&2; exit 2; }
 [ -d "$IMPL_ROOT" ] || { echo "impl-root not found: $IMPL_ROOT" >&2; exit 2; }
 
 REPO_ROOT=$(cd "$IMPL_ROOT" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || echo "")
 
-python3 - "$REF_DIR" "$IMPL_ROOT" "$REPO_ROOT" <<'PY'
+python3 - "$REF_DIR" "$IMPL_ROOT" "$REPO_ROOT" "$CHECK_MODE" <<'PY'
 from __future__ import annotations
 
 import json
@@ -37,10 +48,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-ref_dir, impl_root, repo_root = sys.argv[1:4]
+ref_dir, impl_root, repo_root, check_mode_raw = sys.argv[1:5]
 ref_p = Path(ref_dir).resolve()
 impl_p = Path(impl_root).resolve()
 repo_root = str(Path(repo_root).resolve()) if repo_root else ""
+check_mode = check_mode_raw == "1"
+incomplete_signals: list[str] = []
 
 def read_json(name: str) -> dict | None:
     p = ref_p / name
@@ -51,12 +64,38 @@ def read_json(name: str) -> dict | None:
     except Exception:
         return None
 
+def _font_substitution_declared() -> bool:
+    substitution = read_json("asset-substitution.json")
+    fonts = substitution.get("fonts") if isinstance(substitution, dict) else None
+    return isinstance(fonts, list) and bool(fonts)
+
+def normalized_status(name: str, art: dict | None, key: str = "status") -> str | None:
+    if art is None:
+        return None
+    if name == "font-parity":
+        parity = art.get("parity")
+        if parity == "match":
+            return "pass"
+        if parity == "mismatch" and _font_substitution_declared():
+            return "pass"
+        return str(parity or art.get(key) or "?")
+    status = art.get(key)
+    return str(status) if status is not None else None
+
 def status_line(name: str, art: dict | None, key: str = "status") -> str:
     if art is None:
         return f"  - {name}: ❌ INCOMPLETE (artifact missing)"
-    s = art.get(key, "?")
+    s = normalized_status(name, art, key) or "?"
     marker = "✓" if s == "pass" else "○" if s == "skip" else "❌"
     return f"  - {name}: {marker} {s}"
+
+def artifact_signal(name: str, art: dict | None, *, allow_skip: bool = False) -> str | None:
+    if art is None:
+        return f"{name} missing"
+    status = normalized_status(name, art)
+    if status == "pass" or (allow_skip and status == "skip"):
+        return None
+    return f"{name} status={status!r}"
 
 def section_compare_counts(text: str) -> dict[str, int]:
     rows = []
@@ -85,6 +124,18 @@ print("━" * 70)
 print("Completion Report — SKILL.md 'Hard Done Criteria'")
 print("━" * 70)
 
+state = read_json("pipeline-state.json")
+current_gate = state.get("current_gate") if isinstance(state, dict) else None
+print("\n## Pipeline state\n")
+if current_gate == "done":
+    print('  - current_gate: ✓ "done"')
+elif current_gate is None:
+    print("  - current_gate: ❌ INCOMPLETE (pipeline-state.json missing/unreadable)")
+    incomplete_signals.append("pipeline-state.json missing/unreadable")
+else:
+    print(f"  - current_gate: ❌ INCOMPLETE ({current_gate!r}, need 'done')")
+    incomplete_signals.append(f"current_gate is {current_gate!r}, not 'done'")
+
 # ── Tier 1: Static visual ────────────────────────────────────────────
 print("\n## Tier 1 — Static visual match\n")
 for art_name, label in [
@@ -96,20 +147,34 @@ for art_name, label in [
     ("svg-provenance.json",      "svg-provenance"),
     ("color-token-grounding.json","color-token-grounding"),
 ]:
-    print(status_line(label, read_json(art_name)))
+    art = read_json(art_name)
+    print(status_line(label, art))
+    signal = artifact_signal(label, art, allow_skip=True)
+    if signal:
+        incomplete_signals.append(signal)
 
 sc_result = ref_p / "sections" / "result.txt"
 if sc_result.exists():
     try:
         text = sc_result.read_text(encoding="utf-8")
         counts = section_compare_counts(text)
-        if counts["fail"] or counts["missing"]:
+        section_incomplete = bool(counts["fail"] or counts["missing"] or "INCOMPLETE" in text)
+        if section_incomplete:
             print(
                 f"  - section-compare: ❌ {counts['pass']} pass / "
                 f"{counts['fail']} fail / {counts['missing']} missing"
             )
+            reason = (
+                f"section-compare dirty: {counts['fail']} fail / "
+                f"{counts['missing']} missing"
+            )
+            if "INCOMPLETE" in text:
+                reason += " / INCOMPLETE marker"
+            incomplete_signals.append(reason)
         else:
             print(f"  - section-compare: ✓ {counts['pass']} pass / 0 fail")
+        if counts["total"] == 0:
+            incomplete_signals.append("section-compare has 0 measured rows")
         if (
             counts["total"] > 0
             and counts["structural_only"] >= 3
@@ -124,18 +189,26 @@ if sc_result.exists():
             )
     except Exception:
         print("  - section-compare: ❌ INCOMPLETE (result unreadable)")
+        incomplete_signals.append("section-compare result unreadable")
 else:
     print("  - section-compare: ❌ INCOMPLETE (not run)")
+    incomplete_signals.append("section-compare not run")
 
 # ── Tier 2-4: Runtime + state ────────────────────────────────────────
 print("\n## Tier 2-4 — Runtime + state + transitions (composite)\n")
 rp = read_json("runtime-proof.json")
 tp = read_json("transition-proof.json")
 print(status_line("runtime-proof", rp))
+signal = artifact_signal("runtime-proof", rp, allow_skip=True)
+if signal:
+    incomplete_signals.append(signal)
 if rp and rp.get("status") != "pass":
     for reason in (rp.get("reasons") or [])[:3]:
         print(f"      • {reason}")
 print(status_line("transition-proof", tp))
+signal = artifact_signal("transition-proof", tp, allow_skip=True)
+if signal:
+    incomplete_signals.append(signal)
 if tp and tp.get("status") != "pass":
     for reason in (tp.get("reasons") or [])[:3]:
         print(f"      • {reason}")
@@ -150,7 +223,11 @@ for art_name, label in [
     ("impl-scope.json",       "impl-scope (gate-cheat block)"),
     ("runtime-env.json",      "runtime-env"),
 ]:
-    print(status_line(label, read_json(art_name)))
+    art = read_json(art_name)
+    print(status_line(label, art))
+    signal = artifact_signal(label, art, allow_skip=True)
+    if signal:
+        incomplete_signals.append(signal)
 
 # ── Modified files ───────────────────────────────────────────────────
 print("\n## Modified files (impl scope)\n")
@@ -198,21 +275,16 @@ else:
 
 # ── Overall verdict ──────────────────────────────────────────────────
 print("\n## Overall verdict\n")
-incomplete_signals = []
-if rp is None or (rp.get("status") not in ("pass", "skip")):
-    incomplete_signals.append("runtime-proof not green")
-if tp is None or (tp.get("status") not in ("pass", "skip")):
-    incomplete_signals.append("transition-proof not green")
-if not sc_result.exists():
-    incomplete_signals.append("section-compare not run")
 if incomplete_signals:
     print("  ❌ INCOMPLETE")
     print("     Reasons:")
-    for s in incomplete_signals:
+    for s in dict.fromkeys(incomplete_signals):
         print(f"     - {s}")
     print("\n  Do NOT report the clone as done until all signals above resolve.")
 else:
     print("  ✓ all green per Hard Done Criteria")
 
 print("\n" + "━" * 70)
+if check_mode and incomplete_signals:
+    sys.exit(1)
 PY

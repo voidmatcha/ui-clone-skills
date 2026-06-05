@@ -6,8 +6,7 @@
 # one in-page eval, so the impl can replicate hover transitions without
 # guessing from bundle grep alone.
 #
-# Design: docs/multi-snapshot-capture-design.md § Phase C, with codex
-# review (2026-05-25) applied:
+# Design: docs/multi-snapshot-capture-design.md § Phase C.
 #   [1] RISKY: synthetic dispatchEvent does NOT activate CSS :hover →
 #       static CSSOM extraction is the CSS signal, no runtime trigger.
 #   [2] RISKY: DOM-attribute hash misses paint-only hover changes →
@@ -95,7 +94,7 @@ EVAL_JS='(async () => {
       for (const part of parts) {
         const trimmed = part.trim();
         if (!trimmed.includes(":hover")) continue;
-        // Codex [4]: activation is everything BEFORE :hover; affected is the
+        // Activation is everything BEFORE :hover; affected is the
         // full selector with :hover removed. `.card:hover .title` →
         // activation=".card", affected=".card .title".
         const idx = trimmed.indexOf(":hover");
@@ -126,7 +125,7 @@ EVAL_JS='(async () => {
   const candidatesFound = candidates.size;
   const orderedCandidates = Array.from(candidates.values()).slice(0, CAP);
 
-  // Fixed property set for computed-style hash (codex [2]).
+  // Fixed property set for computed-style hash.
   const TRACKED = [
     "transform", "opacity", "color", "backgroundColor",
     "width", "height", "scale", "rotate", "translate",
@@ -148,6 +147,20 @@ EVAL_JS='(async () => {
     return out;
   };
 
+  const domSnapshot = (el) => ({
+    selector: elSelector(el),
+    className: typeof el.className === "string" ? el.className : "",
+    childElementCount: el.childElementCount,
+    textHash: (() => {
+      const text = (el.textContent || "").slice(0, 1000);
+      let h = 5381;
+      for (let i = 0; i < text.length; i++) h = ((h << 5) + h) + text.charCodeAt(i);
+      return h >>> 0;
+    })(),
+    ariaExpanded: el.getAttribute("aria-expanded"),
+    dataState: el.getAttribute("data-state"),
+  });
+
   // 3. For each candidate, JS-side hover probe: snapshot affected scope
   //    BEFORE, dispatch hover events, settle, snapshot AFTER, diff, restore.
   const results = [];
@@ -162,6 +175,8 @@ EVAL_JS='(async () => {
       kind: "css",
       cssProperties: cand.cssProperties,
       jsChanges: [],
+      domChanges: [],
+      eventDriver: "agent-browser.eval.synthetic-hover",
     };
 
     if (activationEl) {
@@ -175,7 +190,9 @@ EVAL_JS='(async () => {
       } catch (e) {}
 
       const before = new Map();
+      const beforeDom = new Map();
       for (const el of observed) before.set(el, csSnapshot(el));
+      for (const el of observed) beforeDom.set(el, domSnapshot(el));
 
       // Dispatch synthetic hover events. Catches JS-attached handlers
       // (GSAP, Framer Motion, vanilla listeners). Does NOT activate CSS
@@ -203,6 +220,20 @@ EVAL_JS='(async () => {
           });
         }
       }
+      for (const [el, b] of beforeDom) {
+        if (!el.isConnected) {
+          result.domChanges.push({ selector: b.selector, disconnectedAfterHover: true });
+          continue;
+        }
+        const a = domSnapshot(el);
+        const changed = {};
+        for (const key of ["className", "childElementCount", "textHash", "ariaExpanded", "dataState"]) {
+          if (a[key] !== b[key]) changed[key] = { before: b[key], after: a[key] };
+        }
+        if (Object.keys(changed).length > 0) {
+          result.domChanges.push({ selector: b.selector, changes: changed });
+        }
+      }
 
       // Restore hover state.
       try {
@@ -217,15 +248,14 @@ EVAL_JS='(async () => {
     results.push(result);
   }
 
-  // Summary metrics — count CSS-rule signal and JS-diff signal separately
-  // (codex [6]).
+  // Summary metrics — count CSS-rule signal and JS-diff signal separately.
   let cssCount = 0, jsCount = 0, anySignal = 0;
   for (const r of results) {
     const hasCSS = r.kind === "css" || r.kind === "css+js";
     const hasJS = r.kind === "js" || r.kind === "css+js";
     if (hasCSS) cssCount++;
     if (hasJS) jsCount++;
-    if (Object.keys(r.cssProperties).length > 0 || r.jsChanges.length > 0) anySignal++;
+    if (Object.keys(r.cssProperties).length > 0 || r.jsChanges.length > 0 || (r.domChanges || []).length > 0) anySignal++;
   }
 
   return {
@@ -294,7 +324,7 @@ if not isinstance(parsed, dict) or "results" not in parsed:
 
 results = parsed.get("results", [])
 
-# Build manifest with codex [5] stable record shape:
+# Build manifest with a stable record shape:
 # {id, kind, file, selector, activation, changedCount, schemaVersion}.
 manifest_entries = []
 seen_ids: set[str] = set()
@@ -304,7 +334,8 @@ for r in results:
     kind = r.get("kind", "css")
     css_props = r.get("cssProperties", {}) or {}
     js_changes = r.get("jsChanges", []) or []
-    if not css_props and not js_changes:
+    dom_changes = r.get("domChanges", []) or []
+    if not css_props and not js_changes and not dom_changes:
         # No CSS rule body + no JS diff → no signal worth recording.
         continue
 
@@ -327,6 +358,8 @@ for r in results:
         "kind": kind,
         "cssProperties": css_props,
         "jsChanges": js_changes,
+        "domChanges": dom_changes,
+        "eventDriver": r.get("eventDriver", "agent-browser.eval.synthetic-hover"),
         "schemaVersion": 1,
     }
     (outdir / fname).write_text(
@@ -339,7 +372,7 @@ for r in results:
         "file": fname,
         "selector": activation,
         "activation": activation,
-        "changedCount": len(js_changes),
+        "changedCount": len(js_changes) + len(dom_changes),
         "schemaVersion": 1,
     })
 
@@ -356,6 +389,10 @@ summary = {
     "candidatesCappedAt": parsed.get("candidatesCappedAt", 50),
     "candidatesWithCssRule": parsed.get("candidatesWithCssRule", 0),
     "candidatesWithJsDiff": parsed.get("candidatesWithJsDiff", 0),
+    "candidatesWithDomDiff": len([
+        r for r in results
+        if (r.get("domChanges", []) or [])
+    ]),
     "candidatesWithAnySignal": parsed.get("candidatesWithAnySignal", 0),
     "schemaVersion": 1,
 }
@@ -367,3 +404,8 @@ summary = {
 print(f"capture-hover: wrote {len(manifest_entries)} entry/entries to {outdir}/",
       file=sys.stderr)
 PY
+
+SPEC_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/state-structure-spec.py"
+if [ "${STATE_STRUCTURE_SPEC:-1}" != "0" ] && [ -f "$SPEC_PY" ]; then
+  python3 "$SPEC_PY" "$REF_DIR" >/dev/null
+fi

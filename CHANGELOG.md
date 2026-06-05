@@ -1,5 +1,44 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.7.24] - 2026-06-05
+
+Gate enforcement on Codex + transition-fidelity hardening.
+
+### Added
+
+- **Codex gate-hook enforcement on both hosts.** `install.sh` now merges the gate
+  hooks into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks`
+  feature, so plugin-manifest hooks no longer load), and the hooks dual-emit the
+  Codex (`decision: "block"`) and Claude Code
+  (`hookSpecificOutput.permissionDecision: "deny"`) shapes — so the
+  premature-action / unverified-completion gates enforce on Codex, not just
+  Claude. Adds `install.sh --uninstall`.
+- **Transition-fidelity gate enforcement.** Three gates that silently passed a
+  section-AE-only run now fail-close: `header-state-runtime-check.sh` compares the
+  header's scroll GEOMETRY trajectory (height / padding / transform / position at
+  scroll 0/200/600/25%) so a class-less geometric header — or an impl that pins it
+  — is caught; `hover-state-compare.sh` fails when `signals.hasHover` is set but
+  no hover regions exist and synthesizes targets from `hover-css-rules.json` /
+  `hover-candidates.json`; `transition-proof-rollup.sh` and `runtime-proof-rollup.sh`
+  validate the hover-state result and the header geometry trajectory.
+
+### Changed
+
+- **Section-aligned scroll coverage.** `batch-scroll.sh` now pairs semantic
+  ref/impl section anchors before capturing scroll diff probes and adds extra
+  entry/mid/exit samples around sticky, pinned, and scroll-transition regions.
+  Legacy same-percent scroll capture remains available as
+  `SCROLL_CAPTURE_MODE=percent` fallback.
+- **Deterministic scroll-zoom auto-wrap + driver coherence.** The transpiler
+  auto-wraps the scroll-zoom background in `<ScrollScrub>`, resets frozen-scrub and
+  zero-scale entrance states to their visible rest, and keeps the
+  `ScrollStateDriver` mount⟺emit invariant (it emits the driver from the actual
+  `data-stroke-draw` / `data-scroll-fade` stamps and mounts it on the Next App
+  Router page too). A frozen sub-unity scale is reset only when the plan declares a
+  `scrollScrub` band, so static decorative scales are preserved.
+
 ## [0.7.23] - 2026-05-31
 
 Patch release for CSS-module-heavy clone fidelity.

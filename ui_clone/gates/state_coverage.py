@@ -13,6 +13,9 @@ that the impl source has corresponding hooks:
   - states/hover/manifest.json: if entries non-empty, impl/src must
     contain at least one hover handler (`:hover`, `hover:`, `onMouseEnter`,
     `whileHover`, `onPointerEnter`).
+  - states/click/manifest.json: if same-page click mutations are captured,
+    impl/src must contain a click-state handler (`onClick`,
+    `addEventListener("click")`, `@click`, `on:click`, aria/data-state).
 
 Backward-compat: if `<ref_dir>/states/` is absent entirely, emit a single
 pass with "skip" message — legacy ref dirs predate the multi-snapshot
@@ -75,6 +78,18 @@ _HOVER_HANDLERS: tuple[str, ...] = (
 )
 
 
+_CLICK_HANDLERS: tuple[str, ...] = (
+    r"\bonClick\b",
+    r"\bonPointerDown\b",
+    r"\bonMouseDown\b",
+    r"\baddEventListener\([\"']click[\"']",
+    r"\b@click\b",                 # Vue
+    r"\bon:click\b",               # Svelte
+    r"\bdata-state\b",
+    r"\baria-expanded\b",
+)
+
+
 _SRC_GLOB_EXTS: tuple[str, ...] = (
     ".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".sass", ".vue", ".svelte", ".html",
 )
@@ -83,7 +98,7 @@ _SRC_GLOB_EXTS: tuple[str, ...] = (
 # Motion library/feature markers in bundle-map.json. Presence of ANY of
 # these signals the ref has motion-rich behavior that REQUIRES Phase A/B/C
 # capture — states/ absence becomes a fail-closed condition for these
-# sites (codex juanmora review item #1, 2026-05-25).
+# sites.
 _MOTION_RICH_MARKERS: tuple[str, ...] = (
     "gsap",          # GSAP timeline library
     "scrolltrigger", # GSAP ScrollTrigger plugin
@@ -102,7 +117,7 @@ _MOTION_RICH_MARKERS: tuple[str, ...] = (
 # Generic / framework-noise classes that ANY site running the corresponding
 # library shows, regardless of whether the impl actually replicates the
 # splash mechanism. Filtering these prevents false-pass on `lenis` or
-# `w-mod-ix` matched as splash class hooks (codex juanmora review).
+# `w-mod-ix` matched as splash class hooks.
 _GENERIC_NOISE_CLASSES: frozenset[str] = frozenset({
     "body", "html", "no-js",       # base markup attributes
     "w-mod-js", "w-mod-ix",        # Webflow runtime modifiers
@@ -147,7 +162,7 @@ def _strip_js_comments(src: str) -> str:
 def _is_motion_rich_ref(ref_dir: Path) -> bool:
     """True iff bundle-map.json mentions any motion library marker.
 
-    Codex juanmora review (2026-05-25) finding #1: state-coverage gave
+    Motion-site review finding #1: state-coverage gave
     false-pass for GSAP/ScrollTrigger/Lenis/Webflow IX sites when states/
     was absent. Those sites depend on Phase A/B/C capture for transition
     ground truth; absence ≠ legitimate skip.
@@ -167,6 +182,17 @@ def _is_motion_rich_ref(ref_dir: Path) -> bool:
     return any(marker in text for marker in _MOTION_RICH_MARKERS)
 
 
+def _class_referenced(class_name: str, src_text: str) -> bool:
+    """True iff `class_name` appears in impl source as a whole class token,
+    not embedded inside a longer class (`is-loaded` must not match
+    `is-loaded-overlay`). CSS class tokens use `-`/`_` as internal
+    separators, so the boundary excludes word chars, `-`, and `_` on both
+    sides — `\\b` alone is wrong because `-` is already a non-word char and
+    would let `is-loaded` match `is-loaded-overlay`."""
+    pattern = r"(?<![\w-])" + re.escape(class_name) + r"(?![\w-])"
+    return re.search(pattern, src_text) is not None
+
+
 def _extract_class_strings(trajectory: list[dict]) -> list[str]:
     """From a splash trajectory, return the unique non-empty body/html
     class strings — these are the hooks impl must reference.
@@ -174,7 +200,7 @@ def _extract_class_strings(trajectory: list[dict]) -> list[str]:
     Filters _GENERIC_NOISE_CLASSES (Webflow IX modifiers, Lenis state
     classes, base body/html/no-js) — those appear regardless of whether
     the impl actually replicates the splash mechanism, so matching them
-    in impl src would false-pass (codex juanmora review).
+    in impl src would false-pass.
     """
     classes: set[str] = set()
     for entry in trajectory:
@@ -218,7 +244,7 @@ def _check_splash_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
     if not classes:
         # Transitions exist but produced no observable class hooks — N/A.
         return None
-    found = [c for c in classes if c in src_text]
+    found = [c for c in classes if _class_referenced(c, src_text)]
     if found:
         return CheckResult(
             "state-coverage splash",
@@ -263,7 +289,7 @@ def _check_scroll_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
     if summary.get("static") is True:
         # Page fits in viewport — scroll check is N/A.
         return None
-    # Fix 3 reframed (codex review 2026-05-27): infiniteScroll signal is
+    # Fix 3 reframed (review 2026-05-27): infiniteScroll signal is
     # captured by capture-scroll.sh into summary.json but was previously
     # not surfaced anywhere. Emit a non-blocking policy-recommendation
     # warn so the iteration loop sees the unclonable-shape hint EARLY
@@ -381,15 +407,74 @@ def _check_hover_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
     )
 
 
+def _check_click_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
+    click_dir = ref_dir / "states" / "click"
+    manifest_path = click_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return CheckResult(
+            "state-coverage click",
+            "fail",
+            "states/click/manifest.json unreadable",
+            fix="Re-run: bash scripts/extract/capture-click.sh <url> <session> <ref_dir>",
+        )
+    if not isinstance(manifest, dict):
+        return None
+    entries = manifest.get("entries", []) or []
+    if not isinstance(entries, list) or not entries:
+        return None
+    state_entries = [
+        entry for entry in entries
+        if isinstance(entry, dict)
+        and not entry.get("navigationOnly")
+        and entry.get("navigationType", "same-page") == "same-page"
+    ]
+    if not state_entries:
+        # External/same-origin navigation clicks are link fidelity, not
+        # same-page state-machine coverage.
+        return None
+    matched: list[str] = []
+    for pattern in _CLICK_HANDLERS:
+        if re.search(pattern, src_text):
+            matched.append(pattern)
+    if matched:
+        return CheckResult(
+            "state-coverage click",
+            "pass",
+            (
+                f"impl has {len(matched)} click-state handler pattern(s) "
+                f"(ref captured {len(state_entries)} same-page click target(s))"
+            ),
+        )
+    return CheckResult(
+        "state-coverage click",
+        "fail",
+        (
+            f"states/click captured {len(state_entries)} same-page click "
+            "state target(s) on ref but impl/src has no click-state handlers "
+            "(onClick, addEventListener('click'), @click, on:click, "
+            "aria-expanded/data-state). Accordions, tabs, modals, or menus "
+            "will render as static content."
+        ),
+        fix=(
+            "Add a click-driven state controller for the captured selectors. "
+            "External navigation entries in states/click are not enough; "
+            "same-page entries need runtime state mutation."
+        ),
+    )
+
+
 def gate_state_coverage(self: Gate) -> list[CheckResult]:
     """Verify multi-snapshot capture artifacts have corresponding impl hooks.
 
-    Reads <ref_dir>/states/{splash,scroll,hover}/ and grep-checks impl/src/**.
+Reads <ref_dir>/states/{splash,scroll,hover,click}/ and grep-checks impl/src/**.
     For motion-rich refs (GSAP/ScrollTrigger/Lenis/Webflow IX detected in
     bundle-map.json), states/ absence is fail-closed — those sites
-    REQUIRE Phase A/B/C capture for transition ground truth (codex
-    juanmora review finding #1, 2026-05-25). Legacy non-motion-rich refs
-    keep the original lenient skip semantics.
+    REQUIRE Phase A/B/C capture for transition ground truth. Legacy
+    non-motion-rich refs keep the original lenient skip semantics.
     """
     states_root = self.ref_dir / "states"
     motion_rich = _is_motion_rich_ref(self.ref_dir)
@@ -422,7 +507,7 @@ def gate_state_coverage(self: Gate) -> list[CheckResult]:
             )
         ]
 
-    # Fix 2 (codex review 2026-05-27): partial-capture detector for
+    # Fix 2 (review 2026-05-27): partial-capture detector for
     # motion-rich refs. states/ exists (so the "states/ absent" branch
     # above did not fire) but one or more required phase artifacts is
     # missing — e.g. capture-states.sh ran but capture-scroll.sh
@@ -511,6 +596,7 @@ def gate_state_coverage(self: Gate) -> list[CheckResult]:
         _check_splash_coverage(self.ref_dir, src_text),
         _check_scroll_coverage(self.ref_dir, src_text),
         _check_hover_coverage(self.ref_dir, src_text),
+        _check_click_coverage(self.ref_dir, src_text),
     ):
         if check is not None:
             results.append(check)

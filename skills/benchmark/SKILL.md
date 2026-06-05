@@ -619,6 +619,13 @@ timestamp,sha,outcome,iterations,wallclock_s,ae_avg,ssim_avg,gate_fail_total,unc
 2026-05-16T00:00:00Z,abc123,DONE,12,1840,0.023,0.94,4,0
 ```
 
+The full JSON record at `benchmark/history/<timestamp>-<sha>.json` additionally
+carries an `advisory_deductions` block aggregated from the Phase E reviewer's
+`phase-e-review.json` (deduction count, penalty sum, and per-label counts for
+`completeness` / `visual-effect` / `icon-variant`). Advisory trend signal only —
+it feeds no gate and is absent (`null`) when Phase E did not run or the review
+predates schemaVersion 2. CSV schema is unchanged.
+
 ## What this skill is NOT
 
 - Not a CI tool. Lives entirely in the maintainer's local session.

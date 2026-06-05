@@ -72,6 +72,95 @@ def test_completion_report_marks_incomplete_without_proofs(tmp_path: Path) -> No
     )
 
 
+_COMPLETION_REQUIRED_STATUS_ARTIFACTS = [
+    "image-fidelity.json",
+    "svg-dom-parity.json",
+    "required-media-coverage.json",
+    "hero-composite.json",
+    "svg-provenance.json",
+    "color-token-grounding.json",
+    "ref-js-loader.json",
+    "proxy-mirror.json",
+    "html-paste.json",
+    "ref-screenshot-asset.json",
+    "impl-scope.json",
+    "runtime-env.json",
+]
+
+
+def _write_completion_report_green_artifacts(
+    ref: Path, *, current_gate: str, section_result: str
+) -> None:
+    (ref / "sections").mkdir(parents=True)
+    (ref / "pipeline-state.json").write_text(
+        json.dumps({"current_gate": current_gate, "completed_steps": []}),
+        encoding="utf-8",
+    )
+    (ref / "runtime-proof.json").write_text(json.dumps({"status": "pass"}), encoding="utf-8")
+    (ref / "transition-proof.json").write_text(json.dumps({"status": "pass"}), encoding="utf-8")
+    (ref / "font-parity.json").write_text(json.dumps({"parity": "match"}), encoding="utf-8")
+    for name in _COMPLETION_REQUIRED_STATUS_ARTIFACTS:
+        (ref / name).write_text(json.dumps({"status": "pass"}), encoding="utf-8")
+    (ref / "sections" / "result.txt").write_text(section_result, encoding="utf-8")
+
+
+def test_completion_report_check_mode_fails_dirty_closeout(tmp_path: Path) -> None:
+    """`--check` makes the closeout report usable as an unattended loop gate."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    impl.mkdir()
+    _write_completion_report_green_artifacts(
+        ref,
+        current_gate="reference",
+        section_result=(
+            "| Section | AE | Status |\n"
+            "|---------|----|--------|\n"
+            "| hero | 999 | ❌ |\n"
+        ),
+    )
+
+    script = _project_root() / "scripts" / "verify" / "completion-report.sh"
+    proc = subprocess.run(
+        ["bash", str(script), "--check", str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 1
+    assert "current_gate is 'reference', not 'done'" in proc.stdout
+    assert "section-compare dirty" in proc.stdout
+
+
+def test_completion_report_check_mode_passes_green_closeout(tmp_path: Path) -> None:
+    """Green closeout requires current_gate done, clean section rows, and proofs."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    impl.mkdir()
+    _write_completion_report_green_artifacts(
+        ref,
+        current_gate="done",
+        section_result=(
+            "| Section | AE | Status |\n"
+            "|---------|----|--------|\n"
+            "| hero | 0 | ✅ |\n"
+        ),
+    )
+
+    script = _project_root() / "scripts" / "verify" / "completion-report.sh"
+    proc = subprocess.run(
+        ["bash", str(script), "--check", str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert "all green per Hard Done Criteria" in proc.stdout
+
+
 def test_completion_report_surfaces_broad_structural_only_advisory(tmp_path: Path) -> None:
     """A clean section summary can still hide skipped pixel AE rows.
 
@@ -166,6 +255,90 @@ def test_impl_scope_check_initializes_baseline_on_first_call(tmp_path: Path) -> 
         import shutil
         if impl.exists():
             shutil.rmtree(impl, ignore_errors=True)
+
+
+def _init_impl_scope_git_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "ui_clone").mkdir()
+    (repo / "ui_clone" / "gate.py").write_text("BASELINE = True\n", encoding="utf-8")
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    ref = repo / "tmp" / "ref" / "site"
+    impl = repo / "impl"
+    ref.mkdir(parents=True)
+    impl.mkdir()
+    return repo, ref, impl
+
+
+def test_impl_scope_check_ignores_unchanged_preexisting_parent_wip(tmp_path: Path) -> None:
+    """Pre-existing dirty parent-repo work should not force clone agents
+    to ask the user whether to stash/revert unrelated WIP.
+    """
+    repo, ref, impl = _init_impl_scope_git_repo(tmp_path)
+    dirty_file = repo / "ui_clone" / "gate.py"
+    dirty_file.write_text("BASELINE = False\n", encoding="utf-8")
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "impl-scope-check.sh"
+
+    first = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert first.returncode == 0, f"baseline init must pass: {first.stdout}\n{first.stderr}"
+
+    second = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert second.returncode == 0, (
+        "unchanged pre-existing WIP must not fail impl-scope:\n"
+        f"{second.stdout}\n{second.stderr}"
+    )
+    artifact = json.loads((ref / "impl-scope.json").read_text(encoding="utf-8"))
+    assert artifact["status"] == "pass"
+    assert any(
+        row["path"] == "ui_clone/gate.py"
+        and row["reason"] == "pre-existing-dirty-baseline"
+        for row in artifact["allowed"]
+    )
+
+
+def test_impl_scope_check_flags_preexisting_wip_modified_after_baseline(tmp_path: Path) -> None:
+    """The baseline-dirty exemption is content-based, not a broad path
+    whitelist. If the clone iteration edits that file further, fail.
+    """
+    repo, ref, impl = _init_impl_scope_git_repo(tmp_path)
+    dirty_file = repo / "ui_clone" / "gate.py"
+    dirty_file.write_text("BASELINE = False\n", encoding="utf-8")
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "impl-scope-check.sh"
+
+    first = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert first.returncode == 0, f"baseline init must pass: {first.stdout}\n{first.stderr}"
+
+    dirty_file.write_text("BASELINE = 'changed during iteration'\n", encoding="utf-8")
+    second = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert second.returncode == 1
+    artifact = json.loads((ref / "impl-scope.json").read_text(encoding="utf-8"))
+    assert artifact["status"] == "fail"
+    assert any(row["path"] == "ui_clone/gate.py" for row in artifact["violations"])
 
 
 

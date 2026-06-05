@@ -6,8 +6,8 @@
 #
 # 2026-05-22 SKILL.md Tier 2+4 enforcement: roll-up validator that reads
 # every existing runtime-measurement artifact and emits a single
-# composite verdict at <ref-dir>/runtime-proof.json. Per codex-rescue
-# audit (a125b997), the aggregator does NOT run new browser probes — it
+# composite verdict at <ref-dir>/runtime-proof.json. The aggregator does NOT
+# run new browser probes — it
 # only validates the measurements the constituent gates already wrote.
 #
 # Critical: a source gate with status=pass but no actual measurement
@@ -106,11 +106,23 @@ def header_measure(d: dict) -> tuple[bool, str]:
     if d.get("status") == "skip":
         return True, "skipped (static ref header)"
     if d.get("status") == "pass":
-        impl_m = bool(d.get("impl", {}).get("mutates"))
-        ref_m = bool(d.get("ref", {}).get("mutates"))
+        ref = d.get("ref", {})
+        impl = d.get("impl", {})
+        impl_m = bool(impl.get("mutates"))
+        ref_m = bool(ref.get("mutates"))
+        # Geometric trajectory (header-state-runtime-check.sh geoChanges): a header
+        # that animates geometry on scroll (height/transform/position) must be
+        # reproduced — class-toggle parity alone cannot prove the motion arc
+        # (realfood loop-145: ref nav springs on scrollY while impl is pinned).
+        # Artifacts predating the geometry probe carry no geoChanges -> both False
+        # -> this reduces to the original mutation-parity behaviour (no regression).
+        ref_geo = bool(ref.get("geoChanges"))
+        impl_geo = bool(impl.get("geoChanges"))
         if ref_m and not impl_m:
             return False, "ref mutates but impl static — measurement contradicts status"
-        return impl_m == ref_m, "header mutation parity"
+        if ref_geo and not impl_geo:
+            return False, "ref header geometry moves on scroll but impl static — class parity alone cannot prove it"
+        return (impl_m == ref_m) and (impl_geo == ref_geo), "header mutation+geometry parity"
     return False, f"status={d.get('status')}"
 
 def hero_composite_measure(d: dict) -> tuple[bool, str]:

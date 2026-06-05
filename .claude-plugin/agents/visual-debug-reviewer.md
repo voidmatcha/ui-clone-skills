@@ -23,7 +23,7 @@ For each scroll-position pair under `tmp/ref/<component>/static/`:
 2. **Detailed review artifact → persist to disk at `<ref-dir>/phase-e-review.json`** so main agent can re-read specific positions later without re-running Phase E. Shape:
    ```json
    {
-     "schemaVersion": 1,
+     "schemaVersion": 2,
      "runAt": "<ISO timestamp>",
      "positions": [
        {
@@ -35,6 +35,14 @@ For each scroll-position pair under `tmp/ref/<component>/static/`:
            "<detail 2 — which region / element>",
            "<detail 3 — likely cause if obvious>"
          ],
+         "deductions": [
+           {
+             "location": "<region/element, e.g. 'hero CTA row, right icon'>",
+             "reason": "<one observable fact>",
+             "penalty": -12,
+             "label": "completeness|visual-effect|icon-variant"
+           }
+         ],
          "refImage": "<path>",
          "implImage": "<path>"
        }
@@ -42,6 +50,8 @@ For each scroll-position pair under `tmp/ref/<component>/static/`:
    }
    ```
    The `observations` array captures the per-image detail the verdict table omits. Main agent can `jq '.positions[] | select(.pct == 30)'` to retrieve only the relevant entry — no re-vision.
+
+   `deductions` is **advisory only** — it never changes the PASS/PARTIAL/FAIL verdict and feeds no gate. Fill it for PARTIAL/FAIL positions (PASS positions get `[]`). Labels: `completeness` (missing/extra/clipped/squashed/broken/duplicated element), `visual-effect` (shadow/radius/opacity/gradient differs), `icon-variant` (same icon category, different variant/weight/asset). Penalty bands are anchored: large −25..−40, medium −10..−20, small −3..−8. See `skills/visual-debug/comparison-fix.md` Phase E "Advisory deductions" for the full rubric.
 
 Both outputs use the same PASS/PARTIAL/FAIL classification. The verdict table is the routing signal; the JSON is the forensic record.
 

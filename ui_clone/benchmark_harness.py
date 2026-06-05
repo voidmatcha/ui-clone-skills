@@ -290,6 +290,15 @@ Pipeline phases:
 5. Run section-compare → tree-diff → motion checks
 6. Iterate until all STRICT conditions pass
 
+Unattended loop contract:
+- Do not ask the user to choose between approaches, approve a retry, or pick a
+  blocker. If the next step is safe and reversible, pick the next reversible action yourself
+  using the failing gate with the highest impact.
+- If several options look viable, take the one most directly supported by the
+  current artifacts and verification output, then verify it before exiting.
+- Stop only for destructive/external actions (credentials, paid licenses,
+  deleting user work) or a documented unclonable condition.
+
 Use `python -m ui_clone.goal {ref_dir}` to see the next bounded action.
 Use `python -m ui_clone.gate {ref_dir} <gate>` to verify any gate.
 Use `python -m ui_clone.measure section-compare {ref_dir} --orig-url {orig_url} --impl-url {impl_url} --session {session}` to run measurement with LOCKED defaults.
@@ -317,6 +326,15 @@ Your job for THIS iter:
    work persists across iters — only address what's still failing.
 5. EXIT when this iter's work is done. The harness will check STRICT
    conditions after you exit and re-invoke you if needed.
+
+Unattended loop contract:
+- Do not ask the user to choose between approaches, approve a retry, or pick a
+  blocker. If the next step is safe and reversible, pick the next reversible action yourself
+  using the failing gate with the highest impact.
+- If several options look viable, take the one most directly supported by the
+  current artifacts and verification output, then verify it before exiting.
+- Stop only for destructive/external actions (credentials, paid licenses,
+  deleting user work) or a documented unclonable condition.
 
 Token budget remaining: {budget_remaining:,} tokens. Be efficient."""
 

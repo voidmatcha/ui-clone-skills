@@ -385,6 +385,34 @@ def pair_sections(ref: list[Section], impl: list[Section]) -> list[Section]:
     return matches
 
 
+def find_large_extra_sections(
+    matches: list[object], floor_px: int
+) -> list[tuple[str, int]]:
+    """Fix 94 (A3) — impl sections that paired with NO ref (EXTRA_IN_IMPL) and
+    render at least floor_px tall. A faithful clone has ~0 of these; a duplicated
+    or misplaced impl block (a hero re-rendered at the page bottom, or a
+    dedup-renamed "-2" section) surfaces here. Bounded structural-health signal,
+    NOT a general order/structural diff.
+    """
+    out: list[tuple[str, int]] = []
+    for x in matches:
+        if not isinstance(x, dict):
+            continue
+        if x.get("status") != "EXTRA_IN_IMPL" or x.get("ref"):
+            continue
+        im_raw = x.get("impl")
+        im = im_raw if isinstance(im_raw, dict) else {}
+        rect_raw = im.get("rect")
+        rect = rect_raw if isinstance(rect_raw, dict) else {}
+        try:
+            h = int(rect.get("height") or 0)
+        except (TypeError, ValueError):
+            h = 0
+        if h >= floor_px:
+            out.append((str(x.get("name", "?")), h))
+    return out
+
+
 def _load_json(path: Path) -> object | None:
     try:
         data: object = json.loads(path.read_text(encoding="utf-8"))

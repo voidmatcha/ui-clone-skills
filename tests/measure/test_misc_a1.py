@@ -396,6 +396,198 @@ def test_header_state_runtime_dispatcher_wired() -> None:
 
 
 
+# ---------------------------------------------------------------------------
+# 2026-06-05 gate-enforcement fix: header GEOMETRY trajectory parity.
+#
+# The class/data-attr comparator is blind to headers that animate their
+# geometry (height 100->64, padding shrink, transform translateY,
+# position fixed->absolute) on scroll WITHOUT toggling any class. Real
+# artifacts (realfood-gov + 10 sibling refs) shipped status=pass with
+# ref.mutates=true AND classesToggled=[] — the mutation came from
+# body/html/fw-root class deltas, not verified header geometry. An impl
+# that pins the header via overrides.css
+# (.header{position:absolute!important;transform:none!important}) passes
+# silently. The geo-trajectory comparator closes that blind spot.
+# ---------------------------------------------------------------------------
+
+_HSR_SCRIPT_REL = "skills/visual-debug/scripts/header-state-runtime-check.sh"
+
+
+def _hsr_script_body() -> str:
+    return (_project_root() / _HSR_SCRIPT_REL).read_text(encoding="utf-8")
+
+
+def test_header_state_runtime_captures_geometry_source() -> None:
+    """The snap() probe must read computed geometry (getComputedStyle +
+    getBoundingClientRect) and the Python comparator must own a geometry
+    failure path. Mirrors test_header_state_runtime_check_script_present.
+    """
+    body = _hsr_script_body()
+    assert "getBoundingClientRect" in body, "snap() must measure layout rect"
+    assert "paddingTop" in body and "paddingBottom" in body, (
+        "snap() must capture vertical padding trajectory"
+    )
+    assert "position" in body, "snap() must capture position (fixed/absolute)"
+    assert "geo" in body, "snap must expose a geo block for the comparator"
+    assert "geometry" in body.lower(), (
+        "comparator must surface a geometry-specific fail reason"
+    )
+
+
+def _hsr_snap(height: float, *, padding: str = "16px 0px",
+              transform: str = "none", position: str = "fixed",
+              top: str = "0px", cls: str = "") -> dict:
+    """Build a snap() shape with the new geo block. Class set empty by
+    default — this is the class-less geometric header blind spot.
+    """
+    pt, _, pb = padding.partition(" ")
+    return {
+        "tag": "header",
+        "cls": cls,
+        "attrs": {},
+        "childTagClasses": [],
+        "geo": {
+            "height": height,
+            "paddingTop": pt,
+            "paddingBottom": pb if pb else pt,
+            "transform": transform,
+            "position": position,
+            "top": top,
+            "scrollY": 0,
+        },
+    }
+
+
+def _hsr_probe(samples_geo: list, *, scroll_tops: tuple[int, ...] = (200, 600, 1200, 1500)) -> dict:
+    """Compose a probe JSON. samples_geo is a list of (top, height,
+    transform, position) describing each scroll sample's geo. at0 is the
+    scroll=0 baseline (first entry's height treated as start).
+    """
+    at0_height, at0_transform, at0_position = samples_geo[0][1:4]
+    at0 = _hsr_snap(at0_height, transform=at0_transform, position=at0_position)
+    at0["geo"]["scrollY"] = 0
+    samples = []
+    deep = at0
+    for (top, h, tf, pos) in samples_geo[1:]:
+        snap = _hsr_snap(h, transform=tf, position=pos)
+        snap["geo"]["scrollY"] = top
+        samples.append({"top": top, "snapshot": snap})
+        deep = snap
+    return {
+        "found": True,
+        "at0": at0,
+        "at600": deep,
+        "samples": samples,
+        "allRoots0": [{"name": "header", "snap": at0}],
+        "allRootsDeep": [{"name": "header", "snap": deep}],
+        "scrollHeight": 6000,
+    }
+
+
+def _run_hsr_with_stub(
+    tmp_path: Path, ref_probe: dict, impl_probe: dict
+) -> tuple[subprocess.CompletedProcess[str], dict]:
+    """Invoke header-state-runtime-check.sh with a PATH-shimmed
+    agent-browser that emits the supplied probe fixtures. The shim picks
+    ref vs impl by the --session suffix (-hdr-ref / -hdr-impl).
+    """
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    ref_fix = tmp_path / "ref_probe.json"
+    impl_fix = tmp_path / "impl_probe.json"
+    ref_fix.write_text(json.dumps(ref_probe))
+    impl_fix.write_text(json.dumps(impl_probe))
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "agent-browser"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "# Test stub: emit the right probe fixture on `eval`, no-op otherwise.\n"
+        "session=\"\"\n"
+        "is_eval=0\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    --session) session=\"$2\"; shift 2;;\n"
+        "    eval) is_eval=1; shift;;\n"
+        "    *) shift;;\n"
+        "  esac\n"
+        "done\n"
+        "if [ \"$is_eval\" -eq 1 ]; then\n"
+        f"  case \"$session\" in\n"
+        f"    *-hdr-ref) cat {json.dumps(str(ref_fix))[1:-1]};;\n"
+        f"    *-hdr-impl) cat {json.dumps(str(impl_fix))[1:-1]};;\n"
+        "  esac\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+    script = _project_root() / _HSR_SCRIPT_REL
+    proc = subprocess.run(
+        ["bash", str(script), "tsess",
+         "https://ref.example.com", "https://impl.example.com", str(ref_dir)],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    artifact_path = ref_dir / "header-state-runtime.json"
+    artifact = json.loads(artifact_path.read_text()) if artifact_path.is_file() else {}
+    return proc, artifact
+
+
+def test_header_state_runtime_fails_when_ref_geo_moves_but_impl_frozen(tmp_path: Path) -> None:
+    """Ref header shrinks height 100->64 on scroll while toggling NO class;
+    impl header is frozen at 64 (overrides.css suppressor). The gate must
+    FAIL with a geometry reason and exit 1 — the class comparator alone
+    would silently pass here.
+    """
+    ref_probe = _hsr_probe([
+        (0, 100.0, "none", "fixed"),
+        (200, 80.0, "translateY(-8px)", "fixed"),
+        (600, 64.0, "translateY(-12px)", "absolute"),
+        (1500, 64.0, "translateY(-12px)", "absolute"),
+    ])
+    impl_probe = _hsr_probe([
+        (0, 64.0, "none", "absolute"),
+        (200, 64.0, "none", "absolute"),
+        (600, 64.0, "none", "absolute"),
+        (1500, 64.0, "none", "absolute"),
+    ])
+    proc, artifact = _run_hsr_with_stub(tmp_path, ref_probe, impl_probe)
+    assert artifact, f"no artifact written; stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert artifact["status"] == "fail", f"expected fail, got {artifact}"
+    blob = json.dumps(artifact).lower()
+    assert "geometr" in blob, f"fail reason must mention geometry: {artifact['reasons']}"
+    assert proc.returncode == 1, f"geo-fail must exit 1, got {proc.returncode}"
+    assert artifact["ref"].get("geoChanges") is True
+    assert artifact["impl"].get("geoChanges") is False
+
+
+def test_header_state_runtime_passes_when_impl_geo_matches(tmp_path: Path) -> None:
+    """Negative control: impl header also shrinks 100->64 on scroll, so the
+    geometric state machine is reproduced — status must be pass, exit 0.
+    """
+    ref_probe = _hsr_probe([
+        (0, 100.0, "none", "fixed"),
+        (200, 80.0, "translateY(-8px)", "fixed"),
+        (600, 64.0, "translateY(-12px)", "absolute"),
+        (1500, 64.0, "translateY(-12px)", "absolute"),
+    ])
+    impl_probe = _hsr_probe([
+        (0, 100.0, "none", "fixed"),
+        (200, 80.0, "translateY(-8px)", "fixed"),
+        (600, 64.0, "translateY(-12px)", "absolute"),
+        (1500, 64.0, "translateY(-12px)", "absolute"),
+    ])
+    proc, artifact = _run_hsr_with_stub(tmp_path, ref_probe, impl_probe)
+    assert artifact, f"no artifact written; stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert artifact["status"] == "pass", f"expected pass, got {artifact}"
+    assert proc.returncode == 0, f"geo-match must exit 0, got {proc.returncode}"
+    assert artifact["ref"].get("geoChanges") is True
+    assert artifact["impl"].get("geoChanges") is True
+
+
 def test_runtime_proof_rollup_aggregates_source_artifacts(tmp_path: Path) -> None:
     """2026-05-22 codex-rescue audit: the runtime-proof aggregator must
     read source artifacts (not run new probes) and FAIL when any source
@@ -965,3 +1157,53 @@ def test_runtime_frame_proof_script_present() -> None:
     assert "readPixels" in body, "must sample WebGL via readPixels"
     assert "currentFrame" in body, "must read Lottie instance.currentFrame"
     assert "runtime-frame-proof.json" in body
+
+
+def test_runtime_proof_rollup_header_geo_pass_without_impl_geo_is_invalid(
+    tmp_path: Path,
+) -> None:
+    """A header artifact that passes class-mutation parity but whose REF geometry
+    moves on scroll while the IMPL stays static (geoChanges mismatch) must be
+    flagged invalid by the rollup. Class-toggle parity alone cannot prove the
+    motion arc (realfood loop-145: ref nav springs on scrollY, impl pinned)."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "header-state-runtime.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "pass",
+        "ref": {"mutates": True, "geoChanges": True},
+        "impl": {"mutates": True, "geoChanges": False},
+    }))
+    (ref / "hero-composite.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass",
+        "impl": {"video": True, "button": True, "h1OrH2": True, "label": True},
+    }))
+    (ref / "svg-provenance.json").write_text(json.dumps({"schemaVersion": 1, "status": "skip"}))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-proof-rollup.sh"
+    subprocess.run(["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10)
+    artifact = json.loads((ref / "runtime-proof.json").read_text())
+    hdr = next(c for c in artifact["components"] if c["artifact"] == "header-state-runtime.json")
+    assert hdr["valid"] is False, f"header geo-mismatch pass must be invalid: {hdr}"
+
+
+def test_runtime_proof_rollup_header_geo_match_stays_valid(tmp_path: Path) -> None:
+    """Positive: ref + impl geometry both move on scroll -> header valid (no
+    false positive from the geometry validity gate)."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "header-state-runtime.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass",
+        "ref": {"mutates": True, "geoChanges": True},
+        "impl": {"mutates": True, "geoChanges": True},
+    }))
+    (ref / "hero-composite.json").write_text(json.dumps({
+        "schemaVersion": 1, "status": "pass",
+        "impl": {"video": True, "button": True, "h1OrH2": True, "label": True},
+    }))
+    (ref / "svg-provenance.json").write_text(json.dumps({"schemaVersion": 1, "status": "skip"}))
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "runtime-proof-rollup.sh"
+    subprocess.run(["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10)
+    artifact = json.loads((ref / "runtime-proof.json").read_text())
+    hdr = next(c for c in artifact["components"] if c["artifact"] == "header-state-runtime.json")
+    assert hdr["valid"] is True, f"matching geometry must stay valid: {hdr}"

@@ -95,7 +95,8 @@ def _run_capture_hover(
 def _result(activation: str, *, affected: str | None = None,
             kind: str = "css+js",
             css_props: dict | None = None,
-            js_changes: list[dict] | None = None) -> dict:
+            js_changes: list[dict] | None = None,
+            dom_changes: list[dict] | None = None) -> dict:
     """Build one per-candidate hover result entry.
 
     kind: "css" | "js" | "css+js" — which signal class produced this entry.
@@ -117,6 +118,8 @@ def _result(activation: str, *, affected: str | None = None,
         "kind": kind,
         "cssProperties": css_props or {},
         "jsChanges": js_changes or [],
+        "domChanges": dom_changes or [],
+        "eventDriver": "agent-browser.eval.synthetic-hover",
     }
 
 
@@ -130,7 +133,7 @@ def _eval_payload(
     js_count = len([r for r in results if r.get("kind") in ("js", "css+js")])
     any_signal = len([
         r for r in results
-        if r.get("cssProperties") or r.get("jsChanges")
+        if r.get("cssProperties") or r.get("jsChanges") or r.get("domChanges")
     ])
     payload = {
         "results": results,
@@ -275,6 +278,42 @@ def test_combined_css_and_js_signal(tmp_path: Path) -> None:
     snap = json.loads((hover_dir / entry["file"]).read_text())
     assert snap["cssProperties"]
     assert snap["jsChanges"]
+
+
+def test_dom_hover_mutation_counts_as_runtime_signal(tmp_path: Path) -> None:
+    """JS hover handlers may mutate classes/aria/text without changing the
+    tracked computed-style set. Preserve compact domChanges so generation can
+    clone class/state flips instead of guessing from CSSOM alone."""
+    ref_dir = tmp_path / "ref"
+    results = [
+        _result(
+            ".card",
+            kind="js",
+            css_props={},
+            js_changes=[],
+            dom_changes=[
+                {
+                    "selector": "div.card",
+                    "changes": {
+                        "className": {"before": "card", "after": "card is-hover"}
+                    },
+                }
+            ],
+        )
+    ]
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
+    proc = _run_capture_hover(ref_dir, bin_dir)
+    assert proc.returncode == 0, proc.stderr
+
+    hover_dir = ref_dir / "states" / "hover"
+    manifest = json.loads((hover_dir / "manifest.json").read_text())
+    entry = manifest["entries"][0]
+    assert entry["changedCount"] == 1
+    snap = json.loads((hover_dir / entry["file"]).read_text())
+    assert snap["domChanges"][0]["changes"]["className"]["after"] == "card is-hover"
+    assert snap["eventDriver"] == "agent-browser.eval.synthetic-hover"
+    summary = json.loads((hover_dir / "summary.json").read_text())
+    assert summary["candidatesWithDomDiff"] == 1
 
 
 def test_agent_browser_open_failure_exit_2(tmp_path: Path) -> None:

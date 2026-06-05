@@ -53,6 +53,42 @@ class TestSectionGate:
         assert data.get("decision") == "block"
         assert "reason" in data
 
+    def test_stop_hook_active_releases_even_when_gate_would_block(
+        self, tmp_path: Path
+    ) -> None:
+        """When the Stop payload carries stop_hook_active=true the hook must
+        allow the turn to end (exit 0, no block) even though the gate would
+        otherwise block — otherwise it loops until the consecutive-block cap and
+        wastes hours of churn per round."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)  # would block (no result.txt)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"hook_event_name": "Stop", "stop_hook_active": True}),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", (
+            f"stop_hook_active must release without a block; got: {result.stdout!r}"
+        )
+
+    def test_stop_hook_inactive_still_blocks(self, tmp_path: Path) -> None:
+        """Sanity: with stop_hook_active=false the gate still blocks normally."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"hook_event_name": "Stop", "stop_hook_active": False}),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout.strip())
+        assert data.get("decision") == "block"
+
     def test_wip_marker_result_txt_no_failures_exits_0(self, tmp_path: Path) -> None:
         """WIP marker + pipeline-state at section-compare + result.txt with only ✅ → exit 0."""
         import json as _json
@@ -268,6 +304,86 @@ class TestSectionGate:
         monkeypatch.delenv("UI_RE_STALE_DAYS", raising=False)
 
         assert section_gate._fresh_active_dirs([ref_dir]) == []
+
+    def test_implicit_stale_by_pipeline_state_despite_fresh_fs_mtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An abandoned ref whose pipeline-state.last_updated is old must be
+        treated as STALE even when its directory mtime was just bumped (a scan,
+        a read, or the hook itself touching the dir). Filesystem mtime is noisy;
+        pipeline-state.last_updated is the authoritative activity signal. Real
+        bug: an orphan ref (last_updated 2 days ago) whose dir got touched today
+        out-ranked the genuinely-active ref and blocked an unrelated Stop."""
+        import datetime as _dt
+
+        from ui_clone.hooks import section_gate
+
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "abandoned-orphan")
+        old_iso = (
+            _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=4)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps(
+                {
+                    "component": "abandoned-orphan",
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "completed_steps": ["reference", "extraction"],
+                    "current_gate": "post-implement",
+                    "last_updated": old_iso,
+                }
+            ),
+            encoding="utf-8",
+        )
+        # Directory + children carry a FRESH filesystem mtime (just written).
+        monkeypatch.delenv("UI_RE_STALE_DAYS", raising=False)
+
+        assert section_gate._fresh_active_dirs([ref_dir]) == []
+
+    def test_lru_ranks_by_pipeline_state_not_fresh_fs_mtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LRU pruning must rank refs by pipeline-state activity, not fs mtime.
+
+        Reproduces the real block: an abandoned orphan whose dir was touched
+        today (freshest fs mtime) but last advanced 2 days ago must lose the
+        LRU race to genuinely-active refs and be pruned — so it stops hijacking
+        the 'newest active' slot and blocking an unrelated Stop."""
+        import datetime as _dt
+
+        from ui_clone.hooks import section_gate
+
+        def _iso(days_ago: float) -> str:
+            return (
+                _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=days_ago)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        search_root = make_search_root(tmp_path)
+        specs = {"orphan": 2.0, "active-a": 0.001, "active-b": 0.0005}
+        dirs = {}
+        for name, days_ago in specs.items():
+            d = make_ref_dir(search_root, name)
+            (d / "pipeline-state.json").write_text(
+                json.dumps(
+                    {
+                        "component": name,
+                        "started_at": "2026-01-01T00:00:00Z",
+                        "completed_steps": ["reference", "extraction"],
+                        "current_gate": "post-implement",
+                        "last_updated": _iso(days_ago),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dirs[name] = d
+        # All three carry a fresh fs mtime (just written). active_max=2.
+        monkeypatch.setenv("UI_RE_ACTIVE_MAX", "2")
+        monkeypatch.delenv("UI_RE_STALE_DAYS", raising=False)
+
+        kept = {p.name for p in section_gate._fresh_active_dirs(list(dirs.values()))}
+
+        assert "orphan" not in kept, "stale-by-state orphan must be LRU-pruned"
+        assert kept == {"active-a", "active-b"}
 
     def test_multiple_active_sessions_enforces_later_refs(self, tmp_path: Path) -> None:
         """Multiple WIP markers → later dirty refs still block Stop."""
@@ -1537,3 +1653,16 @@ class TestSectionGateCanvasReplayCloseout:
         assert data.get("decision") == "block"
         reason = data.get("reason", "")
         assert "attestation" in reason.lower()
+
+
+def test_coerce_stop_hook_active_handles_string_false() -> None:
+    """Codex LOW: bool("false") is truthy — string forms must coerce correctly."""
+    from ui_clone.hooks.section_gate import _coerce_stop_hook_active
+    assert _coerce_stop_hook_active(True) is True
+    assert _coerce_stop_hook_active(False) is False
+    assert _coerce_stop_hook_active("true") is True
+    assert _coerce_stop_hook_active("false") is False
+    assert _coerce_stop_hook_active("0") is False
+    assert _coerce_stop_hook_active("") is False
+    assert _coerce_stop_hook_active(None) is False
+    assert _coerce_stop_hook_active(1) is True

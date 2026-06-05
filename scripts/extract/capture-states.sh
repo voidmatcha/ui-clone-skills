@@ -5,7 +5,7 @@
 # can replicate the bridge between `is-loading` and `is-loaded`-style states
 # instead of guessing from a single post-settled snapshot.
 #
-# Codex review (2026-05-25, docs/multi-snapshot-capture-design.md):
+# Review follow-up (2026-05-25, docs/multi-snapshot-capture-design.md):
 #   - Single `agent-browser eval` with in-page Promise loop, not 50 shell
 #     evals @ 100ms (CLI round-trip cost + no latency guarantee).
 #   - State-hash includes html/body class + scroll lock + full-screen overlay
@@ -327,3 +327,8 @@ for s in states:
 
 print(f"capture-states: wrote {len(trajectory)} transition(s) to {outdir}/", file=sys.stderr)
 PY
+
+SPEC_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/state-structure-spec.py"
+if [ "${STATE_STRUCTURE_SPEC:-1}" != "0" ] && [ -f "$SPEC_PY" ]; then
+  python3 "$SPEC_PY" "$REF_DIR" >/dev/null
+fi

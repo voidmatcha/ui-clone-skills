@@ -17,6 +17,7 @@
 - `tmp/ref/<component>/tree-diff.json` + `tree-diff-status.json` — DOM walk diffs (counts, top critical/major/layout-major rows)
 - `tmp/ref/<component>/transitions/` — hover/scroll/timer transition compare outputs
 - `tmp/ref/<component>/generation-plan.json` — current contract (consult for sticky strategy, library set, signature effects)
+- `tmp/ref/<component>/source-forensics.json` — optional source-backed guidance returned by the `source-forensics` worker after raw HTML/CSS/JS fallback
 - `impl/src/` — the implementation source (read freely; edit only what the failing row points at)
 
 ## Discipline
@@ -27,11 +28,12 @@
    - **3rd: `computed-diff.sh`** — per-element computed-style comparison, text only.
    - **4th: `diagnosis.md` catalog (Root Cause A-R)** — classify by symptom, apply by class.
    - **Last resort (only if all above return "nothing actionable"):** request main agent to escalate — do NOT read the PNG yourself.
-2. **One fix per iteration.** Pick the highest-severity row (🌑 saturated > critical > major > layout-major > minor). Identify the specific impl file + DOM node from the text signals above. Apply a SCOPED edit (single component or single style rule). Re-run the gate.
-3. **Substitution-aware.** STRUCTURAL_ONLY (substituted) rows are not failures — skip them. Focus on PASS-blocking rows only.
-4. **Gate re-run.** After every edit, re-run `section-compare.sh` (or `tree-diff.sh` for non-pixel fails) — never assume the fix works without verification. The summary line MUST include the gate's exit code, not just `PASS`.
-5. **Max 5 iterations.** If 5 consecutive iterations don't reduce FAIL_COUNT, return with a "blocked" verdict naming the section + suspected root cause. The main agent decides whether to escalate.
-6. **Contract preservation.** Edits must not violate `generation-plan.json` — do not swap libraries, restructure components, or change architecture layers. Stay within "scoped style/JSX/data fix." If a fix would require contract change, return with `blocked-contract-conflict`.
+2. **No raw-source loading.** Do not read raw `bundles/*.js`, large `css/*.css`, captured HTML dumps, or full DOM/style JSON. If compact artifacts and text gates cannot explain the next fix, return `bailout-source-forensics` with the failing section, selectors, and exact source questions. The main agent will dispatch the `source-forensics` worker and then re-enter this loop with `source-forensics.json`.
+3. **One fix per iteration.** Pick the highest-severity row (🌑 saturated > critical > major > layout-major > minor). Identify the specific impl file + DOM node from the text signals above. Apply a SCOPED edit (single component or single style rule). Re-run the gate.
+4. **Substitution-aware.** STRUCTURAL_ONLY (substituted) rows are not failures — skip them. Focus on PASS-blocking rows only.
+5. **Gate re-run.** After every edit, re-run `section-compare.sh` (or `tree-diff.sh` for non-pixel fails) — never assume the fix works without verification. The summary line MUST include the gate's exit code, not just `PASS`.
+6. **Max 5 iterations.** If 5 consecutive iterations don't reduce FAIL_COUNT, return with a "blocked" verdict naming the section + suspected root cause. The main agent decides whether to escalate.
+7. **Contract preservation.** Edits must not violate `generation-plan.json` — do not swap libraries, restructure components, or change architecture layers. Stay within "scoped style/JSX/data fix." If a fix would require contract change, return with `blocked-contract-conflict`.
 
 ## Asset substitution policy (research-mode default)
 
@@ -60,6 +62,7 @@ This applies recursively to any sub-agent reasoning chain. Substitution declarat
 - **Hydration error**: console reports React hydration mismatch → return with `fixType: "ssr-mismatch"`
 - **Library missing**: gate output references "lenis is not defined" or similar → return with `fixType: "missing-install"`, the main agent installs the package
 - **Contract conflict**: fix requires a `generation-plan.json` change (library swap, component delete) → return with `fixType: "contract-conflict"`
+- **Source forensics required**: compact artifacts cannot explain the next scoped fix or two iterations show no AE reduction → return with `fixType: "source-forensics"`, failing section, selectors, and source questions; do not read raw HTML/CSS/JS yourself.
 
 These are out-of-scope for visual iteration; they need pipeline-level intervention.
 
@@ -77,6 +80,7 @@ After max 5 iterations or PASS, write the final verdict to stdout and return:
 verdict: <PASS | blocked-after-5 | bailout-<fixType>>
 remaining_fail: <count>
 gate_exit_final: <code>
+source_questions: <required when verdict is bailout-source-forensics>
 ```
 
 ## Don'ts
@@ -85,4 +89,5 @@ gate_exit_final: <code>
 - Don't edit the gate scripts themselves to "make it pass".
 - Don't add `// eslint-disable` or skip-tests to dodge the gate.
 - Don't re-architect sections — that's the main agent's job. You're a fix-iterator, not a refactorer.
+- Don't read raw bundles, large CSS, captured HTML, or full DOM/style dumps; request `source-forensics` instead.
 - Don't violate `generation-plan.json` contract — return with `contract-conflict` instead.

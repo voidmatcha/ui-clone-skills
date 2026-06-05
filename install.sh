@@ -71,12 +71,14 @@ NO_MARKETPLACE=0
 INSTALL_CLAUDE=1
 INSTALL_CODEX=1
 ASSUME_YES=0
+DO_UNINSTALL=0
 for arg in "$@"; do
   case "$arg" in
     --no-deps) NO_DEPS=1 ;;
     --no-marketplace) NO_MARKETPLACE=1 ;;
     --codex|--codex-only) INSTALL_CLAUDE=0 ;;
     --claude|--claude-only) INSTALL_CODEX=0 ;;
+    --uninstall) DO_UNINSTALL=1 ;;
     --yes|-y) ASSUME_YES=1 ;;
     -h|--help)
       awk 'NR==1{next} /^set -euo/{exit} {sub(/^# ?/,""); print}' "$0"
@@ -255,7 +257,8 @@ loop_setup_notice() {
       # Append to ~/.codex/config.toml:
       [features]
       goals = true
-      plugin_hooks = true
+      # (Gate hooks are installed by install.sh into ~/.codex/hooks.json — the
+      #  plugin_hooks feature was removed in codex-cli 0.137 and is not used.)
       # Restart Codex, then in the REPL run:
       /goal Drive the ui-clone-skills pipeline for tmp/ref/<component> until python -m ui_clone.goal tmp/ref/<component> --check-done exits 0.
 
@@ -332,7 +335,7 @@ prepare_codex_plugin_projection() {
     ln -s "$src" "$dst"
   done
 
-  ok "Codex plugin projection → $plugin_dir"
+  ok "Codex plugin projection → $plugin_dir (source: $REPO_ROOT)"
 }
 
 install_codex_native_agents() {
@@ -469,7 +472,74 @@ register_codex_marketplace() {
   fi
 }
 
+merge_codex_hooks() {
+  # codex-cli >= 0.137 REMOVED the `plugin_hooks` feature, so the plugin's
+  # hooks/codex-hooks.json gates no longer load from the plugin manifest. Merge
+  # them into the stable, OMX-shared ~/.codex/hooks.json instead — idempotent,
+  # touches only `.hooks` (OMX's trust `state` and native wrappers are preserved).
+  # The merged commands resolve the checkout via the install marker, so this is
+  # host- and source-agnostic (local working tree or github clone).
+  have codex || { warn "codex CLI absent — skipping gate-hook merge"; return; }
+  local hooks_file plugin_hooks
+  hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
+  plugin_hooks="$REPO_ROOT/hooks/codex-hooks.json"
+  if [ ! -f "$plugin_hooks" ]; then
+    warn "missing $plugin_hooks — skipping gate-hook merge"; return
+  fi
+  act "Merging ui-clone gate hooks → $hooks_file"
+  if uv run --project "$REPO_ROOT" python -m ui_clone.codex_hooks_install merge \
+       --hooks-file "$hooks_file" --plugin "$plugin_hooks"; then
+    ok "Codex gate hooks installed (idempotent)"
+    warn "First Codex session prompts once to trust the new hooks — accept it."
+  else
+    err "Gate-hook merge failed; $hooks_file left untouched"
+  fi
+}
+
+uninstall_all() {
+  section "Uninstall ui-clone-skills"
+  if have codex; then
+    local hooks_file
+    hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
+    if [ -f "$hooks_file" ]; then
+      if uv run --project "$REPO_ROOT" python -m ui_clone.codex_hooks_install remove \
+           --hooks-file "$hooks_file"; then
+        ok "stripped ui-clone gate hooks from $hooks_file"
+      else
+        warn "could not strip gate hooks from $hooks_file"
+      fi
+    fi
+    if codex plugin remove "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME" >/dev/null 2>&1; then
+      ok "removed Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+    else
+      skip "Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+    fi
+  fi
+  if [ -e "$CODEX_PLUGIN_DIR" ]; then
+    rm -rf "$CODEX_PLUGIN_DIR" && ok "removed projection $CODEX_PLUGIN_DIR"
+  fi
+  if have claude; then
+    if claude plugin uninstall "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+      ok "uninstalled Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
+    else
+      skip "Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
+    fi
+    if claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+      ok "removed Claude marketplace $MARKETPLACE_NAME"
+    else
+      skip "Claude marketplace $MARKETPLACE_NAME"
+    fi
+  fi
+  rm -f "$HOME/.config/ui-clone-skills/root" 2>/dev/null && ok "removed install marker" || true
+  warn "Left in place: Codex native agents (~/.codex/agents/*.toml) and any config.toml [plugins] block — remove manually if desired."
+  ok "Uninstall complete."
+}
+
 main() {
+  if [ "$DO_UNINSTALL" -eq 1 ]; then
+    uninstall_all
+    return 0
+  fi
   section "ui-clone-skills installer (OS: $OS, repo: $REPO_ROOT)"
 
   if [ "$NO_DEPS" -eq 0 ]; then
@@ -499,6 +569,14 @@ main() {
   if [ "$NO_MARKETPLACE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 1 ]; then
     section "Codex plugin"
     register_codex_marketplace
+  fi
+
+  # Codex gate hooks are a SEPARATE concern from the plugin/marketplace (the
+  # plugin only carries skills now that codex removed plugin_hooks), so install
+  # them whenever Codex is targeted — even under --no-marketplace.
+  if [ "$INSTALL_CODEX" -eq 1 ]; then
+    section "Codex gate hooks"
+    merge_codex_hooks
   fi
 
   # Install marker — lets inline preflight bash and shared scripts resolve the
@@ -535,9 +613,11 @@ EOF
     if [ "$INSTALL_CODEX" -eq 1 ]; then
       cat <<EOF
 
-      Codex: restart the CLI to pick up the registered marketplace.
-             Verify: codex plugin list | grep '${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME} (installed)'
-             Enable hooks: codex --enable plugin_hooks
+      Codex: restart the CLI to pick up the registered marketplace + gate hooks.
+             Verify plugin: codex plugin list | grep '${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME} (installed)'
+             Verify hooks:  grep -q ui_clone.hooks "${CODEX_HOME:-\$HOME/.codex}/hooks.json" && echo gate-hooks OK
+             Source: ${CODEX_PLUGIN_DIR} is a public-skill projection symlinked to ${REPO_ROOT}
+             (Accept the one-time hook-trust prompt on first Codex session.)
 EOF
     fi
     cat <<EOF

@@ -61,7 +61,7 @@ RESULT=$(agent-browser --session "$SESSION" eval "$(cat <<'JS'
 
   // ── Helpers: capture at current scroll position ──
   //
-  // Codex juanmora review (2026-05-25): the original tween capture
+  // Motion-site review: the original tween capture
   // reported `ease: function () { ... }` (toString of the GSAP ease wrapper)
   // and empty `targets`. CustomEase / SteppedEase / Back / Power eases all
   // collapse to opaque function source; the agent receiving this data
@@ -229,10 +229,10 @@ RESULT=$(agent-browser --session "$SESSION" eval "$(cat <<'JS'
     };
   });
 
-  // Codex juanmora review (2026-05-25): when GSAP CustomEase is loaded,
+  // Motion-site review: when GSAP CustomEase is loaded,
   // dump the registry data strings (SVG path snippets) so downstream
   // ease replication can use the exact curve instead of cubic-bezier
-  // approximation. Without this, juanmora GSAP `CustomEase` declarations
+  // approximation. Without this, site-defined GSAP `CustomEase` declarations
   // could only be reproduced via guessed `cubic-bezier()` — losing the
   // specific motion character of each named curve.
   const customEaseRegistry = safe(() => {

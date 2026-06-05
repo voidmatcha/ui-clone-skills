@@ -7,7 +7,7 @@ Background:
   escape-hatch invokes visual-judge.sh — a real multimodal LLM diff
   between ref and impl section screenshots — and caches the result.
 
-  Codex review (2026-05-25, see docs/visual-judge-dispatcher-design.md):
+  Visual judge dispatcher design review:
     - module placement: single file (not a new `dispatchers/` package)
     - cache key: ref PNG + impl PNG + label + prompt sha + script sha
     - locking: per-key fcntl.flock (mirrors driver_session.py)
@@ -108,7 +108,7 @@ def _prompt_template() -> Path | None:
 
 
 def _cache_key(ref_png: Path, impl_png: Path, label: str) -> str:
-    """Hash 5 components per codex review item (b):
+    """Hash 5 components per review item (b):
         ref PNG bytes + impl PNG bytes + label + prompt content + script content.
 
     Returns a 24-char hex prefix (sufficient for collision-free path naming

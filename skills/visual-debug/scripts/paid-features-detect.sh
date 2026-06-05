@@ -20,12 +20,10 @@
 #                      enforces declaration via asset-substitution.json
 #     - "skip"       → intentionally not replicating this feature
 #
-# Note on GSAP plugins:
-#   GSAP became 100% free for all users (including all previously-paid Club
-#   plugins, including for commercial use) following the Webflow acquisition.
-#   This script no longer flags DrawSVGPlugin / MorphSVGPlugin / SplitText /
-#   ScrollSmoother / etc. — they are no longer paid features.
-#   Source: https://gsap.com/pricing/, https://webflow.com/blog/gsap-becomes-free
+# Licensing note:
+#   This script only flags dependency families listed below in the current
+#   paid-host/plugin tables. When a provider changes licensing, update those
+#   tables and this note together instead of relying on stale prose.
 #
 # Usage: bash paid-features-detect.sh <ref-dir>
 #   ref-dir: tmp/ref/<component>/ — must already contain bundles/ and/or css/

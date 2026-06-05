@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ui_clone import state as _state
+from ui_clone.gates import base as _base
 from ui_clone.hooks._common import GREEN as _GREEN
 from ui_clone.hooks._common import NC as _NC
 from ui_clone.hooks._common import RED as _RED
@@ -117,7 +118,7 @@ def run(self: Gate, gate: str, json_output: bool = False) -> int:
         return 2
 
     # Composite "all" — recurse per sub-gate so each sub-gate's pass/fail is
-    # recorded individually via mark_passed/mark_failed. Codex review
+    # recorded individually via mark_passed/mark_failed. Review follow-up
     # (2026-05-24): without per-gate recording the hard-cap auto-unclonable
     # in state.mark_failed never fires under composite dispatch, so batch
     # callers silently lose the v0.6.0 saturation guard.
@@ -135,13 +136,21 @@ def run(self: Gate, gate: str, json_output: bool = False) -> int:
         self._render_json(results)
     else:
         self._render_text(results)
-        fail_count = sum(1 for r in results if r.status == "fail")
+        real_fails, stale_fails = _base.partition_failures(results)
+        fail_count = len(real_fails) + len(stale_fails)
         total = len(results)
         print()
         if fail_count > 0:
+            parts = f"{len(real_fails)} real"
+            if stale_fails:
+                parts += f", {len(stale_fails)} stale-artifact"
             print(
-                f"{_RED}BLOCKED{_NC}: {fail_count}/{total} checks failed. Fix before proceeding."
+                f"{_RED}BLOCKED{_NC}: {fail_count}/{total} checks failed "
+                f"({parts}). Fix before proceeding."
             )
+            hint = _base.stale_refresh_hint(stale_fails)
+            if hint:
+                print(f"  {hint}")
         else:
             print(f"{_GREEN}PASS{_NC}: {total}/{total} checks passed. May proceed.")
 

@@ -9,6 +9,14 @@ EXPECTED_CODEX_AGENTS = {
         "contract": "skills/ui-reverse-engineering/js-animation-extraction.md",
         "required_terms": ["bundle-map.json", "bundle-extraction.json", "ScrollTrigger"],
     },
+    "source-forensics": {
+        "contract": "skills/ui-reverse-engineering/source-forensics.md",
+        "required_terms": [
+            "source-forensics.json",
+            "bundles/*.js",
+            "Do not edit implementation source",
+        ],
+    },
     "generation-planner": {
         "contract": "skills/ui-reverse-engineering/enrichment.md",
         "required_terms": ["generation-plan.json", "schemaVersion 2"],
@@ -93,6 +101,7 @@ def test_shared_contract_docs_no_longer_describe_codex_as_inline_only() -> None:
     paths = [
         ROOT / "skills/ui-reverse-engineering/enrichment.md",
         ROOT / "skills/ui-reverse-engineering/iteration-discipline.md",
+        ROOT / "skills/ui-reverse-engineering/source-forensics.md",
         ROOT / "skills/ui-reverse-engineering/diagnosis.md",
         ROOT / "skills/visual-debug/comparison-fix.md",
     ]
@@ -101,3 +110,21 @@ def test_shared_contract_docs_no_longer_describe_codex_as_inline_only() -> None:
         text = path.read_text(encoding="utf-8")
         assert "Codex native" in text, path
         assert "Codex inline" not in text, path
+
+
+def test_raw_source_fallback_is_delegated_and_compact() -> None:
+    skill = (ROOT / "skills/ui-reverse-engineering/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    iteration = (
+        ROOT / "skills/ui-reverse-engineering/iteration-discipline.md"
+    ).read_text(encoding="utf-8")
+    contract = (ROOT / "skills/ui-reverse-engineering/source-forensics.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Raw HTML/CSS/JS fallback rule" in skill
+    assert "source-forensics" in skill
+    assert "bailout-source-forensics" in iteration
+    assert "Keep large raw sources out of the main clone context" in contract
+    assert "main agent should read only `source-forensics.json`" in contract

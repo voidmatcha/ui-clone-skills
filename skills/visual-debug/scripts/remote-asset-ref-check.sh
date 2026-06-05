@@ -141,6 +141,22 @@ def is_violating(url: str) -> bool:
     return True
 
 
+def var_used_as_asset(var: str, text: str) -> bool:
+    """True iff `var` is referenced in an asset position — a JSX src/poster
+    attribute or a CSS url(). An outbound-link const (`<a href={var}>`,
+    social URLs, external references) is NOT an asset hotlink, so flagging
+    its mere definition false-fails legitimate clones. Conservative when the
+    var name is unknown."""
+    if not var or var == "?":
+        return True
+    ev = re.escape(var)
+    asset_use = (
+        r"\b(?:src|poster)\s*=\s*\{[^}]*\b" + ev + r"\b",  # src={...var...}/poster={...var...}
+        r"url\(\s*[`\"']?[^)]*\b" + ev + r"\b",             # CSS url(...var...)
+    )
+    return any(re.search(p, text) for p in asset_use)
+
+
 for path in impl_src.rglob("*"):
     if not path.is_file():
         continue
@@ -174,11 +190,12 @@ for path in impl_src.rglob("*"):
                 "kind": "direct",
             })
 
-    # Host-const pattern — defining `const X = 'https://violating-host'`
-    # in impl source is itself the smell. heavy-motion site's exact pattern.
-    # Simpler to flag the const definition than chase template-literal
-    # usage downstream; the const has no legitimate reason to exist in
-    # a clone whose assets should all be local.
+    # Host-const pattern — `const X = 'https://violating-host'` is only a
+    # cheat when X is fed into an asset position (src/poster/url), e.g.
+    #   const A = 'https://cdn'; <img src={`${A}/x.webp`} />
+    # An outbound-link const (`<a href={X}>`, social/external URLs) is NOT
+    # an asset hotlink, so gate the violation on actual asset usage of the
+    # var to avoid false-failing legitimate external links.
     for m in HOST_CONST_PATTERN.finditer(text_no_comment):
         host_url = m.group(1)
         if not is_violating(host_url):
@@ -188,6 +205,8 @@ for path in impl_src.rglob("*"):
             text_no_comment,
         )
         var = var_match.group(1) if var_match else "?"
+        if not var_used_as_asset(var, text_no_comment):
+            continue
         violations.append({
             "file": str(path.relative_to(impl_src)),
             "url": host_url[:200],

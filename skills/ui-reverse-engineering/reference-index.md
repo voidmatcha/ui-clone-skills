@@ -29,6 +29,7 @@ Look up which sub-doc owns a topic. Read SKILL.md first for pipeline flow; read 
 | `transition-spec-rules.md` | 5d | Transition spec JSON schema and validation |
 | `verification-plan.md` | 5d | `verification-plan.json` + `known-artifacts.json` schema — signal-derived required-checks manifest for downstream gates |
 | `animation-detection.md` | 6 | Idle/scroll/per-element animation phases |
+| `state-structure-spec.md` | 6-state | Compact splash/scroll/hover/click state rollup; event-driver and click navigation guard contract |
 | `section-audit.md` | 6c | Six-stage audit: element ownership via parentElement chain |
 | `transition-coverage.md` | 6d | Multi-position scroll measurement → transition-coverage.json |
 | `enrichment.md` | 6-pre | Generation-plan enrichment contract — operational doc for `generation-planner` sub-agent (Claude + Codex native paths) |

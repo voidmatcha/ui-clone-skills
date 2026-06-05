@@ -20,18 +20,27 @@ All 4 phases are MANDATORY. Phase 0 is cheap (one eval) and recovers runtime-onl
 ## Multi-snapshot DOM state inputs (v0.7.0+)
 
 Phases 0/A/B/C above capture **motion** (pixels over time). The
-multi-snapshot capture pipeline (`scripts/extract/capture-{states,scroll,hover}.sh`,
-v0.7.0) captures **DOM state** (HTML + computed style at distinct moments)
+multi-snapshot capture pipeline (`scripts/extract/capture-{states,scroll,hover,click}.sh`,
+v0.7.0+) captures **DOM state** (HTML + computed style at distinct moments)
 which complements the video signal: video shows WHAT moves, multi-snapshot
 shows WHICH class hooks / scroll positions / hover targets gate the
 movement. The two together give the impl enough signal to replicate state
 *and* motion.
 
+The scripts are wrappers around a live `agent-browser` page. Events happen in
+that browser session, not in static source parsing: splash is observed during a
+fresh navigation, scroll uses the detected browser scroll engine, hover uses
+browser runtime probes plus hover visual checks, and click uses real
+`agent-browser click` in an isolated session per candidate when the candidate is
+safe to activate.
+
 | Artifact | Produced by | Consumes |
 |---|---|---|
 | `tmp/ref/<c>/states/splash/trajectory.json` + `0ms.json`, `settled.json`, `<NNN>ms.json` | `capture-states.sh` (Phase A — splash transitions) | Splash class transitions (`is-loading` → `is-loaded`, body-class flips) and the DOM bookends at t=0 and end-of-splash so the impl can replicate the reveal sequence. The intermediate `<NNN>ms.json` files capture structural mutations >20% DOM delta. |
 | `tmp/ref/<c>/states/scroll/<pct>pct.json` + `trajectory.json` + `summary.json` | `capture-scroll.sh` (Phase B — scroll-progress snapshots) | DOM at 7 scroll percentages [0, 10, 25, 50, 75, 90, 100] plus `visibleSections` index per stop. `summary.json.scrollEngine` records native/lenis/locomotive (so the impl uses the right scroll API), `scrollHeightDeltaPct` exposes growth during the sweep for downstream infinite-scroll detection. |
-| `tmp/ref/<c>/states/hover/elem-<id>.json` + `manifest.json` + `summary.json` | `capture-hover.sh` (Phase C — hover-state snapshots) | Per-candidate hover signal split into `kind: "css"` (declared properties from CSSOM `:hover` rules), `kind: "js"` (synthetic dispatchEvent + computed-style diff for JS-attached handlers), `kind: "css+js"` (both). Manifest entries carry a stable `id` (SHA-256[:8] of activation\|affected\|kind) so downstream consumers can cross-reference. |
+| `tmp/ref/<c>/states/hover/elem-<id>.json` + `manifest.json` + `summary.json` | `capture-hover.sh` (Phase C — hover-state snapshots) | Per-candidate hover signal split into `kind: "css"` (declared properties from CSSOM `:hover` rules), `kind: "js"` (browser runtime event probe + computed-style diff for JS-attached handlers), `domChanges` (class/text/aria/data-state mutation), or `kind: "css+js"` (both). Manifest entries carry a stable `id` (SHA-256[:8] of activation\|affected\|kind) so downstream consumers can cross-reference. |
+| `tmp/ref/<c>/states/click/click-<id>.json` + `manifest.json` + `summary.json` | `capture-click.sh` (Phase C-click — click-state snapshots) | Real `agent-browser click` per safe candidate in an isolated throwaway session. External or same-origin navigation is guarded with `back`/reopen and recorded as `navigationOnly`; non-HTTP schemes, downloads, and `_blank` targets are recorded as declared navigation and skipped; only same-page clicks can claim DOM mutation. |
+| `tmp/ref/<c>/state-structure-spec.json` | `state-structure-spec.py` (post-pass; called by capture scripts) | Compact derived index across splash/scroll/hover/click events. It contains triggers, event drivers, class/DOM mutation summaries, guard status, and artifact references — never full `outerHTML` / `fullHTML`. Read `state-structure-spec.md` for the contract. |
 
 **Relationship to existing phases**:
 - Phase 0 catches *runtime parameter values* — multi-snapshot does NOT
@@ -46,16 +55,21 @@ movement. The two together give the impl enough signal to replicate state
 - Phase C (per-element tracking) targets one section's pixel trajectory;
   `capture-hover.sh` enumerates all `:hover`-rule + JS-handler targets
   across the page. Different axes (position vs. interaction).
+- Click-state capture is not a crawler. It opens a fresh browser session for
+  each candidate and restores after navigation. Off-site links are recorded as
+  navigation evidence, not as observed same-page DOM mutation.
 
 **State-coverage gate** (`gate_state_coverage`, inserted into GATE_ORDER
 between `pre-generate` and `post-implement` in v0.7.0) consumes the
-three multi-snapshot artifacts and fails when impl source lacks
-corresponding hooks: class strings from splash trajectory, scroll-state
-primitives (IntersectionObserver / ScrollTrigger / useScroll /
-`use:inView` / `v-intersection-observer` / ...), and hover handlers
-(`:hover` / Tailwind `hover:` / `onMouseEnter` / `whileHover` /
-`@mouseenter` / `on:mouseenter`). Backward-compat: legacy ref dirs
-without `states/` pass the gate as skip.
+multi-snapshot artifacts and fails when impl source lacks corresponding hooks:
+class strings from splash trajectory, scroll-state primitives
+(IntersectionObserver / ScrollTrigger / useScroll / `use:inView` /
+`v-intersection-observer` / ...), hover handlers (`:hover` / Tailwind
+`hover:` / `onMouseEnter` / `whileHover` / `@mouseenter` /
+`on:mouseenter`), and same-page click handlers (`onClick` /
+`addEventListener("click")` / `@click` / `on:click` / `aria-expanded` /
+`data-state`). Backward-compat: legacy ref dirs without `states/` pass the
+gate as skip.
 
 ## Phase 0 — Runtime instrumentation (zero-video)
 

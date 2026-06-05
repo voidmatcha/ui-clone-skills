@@ -166,7 +166,7 @@ def _child_changed(before: dict, after: dict) -> bool:
     # while the container's own box stays flat. childSig is a compact join of
     # the first N descendants' transform|opacity; any differing non-empty
     # signature is a measured child-level delta the container-only checks miss
-    # (juanmora cta-email-click-splittext: container static, child spans animate).
+    # (split-text/reveal pattern: container static, child spans animate).
     b, a = before.get("childSig"), after.get("childSig")
     return isinstance(b, str) and isinstance(a, str) and bool(b) and b != a
 
@@ -195,6 +195,30 @@ def _child_revealed(before: dict, after: dict) -> bool:
     b_hidden = sum(1 for o in bo if o < 0.5)
     a_hidden = sum(1 for o in ao if o < 0.5)
     return a_hidden < b_hidden
+
+
+def _stroke_offset_px(v: object) -> float | None:
+    s = str(v or "").strip()
+    if s.endswith("px"):
+        s = s[:-2]
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _stroke_drew(before: dict, after: dict) -> bool:
+    # Fix 78 — an SVG stroke draw-in animates strokeDashoffset (length -> 0),
+    # touching NEITHER opacity nor transform, so the reveal judgment measured
+    # "opacity 0 -> 0, transform I -> I" and false-negatived a firing draw.
+    # Direction-aware on purpose (anti-loosening, mirrors _child_revealed):
+    # only an offset whose magnitude DECREASED counts — the draw-in the spec
+    # declares. Static dashes (no change) and draw-outs do not pass.
+    b = _stroke_offset_px(before.get("strokeDashoffset"))
+    a = _stroke_offset_px(after.get("strokeDashoffset"))
+    if b is None or a is None:
+        return False
+    return abs(a) < abs(b) - _OPACITY_EPS
 
 
 def _any_visual_change(before: dict, after: dict) -> bool:
@@ -397,6 +421,7 @@ def decide(entry: dict, obs: dict, skip_ids: set[str]) -> dict:
         _opacity_rose(before, after)
         or _transform_changed(before, after)
         or _child_revealed(before, after)
+        or _stroke_drew(before, after)
         or (kind == "splash" and _opacity_changed(before, after))
     )
     res["observed"] = (
@@ -404,6 +429,11 @@ def decide(entry: dict, obs: dict, skip_ids: set[str]) -> dict:
         f"transform {_norm_transform(before.get('transform'))} -> "
         f"{_norm_transform(after.get('transform'))}"
     )
+    if before.get("strokeDashoffset") is not None or after.get("strokeDashoffset") is not None:
+        res["observed"] += (
+            f", strokeDashoffset {before.get('strokeDashoffset')} -> "
+            f"{after.get('strokeDashoffset')}"
+        )
     res["status"] = "pass" if fired else "fail"
     return res
 

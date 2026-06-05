@@ -56,6 +56,7 @@ One entry per distinct transition. Each entry is **self-contained**:
 5. **Convert GSAP easing to CSS** — write both GSAP name and `cubic-bezier()`.
 6. **Include `simultaneous`** — transitions that co-occur with specific delays.
 7. **Consult `animation-runtime-dump.json`** when present — easing functions, resolved ScrollTrigger pixel offsets, Lenis/IX2 timings live there even when bundle-grep misses them. Phase 0 of `animation-detection.md` writes this file.
+8. **Consult `state-structure-spec.json`** when a transition depends on DOM/class/content state — page-load splash swaps, sticky threshold class flips, hover class/data-state mutations, accordions, tabs, modals, or click navigation. This file is the compact browser-observed state index; raw `states/**` HTML dumps are fallback evidence for `source-forensics`, not first-pass generation context.
 
 ## 4. Gate
 
@@ -68,6 +69,7 @@ $ cat tmp/ref/<c>/transition-spec.json
  □ Each entry has: id, trigger, source_chunk, bundle_branch, target, animation
  □ Each entry has: reference_frames (or "none" if not yet captured)
  □ Each RAF-driven entry (auto-timer canvas, looping shader, video) has: "dynamic": true
+ □ Entries that depend on DOM structure/class/content swaps reference the matching `state-structure-spec.json` event in notes or `state_structure_ref`
  □ GSAP easing converted to cubic-bezier
  □ Capture verification passed (Step 5e below)
 ```

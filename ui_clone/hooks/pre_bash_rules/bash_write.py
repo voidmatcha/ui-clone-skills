@@ -3,7 +3,7 @@
 Bash redirects/streams that write to a file. Each pattern captures the
 target path. Designed to catch the common ways an agent could bypass the
 PreToolUse Edit/Write hook (pre_generate.py): `cat > file`, `tee file`,
-`sed -i ... file`, and Codex-flagged v0.8 additions:
+`sed -i ... file`, plus later file-API additions:
 `python3 -c "open(...).write(...)"`, `cp source target`, `mv source target`.
 Bash redirect was the original bypass; v0.6 → v0.7 closed `>`/`tee`/`sed`;
 v0.8 closes the file-API bypass after a natural-prompt nested agent

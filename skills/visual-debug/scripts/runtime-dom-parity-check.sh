@@ -130,7 +130,7 @@ ANALYSIS_JS='(() => {
       if (el.querySelector("svg") || el.querySelector("canvas")) lottieMounted++;
     }
   });
-  // Codex universality audit FN: text-node count without visibility
+  // Universality audit FN: text-node count without visibility
   // check let a screenshot-overlay impl satisfy the floor by stuffing
   // hidden text. Re-count text inside ELEMENTS that have nonzero
   // rects and non-hidden style.
@@ -151,10 +151,9 @@ ANALYSIS_JS='(() => {
   });
   let visibleTextNodes = 0;
   while (visTw.nextNode()) visibleTextNodes++;
-  // Opaque-overlay detection (codex follow-up review 2026-05-24).
-  // L64 surfaced "splash class preserved + styled but rendering as opaque
-  // overlay covering everything" — class-signature gates pass, visual is
-  // a solid color. Find fixed/absolute elements with high z-index,
+  // Opaque-overlay detection. A splash class can be preserved and styled yet
+  // render as an opaque overlay covering everything; class-signature gates pass,
+  // visual output is a solid color. Find fixed/absolute elements with high z-index,
   // covering >= 70% of viewport, opaque background, no media descendants.
   // If present, the page is rendering through a visual blocker.
   let opaqueOverlayCount = 0;
@@ -325,7 +324,7 @@ if "error" not in ref_data and "error" not in impl_data:
 
     section_count = int(impl_data.get("sectionCount") or 0)
     min_text_nodes = max(10, section_count * 2)
-    # Codex universality audit FN: count VISIBLE text nodes (style+
+    # Universality audit FN: count VISIBLE text nodes (style+
     # geometry filtered), not the raw walker count. Falls back to the
     # raw count if the visibility-filtered field is absent (older
     # artifact format).
@@ -347,7 +346,7 @@ if "error" not in ref_data and "error" not in impl_data:
 
     max_ratio = float(impl_data.get("maxElementRatio") or 0.0)
     if max_ratio > 0.90:
-        # Codex universality audit FP: a legitimate full-viewport hero
+        # Universality audit FP: a legitimate full-viewport hero
         # image / video / background-image can cover >90% by design.
         # Require AT LEAST ONE corroborating signal before failing:
         #   (a) DOM node count well below ref (<=50% of ref), OR
@@ -393,10 +392,9 @@ if "error" not in ref_data and "error" not in impl_data:
                 ),
             })
 
-    # Opaque-overlay occlusion (codex follow-up review 2026-05-24).
-    # L64 root cause: splash classes were preserved + styled (class-sig
-    # gates passed) but rendered as opaque div covering the viewport →
-    # visual = solid color despite metrics looking healthy. Pair the
+    # Opaque-overlay occlusion. Splash classes can be preserved and styled
+    # while rendering as an opaque div covering the viewport, producing a
+    # solid-color visual despite healthy class metrics. Pair the
     # browser-eval count with a corroborator (impl text dropout vs ref)
     # so we don't false-positive on intentional modals / cookie banners.
     impl_overlay_count = int(impl_data.get("opaqueOverlayCount") or 0)
@@ -443,7 +441,7 @@ if "error" not in ref_data and "error" not in impl_data:
                         if asymmetric
                         else f"Ref visible text={ref_visible_text}, impl visible text={impl_visible_text} (<40% of ref). "
                     )
-                    + "L64 pattern: class signatures preserved + styled but "
+                    + "Class signatures are preserved and styled, but "
                     "the splash/intro overlay covers content. Sample below."
                 ),
             })

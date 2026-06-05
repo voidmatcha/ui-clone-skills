@@ -44,6 +44,147 @@ def test_hover_state_compare_single_viewport_back_compat(tmp_path: Path) -> None
 
 
 
+def test_hover_state_compare_fails_when_hasHover_but_no_regions(tmp_path: Path) -> None:
+    """signals.hasHover=true + full-page-only regions.json (no triggerType) → FAIL.
+
+    Loop-claude-144 realfood regression: verification-plan scheduled the row
+    (severity:block, reason "signals.hasHover=true"), 12 :hover CSS rules exist,
+    yet the Lenis regions.json producer emits one full-page region with zero
+    triggerType fields. The old script self-certified PASS (exit 0, ✅) because
+    the triggerType jq matched nothing — shipping hover motion UNVERIFIED while
+    the gate showed green. With the scheduling-signal cross-check the empty
+    target list must now be a blocking FAIL.
+    """
+    import subprocess
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "regions.json").write_text(json.dumps({
+        "regions": [{"name": "full-page", "x": 0, "y": 0, "width": 1440, "height": 20133}]
+    }))
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "signals": {"hasHover": True},
+    }))
+    plugin_root = tmp_path / "fake-plugin-root"
+    _make_stub_compare(plugin_root)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "hover-state-compare.sh"
+    env = {**os.environ, "PLUGIN_ROOT": str(plugin_root)}
+    proc = subprocess.run(
+        ["bash", str(script), "https://ref.example", "https://impl.example", "test-session", str(ref)],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    result = (ref / "transitions" / "hover-state-result.txt").read_text()
+    assert "❌" in result
+    assert "UNVERIFIED" in result
+
+
+def test_hover_state_compare_synthesizes_from_hover_css_rules(tmp_path: Path) -> None:
+    """Empty regions.json + hover-css-rules.json → targets synthesized from CSS.
+
+    The compound CSS selector `.dga_pdf_card__RKAwD:hover .dga_pdf_card_tooltip__azeG1`
+    must reduce to the hoverable base `.dga_pdf_card__RKAwD` (split on first comma,
+    then first colon). With a stub inner that exits 0 the run passes (exit 0), the
+    result records the synth source, and a target dir mangled from the base selector
+    exists. Confirms synthesis ran instead of the old silent skip.
+    """
+    import subprocess
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "regions.json").write_text(json.dumps({
+        "regions": [{"name": "full-page", "x": 0, "y": 0, "width": 1440, "height": 20133}]
+    }))
+    (ref / "hover-css-rules.json").write_text(json.dumps([
+        {
+            "selector": ".dga_pdf_card__RKAwD:hover .dga_pdf_card_tooltip__azeG1",
+            "css": "opacity: 1; transform: translateY(-50%) translateX(0px);",
+            "media": "(min-width: 901px)",
+        }
+    ]))
+    plugin_root = tmp_path / "fake-plugin-root"
+    _make_stub_compare(plugin_root)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "hover-state-compare.sh"
+    env = {**os.environ, "PLUGIN_ROOT": str(plugin_root)}
+    proc = subprocess.run(
+        ["bash", str(script), "https://ref.example", "https://impl.example", "test-session", str(ref)],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert proc.returncode == 0, f"expected exit 0, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    result = (ref / "transitions" / "hover-state-result.txt").read_text()
+    assert "synth-hover-css" in result
+    # Base selector ".dga_pdf_card__RKAwD" → SAFE_NAME mangles non-word chars to "_".
+    assert (ref / "transitions" / "hover-state" / "_dga_pdf_card__RKAwD").is_dir()
+
+
+def test_hover_state_compare_synthesizes_from_candidates(tmp_path: Path) -> None:
+    """Empty regions.json + hover-candidates.json → targets synthesized from candidates.
+
+    realfood loop-omx-36 shape: [{selector, source, text, transition}] (no rect).
+    `.text` names the target ("Real Food"); synth-hover-candidate is recorded and a
+    target dir mangled from the text exists.
+    """
+    import subprocess
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "regions.json").write_text(json.dumps({
+        "regions": [{"name": "full-page", "x": 0, "y": 0, "width": 1440, "height": 20133}]
+    }))
+    (ref / "hover-candidates.json").write_text(json.dumps([
+        {
+            "selector": "button.nav_dot_button__kZB4V",
+            "source": "css-transition",
+            "text": "Real Food",
+            "transition": "all",
+        }
+    ]))
+    plugin_root = tmp_path / "fake-plugin-root"
+    _make_stub_compare(plugin_root)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "hover-state-compare.sh"
+    env = {**os.environ, "PLUGIN_ROOT": str(plugin_root)}
+    proc = subprocess.run(
+        ["bash", str(script), "https://ref.example", "https://impl.example", "test-session", str(ref)],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert proc.returncode == 0, f"expected exit 0, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    result = (ref / "transitions" / "hover-state-result.txt").read_text()
+    assert "synth-hover-candidate" in result
+    # "Real Food" → SAFE_NAME mangles the space → "Real_Food".
+    assert (ref / "transitions" / "hover-state" / "Real_Food").is_dir()
+
+
+def test_hover_state_compare_passes_when_no_hover_signal_anywhere(tmp_path: Path) -> None:
+    """Empty regions.json + NO plan/hover artifacts → legitimate skip survives.
+
+    Back-compat: without a scheduling signal and without recoverable hover
+    targets, the gate must keep the ✅ exit-0 skip path (no false FAIL).
+    """
+    import subprocess
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "regions.json").write_text(json.dumps({
+        "regions": [{"name": "full-page", "x": 0, "y": 0, "width": 1440, "height": 20133}]
+    }))
+    plugin_root = tmp_path / "fake-plugin-root"
+    _make_stub_compare(plugin_root)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "hover-state-compare.sh"
+    env = {**os.environ, "PLUGIN_ROOT": str(plugin_root)}
+    proc = subprocess.run(
+        ["bash", str(script), "https://ref.example", "https://impl.example", "test-session", str(ref)],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert proc.returncode == 0, f"expected exit 0, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
+    result = (ref / "transitions" / "hover-state-result.txt").read_text()
+    assert "✅" in result
+
+
 def test_click_state_compare_fans_out_per_viewport(tmp_path: Path) -> None:
     """VIEWPORTS=\"375x812,1280x800\" → per-viewport subdirs + result.txt sections.
 

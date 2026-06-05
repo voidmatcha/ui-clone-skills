@@ -61,6 +61,7 @@ external_sdks = load("external-sdks.json", {})
 bundle_map = load("bundle-map.json", {})
 transition_spec = load("transition-spec.json", {})
 scroll_engine = load("scroll-engine.json", {})
+bundle_extraction = load("bundle-extraction.json", {})
 paid_features = load("paid-features.json", {})
 asset_sub = load("asset-substitution.json", {})
 font_parity = load("font-parity.json", {})
@@ -225,18 +226,33 @@ def recover_linked_css_artifacts() -> None:
         pass
 
 
-def class_signature_count(*artifacts) -> int:
+def class_signature_count(*artifacts, include_css: bool = True) -> int:
+    """Distinct CSS-module className tokens.
+
+    With include_css=True (default) it unions DOM-artifact tokens with every
+    class DEFINED in the ref css/*.css files — the right signal for deciding
+    whether a site is CSS-module-heavy (forensic_required).
+
+    With include_css=False it counts only tokens that appear on captured DOM
+    elements. That is the reachable ceiling a faithful clone can preserve in
+    JSX: stylesheets define far more classes (pseudo/state/unused variants) than
+    ever land on rendered elements, so the forensic *gate* threshold must be a
+    fraction of THIS count, not of the inflated CSS-definition count — otherwise
+    the gate is mathematically unreachable (realfood: 136 DOM classes but 599
+    CSS-defined, so 25%*599=149 > 136 blocks every clone).
+    """
     found: set[str] = set()
     for artifact in artifacts:
         for text in walk_values(artifact):
             found.update(CSS_MODULE_CLASS_RE.findall(text))
-    css_dir = ref_dir / "css"
-    if css_dir.is_dir():
-        for css_file in css_dir.glob("*.css"):
-            try:
-                found.update(CSS_MODULE_CLASS_RE.findall(css_file.read_text(errors="ignore")))
-            except OSError:
-                continue
+    if include_css:
+        css_dir = ref_dir / "css"
+        if css_dir.is_dir():
+            for css_file in css_dir.glob("*.css"):
+                try:
+                    found.update(CSS_MODULE_CLASS_RE.findall(css_file.read_text(errors="ignore")))
+                except OSError:
+                    continue
     return len(found)
 
 
@@ -256,7 +272,9 @@ if not isinstance(sections, list):
 
 recover_linked_css_artifacts()
 css_bytes, css_files = css_bytes_and_files()
-css_module_signature_count = class_signature_count(section_map, load("structure.json", {}), load("dom-scaffold.json", {}))
+_dom_artifacts = (section_map, load("structure.json", {}), load("dom-scaffold.json", {}))
+css_module_signature_count = class_signature_count(*_dom_artifacts)
+dom_class_signature_count = class_signature_count(*_dom_artifacts, include_css=False)
 css_artifacts_complete = bool(css_files) and css_bytes >= CSS_FORENSIC_MIN_BYTES
 css_artifacts_missing = css_module_signature_count >= CSS_MODULE_FORENSIC_MIN_SIGNATURES and not css_artifacts_complete
 forensic_required = css_module_signature_count >= CSS_MODULE_FORENSIC_MIN_SIGNATURES and (
@@ -289,6 +307,7 @@ forensic_preservation = {
     "required": forensic_required,
     "strategy": "ref-derived-jsx-with-local-css" if forensic_required else "standard-react-rebuild",
     "classSignatureCount": css_module_signature_count,
+    "domClassSignatureCount": dom_class_signature_count,
     "cssBytes": css_bytes,
     "cssFiles": css_files,
     "cssArtifactStatus": css_artifact_status,
@@ -360,6 +379,50 @@ detect_in(scroll_engine, "scrollsmoother", "gsap", "ScrollSmoother (GSAP) detect
 
 
 # ── Sticky strategy ──────────────────────────────────────────────
+def sticky_containing_block(css_class):
+    """For a CSS-module class that is position:sticky in the captured DOM, find
+    its nearest ancestor with position:relative — the element that bounds the
+    sticky's scroll range. Returns {selector, height, position} or None.
+
+    Without this the generator renders the sticky flat at App level, so its
+    containing block becomes the whole page body and it pins for the entire
+    scroll instead of releasing at the end of its section (the realfood
+    "sticky never releases" bug). class_signature already proves the structure
+    preserves section->sticky nesting; we just surface the wrapper to codegen.
+    """
+    structure = load("structure.json", {})
+    target = (css_class or "").strip()
+    if not target:
+        return None
+    result = {}
+
+    def walk(node, ancestors):
+        if not isinstance(node, dict):
+            return False
+        cls = node.get("class") or ""
+        pos = (node.get("styles") or {}).get("position")
+        if target in cls and pos == "sticky":
+            for anc in reversed(ancestors):
+                apos = (anc.get("styles") or {}).get("position")
+                if apos == "relative":
+                    acls = (anc.get("class") or "").split()
+                    sel = f"{anc.get('tag','')}." + ".".join(acls) if acls else anc.get("tag", "")
+                    result.update({
+                        "selector": sel.rstrip("."),
+                        "height": (anc.get("styles") or {}).get("height"),
+                        "position": "relative",
+                    })
+                    return True
+            return True  # sticky found but no relative ancestor
+        for child in node.get("children") or []:
+            if walk(child, ancestors + [node]):
+                return True
+        return False
+
+    walk(structure, [])
+    return result or None
+
+
 sticky_plan = []
 # Detect GSAP ScrollTrigger.pin in bundle-map / transition-spec — when present,
 # the sticky element is likely a pin target rather than CSS sticky.
@@ -367,8 +430,12 @@ bundle_text = json.dumps(bundle_map).lower() + json.dumps(transition_spec).lower
 has_scroll_trigger_pin = (
     "scrolltrigger" in bundle_text and ("pin" in bundle_text or "pin:" in bundle_text)
 )
-if isinstance(sticky, list):
-    for entry in sticky:
+# sticky-elements.json is `{"elements": [...]}` (not a bare list); reading it
+# as a list left stickyStrategy empty, so the agent improvised sticky onto
+# whole sections instead of mirroring the real fixed/sticky elements.
+sticky_entries = sticky.get("elements", []) if isinstance(sticky, dict) else sticky
+if isinstance(sticky_entries, list):
+    for entry in sticky_entries:
         if not isinstance(entry, dict):
             continue
         position = entry.get("position", "")
@@ -383,14 +450,29 @@ if isinstance(sticky, list):
             mechanism = "css-fixed"
         else:
             mechanism = "css-sticky"
+        css_class = entry.get("className") or entry.get("cls", "")
+        containing_block = (
+            sticky_containing_block(css_class) if mechanism == "css-sticky" else None
+        )
+        # css-sticky must render INSIDE its relative containing block (the section
+        # whose height bounds the pin), not flat at App level — else it pins to
+        # the page body and never releases. css-fixed / gsap-pin stay at App.
+        render_at = containing_block["selector"] if containing_block else "App"
         sticky_plan.append({
-            "selector": f"{entry.get('tag', '')}.{entry.get('cls', '')}".rstrip("."),
+            "selector": f"{entry.get('tag', '')}.{css_class}".rstrip("."),
             "position": position,
-            "top": entry.get("top"),
+            "top": entry.get("top") if entry.get("top") is not None else entry.get("stickyTop"),
             "zIndex": entry.get("zIndex"),
-            "renderAt": "App",  # single render at App/layout level
+            "renderAt": render_at,
+            "containingBlock": containing_block,
             "mechanism": mechanism,
-            "note": "Render ONCE at App/layout level; do not duplicate per section.",
+            "note": (
+                "Wrap this sticky inside its containingBlock (position:relative + "
+                "that height) so it releases at the section end; do not render it "
+                "flat at App level."
+                if containing_block
+                else "Render ONCE at App/layout level; do not duplicate per section."
+            ),
         })
 
 
@@ -436,23 +518,128 @@ arch_layers = {
 
 
 # ── Scroll wiring ────────────────────────────────────────────────
+# Require an explicit smooth-scroll engine/library — NOT a bare "smooth"
+# substring match, which previously matched the `smoothScroll` KEY even when its
+# value was false ({"engine":"native","smoothScroll":false} wrongly injected
+# Lenis). Codex review regression.
+_se = scroll_engine if isinstance(scroll_engine, dict) else {}
+_se_engine = (_se.get("engine") or "").strip().lower()
 has_smooth_scroll = (
     "lenis" in detected_libs
-    or "scrollsmoother" in json.dumps(scroll_engine).lower()
-    or json.dumps(scroll_engine).lower().count("smooth") >= 1
+    or _se_engine in ("lenis", "locomotive", "scrollsmoother")
+    or ("gsap" in detected_libs and "scrollsmoother" in json.dumps(_se).lower())
 )
+# Thread the site's real Lenis constructor options (from scroll-engine.json)
+# into the plan so the generated SmoothScroll.tsx mirrors the reference feel
+# instead of falling back to Lenis library defaults. Only pass through known
+# Lenis keys; absent options → empty dict (generator uses Lenis defaults).
+_LENIS_OPTION_KEYS = (
+    "lerp", "duration", "easing", "smoothWheel", "smoothTouch",
+    "wheelMultiplier", "touchMultiplier", "orientation", "gestureOrientation",
+    "direction", "infinite", "syncTouch",
+)
+smooth_scroll_config: dict = {}
+if has_smooth_scroll:
+    raw_opts = scroll_engine.get("options") if isinstance(scroll_engine, dict) else None
+    if isinstance(raw_opts, dict):
+        smooth_scroll_config = {
+            k: raw_opts[k] for k in _LENIS_OPTION_KEYS if k in raw_opts
+        }
 smooth_scroll_plan = {
     "required": has_smooth_scroll,
     "wrapper": "lib/SmoothScroll.tsx" if has_smooth_scroll else None,
     "library": "lenis" if "lenis" in detected_libs else (
         "gsap-ScrollSmoother" if "gsap" in detected_libs and "scrollsmoother" in json.dumps(scroll_engine).lower() else None
     ),
+    "config": smooth_scroll_config,
 }
 scroll_listener_plan = {
     "required": not has_smooth_scroll and bool(transition_spec.get("transitions") if isinstance(transition_spec, dict) else False),
     "wrapper": "lib/ScrollListener.tsx" if (not has_smooth_scroll and transition_spec) else None,
     "approach": "RAF + getBoundingClientRect, single passive listener, write transforms via refs",
 }
+
+
+# ── Scroll-driven reveals (Framer useScroll / scrollYProgress) ───────
+# scroll-engine.json's scrollDriven block records the library + hooks the site
+# uses to map scroll progress onto opacity/transform (the primary reveal
+# mechanism on Framer-Motion sites). Surface it as a contract so the generator
+# wires real scrollYProgress→useTransform reveals instead of treating these as
+# plain load/intersection fades.
+_scroll_driven_raw = scroll_engine.get("scrollDriven") if isinstance(scroll_engine, dict) else None
+if isinstance(_scroll_driven_raw, dict) and _scroll_driven_raw.get("hooks"):
+    scroll_driven_plan = {
+        "required": True,
+        "library": _scroll_driven_raw.get("library"),
+        "hooks": list(_scroll_driven_raw.get("hooks") or []),
+        "evidence": _scroll_driven_raw.get("evidence", ""),
+        "note": (
+            "Map section scroll progress onto opacity/transform via "
+            "scrollYProgress + useTransform. Under smooth-scroll (see "
+            "smoothScroll) drive progress from the Lenis scroll source "
+            "(ReactLenis root or RAF+getBoundingClientRect per "
+            "component-generation rule 14) — never a raw window 'scroll' listener."
+        ),
+    }
+elif "framer-motion" in detected_libs:
+    # The decode step did not populate scroll-engine.scrollDriven, but
+    # framer-motion IS detected — infer the scroll-driven reveal contract so
+    # ScrollReveal still wires. The transpiler only wraps
+    # sections that actually contain reveal resets, so this is safe even if some
+    # framer usage is hover/mount-only.
+    scroll_driven_plan = {
+        "required": True,
+        "library": "framer-motion",
+        "hooks": ["useScroll", "useTransform", "scrollYProgress"],
+        "evidence": "framer-motion detected (scrollDriven block absent — inferred)",
+        "note": (
+            "Map section scroll progress onto opacity/transform via "
+            "scrollYProgress + useTransform; drive progress from the Lenis "
+            "scroll source, never a raw window 'scroll' listener."
+        ),
+    }
+else:
+    scroll_driven_plan = {"required": False, "library": None, "hooks": [], "evidence": "", "note": ""}
+
+
+# ── Scroll-scrub params (deterministic, from bundle-extraction.json) ──
+# scrollDriven above is the high-level contract (library + hooks). bundle-
+# extraction.json carries the CONCRETE per-site tables that _bundle_extraction.py
+# pulls from the minified bundle: each Framer useScroll site's offset window plus
+# its useTransform(progress, [input], [output]) mappings. Surface these so the
+# generator emits real scroll-scrub motion (e.g. a background scale band crossing
+# 1.0) instead of a generic opacity fade. Only sites that actually carry transform
+# tables become scrub contracts; detection-only sites stay covered by scrollDriven.
+_be_extractions = bundle_extraction.get("extractions") if isinstance(bundle_extraction, dict) else None
+_fm_records = _be_extractions.get("framerMotion", []) if isinstance(_be_extractions, dict) else []
+_scrub_sites = []
+for _r in _fm_records if isinstance(_fm_records, list) else []:
+    if not isinstance(_r, dict) or _r.get("kind") != "useScroll":
+        continue
+    _transforms = [t for t in (_r.get("transforms") or []) if isinstance(t, dict)]
+    if not _transforms:
+        continue
+    _scrub_sites.append({
+        "offset": _r.get("offset"),
+        "transforms": _transforms,
+        "source": _r.get("source"),
+    })
+if _scrub_sites:
+    scroll_scrub_plan = {
+        "required": True,
+        "library": "framer-motion",
+        "count": len(_scrub_sites),
+        "sites": _scrub_sites[:24],
+        "note": (
+            "Each site maps a section's scrollYProgress (useScroll target+offset) "
+            "onto a property via useTransform(progress, input, output). Emit "
+            "useScroll({ target, offset }) + useTransform per site; wrap output in "
+            "useSpring only where the bundle did. Drive progress from the Lenis "
+            "scroll source, never a raw window 'scroll' listener."
+        ),
+    }
+else:
+    scroll_scrub_plan = {"required": False, "library": None, "count": 0, "sites": [], "note": ""}
 
 
 # ── Intro animation ──────────────────────────────────────────────
@@ -526,9 +713,34 @@ tokens_stub: dict = {
     "_note": "Sub-agent (Claude) or Codex inline-enrichment fills semantic names from css/variables.txt + styles.json.",
 }
 ds_components_required: list = []
-# Plan emits signatureEffects as null when generation-planner hasn't run yet;
-# the enrichment pass (Claude sub-agent or Codex inline) replaces null with [].
-signature_effects = None
+# Deterministic signature-effect candidates (per-character scroll scrub, etc.)
+# extracted from bundles by _signature_effects.py. Populate signatureEffects
+# from high/medium-confidence candidates so generation gets a concrete contract
+# regardless of whether the LLM enrichment pass ran; enrichment then refines
+# names/components/selectors on top (it must not drop these). With no
+# candidates, stay null so enrichment's "needs-enrichment" semantics hold.
+_sig_doc = load("signature-effects-candidates.json", {})
+_sig_candidates = _sig_doc.get("candidates", []) if isinstance(_sig_doc, dict) else []
+_sig_strong = [
+    c for c in _sig_candidates
+    if isinstance(c, dict) and c.get("confidence") in ("high", "medium")
+]
+if _sig_strong:
+    signature_effects = [
+        {
+            "name": c.get("name"),
+            "effectType": c.get("effectType"),
+            "selector": c.get("selector"),
+            "library": c.get("library"),
+            "trigger": c.get("trigger"),
+            "animation": c.get("animation"),
+            "component": f"components/ui/{c.get('name', 'SignatureEffect')}.tsx",
+            "source": "deterministic-bundle-detection",
+        }
+        for c in _sig_strong
+    ]
+else:
+    signature_effects = None
 
 
 # ── Assemble plan ────────────────────────────────────────────────
@@ -548,6 +760,8 @@ plan = {
     "architectureLayers": arch_layers,
     "smoothScroll": smooth_scroll_plan,
     "scrollListener": scroll_listener_plan,
+    "scrollDriven": scroll_driven_plan,
+    "scrollScrub": scroll_scrub_plan,
     "introAnimation": intro_plan,
     "signatureEffects": signature_effects,
     "forensicPreservation": forensic_preservation,

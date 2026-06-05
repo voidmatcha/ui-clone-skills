@@ -98,13 +98,125 @@ def _extract_gsap(all_text: str, file_offsets: list[tuple[str, int]]) -> list[di
     return calls
 
 
+_SCRUB_PROPS = (
+    r"scale[XYZ]?|rotate[XYZ]?|opacity|x|y|skew[XY]|filter|backgroundColor"
+)
+
+
+def _resolve_scrub_property(result_var: str | None, window: str) -> str | None:
+    """Resolve which motion property a useTransform result drives.
+
+    `result_var` is the LHS the transform was assigned to (e.g. ``E`` in
+    ``E=(0,s.G)(p,[...],[...])``). The property binding appears later in the
+    component as ``{scale:E}`` / ``style:{opacity:E}``. Framer sites often wrap
+    the transform in a useSpring before binding (``S=(0,l.z)(E,{stiffness})`` ->
+    ``{scale:S}``), so we follow one spring/derive hop. Returns the property name
+    (scale/opacity/y/...) or None when it cannot be resolved.
+    """
+    if not result_var:
+        return None
+    direct = re.search(
+        r"(" + _SCRUB_PROPS + r")\s*:\s*" + re.escape(result_var) + r"\b", window
+    )
+    if direct:
+        return direct.group(1)
+    # one hop: SPRING = (0,NS)(result_var, { ... }) ; then {prop: SPRING}
+    hop = re.search(
+        r"(\w+)\s*=\s*\(0,[\w$.]+\)\(\s*" + re.escape(result_var) + r"\s*,\s*\{",
+        window,
+    )
+    if hop:
+        spring_var = hop.group(1)
+        hopped = re.search(
+            r"(" + _SCRUB_PROPS + r")\s*:\s*" + re.escape(spring_var) + r"\b", window
+        )
+        if hopped:
+            return hopped.group(1)
+    return None
+
+
 def _extract_framer_motion(all_text: str, file_offsets: list[tuple[str, int]]) -> list[dict]:
-    """Find Framer Motion hook construction sites (useScroll / useTransform / useInView)."""
+    """Find Framer Motion scroll hooks, including in minified bundles.
+
+    Minification mangles the hook identifiers (``useScroll`` -> ``(0,o.L)``,
+    ``useTransform`` -> ``(0,s.G)``, ``useMotionValueEvent`` -> ``(0,$.L)``),
+    so the literal-name patterns below match nothing on a real production
+    build. We therefore ALSO anchor on Framer's stable API string literals
+    that survive minification:
+
+      * ``useScroll``: ``{scrollYProgress:VAR}=(0,NS)({target:T,offset:[...]})``
+      * ``useTransform`` bound to that progress var: ``(0,NS)(VAR,[in],[out])``
+      * ``useMotionValueEvent`` threshold: ``(0,NS)(VAR,"change",cb)``
+
+    Keying on the stable literals (not the per-build mangled function names)
+    keeps the extractor general across sites. The ``transforms`` search is
+    windowed to ~2.5 KB after each useScroll site to keep a single-letter
+    progress var local to its own component (minified vars are reused).
+    """
     uses: list[dict] = []
+
+    # --- A) Minified scroll-scrub: stable Framer API literals -------------
+    scroll_re = re.compile(
+        r"\{\s*scrollYProgress\s*:\s*(\w+)\s*\}\s*=\s*"
+        r"\(0,[\w$.]+\)\(\s*(\{[^{}]{0,200}\})\s*\)"
+    )
+    for m in scroll_re.finditer(all_text):
+        progress_var = m.group(1)
+        opts = m.group(2)
+        tgt = re.search(r"target\s*:\s*(\w+)", opts)
+        off = re.search(r"offset\s*:\s*(\[[^\]]{0,120}\])", opts)
+        window = all_text[m.start(): m.start() + 2500]
+        # The bound property (scale vs opacity vs y) is what makes a scrub
+        # reproducible — a scale band and an opacity band render differently.
+        # Resolve it from the transform's result var, allowing one useSpring
+        # hop (out=useTransform(...); spring=useSpring(out); style={scale:spring}).
+        prop_window = all_text[m.start(): m.start() + 4000]
+        # Input range may be a plain bracket OR a media-query ternary
+        # (cond?[...]:[...]); output is always a bracket. Capture the optional
+        # result-var LHS so we can resolve the bound property.
+        tf_re = re.compile(
+            r"(?:(\w+)\s*=\s*)?\(0,[\w$.]+\)\(\s*" + re.escape(progress_var) +
+            r"\s*,\s*(\[[^\]]{0,160}\]|[\w$]{1,3}\?\[[^\]]{0,90}\]:\[[^\]]{0,90}\])"
+            r"\s*,\s*(\[[^\]]{0,200}\])\s*\)"
+        )
+        transforms = [
+            {
+                "input": t.group(2),
+                "output": t.group(3),
+                "property": _resolve_scrub_property(t.group(1), prop_window),
+            }
+            for t in tf_re.finditer(window)
+        ]
+        uses.append({
+            "kind": "useScroll",
+            "progressVar": progress_var,
+            "target": tgt.group(1) if tgt else None,
+            "offset": off.group(1) if off else None,
+            "transforms": transforms[:12],
+            "transformCount": len(transforms),
+            "source": _find_file_for_offset(file_offsets, m.start()),
+            "confidence": "high",
+            "minified": True,
+        })
+
+    # useMotionValueEvent threshold callbacks drive per-word/line scroll
+    # highlights; the `(0,NS)(` interop prefix distinguishes these from a
+    # plain `el.addEventListener("change", ...)`.
+    for m in re.finditer(r"\(0,[\w$.]+\)\(\s*(\w+)\s*,\s*[\"']change[\"']\s*,", all_text):
+        uses.append({
+            "kind": "useMotionValueEvent",
+            "valueVar": m.group(1),
+            "event": "change",
+            "source": _find_file_for_offset(file_offsets, m.start()),
+            "confidence": "medium",
+            "minified": True,
+        })
+
+    # --- B) Unminified fallback: literal hook names ----------------------
     for pattern, kind in [
-        (r"useScroll\s*\(\s*(\{[^{}]{0,200}\})?", "useScroll"),
-        (r"useTransform\s*\(\s*[^,]+,\s*(\[[^\]]+\])\s*,\s*(\[[^\]]+\])", "useTransform"),
-        (r"useInView\s*\(\s*[^,]+,\s*(\{[^{}]{0,200}\})", "useInView"),
+        (r"\buseScroll\s*\(\s*(\{[^{}]{0,200}\})?", "useScroll"),
+        (r"\buseTransform\s*\(\s*[^,]+,\s*(\[[^\]]+\])\s*,\s*(\[[^\]]+\])", "useTransform"),
+        (r"\buseInView\s*\(\s*[^,]+,\s*(\{[^{}]{0,200}\})", "useInView"),
     ]:
         for m in re.finditer(pattern, all_text):
             uses.append({
@@ -113,6 +225,7 @@ def _extract_framer_motion(all_text: str, file_offsets: list[tuple[str, int]]) -
                 "raw": m.group(0)[:200],
                 "confidence": "medium",
             })
+
     return uses
 
 

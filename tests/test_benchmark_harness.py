@@ -256,6 +256,8 @@ def test_build_iter_prompt_iter1_initial_when_no_state(tmp_path: Path) -> None:
     # Should NOT include the ITER template's "What's still unmet" header
     # because that's only for the continuation prompt.
     assert "What's still unmet" not in prompt
+    assert "Do not ask the user to choose" in prompt
+    assert "pick the next reversible action yourself" in prompt
 
 
 def test_build_iter_prompt_continuation_with_state(tmp_path: Path) -> None:
@@ -271,6 +273,8 @@ def test_build_iter_prompt_continuation_with_state(tmp_path: Path) -> None:
     assert "What's still unmet" in prompt
     # Should mention specific unmet conditions
     assert "STRICT v2 conditions still unmet" in prompt
+    assert "Do not ask the user to choose" in prompt
+    assert "pick the next reversible action yourself" in prompt
 
 
 # ── Main loop wiring (mocked claude) ─────────────────────────────────────

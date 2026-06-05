@@ -453,3 +453,23 @@ def test_section_capture_runs_commands_as_argv(monkeypatch: pytest.MonkeyPatch, 
     joined = "\n".join(" ".join(cmd) for cmd, _kwargs in calls)
     assert "hero_touch_tmp_pwned.png" in joined
     assert 'document.querySelector("main[data-x=\\"quoted\\"]")' in joined
+
+
+def test_find_large_extra_sections_flags_tall_unpaired_impl() -> None:
+    """Fix 94 (A3): a tall EXTRA_IN_IMPL row (a duplicated/misplaced impl block)
+    must be flagged so the section-compare gate FAILs; small/legit extras and
+    ref-paired rows must not."""
+    from ui_clone.section_compare_sections import find_large_extra_sections
+
+    matches = [
+        {"name": "hero", "status": "PASS", "ref": {"x": 1}, "impl": {"rect": {"height": 900}}},
+        {"name": "dga_eatReal-2", "status": "EXTRA_IN_IMPL", "ref": None,
+         "impl": {"rect": {"height": 1062}}},  # tall duplicate -> flagged
+        {"name": "skip-link", "status": "EXTRA_IN_IMPL", "ref": None,
+         "impl": {"rect": {"height": 24}}},     # tiny chrome -> not flagged
+        {"name": "no-rect", "status": "EXTRA_IN_IMPL", "ref": None, "impl": {}},
+    ]
+    flagged = find_large_extra_sections(matches, 500)
+    assert flagged == [("dga_eatReal-2", 1062)]
+    # Raising the floor above the dup height clears it (env-tunable knob).
+    assert find_large_extra_sections(matches, 2000) == []

@@ -48,14 +48,14 @@ secret_patterns=(
 )
 secret_hits=0
 for p in "${secret_patterns[@]}"; do
-  # tmp/, scratch/, and benchmark/ hold third-party site contents captured by the
-  # pipeline (e.g. each ref site's head.json). Those contain PUBLIC API keys
-  # that ship in the site's own HTML — not maintainer secrets. They're
-  # gitignored and never published, so exclude from this scan.
+  # tmp/, scratch/, benchmark/, and .omx/ hold generated runtime/captured
+  # contents. Those can contain third-party public keys, absolute paths, and
+  # local agent logs; they are gitignored and never published, so exclude them
+  # from shipped-surface scans.
   hits=$(grep -rEn "$p" \
     --include='*.sh' --include='*.md' --include='*.json' --include='*.yaml' --include='*.yml' \
     --exclude="$SELF" --exclude="$DRIFT_TEST" \
-    --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=node_modules \
+    --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules \
     --exclude-dir=.venv --exclude-dir=.mypy_cache --exclude-dir=.sisyphus \
     . 2>/dev/null | \
     grep -vE 'evals\.json|example|placeholder|YOUR_|TODO|<YOUR' || true)
@@ -69,7 +69,7 @@ done
 
 section "Code injection"
 eval_count=$(grep -rEn '(^|[[:space:];&|])eval[[:space:]"'"'"']' \
-  --include='*.sh' --exclude="$SELF" --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=node_modules . 2>/dev/null | \
+  --include='*.sh' --exclude="$SELF" --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules . 2>/dev/null | \
   grep -v 'agent-browser' | \
   grep -v "^[^:]*:[0-9]*:[[:space:]]*echo " | \
   grep -vE "^[^:]*:[0-9]+:[[:space:]]*#" | wc -l | tr -d ' ')
@@ -80,13 +80,13 @@ eval_count=$(grep -rEn '(^|[[:space:];&|])eval[[:space:]"'"'"']' \
 # not part of the shipped surface — same exclusion as the secret scan above.
 fixed_tmp=$(grep -rEn '/tmp/[a-zA-Z][a-zA-Z0-9_.-]+\.(txt|log|json|tmp)' \
   --include='*.sh' --exclude="$SELF" \
-  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=node_modules . 2>/dev/null | \
+  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules . 2>/dev/null | \
   grep -v 'mktemp\|RESULT_FILE\|TEMP_FILE' | wc -l | tr -d ' ')
 [ "$fixed_tmp" -eq 0 ] && ok "no fixed /tmp paths (CWE-377)" || err "fixed /tmp paths found ($fixed_tmp)"
 
 backdoor=$(grep -rEn 'nc -[el]|/dev/tcp/|bash -i.*&|reverse shell|exec [0-9]<>/dev/' \
   --include='*.sh' --exclude="$SELF" \
-  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=node_modules . 2>/dev/null | wc -l | tr -d ' ')
+  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules . 2>/dev/null | wc -l | tr -d ' ')
 [ "$backdoor" -eq 0 ] && ok "no reverse-shell / backdoor patterns" || err "backdoor pattern ($backdoor)"
 
 section "Manifest validity"

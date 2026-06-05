@@ -41,7 +41,7 @@
 
 set -uo pipefail
 
-# Codex review (2026-05-24/25): per-check timeout via Python wrapper.
+# Verification review: per-check timeout via Python wrapper.
 # The first attempt used bash timeout-shim.sh's pure-bash fallback, which
 # only SIGTERM's the immediate child PID and leaves the spawned tree
 # (bash → node → chromium) alive inside the `if cmd | tail | sed; then`
@@ -62,7 +62,7 @@ if [ -z "$SESSION" ] || [ -z "$REF_URL" ] || [ -z "$IMPL_URL" ] || [ -z "$REF_DI
   exit 2
 fi
 
-# Codex universality audit MEDIUM: prior version derived deterministic
+# Universality audit MEDIUM: prior version derived deterministic
 # session suffixes (`{session}-hyd`, `{session}-rdp`, etc) from the
 # caller's session name. Repeated invocations against the same parent
 # session reused stale browser state and leaked across loops. Append
@@ -193,6 +193,7 @@ SIGNATURES = {
     "proxy-mirror-check.sh": "{ref_dir}",
     "bundle-paste-check.sh": "{ref_dir} {impl_root}",
     "transition-spec-coverage.sh": "{ref_dir} {impl_src}",
+    "signature-effects-coverage-check.sh": "{ref_dir} {impl_src}",
     "spec-implementation-coverage.sh": "{ref_dir} {impl_src}",
     "runtime-spec-coverage.sh": "{ref_dir} {impl_src}",
     "bundle-impl-coverage-check.sh": "{ref_dir} {impl_pkg}",
@@ -226,8 +227,8 @@ SIGNATURES = {
     # impl-url ref-dir [w] [h]. self-skips when ref header is static.
     "header-state-runtime-check.sh":
         "{session}-hsr {ref_url} {impl_url} {ref_dir}",
-    # 2026-05-22 (codex-rescue a125b997): svg-provenance closes the
-    # IconMark.tsx hand-roll loophole. svg-dom-parity only checks count
+    # svg-provenance closes the IconMark.tsx hand-roll loophole.
+    # svg-dom-parity only checks count
     # + section presence; this gate asserts impl SVG geometry traces
     # back to ref geometry. Args: session ref-url impl-url ref-dir.
     "svg-provenance-check.sh":

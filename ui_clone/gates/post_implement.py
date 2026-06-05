@@ -21,6 +21,21 @@ if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
 
 _CSS_MODULE_CLASS_RE = re.compile(r"\b[A-Za-z][\w-]*__[A-Za-z0-9_-]{4,}\b")
+# Codex MED (c): only count CSS-module tokens that appear inside a class /
+# className attribute value — not anywhere in the raw source (comments / string
+# literals could otherwise pad the forensic count). Captures the attribute value
+# from `class="…"`, `className="…"`, `className='…'`, and `className={…}`.
+_CLASS_ATTR_RE = re.compile(
+    r"""(?:class|className)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})"""
+)
+
+
+def _classname_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for m in _CLASS_ATTR_RE.finditer(text):
+        value = m.group(1) or m.group(2) or m.group(3) or ""
+        tokens.update(_CSS_MODULE_CLASS_RE.findall(value))
+    return tokens
 _FORENSIC_SOURCE_SUFFIXES = (".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte", ".astro")
 
 
@@ -94,14 +109,23 @@ def _check_forensic_preservation_compliance(self: Gate) -> CheckResult | None:
                 except OSError:
                     continue
 
-    class_tokens = {
-        token
-        for text in code_texts
-        for token in _CSS_MODULE_CLASS_RE.findall(text)
-    }
+    class_tokens: set[str] = set()
+    for text in code_texts:
+        class_tokens |= _classname_tokens(text)
+    # Threshold base = classes that actually appear on the reference DOM (the
+    # reachable ceiling a faithful clone can preserve in JSX). Stylesheets define
+    # far more classes (pseudo/state/unused variants) than land on rendered
+    # elements, so basing the bar on classSignatureCount (which unions CSS-file
+    # definitions) makes the gate mathematically unreachable — realfood had 136
+    # DOM classes but 599 CSS-defined, so 25%*599=149 > 136 blocked every clone.
+    # Prefer domClassSignatureCount; fall back to classSignatureCount for plans
+    # written before that field existed.
+    dom_count_raw = forensic.get("domClassSignatureCount")
+    dom_count = dom_count_raw if isinstance(dom_count_raw, int) and dom_count_raw > 0 else 0
     ref_count_raw = forensic.get("classSignatureCount")
     ref_count = ref_count_raw if isinstance(ref_count_raw, int) and ref_count_raw > 0 else 0
-    required_token_count = max(10, int(ref_count * 0.25)) if ref_count else 10
+    threshold_base = dom_count or ref_count
+    required_token_count = max(10, int(threshold_base * 0.25)) if threshold_base else 10
     has_ref_css_import = any("ref-css" in text for text in import_texts)
 
     failures: list[str] = []
@@ -112,7 +136,7 @@ def _check_forensic_preservation_compliance(self: Gate) -> CheckResult | None:
     if len(class_tokens) < required_token_count:
         failures.append(
             f"preserved CSS-module className tokens {len(class_tokens)} "
-            f"< required {required_token_count} (ref signatures={ref_count})"
+            f"< required {required_token_count} (DOM class signatures={threshold_base})"
         )
 
     if failures:
@@ -280,7 +304,7 @@ def _find_impl_root(self: Gate) -> Path | None:
     verify-loop) share one resolver. audit incident surfaced a split-brain risk
     where a Python and a shell heuristic could diverge — passing one
     while failing the other was a real escape vector. A single canonical
-    implementation closes that gap (Codex audit issue 1).
+    implementation closes that gap (a prior audit escape).
 
     Returns the impl ROOT (containing src/ and public/), not impl/public/.
     None when the resolver exits non-zero. Stdout shape from resolver
@@ -328,14 +352,14 @@ def _find_impl_root(self: Gate) -> Path | None:
 def _check_sections_result_health(self: Gate) -> CheckResult | None:
     """Fail post-implement when sections/result.txt is missing or dirty.
 
-    Loop-23 finding: auxiliary gates (asset-transfer, hydration,
+    Visual-health regression finding: auxiliary gates (asset-transfer, hydration,
     image-fidelity, bundle-impl-coverage) reported `pass` while the
     canonical visual-diff result was 0 PASS / 12 FAIL / 3 SKIP — i.e. the
     clone was visually broken but the gate let it through. section-compare.sh
     already exit-1's on FAIL_COUNT > 0, but gate_post_implement never read
     its output. This adds the aggregate read.
 
-    Loop-30 finding: Codex runs could skip section-compare entirely, leaving
+    Missing-section-compare finding: Agent runs could skip section-compare entirely, leaving
     no result.txt for this aggregate check to read. Treat missing/unparseable
     canonical visual evidence as a post-implement failure.
     """
@@ -560,7 +584,7 @@ def _check_visual_debug_stamp(self: Gate) -> CheckResult | None:
 
     Trigger condition is "result.txt exists" (not "≥1 PASS") because
     the anti-cheat baseline must run on any site that reached section-
-    compare, including 0-PASS visual-fidelity-failure runs — codex
+    compare, including 0-PASS visual-fidelity-failure runs. Agents
     must not be able to skip the baseline by intentionally failing
     sections.
 
@@ -599,7 +623,7 @@ def _check_visual_debug_stamp(self: Gate) -> CheckResult | None:
                 "<orig-url> <impl-url> <ref-dir>"
             ),
         )
-    # Provisional handling (Fix 1, codex review 2026-05-27): auto-verify
+    # Provisional handling (Fix 1, review 2026-05-27): auto-verify
     # writes a provisional stamp at the start of its run so post-implement
     # gate can pass DURING that same run (chicken-and-egg). A crashed/
     # orphaned auto-verify leaves provisional=true behind, which without
@@ -812,15 +836,14 @@ def _check_spec_bundle_grounding(self: Gate) -> CheckResult | None:
     )
 
 
-# E1: bundle-grep context inject — claude fidelity analysis 2026-05-25,
-# codex review of D+E1 staged design.
+# E1: bundle-grep context inject — fidelity analysis and D+E1 staged design review.
 # When fix iterations stall (any active gate has failed 2+ times) AND
 # sections/result.txt has failing rows, auto-inject ref-source snippets
 # for the worst-AE selectors so the next fix iteration is grounded in
 # the ref's actual code instead of guessed. Cost: 0 (greps captured ref
 # artifacts, no LLM call).
 
-# Codex review item (a): mark_failed bumps the counter AFTER the gate
+# Review item (a): mark_failed bumps the counter AFTER the gate
 # runs, so an in-gate check reads the previous count. "fail 2-3" target
 # becomes effective threshold >= 2.
 _E1_FAIL_THRESHOLD = 2
@@ -832,7 +855,7 @@ _E1_BUNDLE_GREP_TIMEOUT_S = 15
 def _parse_failing_section_rows(text: str) -> list[tuple[str, int]]:
     """Return [(label, ae_per_mpx)] for rows marked ❌ or 🌑.
 
-    Codex review item (c): saturated rows use 🌑 not ❌ but still count
+    Review item (c): saturated rows use 🌑 not ❌ but still count
     as fail and must be included for worst-N selection.
     """
     out: list[tuple[str, int]] = []
@@ -851,6 +874,52 @@ def _parse_failing_section_rows(text: str) -> list[tuple[str, int]]:
             continue
         out.append((label, ae_per_mpx))
     return out
+
+
+def _ref_source_patterns_for_label(ref_dir: Path, label: str) -> list[str]:
+    """Map a sanitized section-compare label back to greppable ref-source tokens.
+
+    section-compare sanitizes section names: CSS-module underscore runs
+    collapse (prefix_hero__Hash -> prefix_hero_Hash) and duplicate ids gain a
+    -N suffix (footer-2). Grepping the label verbatim therefore misses the ref
+    css/bundles for exactly the worst-AE sections, and the stuck-fix-loop
+    context degrades to 'no ref-source matches for selector' — the agent gets
+    no ref grounding for its next iteration. Resolve the label against
+    section-map.json (first class token + id) by comparing on the same
+    sanitized form; the raw label stays as the last-resort pattern.
+    """
+    base = re.sub(r"-\d+$", "", label)
+
+    def _sanitized(token: str) -> str:
+        return re.sub(r"_{2,}", "_", token)
+
+    candidates: list[str] = []
+    sections: list[object] = []
+    try:
+        data = json.loads((ref_dir / "section-map.json").read_text(encoding="utf-8"))
+        raw = data.get("sections") if isinstance(data, dict) else data
+        if isinstance(raw, list):
+            sections = raw
+    except (OSError, json.JSONDecodeError):
+        sections = []
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        cls_tokens = str(sec.get("className") or sec.get("cls") or "").split()
+        first_cls = cls_tokens[0] if cls_tokens else ""
+        sid = str(sec.get("id") or "")
+        matched = any(
+            tok and (tok in (label, base) or _sanitized(tok) in (label, base))
+            for tok in (first_cls, sid)
+        )
+        if not matched:
+            continue
+        for tok in (first_cls, sid):
+            if tok and tok not in candidates:
+                candidates.append(tok)
+    if label not in candidates:
+        candidates.append(label)
+    return candidates
 
 
 def _resolve_repo_root_for_bundle_grep() -> Path | None:
@@ -882,12 +951,12 @@ def _check_bundle_grep_context_inject(self: Gate) -> CheckResult | None:
     failures already block. A warn surfaces the snippets without adding
     another fail count.
 
-    Codex review item (f): post_implement.py must not auto-DISPATCH expensive
+    Review item (f): post_implement.py must not auto-DISPATCH expensive
     LLM calls (visual-judge auto-run = D). bundle-grep is cheap text grep,
     so consuming/injecting it here is in scope. The D dispatcher belongs
     in driver/goal-card territory, not in the gate.
     """
-    # Active-gate counter — codex review item (d): use max() across
+    # Active-gate counter — review item (d): use max() across
     # post-implement and section-compare because mark_failed only bumps the
     # current_gate counter, and visual fails accruing under post-implement
     # leave the section-compare counter stale.
@@ -925,17 +994,24 @@ def _check_bundle_grep_context_inject(self: Gate) -> CheckResult | None:
 
     snippets: list[str] = []
     for label, ae in worst:
-        try:
-            proc = subprocess.run(
-                ["bash", str(grep_script), str(self.ref_dir), label],
-                capture_output=True,
-                text=True,
-                timeout=_E1_BUNDLE_GREP_TIMEOUT_S,
-                check=False,
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            continue
-        output = (proc.stdout or "").strip()
+        # Try real ref-source tokens (resolved from section-map) before the
+        # sanitized display label — the label's collapsed underscores never
+        # match CSS-module tokens in the ref css/bundles.
+        output = ""
+        for pattern in _ref_source_patterns_for_label(self.ref_dir, label):
+            try:
+                proc = subprocess.run(
+                    ["bash", str(grep_script), str(self.ref_dir), pattern],
+                    capture_output=True,
+                    text=True,
+                    timeout=_E1_BUNDLE_GREP_TIMEOUT_S,
+                    check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                continue
+            output = (proc.stdout or "").strip()
+            if output:
+                break
         if not output:
             snippets.append(
                 f"  • {label} (AE/Mpx={ae}): no ref-source matches for selector"

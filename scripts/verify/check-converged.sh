@@ -17,7 +17,7 @@
 # Usage:
 #   bash scripts/verify/check-converged.sh <ref-dir> [--write-stamp] [--stage A|B|C|D]
 #
-# --write-stamp (codex review, Task #11):
+# --write-stamp (review, Task #11):
 #   On convergence (exit 0), additionally write structural-convergence-stamp.json
 #   into <ref-dir>/. The Stop hook consumes this stamp as proof-of-closeout when
 #   pipeline-state.json's closeoutPolicy=="structural" (default canonical path

@@ -47,7 +47,7 @@ It writes **`canvas-replay-plan.json`**:
   "schemaVersion": 1,
   "decision": "canvas-replay",
   "reason": "origin-lock",
-  "url": "https://www.raviklaassens.com/",
+  "url": "https://example.com/",
   "sections": [
     {
       "section": "sec-2",
@@ -130,11 +130,11 @@ is loosened by the auto path.
 
 The default canonical closeout policy requires `section-compare` to pass —
 pixel-exact AE/SSIM diff between ref and impl screenshots. Sites whose
-visual identity is driven by imperative `<canvas>` drawing (kayiseisagu's
-`.bg-canvas` arcs, raviklaassens UnicornStudio scenes) fail this gate by
+visual identity is driven by imperative `<canvas>` drawing (custom canvas
+arcs, exported WebGL scenes, or similar generated plates) fail this gate by
 design: CSS approximation of canvas output is approximate, AE/SSIM is
-bit-exact. Past iterations confirmed AE/Mpx stays 60k–440k regardless of
-fix attempts.
+bit-exact. Past iterations confirmed AE/Mpx can stay saturated regardless of
+CSS-only fix attempts.
 
 Current default fallback is the 30-min canvas CSS replication hard cap →
 `record_unclonable(category="hard-cap-fail")`. The clone is shelved as
@@ -313,7 +313,7 @@ attestation knowingly).
 
 ## Related design docs
 
-- `docs/canvas-replay-mode-design.md` — original design + codex review notes
+- `docs/canvas-replay-mode-design.md` — original design and review notes
 - `docs/multi-snapshot-capture-design.md` — splash/scroll/hover DOM state
   capture that complements canvas-replay (capture phases run before
   closeout policy matters)

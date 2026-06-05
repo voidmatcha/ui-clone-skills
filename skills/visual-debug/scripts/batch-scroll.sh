@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# batch-scroll.sh — Capture screenshots at identical scroll positions from two URLs
+# batch-scroll.sh — Capture section-aligned scroll screenshots from two URLs
 # Usage: bash batch-scroll.sh <original-url> <impl-url> <session> [output-dir]
 #
-# Captures at 0%, 10%, 20%, ..., 100% scroll progress from both sites.
+# Default mode captures paired semantic section anchors, with extra probes at
+# sticky/pinned and scroll-transition entry/mid/exit phases. Percentage capture
+# (0%, 10%, ..., 100%) is retained as a fallback / explicit opt-in.
+#
 # Uses interleaved capture: ref 0% → impl 0% → ref 10% → impl 10% → ...
 # This eliminates carousel/animation drift between the two sides.
 #
-# Uses content-anchored alignment: measures total scroll height per site,
-# converts percentage to absolute scroll position.
+# Why not percentage first: 25% of a short impl page often corresponds to a
+# different section than 25% of the taller ref page, so AE diff reports a false
+# mismatch. Section anchors compare ref section N with impl section N even when
+# their heights differ.
 #
 # Output: <dir>/static/ref/*.png and <dir>/static/impl/*.png
 #
@@ -17,6 +22,9 @@
 #   NO_IMAGES=1        Hide all images/video via CSS + Blink flag — reduces AE noise from dynamic content (default: 0)
 #   WAIT_INIT=6000     Page settle wait in ms after open (default: 6000)
 #   WAIT_SCROLL=500    Wait in ms between scroll and screenshot (default: 500)
+#   SCROLL_CAPTURE_MODE=anchors|percent  Default anchors; percent is legacy.
+#   SCROLL_ANCHOR_MIN_COUNT=4            Fallback to percent below this count.
+#   SCROLL_ANCHOR_MAX=24                 Max section/sticky probes.
 
 set -euo pipefail
 
@@ -30,6 +38,12 @@ VIEW_H="${VIEW_H:-900}"
 NO_IMAGES="${NO_IMAGES:-0}"
 WAIT_INIT="${WAIT_INIT:-6000}"
 WAIT_SCROLL="${WAIT_SCROLL:-500}"
+SCROLL_CAPTURE_MODE="${SCROLL_CAPTURE_MODE:-anchors}"
+SCROLL_ANCHOR_MIN_COUNT="${SCROLL_ANCHOR_MIN_COUNT:-4}"
+SCROLL_ANCHOR_MAX="${SCROLL_ANCHOR_MAX:-24}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 SESSION_REF="${SESSION}-ref"
 SESSION_IMPL="${SESSION}-impl"
@@ -48,7 +62,7 @@ mkdir -p "$DIR/static/ref" "$DIR/static/impl" "$DIR/static/diff"
 
 POSITIONS=(0 10 20 30 40 50 60 70 80 90 100)
 
-echo "═══ Batch Scroll Capture (interleaved) ═══"
+echo "═══ Batch Scroll Capture (section-aligned, interleaved) ═══"
 echo "Original: $ORIG_URL"
 echo "Implementation: $IMPL_URL"
 echo ""
@@ -232,46 +246,160 @@ fi
 
 echo ""
 
-# Interleaved capture: ref N% → impl N% for each position
-echo "▸ Capturing (interleaved)..."
-for PCT in "${POSITIONS[@]}"; do
-  Y_REF=$(awk "BEGIN { printf \"%d\", $ORIG_HEIGHT * $PCT / 100 }")
-  Y_IMPL=$(awk "BEGIN { printf \"%d\", $IMPL_HEIGHT * $PCT / 100 }")
-
-  # Scroll both — falls back to inner-wrapper scrollTop when document body has overflow:hidden
-  _scroll_js() {
-    local sel="$1"; local y="$2"
-    if [ "$sel" = "__document__" ]; then
-      echo "(() => { window.scrollTo(0, $y); return $y; })()"
-    else
-      # Use the detected selector; dispatch a 'scroll' event so libraries that listen
-      # for scroll events (Lenis, IntersectionObserver poll) re-evaluate.
-      echo "(() => { const w = document.querySelector('$sel'); if (!w) { window.scrollTo(0, $y); return $y; } w.scrollTop = $y; w.dispatchEvent(new Event('scroll')); return w.scrollTop; })()"
-    fi
-  }
-  agent-browser --session "$SESSION_REF" eval "$(_scroll_js "$ORIG_SEL" "$Y_REF")" 2>&1 > /dev/null
-  agent-browser --session "$SESSION_IMPL" eval "$(_scroll_js "$IMPL_SEL" "$Y_IMPL")" 2>&1 > /dev/null
-
-  sleep "$(awk "BEGIN { printf \"%.3f\", $WAIT_SCROLL / 1000 }")"
-
-  # Screenshot both
-  agent-browser --session "$SESSION_REF" screenshot "$DIR/static/ref/${PCT}pct.png" 2>&1 > /dev/null
-  agent-browser --session "$SESSION_IMPL" screenshot "$DIR/static/impl/${PCT}pct.png" 2>&1 > /dev/null
-
-  # Verify screenshots were actually written (silent failure guard)
-  if [ ! -s "$DIR/static/ref/${PCT}pct.png" ] || [ ! -s "$DIR/static/impl/${PCT}pct.png" ]; then
-    echo "  ⚠️  ${PCT}% — screenshot missing or empty (browser may have crashed)"
+_scroll_js() {
+  local sel="$1"; local y="$2"
+  if [ "$sel" = "__document__" ]; then
+    echo "(() => { window.scrollTo(0, $y); window.dispatchEvent(new Event('scroll')); return $y; })()"
   else
-    echo "  ✓ ${PCT}% (ref y=$Y_REF, impl y=$Y_IMPL)"
+    # Use the detected selector; dispatch a 'scroll' event so libraries that listen
+    # for scroll events (Lenis, IntersectionObserver poll) re-evaluate.
+    echo "(() => { const w = document.querySelector('$sel'); if (!w) { window.scrollTo(0, $y); window.dispatchEvent(new Event('scroll')); return $y; } w.scrollTop = $y; w.dispatchEvent(new Event('scroll')); return w.scrollTop; })()"
   fi
-done
+}
+
+ANCHOR_PLAN="$DIR/static/scroll-anchors.json"
+USE_ANCHOR_PLAN=0
+EXPECTED_CAPTURE_COUNT=${#POSITIONS[@]}
+
+if [ "$SCROLL_CAPTURE_MODE" != "percent" ]; then
+  echo "▸ Building section anchor plan..."
+  ANCHOR_ENUM_JS='(() => {
+    const vh = window.innerHeight || document.documentElement.clientHeight || 900;
+    const vw = window.innerWidth || document.documentElement.clientWidth || 1440;
+    const textOf = (el) => (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+    const classOf = (el) => typeof el.className === "string" ? el.className : "";
+    const visible = (el, rect) => {
+      const cs = getComputedStyle(el);
+      return cs.display !== "none" && cs.visibility !== "hidden" && Number(cs.opacity || 1) > 0.02
+        && rect.width >= Math.min(240, vw * 0.25) && rect.height >= 120;
+    };
+    const meaningful = (el, rect) => {
+      if (!visible(el, rect)) return false;
+      const text = textOf(el);
+      return text.length >= 24 || !!el.querySelector("img,svg,canvas,video,picture,lottie-player,dotlottie-player");
+    };
+    const identity = (el) => [el.id, classOf(el), el.tagName.toLowerCase()].join(" ");
+    const anchors = [];
+    const seen = new Set();
+    const add = (el, rect) => {
+      const text = textOf(el);
+      const top = Math.max(0, Math.round(rect.top + window.scrollY));
+      const key = `${Math.round(top / 80)}:${el.tagName}:${(text || identity(el)).slice(0, 60)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      anchors.push({
+        index: anchors.length,
+        tag: el.tagName.toLowerCase(),
+        id: el.id || null,
+        className: classOf(el),
+        childCount: el.children ? el.children.length : 0,
+        rect: {
+          top,
+          left: Math.round(rect.left),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height)
+        },
+        fingerprint: text.slice(0, 500),
+        textWords: text.toLowerCase().replace(/[^a-z0-9]+/g, " ").slice(0, 1200)
+      });
+    };
+    const walk = (el, depth) => {
+      if (!el || depth > 5) return;
+      const rect = el.getBoundingClientRect();
+      if (!meaningful(el, rect)) return;
+      const kids = Array.from(el.children || []).filter(child => meaningful(child, child.getBoundingClientRect()));
+      const isJumbo = rect.height > vh * 1.8 && kids.length >= 2;
+      const isGeneric = ["BODY", "MAIN", "DIV"].includes(el.tagName) && !el.id && !/section|hero|footer|header|sticky|pin/i.test(classOf(el));
+      if ((isJumbo || isGeneric) && depth < 5) {
+        kids.forEach(child => walk(child, depth + 1));
+        return;
+      }
+      add(el, rect);
+      if (depth < 2 && rect.height > vh * 1.2) kids.slice(0, 12).forEach(child => walk(child, depth + 1));
+    };
+    const roots = Array.from(document.querySelectorAll("main, [role=main]"));
+    if (roots.length === 0) roots.push(document.body);
+    roots.forEach(root => Array.from(root.children || [root]).forEach(child => walk(child, 0)));
+    document.querySelectorAll("header, footer, nav, section, article, [id]").forEach(el => walk(el, 0));
+    anchors.sort((a, b) => a.rect.top - b.rect.top || b.rect.height - a.rect.height);
+    return anchors.slice(0, 80);
+  })()'
+
+  agent-browser --session "$SESSION_REF" eval --json "$ANCHOR_ENUM_JS" > "$DIR/static/ref-anchors.json" 2>/dev/null || true
+  agent-browser --session "$SESSION_IMPL" eval --json "$ANCHOR_ENUM_JS" > "$DIR/static/impl-anchors.json" 2>/dev/null || true
+
+  if PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m ui_clone.scroll_anchor_plan build \
+      "$DIR/static/ref-anchors.json" \
+      "$DIR/static/impl-anchors.json" \
+      "$ANCHOR_PLAN" \
+      --viewport-height "$VIEW_H" \
+      --max-anchors "$SCROLL_ANCHOR_MAX" \
+      --sticky "$DIR/sticky-elements.json" \
+      --transition-spec "$DIR/transition-spec.json" 2>&1; then
+    ANCHOR_COUNT=$(python3 -c "import json; print(len(json.load(open('$ANCHOR_PLAN'))))" 2>/dev/null || echo "0")
+    if [ "${ANCHOR_COUNT:-0}" -ge "${SCROLL_ANCHOR_MIN_COUNT:-4}" ]; then
+      USE_ANCHOR_PLAN=1
+      EXPECTED_CAPTURE_COUNT="$ANCHOR_COUNT"
+      echo "  ✓ using $ANCHOR_COUNT section/sticky anchor probe(s)"
+    else
+      echo "  ⚠️  only ${ANCHOR_COUNT:-0} anchors found (< $SCROLL_ANCHOR_MIN_COUNT); falling back to percent positions"
+    fi
+  else
+    echo "  ⚠️  section anchor planning failed; falling back to percent positions"
+  fi
+fi
+
+# Interleaved capture: ref anchor → impl anchor, or ref N% → impl N%.
+echo "▸ Capturing (interleaved)..."
+if [ "$USE_ANCHOR_PLAN" = "1" ]; then
+  while IFS=$'\t' read -r NAME Y_REF Y_IMPL REASON; do
+    [ -n "$NAME" ] || continue
+    agent-browser --session "$SESSION_REF" eval "$(_scroll_js "$ORIG_SEL" "$Y_REF")" 2>&1 > /dev/null
+    agent-browser --session "$SESSION_IMPL" eval "$(_scroll_js "$IMPL_SEL" "$Y_IMPL")" 2>&1 > /dev/null
+
+    sleep "$(awk "BEGIN { printf \"%.3f\", $WAIT_SCROLL / 1000 }")"
+
+    agent-browser --session "$SESSION_REF" screenshot "$DIR/static/ref/${NAME}.png" 2>&1 > /dev/null
+    agent-browser --session "$SESSION_IMPL" screenshot "$DIR/static/impl/${NAME}.png" 2>&1 > /dev/null
+
+    if [ ! -s "$DIR/static/ref/${NAME}.png" ] || [ ! -s "$DIR/static/impl/${NAME}.png" ]; then
+      echo "  ⚠️  ${NAME} — screenshot missing or empty (browser may have crashed)"
+    else
+      echo "  ✓ ${NAME} ($REASON; ref y=$Y_REF, impl y=$Y_IMPL)"
+    fi
+  done < <(PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m ui_clone.scroll_anchor_plan tsv "$ANCHOR_PLAN")
+else
+  echo "  ↳ legacy percent mode"
+  for PCT in "${POSITIONS[@]}"; do
+    Y_REF=$(awk "BEGIN { printf \"%d\", $ORIG_HEIGHT * $PCT / 100 }")
+    Y_IMPL=$(awk "BEGIN { printf \"%d\", $IMPL_HEIGHT * $PCT / 100 }")
+
+    agent-browser --session "$SESSION_REF" eval "$(_scroll_js "$ORIG_SEL" "$Y_REF")" 2>&1 > /dev/null
+    agent-browser --session "$SESSION_IMPL" eval "$(_scroll_js "$IMPL_SEL" "$Y_IMPL")" 2>&1 > /dev/null
+
+    sleep "$(awk "BEGIN { printf \"%.3f\", $WAIT_SCROLL / 1000 }")"
+
+    agent-browser --session "$SESSION_REF" screenshot "$DIR/static/ref/${PCT}pct.png" 2>&1 > /dev/null
+    agent-browser --session "$SESSION_IMPL" screenshot "$DIR/static/impl/${PCT}pct.png" 2>&1 > /dev/null
+
+    if [ ! -s "$DIR/static/ref/${PCT}pct.png" ] || [ ! -s "$DIR/static/impl/${PCT}pct.png" ]; then
+      echo "  ⚠️  ${PCT}% — screenshot missing or empty (browser may have crashed)"
+    else
+      echo "  ✓ ${PCT}% (ref y=$Y_REF, impl y=$Y_IMPL)"
+    fi
+  done
+fi
 
 # Final count verification
 REF_ACTUAL=$({ find "$DIR/static/ref" -name "*.png" 2>/dev/null || true; } | wc -l | tr -d ' ')
 IMPL_ACTUAL=$({ find "$DIR/static/impl" -name "*.png" 2>/dev/null || true; } | wc -l | tr -d ' ')
 echo ""
-echo "▸ Captured: ref=$REF_ACTUAL impl=$IMPL_ACTUAL (expected ${#POSITIONS[@]} each)"
-if [ "$REF_ACTUAL" -lt "${#POSITIONS[@]}" ] || [ "$IMPL_ACTUAL" -lt "${#POSITIONS[@]}" ]; then
+echo "▸ Captured: ref=$REF_ACTUAL impl=$IMPL_ACTUAL (expected $EXPECTED_CAPTURE_COUNT each)"
+CAPTURE_RC=0
+if [ "$REF_ACTUAL" -lt "$EXPECTED_CAPTURE_COUNT" ] || [ "$IMPL_ACTUAL" -lt "$EXPECTED_CAPTURE_COUNT" ]; then
   echo "  ⚠️  Some captures missing — check browser sessions above"
+  CAPTURE_RC=1
 fi
 echo "▸ Next: bash \"\$(dirname \"\$0\")/batch-compare.sh\" $DIR"
+exit "$CAPTURE_RC"

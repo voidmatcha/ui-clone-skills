@@ -13,6 +13,7 @@
 #   <ref-dir>/font-parity.json                        — match / mismatch
 #   <ref-dir>/responsive/boundary-collisions.json     — overflow zones
 #   <ref-dir>/spec-implementation-coverage.json       — spec → impl coverage %
+#   <ref-dir>/phase-e-review.json                     — Phase E advisory deductions
 #
 # Outputs:
 #   benchmark/history/<UTC-iso>-<sha>.json (full record incl. quality dims)
@@ -144,6 +145,32 @@ if isinstance(sc, dict):
     if isinstance(total, int) and total > 0 and isinstance(withm, int):
         spec_coverage_pct = round(withm / total, 4)
 
+# ── phase-e-review.json — advisory deduction aggregate ──────────────────────
+# Aggregates the Phase E reviewer's advisory {location, reason, penalty, label}
+# entries (schemaVersion 2+). Maintainer trend signal only; never feeds a gate.
+per = load_json("phase-e-review.json")
+advisory_deductions = None
+if isinstance(per, dict) and isinstance(per.get("positions"), list):
+    by_label = {"completeness": 0, "visual-effect": 0, "icon-variant": 0}
+    penalty_sum = 0.0
+    deductions_total = 0
+    for pos in per["positions"]:
+        if not isinstance(pos, dict):
+            continue
+        for d in pos.get("deductions") or []:
+            if not isinstance(d, dict):
+                continue
+            deductions_total += 1
+            if d.get("label") in by_label:
+                by_label[d["label"]] += 1
+            if isinstance(d.get("penalty"), (int, float)):
+                penalty_sum += d["penalty"]
+    advisory_deductions = {
+        "deductions_total": deductions_total,
+        "penalty_sum": round(penalty_sum, 2),
+        "by_label": by_label,
+    }
+
 # ── Capture depth — how thorough was Phase 1 / Phase 2? ─────────────────────
 # Reveals whether ui-capture actually populated the reference set, vs the
 # agent short-circuiting and going straight to extraction.
@@ -177,6 +204,7 @@ rec = {
     "font_parity": font_parity,
     "boundary_collisions": boundary_collisions,
     "spec_coverage_pct": spec_coverage_pct,
+    "advisory_deductions": advisory_deductions,
     "gate_fail_total": gate_fail_total,
     "unclonable_count": len(unclonable),
     "unclonable_reasons_summary": unclonable_summary,

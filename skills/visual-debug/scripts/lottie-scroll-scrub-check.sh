@@ -198,8 +198,8 @@ if requires:
     ...document.querySelectorAll("[data-lottie], [data-animation-path], [data-lottie-src]"),
     ...document.querySelectorAll("[id*=\"lottie\" i], [class*=\"lottie\" i]"),
   ]));
-  // juanmora iter-3/4/5 finding (2026-05-28): lottie-scroll-state-mismatch
-  // FAILed because the probe sampled lottie currentFrame too soon after
+  // lottie-scroll-state-mismatch can fail when the probe samples lottie
+  // currentFrame too soon after
   // scrollTo. ScrollTrigger callbacks run inside requestAnimationFrame, and
   // GSAP-driven lottie scrubbing typically needs 1-3 frames after the scroll
   // event before the .lottie instance's currentFrame settles. 220ms (≈13

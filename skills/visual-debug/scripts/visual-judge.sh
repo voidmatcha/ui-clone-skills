@@ -13,7 +13,7 @@
 # direction early when AE is uniformly catastrophic.
 set -euo pipefail
 
-# Codex review (2026-05-24/25): wrap `claude --print` in a Python timeout
+# Verification review: wrap `claude --print` in a Python timeout
 # (subprocess.Popen + start_new_session + killpg). Multimodal LLM calls can
 # hang indefinitely (network stall, model wedged); the unbounded version
 # burned vision budget on stuck calls. Default 5 min covers normal latency
@@ -98,7 +98,7 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 3
 fi
 
-# Codex review: `if ! VAR=$(...)` flips the exit code via `!`, swallowing
+# Review follow-up: `if ! VAR=$(...)` flips the exit code via `!`, swallowing
 # 124 (the timeout signal). Use `|| { ... }` so the actual exit code lands
 # in $? cleanly.
 RESPONSE="$(python3 "$_RUN_WITH_TIMEOUT" "$VISUAL_JUDGE_TIMEOUT_SEC" claude --print --permission-mode auto "$PROMPT")" || {

@@ -209,8 +209,8 @@ def _find_active_markers(search_root: Path) -> list[Path]:
             dirs.append(d)
             continue
         # Implicit activation: impl/ exists but the canonical marker is missing.
-        # Loop-61 false-positive fix: resolve impl per ref dir (impl_root /
-        # .impl-root marker / env), not from a single repo-root convention.
+        # Resolve impl per ref dir (impl_root / .impl-root marker / env),
+        # not from a single repo-root convention.
         # A rogue <project_root>/impl symlink no longer false-positives every
         # prior tmp/ref/<c>/ — only ref dirs whose recorded impl_root exists
         # implicit-activate.
@@ -222,8 +222,45 @@ def _find_active_markers(search_root: Path) -> list[Path]:
     return dirs
 
 
+def _pipeline_state_epoch(ref_dir: Path) -> float | None:
+    """Authoritative activity timestamp: pipeline-state.json's last_updated,
+    parsed to epoch seconds. Returns None when absent/unparseable.
+
+    Filesystem mtime alone is unreliable for staleness: any read, scan, or the
+    Stop hook itself touching a ref dir bumps its mtime, so an abandoned orphan
+    (last advanced days ago) can masquerade as fresh and out-rank the genuinely
+    active ref. pipeline-state.last_updated only moves when the pipeline does
+    real work, so it is the correct activity signal.
+    """
+    try:
+        state = PipelineState.load(ref_dir)
+    except (OSError, ValueError):
+        return None
+    raw = (state.last_updated or "").strip()
+    if not raw:
+        return None
+    import datetime
+
+    iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        dt = datetime.datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.UTC)
+    return dt.timestamp()
+
+
 def _active_ref_mtime(ref_dir: Path) -> float | None:
-    """Best-effort activity timestamp for implicit active refs without markers."""
+    """Best-effort activity timestamp for implicit active refs without markers.
+
+    Prefers pipeline-state.last_updated (authoritative) and only falls back to
+    filesystem mtime when no pipeline-state timestamp exists — so a freshly
+    touched but abandoned orphan is still correctly classified stale.
+    """
+    state_epoch = _pipeline_state_epoch(ref_dir)
+    if state_epoch is not None:
+        return state_epoch
     mtimes: list[float] = []
     try:
         mtimes.append(ref_dir.stat().st_mtime)
@@ -414,7 +451,7 @@ def _newer_impl_files(impl_dir: Path, stamp_path: Path, limit: int = 5) -> list[
 def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     """Block Stop unless pipeline.execute_verify wrote a fresh stamp.
 
-    Codex Q1 (audit incident post-mortem): the SKILL.md mandate to run
+    Prior audit finding: the SKILL.md mandate to run
     `pipeline ... verify` was bypassed because the agent invoked
     individual verification scripts directly. This check closes the
     bypass — Stop blocks unless `verify-stamp.json` exists AND is
@@ -508,7 +545,7 @@ def _enforce_structural_convergence_stamp(ref_dir: Path) -> str | None:
     """Block Stop unless check-converged.sh wrote a fresh structural stamp.
 
     Parallel to _enforce_verify_stamp but for plans that opted into the
-    structural closeout policy (codex Task #11 review). The two stamps are
+    structural closeout policy. The two stamps are
     distinct artifacts with distinct writers — section-staged plans satisfy
     Stop via structural-convergence-stamp.json from scripts/verify/check-
     converged.sh; canonical plans satisfy Stop via verify-stamp.json from
@@ -613,7 +650,7 @@ def _enforce_canvas_replay_stamp(ref_dir: Path) -> str | None:
     opted into the canvas-replay closeout policy (v0.7.0). Canvas-replay
     is the opt-in escape from the 30-min canvas CSS replication cap for
     refs whose visual identity is canvas-driven (WebGL UnicornStudio
-    scenes, generative scroll-driven plates). Codex review applied
+    scenes, generative scroll-driven plates). Review finding applied
     (2026-05-25):
 
       [1] No new GATE_ORDER entry — modifier inside post-implement.
@@ -691,8 +728,8 @@ def _enforce_canvas_replay_stamp(ref_dir: Path) -> str | None:
         )
 
     # Attestation file must exist + still hash to the same value the stamp
-    # recorded. Codex [2] / [5]: tamper detection on the operator's license
-    # confirmation (adding ref_canvas_sources URLs after stamping would
+    # recorded. Tamper detection protects the operator's license confirmation
+    # (adding ref_canvas_sources URLs after stamping would
     # silently expand which JS bundles the gate allows).
     if not attestation_path.is_file():
         return (
@@ -746,16 +783,16 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     # halts loop spawning on --check-done exit 2; this hook stops firing
     # blocking-reason text symmetrically.
     if state.unclonable_reasons:
-        # Loop-23 slip path: synthetic / forensic markers (any gate name
-        # NOT in GATE_ORDER) preserved from a prior loop must NOT
+        # Slip path: synthetic / forensic markers (any gate name NOT in
+        # GATE_ORDER) preserved from a prior loop must NOT
         # release Stop on a fresh state (`completed_steps == []`).
-        # Codex-23 inherited such a marker (`gate="session-cleanup"`)
+        # Interrupted runs can inherit such a marker (`gate="session-cleanup"`)
         # and exited "done" without exercising a single gate. Real hard
         # blockers (hard-cap fail-count, paid-font, DRM canvas,
         # auth-gated) still release — they carry a canonical gate name
         # produced by a gate that DID run. Filtering by `gate in
-        # GATE_ORDER` keeps this robust against codex renaming the
-        # synthetic marker (e.g. "session-cleanup" → "forensic-preserve").
+        # GATE_ORDER` keeps this robust against future synthetic marker
+        # renames (e.g. "session-cleanup" → "forensic-preserve").
         canonical_reasons = [
             r for r in state.unclonable_reasons
             if r.get("gate") in GATE_ORDER
@@ -804,6 +841,17 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     return stamp_enforcer(ref_dir)
 
 
+def _coerce_stop_hook_active(value: object) -> bool:
+    """Codex LOW: the Stop payload may carry stop_hook_active as a real bool OR
+    a JSON string. `bool("false")` is truthy, which would wrongly release the
+    gate on the FIRST stop. Coerce string forms explicitly."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+    return bool(value)
+
+
 def main() -> None:
     project_root = _find_project_root()
     search_root = project_root / "tmp" / "ref"
@@ -813,6 +861,7 @@ def main() -> None:
     # block on parse error) to extract the active session id for the
     # driver-session bypass check.
     session_id_from_payload = ""
+    stop_hook_active = False
     if not sys.stdin.isatty():
         try:
             raw = sys.stdin.read()
@@ -822,8 +871,19 @@ def main() -> None:
                     sid = payload.get("session_id")
                     if isinstance(sid, str):
                         session_id_from_payload = sid
+                    stop_hook_active = _coerce_stop_hook_active(payload.get("stop_hook_active"))
         except (json.JSONDecodeError, OSError):
             pass
+
+    # Stop-hook re-entrancy guard. Claude Code sets stop_hook_active=true when
+    # the current stop is itself the result of a previous Stop-hook block. If we
+    # block again the turn never ends — it loops until the consecutive-block cap
+    # (observed on loop-112: 9 blocks -> ~2h18m wasted churn, then a forced
+    # turn-end with the agent left idle and no STATUS marker, read as a stall).
+    # Allow the stop: the agent was already nudged once, and the driver's STATUS
+    # marker + stall watchdog own round closeout. Matches Claude Code guidance.
+    if stop_hook_active:
+        sys.exit(0)
 
     # Driver-session bypass — maintainer running parallel loops as an
     # observer/orchestrator, not a clone agent. Production users never

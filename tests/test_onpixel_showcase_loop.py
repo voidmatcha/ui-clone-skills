@@ -173,6 +173,7 @@ def test_impl_workspace_agents_carries_research_and_scoring_contract_without_pro
 
     assert "Do not copy, rsync, cp -R, or port source files" in agents
     assert "completion-report.sh" in agents
+    assert "completion-report.sh" in agents and "--check" in agents
     assert "python -m ui_clone.goal" in agents
     assert "INCOMPLETE" in agents
     assert "Do not run `npx playwright node`" in agents
@@ -183,6 +184,8 @@ def test_impl_workspace_agents_carries_research_and_scoring_contract_without_pro
     assert "offscreen rails" in agents
     assert "clone-research.md" in agents
     assert "clone-experiments.tsv" in agents
+    assert "Do not ask the user to choose" in agents
+    assert "pick the next reversible fix yourself" in agents
     assert "handover" not in agents.lower()
 
 

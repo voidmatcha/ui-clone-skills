@@ -167,6 +167,26 @@ with open(js, "w") as f:
         "shared_diffs": shared_diffs,
     }, f, indent=2)
 
+# ── Canonical result artifact ──
+# verification-plan declares this check's artifact as
+# transitions/keyframes-diff-result.txt; without writing it the gate keeps
+# reporting MISSING_ARTIFACT even after the check runs (producer/plan
+# filename drift). Verdict follows the plan's "warn" severity contract:
+# PASS when ref and impl keyframes match, WARN when names are missing or
+# shared keyframes diverge.
+result = os.path.join(out_dir, "keyframes-diff-result.txt")
+status = "PASS" if not only_ref and not shared_diffs else "WARN"
+with open(result, "w") as f:
+    f.write(
+        f"keyframes-diff: ref={len(ref_names)} impl={len(impl_names)} "
+        f"only_ref={len(only_ref)} only_impl={len(only_impl)} "
+        f"shared_diffs={len(shared_diffs)} -> {status}\n"
+    )
+    for n in only_ref:
+        f.write(f"MISSING {n}\n")
+    for sd in shared_diffs:
+        f.write(f"DIFF {sd['name']} ({len(sd['diffs'])} property diff(s))\n")
+
 print(f"  Ref: {len(ref_names)} keyframes, Impl: {len(impl_names)} keyframes")
 print(f"  Only ref:  {len(only_ref)}  (missing from impl)")
 print(f"  Only impl: {len(only_impl)} (extra)")

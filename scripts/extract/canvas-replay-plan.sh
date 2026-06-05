@@ -59,7 +59,7 @@ done
 SCENE_STATUS="-1"
 if [ -n "$SCENE_SRC" ] && printf '%s' "$SCENE_SRC" | grep -qiE '\.json($|\?)'; then
   SCENE_STATUS="$(curl -s -o /dev/null -m 8 -w '%{http_code}' \
-    -H 'Origin: https://example.com' -H 'Referer: https://example.com/' \
+    -H 'Origin: https://probe.example' -H 'Referer: https://probe.example/' \
     "$SCENE_SRC" 2>/dev/null || echo 0)"
 fi
 

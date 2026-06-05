@@ -79,7 +79,7 @@ STYLE_KEYS = (
 # Per-node style shortener — mirrors extract-styles.sh's shorten_styles. The
 # input is the raw computed-CSS dict extract-dom.sh writes onto each node
 # (full property names like 'background-color', 'font-family'); the output
-# is the shorthand keyspace dom-scaffold consumers expect. Codex review
+# is the shorthand keyspace dom-scaffold consumers expect. Review follow-up
 # 2026-05-22 (Q1): per-node styles must win over the class-level aggregate
 # so exceptional instances (a `.card` inside a hero) don't inherit the
 # dominant class's structural layout (320px catalog width stamped over an
@@ -238,7 +238,7 @@ def walk(node, styles_map, depth=0, max_depth=8):
     # Per-node styles win over the class/tag aggregate: the aggregate is a
     # fallback for nodes that did not capture a computed value, but the raw
     # per-node styles already reflect the exceptional-instance layout
-    # extract-dom.sh measured for *this* node. See Codex review 2026-05-22.
+    # extract-dom.sh measured for *this* node. See Review follow-up 2026-05-22.
     per_node = shorten_node_styles(node.get("styles") or {})
     aggregate = resolve_styles(tag, cls, styles_map)
     styles = {**aggregate, **per_node}

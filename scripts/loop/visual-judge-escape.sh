@@ -11,7 +11,7 @@
 #   real multimodal LLM findings for the worst-AE sections. Cached results
 #   are reused across iterations.
 #
-#   Per codex review (2026-05-25), auto-dispatch from goal.py or
+#   Auto-dispatch from goal.py or
 #   post_implement.py is RISKY — this stays driver-territory, invoked by
 #   a human (or a higher-level orchestrator) only when the fix loop has
 #   genuinely stalled.

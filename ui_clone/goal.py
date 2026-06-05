@@ -242,11 +242,10 @@ def _section_compare_row_counts(ref_dir: Path) -> dict[str, int]:
 def _section_compare_stop_guard(ref_dir: Path) -> str | None:
     """Return a hard stop-warning when section failures cannot be converged.
 
-    Benchmark runs may use the graded `INCOMPLETE-CONVERGED` marker, but only
-    after the section signal has improved enough to be meaningful. Loop-55
-    exposed a bad stop: 0 PASS rows plus saturated sections was reported as
-    converged. Loop-56 exposed the next bad stop: 1 PASS / 14 FAIL plus a
-    failing tree-diff was still reported as converged. This guard makes the
+    Automated runs may use the graded `INCOMPLETE-CONVERGED` marker, but only
+    after the section signal has improved enough to be meaningful. Prior
+    failures exposed bad stops where saturated sections or failing tree-diff
+    evidence were still reported as converged. This guard makes the
     disqualifiers explicit in every goal card that sees failed section evidence.
     """
     counts = _section_compare_row_counts(ref_dir)
@@ -356,7 +355,7 @@ def _visual_judge_next_action(ref_dir: Path) -> str | None:
     # visual-judge findings for any of the worst sections, inline the
     # priority_fix so the agent sees the LLM verdict immediately instead
     # of having to re-run visual-judge. This is read-only — no dispatch
-    # happens here per codex review (item c, RISKY).
+    # happens here because dispatching expensive visual review from the goal-card path is risky.
     cached_findings: list[str] = []
     try:
         from ui_clone import visual_judge_dispatcher as _vjd
@@ -484,7 +483,7 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     # matters because post-implement's check transitively includes
     # section-compare evidence — when section-compare fails, post-implement
     # also fails, but current_gate stays at "post-implement" and never advances
-    # to "section-compare". Observed across multiple benchmark runs:
+    # to "section-compare". In repeated automated runs,
     # gate_fail_counts[post-implement] climbed past 400 while the routing
     # override never fired. Broadening the trigger to post-implement
     # cuts the runaway loop.
@@ -517,9 +516,9 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
 
     # Abort banner: hard-blocker reasons recorded by gates/scripts when they
     # detect a condition the pipeline cannot resolve (paid font with no
-    # substitution, DRM canvas, auth-gated content, etc.) OR — added in Fix 4
-    # after the 3-round benchmark observed B bench retrying post-implement
-    # 445 times — when any gate has failed more than _MAX_GATE_FAILS times.
+    # substitution, DRM canvas, auth-gated content, etc.) OR when any gate
+    # has failed more than _MAX_GATE_FAILS times. This stops runaway loops
+    # that keep retrying a terminally failing gate.
     abort_banner: str | None = None
     if state.unclonable_reasons:
         summary = "; ".join(
@@ -566,8 +565,7 @@ def build_goal_card(ref_dir: Path) -> str:
     # block (Mission / Current goal / Next action / Stop condition / Required
     # evidence / No infinite loop) is suppressed because LLMs observed
     # prioritizing "Next action" over "ABORT" when both appear in the same
-    # card — linear-app reached 97 post-implement failures and realfood-gov 6
-    # before the human had to manually stop. JSON drivers (to_json) still see
+    # card — prior failed runs kept iterating until manually stopped. JSON drivers (to_json) still see
     # the full structured fields; this change is text-rendering only.
     if card.abort_banner is not None:
         lines = [

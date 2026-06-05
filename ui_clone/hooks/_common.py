@@ -360,7 +360,7 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "summary.json",
         "known-artifacts.json",
         "tailwind-conflict.json",
-        # Codex review v0.8: gate.py + verification-plan.sh references that
+        # Review follow-up: gate.py + verification-plan.sh references that
         # were missing from the initial allowlist — would otherwise
         # false-positive deny on a standard pipeline run.
         "regions.json",
@@ -457,7 +457,7 @@ def is_ad_hoc_ref_artifact(file_path: str) -> tuple[bool, str]:
     if basename in CANONICAL_REF_ARTIFACTS:
         return False, ""
     # Heuristic suggestion — only return a suggestion when we're confident.
-    # Codex review v0.8: substring matches on short keywords (`key`, `page`,
+    # Review follow-up: substring matches on short keywords (`key`, `page`,
     # `stat`) over-fire on legitimate diagnostic names like
     # `section-counts.json` → suggests `section-map.json` confidently and
     # misleads the agent. Restrict to prefix matches on the file stem.
@@ -504,7 +504,7 @@ def is_component_file(file_path: str) -> bool:
     - /src/app/layout.{tsx,jsx}    — Next.js App Router root layout
     - /src/pages/**            — Next.js Pages Router
 
-    Codex audit (signal #2): heavy-motion site agent wrote impl/src/main.jsx
+    Audit signal: heavy-motion site agent wrote impl/src/main.jsx
     by hand after scaffold-to-jsx failed; the old substring set
     (components/, projects/, app/**/page.*) did NOT cover main.jsx, so
     pre_generate / pre_bash silently allowed the handcrafted entry to

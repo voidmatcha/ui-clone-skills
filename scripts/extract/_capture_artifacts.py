@@ -1,7 +1,6 @@
 """Deterministic artifact-handling helpers for `scripts/extract/capture.sh`.
 
-Extracted per codex review (agentId a541f8a835d9e8569, verdict
-partial_migrate) so the JSON/parsing/timing layer is unit-testable
+Extracted so the JSON/parsing/timing layer is unit-testable
 while agent-browser orchestration stays in shell. Shell wrapper calls
 these via:
     python3 _capture_artifacts.py parse-height '"5400"'

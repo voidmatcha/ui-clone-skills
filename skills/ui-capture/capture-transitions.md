@@ -8,7 +8,7 @@ Capture each region from `regions.json`. Apply trigger type to choose the correc
 
 - Pre-scrolling before `record start` has NO effect on the recording
 - Any `eval` scroll commands issued AFTER `record start` DO work, but only appear in the recording after a delay while the page reloads (~3-5s)
-- **The recording is always captured at 1280×720 regardless of `set viewport`** — this is a known bug in agent-browser ([#1031](https://github.com/vercel-labs/agent-browser/issues/1031)). Chrome is launched with `--window-size=1280,720` hardcoded, and the new recording context does not inherit the session viewport. `set viewport` still controls CSS layout (so the page renders at the correct width), but the captured frames are cropped to 1280×720. Upscale after recording as a workaround (see below).
+- **Verify the recorded frame size after `record start` before trusting the clip.** Some agent-browser builds launch the recording context with a fixed window size that does not inherit the active session viewport. `set viewport` can still control CSS layout, but captured frames may be cropped if the recorder window is smaller than the target layout. Inspect the first frame or metadata and, when needed, crop/upscale after recording as a workaround (see below).
 
 **Correct pattern for deep-page elements:**
 ```bash
@@ -49,16 +49,7 @@ agent-browser --session <project> wait 1000
 ffmpeg -y -ss <crop_t> -i <file>.webm -c:v libx264 -preset fast -crf 23 -an <file>.mp4
 ```
 
-**Crop point rules by section depth (empirically measured on 1440px viewport, Next.js SSR pages):**
-
-| Target y | Crop point | Notes |
-|----------|-----------|-------|
-| y < 2000 (header, nav, hero) | 4.0s | Page loads at y=0, no scroll needed |
-| y 2000–6000 (scroll grid ~y=1200, passion ~y=5000) | 5.0–10.0s | Scroll grid: 8.5s; Passion: 10.0s — wide variance, always verify |
-| y 6000–10000 (evolve ~y=7500, flip cards ~y=9000) | 6.0–7.0s | Evolve: 6.0s; Flip cards: 7.0s |
-| y > 10000 (playground ~y=10200, scale ~y=14000) | 5.0s | Instant scroll jump, settles fast |
-
-> **Warning:** "scroll grid" (y~1200) takes 8.5s despite being shallow — it's a slow-scroll range covering 2400px, so the page traversal itself takes extra time. Do NOT assume shallow y = fast arrival.
+**Crop point rule:** measure the target section's arrival in the current recording instead of using a site-specific table. Record the wall-clock time before the scroll command, wait until the target selector is visible in a verification screenshot, then crop from that measured arrival time plus a small settle margin (usually 0.5-1.0s). Deep sections, smooth-scroll engines, pinned ranges, and scrubbed scroll scenes can all make arrival time non-linear, so target y alone is not a reliable crop predictor.
 
 **Verify the crop worked:** Always read the first frame of the output mp4:
 ```bash

@@ -187,8 +187,9 @@ def gate_paid_features(self: Gate) -> list[CheckResult]:
     that can never close (every text-bearing section reports 100% mismatch
     forever when the impl silently falls back to default sans-serif).
 
-    Note: GSAP plugins are no longer checked — GSAP became 100% free
-    following the Webflow acquisition. See paid-features-detect.sh header.
+    Licensing changes over time. The detector only checks dependency families
+    listed in paid-features-detect.sh; update that table when a provider's
+    licensing changes.
     """
     results = []
     path = self.ref_dir / "paid-features.json"

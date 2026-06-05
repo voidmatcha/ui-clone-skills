@@ -83,6 +83,14 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "ERROR: python3 required for fixture writes + median calc" >&2
   exit 2
 fi
+# Resolve the real interpreter once. On pyenv/asdf systems, every `python3`
+# invocation may traverse a shell shim; this bench runs many tiny Python
+# snippets and the shim overhead can dominate enough to trip the 60s smoke
+# tests. Calling sys.executable directly keeps the benchmark about the
+# verification scripts, not the version-manager startup path.
+PYTHON_BIN=$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || command -v python3)
+[ -n "$PYTHON_BIN" ] || { echo "ERROR: cannot resolve python3 executable" >&2; exit 2; }
+export PYTHON_BIN
 
 BENCH_ROOT="$(mktemp -d)"
 trap 'rm -rf "$BENCH_ROOT"' EXIT
@@ -154,7 +162,7 @@ write_rsc_fail_fixture() {
 # don't depend on GNU time / coreutils flags that differ across darwin/linux.
 time_ms() {
   local out
-  out=$(python3 - "$@" <<'PY'
+  out=$("$PYTHON_BIN" - "$@" <<'PY'
 import os, subprocess, sys, time
 cmd = sys.argv[1:]
 t0 = time.monotonic_ns()
@@ -168,7 +176,7 @@ PY
 }
 
 median_ms() {
-  python3 - "$@" <<'PY'
+  "$PYTHON_BIN" - "$@" <<'PY'
 import sys
 vals = sorted(int(x) for x in sys.argv[1:])
 print(vals[len(vals)//2])
@@ -195,7 +203,7 @@ run_vp_bench() {
   local med
   med=$(median_ms "${samples[@]}")
   local count
-  count=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["requiredChecks"]))' "$dir/verification-plan.json")
+  count=$("$PYTHON_BIN" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["requiredChecks"]))' "$dir/verification-plan.json")
   printf '%s\t%s\n' "$med" "$count"
 }
 
@@ -266,16 +274,75 @@ write_rsc_fail_fixture "$RSC_FAIL_DIR"
 # 2=all; tiers: 0=quick 1=standard 2=comprehensive).
 VP_MS=()
 VP_COUNT=()
-FIXTURES=("empty" "hover" "all")
-FIXTURE_DIRS=("$EMPTY_DIR" "$HOVER_DIR" "$ALL_DIR")
 TIERS=("quick" "standard" "comprehensive")
+JOB_DIR="$BENCH_ROOT/jobs"
+mkdir -p "$JOB_DIR"
+JOB_KEYS=()
+JOB_PIDS=()
+
+write_vp_cell_fixture() {
+  local fixture_idx="$1" dir="$2"
+  case "$fixture_idx" in
+    0) write_empty_fixture "$dir" ;;
+    1) write_hover_only_fixture "$dir" ;;
+    2) write_all_signals_fixture "$dir" ;;
+    *) echo "ERROR: bad fixture index: $fixture_idx" >&2; exit 2 ;;
+  esac
+}
+
+start_job() {
+  local key="$1"
+  shift
+  "$@" > "$JOB_DIR/$key.out" 2> "$JOB_DIR/$key.err" &
+  JOB_KEYS+=("$key")
+  JOB_PIDS+=("$!")
+}
+
+wait_for_jobs() {
+  local failed=0
+  local i key pid rc
+  for ((i=0; i<${#JOB_PIDS[@]}; i++)); do
+    key="${JOB_KEYS[$i]}"
+    pid="${JOB_PIDS[$i]}"
+    if wait "$pid"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+      failed=1
+      echo "ERROR: bench job '$key' failed with exit $rc" >&2
+      if [ -s "$JOB_DIR/$key.err" ]; then
+        cat "$JOB_DIR/$key.err" >&2
+      fi
+    fi
+  done
+  if [ "$failed" -ne 0 ]; then
+    exit 2
+  fi
+}
 
 for fi in 0 1 2; do
-  dir="${FIXTURE_DIRS[$fi]}"
   for ti in 0 1 2; do
     tier="${TIERS[$ti]}"
     idx=$(( fi * 3 + ti ))
-    out=$(run_vp_bench "$dir" "$tier")
+    cell_dir="$BENCH_ROOT/vp-$fi-$ti"
+    write_vp_cell_fixture "$fi" "$cell_dir"
+    start_job "vp_$idx" run_vp_bench "$cell_dir" "$tier"
+  done
+done
+
+start_job "sic_pass" run_sic_bench "$SIC_PASS_COMP" "$SIC_PASS_IMPL" 0
+start_job "sic_fail" run_sic_bench "$SIC_FAIL_COMP" "$SIC_FAIL_IMPL" 1
+start_job "rsc_pass" run_rsc_bench "$RSC_PASS_DIR" 0
+start_job "rsc_fail" run_rsc_bench "$RSC_FAIL_DIR" 1
+
+wait_for_jobs
+
+for fi in 0 1 2; do
+  for ti in 0 1 2; do
+    idx=$(( fi * 3 + ti ))
+    out=$(cat "$JOB_DIR/vp_$idx.out")
     VP_MS[$idx]=$(echo "$out" | awk '{print $1}')
     VP_COUNT[$idx]=$(echo "$out" | awk '{print $2}')
   done
@@ -284,10 +351,10 @@ done
 vp_ms()    { echo "${VP_MS[$(( $1 * 3 + $2 ))]}";    }
 vp_count() { echo "${VP_COUNT[$(( $1 * 3 + $2 ))]}"; }
 
-SIC_PASS=$(run_sic_bench "$SIC_PASS_COMP" "$SIC_PASS_IMPL" 0)
-SIC_FAIL=$(run_sic_bench "$SIC_FAIL_COMP" "$SIC_FAIL_IMPL" 1)
-RSC_PASS=$(run_rsc_bench "$RSC_PASS_DIR" 0)
-RSC_FAIL=$(run_rsc_bench "$RSC_FAIL_DIR" 1)
+SIC_PASS=$(cat "$JOB_DIR/sic_pass.out")
+SIC_FAIL=$(cat "$JOB_DIR/sic_fail.out")
+RSC_PASS=$(cat "$JOB_DIR/rsc_pass.out")
+RSC_FAIL=$(cat "$JOB_DIR/rsc_fail.out")
 
 # Detect accuracy mismatches before formatting.
 exit_code=0
@@ -313,7 +380,7 @@ if [ "$EMIT_JSON" = "1" ]; then
   RSC_PASS_MS=$(echo "$RSC_PASS" | awk '{print $1}') \
   RSC_FAIL_MS=$(echo "$RSC_FAIL" | awk '{print $1}') \
   ACCURACY=$( [ $exit_code -eq 0 ] && echo ok || echo regression ) \
-  python3 - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import json, os
 def cell(prefix, tier):
     pf = {"q":"Q","s":"S","c":"C"}[tier]

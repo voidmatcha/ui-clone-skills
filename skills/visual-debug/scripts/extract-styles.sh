@@ -154,7 +154,7 @@ buckets: defaultdict = defaultdict(lambda: defaultdict(Counter))
 # *fallback* — not the source of truth — and dropping structural keys here
 # keeps it from poisoning the fallback path.
 #
-# Codex review 2026-05-22 (Q1): without this carve-out the modal aggregate
+# Review follow-up 2026-05-22 (Q1): without this carve-out the modal aggregate
 # is the only source of structural styles a Phase-4 consumer ever sees,
 # and exceptional instances inherit the dominant class's layout.
 CLASS_LEVEL_STRUCTURAL_KEYS = {

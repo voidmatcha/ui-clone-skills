@@ -7,7 +7,7 @@
 # orchestrator) decides when to actually execute the printed lines.
 #
 # Usage:
-#   bash scripts/loop/launch-stage.sh <A|B|C|D>
+#   TARGET_URL=https://example.org bash scripts/loop/launch-stage.sh <A|B|C|D>
 #
 # Exit codes:
 #   0  printed launch commands to stdout
@@ -21,6 +21,8 @@ if [[ $# -ne 1 ]]; then
 fi
 
 stage="$1"
+target="${TARGET_URL:-<ref-url>}"
+ref_dir="${REF_DIR:-tmp/ref/<component>}"
 case "$stage" in
   A|B|C|D) ;;
   *)
@@ -35,13 +37,11 @@ case "$stage" in
     sub_command="decode"
     tier="comprehensive"
     sections=""
-    target="https://linear.app"
     ;;
   B)
     sub_command="clone"
     tier="comprehensive"
     sections="hero"
-    target="https://linear.app"
     ;;
   C)
     sub_command="clone"
@@ -50,13 +50,11 @@ case "$stage" in
     # section-map.json is produced.
     tier="comprehensive"
     sections="hero,<sec2>,<sec3>"
-    target="https://linear.app"
     ;;
   D)
     sub_command="verify"
     tier="comprehensive"
     sections=""
-    target="https://linear.app"
     ;;
 esac
 
@@ -98,5 +96,5 @@ sleep 8
 purplemux tab send -w ws-MpcnYf "\$TAB_ID" "\$(cat ${prompt_path})"
 
 # When the loop reports DONE or stops, run:
-#   bash scripts/loop/finalize-stage.sh tmp/ref/linear-app ${stage}
+#   bash scripts/loop/finalize-stage.sh ${ref_dir} ${stage}
 EOF

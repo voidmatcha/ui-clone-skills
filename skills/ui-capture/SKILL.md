@@ -177,7 +177,7 @@ agent-browser --session <name> set viewport 1440 900
 agent-browser --session <name> wait 3000  # ← see "Splash-aware wait" below before keeping 3000
 ```
 
-**Splash-aware wait — CALIBRATE before recording.** `wait 3000` is the right default for *bare* sites (no preloader, instant content). It is the wrong default for any site with a timed splash, intro animation, or progress counter — and most modern marketing sites have one (Slater, Barba, GSAP intros, anime.js loaders, custom WebGL). Capturing during the splash records a transient state that will never match impl post-load, dominating AE forever.
+**Splash-aware wait — CALIBRATE before recording.** `wait 3000` is the right default for *bare* sites (no preloader, instant content). It is the wrong default for any site with a timed splash, intro animation, progress counter, or other load-gated motion signal. Capturing during the splash records a transient state that will never match impl post-load, dominating AE forever.
 
 Calibrate the wait once per project, then reuse the value in `WAIT_REF`/`WAIT_IMPL` for `section-compare.sh`:
 

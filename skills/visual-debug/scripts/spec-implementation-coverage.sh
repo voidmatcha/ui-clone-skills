@@ -8,43 +8,8 @@
 #      hooks — fade-in is missing, easing wrong, or scroll-driven entry never
 #      wired to IntersectionObserver / useScroll.
 #
-# Why a separate script instead of folding into transition-spec-coverage:
-#   transition-spec-coverage answers "does the impl mention this entry?" —
-#   useful as a pre-generate sanity check or a quick presence audit. This
-#   script answers "and does the impl actually animate it?" — meaningful only
-#   after generation, with a strictly stronger pass bar. Splitting keeps the
-#   cheaper presence check usable at quick tier while gating the expensive
-#   declaration check at standard tier.
-#
-# What counts as a "motion declaration":
-#   - CSS transition / animation properties (transition:, animation:,
-#     @keyframes, transition-property:)
-#   - React motion libraries (framer-motion / motion, react-spring,
-#     @react-spring, react-use-gesture)
-#   - Scroll/intersection hooks (useScroll, useTransform, useSpring,
-#     useScrollTrigger, IntersectionObserver, react-intersection-observer)
-#   - GSAP / Lenis / ScrollMagic (gsap.to, gsap.from, gsap.timeline, Lenis,
-#     ReactLenis, ScrollMagic)
-#   - Tailwind animation utilities (animate-, transition-, ease-, duration-,
-#     hover:, focus:, group-hover:) — captured by the `transition-` prefix
-#   - Trigger-specific runtime wiring. Generic motion keywords are not enough:
-#     hover entries need hover handlers/CSS, click/accordion entries need click
-#     or expansion state, smooth-scroll entries need real smooth-scroll wiring,
-#     and load reveals need mount/load reveal wiring.
-#
-# The matcher is intentionally permissive — a false positive here means an
-# implementation passes that should have failed (rare in practice given the
-# entry must also be selector-matched); a false negative means a real impl
-# with custom motion plumbing fails. Permissive errs toward fewer false
-# negatives, which is the right trade-off for an additive gate (the
-# transition-spec-coverage row catches the missing-entirely case separately).
-#
 # Usage:
 #   bash spec-implementation-coverage.sh <component-dir> <impl-src-dir>
-#
-#   <component-dir>: path containing transition-spec.json (e.g. tmp/ref/<c>)
-#   <impl-src-dir>:  path to the impl source root for the component
-#                    (e.g. apps/<app>/src/projects/<c>)
 #
 # Exit: 0 = every covered entry has a motion declaration in its matched files,
 #       1 = entries with selector hit but no motion declaration,
@@ -69,376 +34,287 @@ if ! command -v node &>/dev/null; then
   exit 2
 fi
 
-# Same parse shape as transition-spec-coverage.sh — keep the field order
-# (id|type|trigger|selector) so reading either script is easy. The `_`
-# placeholder preserves empty fields against bash `read` IFS collapsing.
-ENTRIES=$(node -e "
+# Single-process implementation. The original shell version spawned grep for
+# every (entry × needle × file) probe; on macOS with version-manager shims this
+# pushed small fixtures past pytest's 30s timeout. Keep the public table and
+# JSON contract, but do all scanning from one Node process.
+node - "$COMP_DIR" "$IMPL_DIR" "$SPEC" <<'NODE'
 const fs = require('fs');
-const spec = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
-const list = Array.isArray(spec) ? spec
-  : (Array.isArray(spec.transitions) ? spec.transitions
-    : (Array.isArray(spec.entries) ? spec.entries : []));
-for (const e of list) {
-  const id = (e.id || e.name || '').toString();
-  const type = (e.type || (e.animation && e.animation.type) || '_').toString();
-  const trigger = (e.trigger || '_').toString();
-  const selector = (e.selector || e.target || '_').toString();
-  if (!id) continue;
-  console.log([id, type, trigger, selector].join('|'));
-}
-" "$SPEC")
+const path = require('path');
 
-if [ -z "$ENTRIES" ]; then
-  echo "ERROR: spec has no entries (or schema not recognised)."
-  exit 2
-fi
+const [compDir, implDir, specPath] = process.argv.slice(2);
 
-echo "═══ Spec Implementation Coverage ═══"
-echo "Spec:        $SPEC"
-echo "Impl source: $IMPL_DIR"
-echo ""
-
-# Motion-declaration needles. Order roughly by frequency in modern impls so
-# the inner grep loop short-circuits sooner on the common cases.
-MOTION_NEEDLES=(
-  # CSS
-  "transition:"
-  "transition-property"
-  "scroll-behavior"
-  "animation:"
-  "@keyframes"
-  # Tailwind utilities
-  "transition-"
-  "animate-"
-  "duration-"
-  "ease-"
-  "hover:"
-  "group-hover:"
-  "focus:"
-  # framer-motion / motion
-  "framer-motion"
-  "from 'motion"
-  "from \"motion"
-  "<motion."
-  "useMotionValue"
-  "useTransform"
-  "useScroll"
-  "useSpring"
-  "AnimatePresence"
-  # GSAP / Lenis / ScrollMagic
-  "gsap.to"
-  "gsap.from"
-  "gsap.timeline"
-  "ScrollTrigger"
-  "Lenis"
-  "ReactLenis"
-  # IntersectionObserver
-  "IntersectionObserver"
-  "useInView"
-  "useIntersection"
-  "useScrollTrigger"
-  # react-spring
-  "react-spring"
-  "useSprings"
-  "useChain"
-  # Webflow IX2 markers
-  "data-w-id"
-  "w-mod"
-)
-
-MARKER_SCAFFOLD_RE='data-transition-hooks|data-transition=|data-scroll-hook|data-hover-hook|data-click-hook|data-motion-hook|hidden[[:space:]][^>]*data-'
-MARKER_HOOK_FILE_RE='data-transition-hooks'
-
-has_marker_scaffold() {
-  local files="$1"
-  local f
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    if grep -Eq "$MARKER_SCAFFOLD_RE" "$f" 2>/dev/null; then
-      return 0
-    fi
-  done <<< "$files"
-  return 1
+function failSetup(message) {
+  console.log(`ERROR: ${message}`);
+  process.exit(2);
 }
 
-has_motion_needle() {
-  local needle="$1"
-  local files="$2"
-  local f
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    if grep -Eq "$MARKER_HOOK_FILE_RE" "$f" 2>/dev/null; then
-      continue
-    fi
-    if grep -Ev "$MARKER_SCAFFOLD_RE" "$f" 2>/dev/null | grep -qF "$needle"; then
-      return 0
-    fi
-  done <<< "$files"
-  return 1
+function loadSpec(file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    failSetup(`cannot parse transition-spec.json: ${error.message}`);
+  }
+  const list = Array.isArray(parsed)
+    ? parsed
+    : (Array.isArray(parsed.transitions)
+      ? parsed.transitions
+      : (Array.isArray(parsed.entries) ? parsed.entries : []));
+  return list
+    .map((entry) => ({
+      id: String(entry.id || entry.name || ''),
+      type: String(entry.type || (entry.animation && entry.animation.type) || ''),
+      trigger: String(entry.trigger || ''),
+      selector: String(entry.selector || entry.target || ''),
+    }))
+    .filter((entry) => entry.id);
 }
 
-has_code_match() {
-  local regex="$1"
-  local files="$2"
-  local f
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    if grep -Eq "$MARKER_HOOK_FILE_RE" "$f" 2>/dev/null; then
-      continue
-    fi
-    if grep -Ev "$MARKER_SCAFFOLD_RE" "$f" 2>/dev/null | grep -Eq "$regex"; then
-      return 0
-    fi
-  done <<< "$files"
-  return 1
+const entries = loadSpec(specPath);
+if (entries.length === 0) {
+  console.log('ERROR: spec has no entries (or schema not recognised).');
+  process.exit(2);
 }
 
-trigger_static_reason() {
-  local id="$1"
-  local type="$2"
-  local trigger="$3"
-  local files="$4"
-  local key
-  key=$(printf '%s %s %s' "$id" "$type" "$trigger")
-
-  if echo "$key" | grep -Eiq 'hover|mouseenter|mouseover|pointerenter'; then
-    if ! has_code_match '(^|[^A-Za-z0-9_-])(:hover|hover:|group-hover:|onMouseEnter|onMouseLeave|onPointerEnter|onPointerLeave|whileHover|useHover|addEventListener[[:space:]]*\([[:space:]]*["'\''](mouseenter|mouseover|pointerenter))' "$files"; then
-      echo "hover trigger missing handler/css"
-      return 0
-    fi
-  fi
-
-  if echo "$key" | grep -Eiq 'click|accordion|toggle|expanded'; then
-    if ! has_code_match '(onClick|addEventListener[[:space:]]*\([[:space:]]*["'\'']click|aria-expanded|useState|useReducer|<details|<summary|[[:space:]]open[=}]|data-state=|set[A-Z][A-Za-z0-9_]*)' "$files"; then
-      echo "click/accordion trigger missing handler/state"
-      return 0
-    fi
-  fi
-
-  if echo "$key" | grep -Eiq 'smooth-scroll|smooth[[:space:]_-]*scroll|lenis'; then
-    if ! has_code_match '(new[[:space:]]+Lenis|ReactLenis|from[[:space:]]+["'\'']lenis["'\'']|Lenis[[:space:]]*\(|scroll-behavior[[:space:]]*:[[:space:]]*smooth|scrollBehavior[[:space:]]*:[[:space:]]*["'\'']?smooth)' "$files"; then
-      echo "smooth scroll missing Lenis/native smooth-scroll wiring"
-      return 0
-    fi
-  elif echo "$key" | grep -Eiq '(^|[[:space:]_-])scroll([[:space:]_-]|$)|scroll-driven|scrolltrigger'; then
-    if ! has_code_match '(useScroll|scrollYProgress|useTransform|ScrollTrigger|scrollTrigger|addEventListener[[:space:]]*\([[:space:]]*["'\'']scroll|onscroll|requestAnimationFrame|getBoundingClientRect|ScrollTimeline|animationTimeline)' "$files"; then
-      echo "scroll trigger missing scroll progress/listener wiring"
-      return 0
-    fi
-  fi
-
-  if echo "$key" | grep -Eiq 'page-load|(^|[[:space:]_-])load([[:space:]_-]|$)|mount-reveal|load-reveal'; then
-    if ! has_code_match '(@keyframes|animation:|animate-|<motion\.|initial=|animate=|useEffect|requestAnimationFrame|setTimeout|onLoad|data-loaded|isLoaded|loaded)' "$files"; then
-      echo "load reveal missing mount/load animation wiring"
-      return 0
-    fi
-  fi
-
-  return 1
+const skipDirs = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 'coverage']);
+function walk(dir, out = []) {
+  for (const name of fs.readdirSync(dir)) {
+    if (skipDirs.has(name)) continue;
+    const full = path.join(dir, name);
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch (_) {
+      continue;
+    }
+    if (stat.isDirectory()) walk(full, out);
+    else if (stat.isFile()) out.push(full);
+  }
+  return out;
 }
 
-UNCOVERED=0
-PRESENCE_ONLY=0
-SCROLL_SCRUB_STATIC=0
-INTERSECTION_STATIC=0
-TRIGGER_STATIC=0
-MARKER_ONLY=0
-MISSING_ENTIRELY=0
-TOTAL=0
+const files = walk(implDir).map((file) => {
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (_) {
+    text = '';
+  }
+  return { file, text };
+});
 
-echo "| # | id | trigger | type | matched file(s) | motion |"
-echo "|---|----|---------|------|-----------------|--------|"
+const motionNeedles = [
+  'transition:', 'transition-property', 'scroll-behavior', 'animation:', '@keyframes',
+  'transition-', 'animate-', 'duration-', 'ease-', 'hover:', 'group-hover:', 'focus:',
+  'framer-motion', "from 'motion", 'from "motion', '<motion.', 'useMotionValue',
+  'useTransform', 'useScroll', 'useSpring', 'AnimatePresence',
+  'gsap.to', 'gsap.from', 'gsap.timeline', 'ScrollTrigger', 'Lenis', 'ReactLenis',
+  'IntersectionObserver', 'useInView', 'useIntersection', 'useScrollTrigger',
+  'react-spring', 'useSprings', 'useChain', 'data-w-id', 'w-mod',
+];
 
-i=0
-while IFS='|' read -r id type trigger selector; do
-  [ "$type" = "_" ] && type=""
-  [ "$trigger" = "_" ] && trigger=""
-  [ "$selector" = "_" ] && selector=""
-  TOTAL=$((TOTAL + 1))
+const markerScaffoldRe = /data-transition-hooks|data-transition=|data-scroll-hook|data-hover-hook|data-click-hook|data-motion-hook|hidden\s+[^>]*data-/;
+const markerHookFileRe = /data-transition-hooks/;
+const markerLineRe = /.*(?:data-transition-hooks|data-transition=|data-scroll-hook|data-hover-hook|data-click-hook|data-motion-hook|hidden\s+[^>]*data-).*\n?/g;
 
-  # Build needles for finding matched impl files. Same logic as
-  # transition-spec-coverage.sh — keep selector/id family lookups identical
-  # so an entry covered there is the same entry inspected here.
-  needles=()
-  needles+=("$id")
-  camel=$(echo "$id" | awk -F'-' '{ for (i=1;i<=NF;i++) { if (i==1) printf "%s",$i; else printf "%s%s", toupper(substr($i,1,1)), substr($i,2) } }')
-  pascal=$(echo "$id" | awk -F'-' '{ for (i=1;i<=NF;i++) printf "%s%s", toupper(substr($i,1,1)), substr($i,2) }')
-  [ -n "$camel" ] && [ "$camel" != "$id" ] && needles+=("$camel")
-  [ -n "$pascal" ] && [ "$pascal" != "$id" ] && [ "$pascal" != "$camel" ] && needles+=("$pascal")
-  for raw in $(echo "$selector" | tr ' ' '\n' | sed 's/^[\.#]//' | tr '.' '\n' | grep -v '^$'); do
-    case "$raw" in
-      ">"|"+"|"~"|"*"|":"*) continue ;;
-      *) ;;
-    esac
-    [ ${#raw} -lt 3 ] && continue
-    needles+=("$raw")
-    base=$(echo "$raw" | sed 's/__[A-Za-z0-9_-]\{3,\}$//')
-    if [ -n "$base" ] && [ "$base" != "$raw" ] && [ ${#base} -ge 3 ]; then
-      needles+=("$base")
-      local_name=$(echo "$base" | sed 's/^[a-z]*_//')
-      if [ -n "$local_name" ] && [ "$local_name" != "$base" ] && [ ${#local_name} -ge 3 ]; then
-        needles+=("$local_name")
-      fi
-    fi
-  done
-
-  # Find matched files (uniqued).
-  matched_files=""
-  for n in "${needles[@]}"; do
-    [ -z "$n" ] && continue
-    found=$(grep -r -l -F "$n" "$IMPL_DIR" 2>/dev/null || true)
-    if [ -n "$found" ]; then
-      matched_files="$matched_files
-$found"
-    fi
-  done
-  matched_files=$(echo "$matched_files" | sort -u | grep -v '^$' || true)
-
-  if [ -z "$matched_files" ]; then
-    # Not matched at all. A transition-spec entry with zero impl presence is
-    # a real coverage gap — the transition was never implemented — not an
-    # exemption. Count it against this gate's exit code so a missing-entirely
-    # entry can never pass silently while transition-spec-coverage is the only
-    # thing watching it.
-    echo "| $i | ❌ $id | $trigger | $type | (none — entry not implemented) | — |"
-    MISSING_ENTIRELY=$((MISSING_ENTIRELY + 1))
-    UNCOVERED=$((UNCOVERED + 1))
-    i=$((i + 1))
-    continue
-  fi
-
-  # Search the matched files for any motion-declaration needle. Stop on
-  # first hit to keep the loop fast on large impls.
-  motion_hit=""
-  for m in "${MOTION_NEEDLES[@]}"; do
-    if has_motion_needle "$m" "$matched_files"; then
-      motion_hit="\`$m\`"
-      break
-    fi
-  done
-
-  file_count=$(echo "$matched_files" | wc -l | tr -d ' ')
-  if has_marker_scaffold "$matched_files"; then
-    MARKER_ONLY=$((MARKER_ONLY + 1))
-  fi
-
-  # Stronger bar for pinned / scrubbed scroll storytelling. A CSS transition
-  # proves an element can animate after some state changes; it does NOT prove
-  # the page implements the reference pattern where scroll progress is sampled
-  scroll_scrub_entry=0
-  if echo "$id $type $trigger" | grep -Eiq 'scroll-scrub|scroll-driven.*pin|pin.*scroll|sticky-pin'; then
-    scroll_scrub_entry=1
-  fi
-  if [ "$scroll_scrub_entry" -eq 1 ]; then
-    has_progress=0
-    has_pin=0
-    while IFS= read -r f; do
-      [ -z "$f" ] && continue
-      if grep -Eq 'useScroll|scrollYProgress|useTransform|ScrollTrigger|scrollTrigger|requestAnimationFrame|getBoundingClientRect|ScrollTimeline|animationTimeline' "$f" 2>/dev/null; then
-        has_progress=1
-      fi
-      if grep -Eq "position:[[:space:]]*['\"]?sticky|position:[[:space:]]*sticky|className=.*sticky|pin:[[:space:]]*true|pin:[[:space:]]*[^,}]+|ScrollTrigger" "$f" 2>/dev/null; then
-        has_pin=1
-      fi
-      [ "$has_progress" -eq 1 ] && [ "$has_pin" -eq 1 ] && break
-    done <<< "$matched_files"
-    if [ "$has_progress" -eq 0 ] || [ "$has_pin" -eq 0 ]; then
-      echo "| $i | ❌ $id | $trigger | $type | $file_count file(s) | scroll-scrub missing progress=$has_progress pin=$has_pin |"
-      SCROLL_SCRUB_STATIC=$((SCROLL_SCRUB_STATIC + 1))
-      UNCOVERED=$((UNCOVERED + 1))
-      i=$((i + 1))
-      continue
-    fi
-    motion_hit="${motion_hit:-\`scroll-scrub progress+pin\`}"
-  fi
-
-  # Stronger bar for in-view / intersection reveals. A CSS transition proves
-  # the element can animate, but it does not prove the implementation observes
-  intersection_entry=0
-  if echo "$id $type $trigger" | grep -Eiq 'intersection|in-view|inview|viewport|while-in-view|whileInView'; then
-    intersection_entry=1
-  fi
-  if [ "$intersection_entry" -eq 1 ]; then
-    has_observer=0
-    while IFS= read -r f; do
-      [ -z "$f" ] && continue
-      if grep -Eq 'IntersectionObserver|useInView|whileInView|viewport[[:space:]]*=|viewport:|onViewportEnter|onViewportLeave|useIntersection|react-intersection-observer' "$f" 2>/dev/null; then
-        has_observer=1
-        break
-      fi
-    done <<< "$matched_files"
-    if [ "$has_observer" -eq 0 ]; then
-      echo "| $i | ❌ $id | $trigger | $type | $file_count file(s) | intersection reveal missing observer |"
-      INTERSECTION_STATIC=$((INTERSECTION_STATIC + 1))
-      UNCOVERED=$((UNCOVERED + 1))
-      i=$((i + 1))
-      continue
-    fi
-    motion_hit="${motion_hit:-\`intersection observer\`}"
-  fi
-
-  if [ -z "$motion_hit" ]; then
-    echo "| $i | ❌ $id | $trigger | $type | $file_count file(s) | — |"
-    PRESENCE_ONLY=$((PRESENCE_ONLY + 1))
-    UNCOVERED=$((UNCOVERED + 1))
-    i=$((i + 1))
-    continue
-  fi
-
-  trigger_reason=$(trigger_static_reason "$id" "$type" "$trigger" "$matched_files" || true)
-  if [ -n "$trigger_reason" ]; then
-    echo "| $i | ❌ $id | $trigger | $type | $file_count file(s) | $trigger_reason |"
-    TRIGGER_STATIC=$((TRIGGER_STATIC + 1))
-    UNCOVERED=$((UNCOVERED + 1))
-    i=$((i + 1))
-    continue
-  fi
-
-  echo "| $i | ✅ $id | $trigger | $type | $file_count file(s) | $motion_hit |"
-  i=$((i + 1))
-done <<< "$ENTRIES"
-
-echo ""
-echo "Coverage: $((TOTAL - UNCOVERED)) / $TOTAL with motion declared"
-echo ""
-
-# JSON sidecar for gate_post_implement (verification-plan dispatch reads this).
-STATUS="pass"
-[ "$UNCOVERED" -gt 0 ] && STATUS="fail"
-cat > "$COMP_DIR/spec-implementation-coverage.json" <<JSON
-{
-  "schemaVersion": 1,
-  "status": "$STATUS",
-  "total": $TOTAL,
-  "withMotion": $((TOTAL - UNCOVERED)),
-  "presenceOnly": $PRESENCE_ONLY,
-  "scrollScrubStatic": $SCROLL_SCRUB_STATIC,
-  "intersectionStatic": $INTERSECTION_STATIC,
-  "triggerStatic": $TRIGGER_STATIC,
-  "markerOnly": $MARKER_ONLY,
-  "missingEntirely": $MISSING_ENTIRELY
+function camelize(id, pascal = false) {
+  return id.split('-').filter(Boolean).map((part, index) => {
+    if (!pascal && index === 0) return part;
+    return part.charAt(0).toUpperCase() + part.slice(1);
+  }).join('');
 }
-JSON
 
-if [ "$UNCOVERED" -gt 0 ]; then
-  echo "⛔ $UNCOVERED spec entr$([ "$UNCOVERED" -eq 1 ] && echo "y" || echo "ies") matched in impl source but have no motion declaration."
-  echo ""
-  echo "   This is the bug class where the generated component renders the"
-  echo "   selector but never animates it — same end markup, missing motion."
-  echo "   For scroll-scrub / pinned sections, CSS transition alone is not enough:"
-  echo "   matched source must include a scroll progress source and sticky/pin"
-  echo "   structure."
-  echo "   For intersection / in-view reveals, CSS transition alone is not enough:"
-  echo "   matched source must include viewport observer wiring such as"
-  echo "   IntersectionObserver, useInView, whileInView, or onViewportEnter."
-  echo "   For trigger-specific entries, marker strings are not enough:"
-  echo "   matched source must include non-marker hover/click/load/scroll wiring"
-  echo "   appropriate to the spec trigger."
-  echo "   Fix: open each entry's matched file and wire the declared trigger /"
-  echo "   easing / duration. Do NOT mark verification PASS until this table"
-  echo "   is all ✅."
-  exit 1
-fi
+function selectorNeedles(selector) {
+  const out = [];
+  for (const piece of selector.split(/\s+/)) {
+    for (const token of piece.split('.')) {
+      let raw = token.replace(/^[.#]/, '');
+      if (!raw || ['>', '+', '~', '*'].includes(raw) || raw.startsWith(':')) continue;
+      if (raw.length < 3) continue;
+      out.push(raw);
+      const base = raw.replace(/__[A-Za-z0-9_-]{3,}$/, '');
+      if (base && base !== raw && base.length >= 3) {
+        out.push(base);
+        const localName = base.replace(/^[a-z]*_/, '');
+        if (localName && localName !== base && localName.length >= 3) out.push(localName);
+      }
+    }
+  }
+  return out;
+}
 
-echo "✅ Every covered spec entry has a motion declaration in its matched files."
-exit 0
+function entryNeedles(entry) {
+  const needles = [entry.id];
+  const camel = camelize(entry.id, false);
+  const pascal = camelize(entry.id, true);
+  if (camel && camel !== entry.id) needles.push(camel);
+  if (pascal && pascal !== entry.id && pascal !== camel) needles.push(pascal);
+  needles.push(...selectorNeedles(entry.selector));
+  return [...new Set(needles.filter(Boolean))];
+}
+
+function matchedFiles(entry) {
+  const needles = entryNeedles(entry);
+  return files.filter(({ text }) => needles.some((needle) => text.includes(needle)));
+}
+
+function sanitizedContent(matched) {
+  return matched
+    .filter(({ text }) => !markerHookFileRe.test(text))
+    .map(({ text }) => text.replace(markerLineRe, ''))
+    .join('\n');
+}
+
+function triggerStaticReason(entry, sanitized) {
+  const key = `${entry.id} ${entry.type} ${entry.trigger}`;
+  if (/hover|mouseenter|mouseover|pointerenter/i.test(key)) {
+    const ok = /(^|[^A-Za-z0-9_-])(:hover|hover:|group-hover:|onMouseEnter|onMouseLeave|onPointerEnter|onPointerLeave|whileHover|useHover|addEventListener\s*\(\s*["'](?:mouseenter|mouseover|pointerenter))/m.test(sanitized);
+    if (!ok) return 'hover trigger missing handler/css';
+  }
+  if (/click|accordion|toggle|expanded/i.test(key)) {
+    const ok = /(onClick|addEventListener\s*\(\s*["']click|aria-expanded|useState|useReducer|<details|<summary|\sopen[=}]|data-state=|set[A-Z][A-Za-z0-9_]*)/m.test(sanitized);
+    if (!ok) return 'click/accordion trigger missing handler/state';
+  }
+  if (/smooth-scroll|smooth[\s_-]*scroll|lenis/i.test(key)) {
+    const ok = /(new\s+Lenis|ReactLenis|from\s+["']lenis["']|Lenis\s*\(|scroll-behavior\s*:\s*smooth|scrollBehavior\s*:\s*["']?smooth)/m.test(sanitized);
+    if (!ok) return 'smooth scroll missing Lenis/native smooth-scroll wiring';
+  } else if (/(^|[\s_-])scroll([\s_-]|$)|scroll-driven|scrolltrigger/i.test(key)) {
+    const ok = /(useScroll|scrollYProgress|useTransform|ScrollTrigger|scrollTrigger|addEventListener\s*\(\s*["']scroll|onscroll|requestAnimationFrame|getBoundingClientRect|ScrollTimeline|animationTimeline)/m.test(sanitized);
+    if (!ok) return 'scroll trigger missing scroll progress/listener wiring';
+  }
+  if (/page-load|(^|[\s_-])load([\s_-]|$)|mount-reveal|load-reveal/i.test(key)) {
+    const ok = /(@keyframes|animation:|animate-|<motion\.|initial=|animate=|useEffect|requestAnimationFrame|setTimeout|onLoad|data-loaded|isLoaded|loaded)/m.test(sanitized);
+    if (!ok) return 'load reveal missing mount/load animation wiring';
+  }
+  return '';
+}
+
+let uncovered = 0;
+let presenceOnly = 0;
+let scrollScrubStatic = 0;
+let intersectionStatic = 0;
+let triggerStatic = 0;
+let markerOnly = 0;
+let missingEntirely = 0;
+let total = 0;
+let row = 0;
+
+console.log('═══ Spec Implementation Coverage ═══');
+console.log(`Spec:        ${specPath}`);
+console.log(`Impl source: ${implDir}`);
+console.log('');
+console.log('| # | id | trigger | type | matched file(s) | motion |');
+console.log('|---|----|---------|------|-----------------|--------|');
+
+for (const entry of entries) {
+  total += 1;
+  const matched = matchedFiles(entry);
+  if (matched.length === 0) {
+    console.log(`| ${row} | ❌ ${entry.id} | ${entry.trigger} | ${entry.type} | (none — entry not implemented) | — |`);
+    missingEntirely += 1;
+    uncovered += 1;
+    row += 1;
+    continue;
+  }
+
+  const rawMatched = matched.map(({ text }) => text).join('\n');
+  const sanitized = sanitizedContent(matched);
+  if (matched.some(({ text }) => markerScaffoldRe.test(text))) markerOnly += 1;
+
+  let motionHit = '';
+  for (const needle of motionNeedles) {
+    if (sanitized.includes(needle)) {
+      motionHit = `\`${needle}\``;
+      break;
+    }
+  }
+
+  const key = `${entry.id} ${entry.type} ${entry.trigger}`;
+  if (/scroll-scrub|scroll-driven.*pin|pin.*scroll|sticky-pin/i.test(key)) {
+    const hasProgress = /(useScroll|scrollYProgress|useTransform|ScrollTrigger|scrollTrigger|requestAnimationFrame|getBoundingClientRect|ScrollTimeline|animationTimeline)/.test(rawMatched) ? 1 : 0;
+    const hasPin = /position:\s*['"]?sticky|position:\s*sticky|className=.*sticky|pin:\s*true|pin:\s*[^,}]+|ScrollTrigger/.test(rawMatched) ? 1 : 0;
+    if (!hasProgress || !hasPin) {
+      console.log(`| ${row} | ❌ ${entry.id} | ${entry.trigger} | ${entry.type} | ${matched.length} file(s) | scroll-scrub missing progress=${hasProgress} pin=${hasPin} |`);
+      scrollScrubStatic += 1;
+      uncovered += 1;
+      row += 1;
+      continue;
+    }
+    if (!motionHit) motionHit = '`scroll-scrub progress+pin`';
+  }
+
+  if (/intersection|in-view|inview|viewport|while-in-view|whileInView/i.test(key)) {
+    const hasObserver = /(IntersectionObserver|useInView|whileInView|viewport\s*=|viewport:|onViewportEnter|onViewportLeave|useIntersection|react-intersection-observer)/.test(rawMatched) ? 1 : 0;
+    if (!hasObserver) {
+      console.log(`| ${row} | ❌ ${entry.id} | ${entry.trigger} | ${entry.type} | ${matched.length} file(s) | intersection reveal missing observer |`);
+      intersectionStatic += 1;
+      uncovered += 1;
+      row += 1;
+      continue;
+    }
+    if (!motionHit) motionHit = '`intersection observer`';
+  }
+
+  if (!motionHit) {
+    console.log(`| ${row} | ❌ ${entry.id} | ${entry.trigger} | ${entry.type} | ${matched.length} file(s) | — |`);
+    presenceOnly += 1;
+    uncovered += 1;
+    row += 1;
+    continue;
+  }
+
+  const triggerReason = triggerStaticReason(entry, sanitized);
+  if (triggerReason) {
+    console.log(`| ${row} | ❌ ${entry.id} | ${entry.trigger} | ${entry.type} | ${matched.length} file(s) | ${triggerReason} |`);
+    triggerStatic += 1;
+    uncovered += 1;
+    row += 1;
+    continue;
+  }
+
+  console.log(`| ${row} | ✅ ${entry.id} | ${entry.trigger} | ${entry.type} | ${matched.length} file(s) | ${motionHit} |`);
+  row += 1;
+}
+
+console.log('');
+console.log(`Coverage: ${total - uncovered} / ${total} with motion declared`);
+console.log('');
+
+const status = uncovered > 0 ? 'fail' : 'pass';
+fs.writeFileSync(path.join(compDir, 'spec-implementation-coverage.json'), JSON.stringify({
+  schemaVersion: 1,
+  status,
+  total,
+  withMotion: total - uncovered,
+  presenceOnly,
+  scrollScrubStatic,
+  intersectionStatic,
+  triggerStatic,
+  markerOnly,
+  missingEntirely,
+}, null, 2) + '\n');
+
+if (uncovered > 0) {
+  console.log(`⛔ ${uncovered} spec entr${uncovered === 1 ? 'y' : 'ies'} matched in impl source but have no motion declaration.`);
+  console.log('');
+  console.log('   This is the bug class where the generated component renders the');
+  console.log('   selector but never animates it — same end markup, missing motion.');
+  console.log('   For scroll-scrub / pinned sections, CSS transition alone is not enough:');
+  console.log('   matched source must include a scroll progress source and sticky/pin');
+  console.log('   structure.');
+  console.log('   For intersection / in-view reveals, CSS transition alone is not enough:');
+  console.log('   matched source must include viewport observer wiring such as');
+  console.log('   IntersectionObserver, useInView, whileInView, or onViewportEnter.');
+  console.log('   For trigger-specific entries, marker strings are not enough:');
+  console.log('   matched source must include non-marker hover/click/load/scroll wiring');
+  console.log('   appropriate to the spec trigger.');
+  console.log("   Fix: open each entry's matched file and wire the declared trigger /");
+  console.log('   easing / duration. Do NOT mark verification PASS until this table');
+  console.log('   is all ✅.');
+  process.exit(1);
+}
+
+console.log('✅ Every covered spec entry has a motion declaration in its matched files.');
+process.exit(0);
+NODE

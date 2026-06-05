@@ -182,7 +182,7 @@ class PipelineState:
     # when sections/result.txt shows 0 FAIL. The two stamps are NEVER
     # interchangeable; the field gates which one the Stop hook accepts.
     closeout_policy: str = "canonical"
-    # Codex P0 (2026-05-27 architectural review): transient flag set to True
+    # Fail-closed state review: transient flag set to True
     # when PipelineState.load() had to quarantine a corrupt pipeline-state.json.
     # mark_failed() reads this to decide between "advance fail count on fresh
     # state" (false-positive on quarantine, hard-cap never fires) and "treat
@@ -225,7 +225,7 @@ class PipelineState:
                 ),
             )
         except json.JSONDecodeError as exc:
-            # Codex review (2026-05-24): silently returning defaults on a
+            # State-corruption review: silently returning defaults on a
             # corrupt pipeline-state.json erases terminal/abort state
             # (unclonable_reasons, completed_steps) so the loop restarts at
             # "reference" with no audit trail. Quarantine the corrupt bytes
@@ -434,7 +434,7 @@ class PipelineState:
         would not advance — avoids unnecessary filesystem churn on re-runs.
         The disk is re-read inside the lock so a concurrent mark_failed /
         record_unclonable from another process is absorbed rather than
-        clobbered (codex review 2026-05-24).
+        clobbered by concurrent writers.
         """
         if gate not in GATE_ORDER:
             return
@@ -498,7 +498,7 @@ class PipelineState:
         HARD_CAP_GATE_FAILS, also writes a canonical `category="hard-cap-fail"`
         entry into unclonable_reasons. Both the bump and the auto-record
         happen inside one cross-process write lock so two parallel
-        mark_failed callers can't lose increments (codex review 2026-05-24).
+        mark_failed callers cannot lose increments.
         """
         if gate not in GATE_ORDER:
             return
@@ -510,7 +510,7 @@ class PipelineState:
             authoritative = (
                 PipelineState.load(ref_dir) if state_path.is_file() else self
             )
-            # Codex P0 fail-closed (2026-05-27): if PipelineState.load() had
+            # Fail-closed state review: if PipelineState.load() had
             # to quarantine a corrupt pipeline-state.json, the in-memory
             # `authoritative` is fresh (current_gate='reference', no fail
             # counts, no completed_steps). Without this guard, the next
@@ -585,8 +585,7 @@ class PipelineState:
 
         Lock-protected RMW: the disk is re-read inside the lock so a
         concurrent record_unclonable / mark_failed from another process
-        contributes to the dedup decision instead of being clobbered
-        (codex review 2026-05-24).
+        contributes to the dedup decision instead of being clobbered.
 
         category (Step G): short machine-readable kind name (e.g.,
             "drm-canvas", "commercial-font", "auth-gated", "hard-cap-fail").

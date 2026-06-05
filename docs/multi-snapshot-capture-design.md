@@ -37,7 +37,7 @@ tmp/ref/juanmora/
 |---|---|---|
 | **Splash overlay** (`is-loading` → `is-loaded` body class) | Splash already gone OR splash blocking content | DOM at `is-loading` + DOM at `is-loaded` (both, so impl can diff and replicate the transition) |
 | **Splash-gated reveals** (hero entry animations triggered by body class change) | Initial `from` state OR final state, never the bridge | DOM at each class-transition moment |
-| **Scroll-driven state** (sticky navbar shrink, scroll-progress fades, parallax position) | Top-of-page state only | DOM at 0% / 25% / 50% / 75% / 100% scroll positions |
+| **Scroll-driven state** (sticky navbar shrink, scroll-progress fades, parallax position) | Top-of-page state only | DOM at semantic section anchors plus sticky / pinned / scroll-transition entry-mid-exit probes; percentage stops are fallback only |
 | **Lazy-loaded sections** (IntersectionObserver-mounted) | Section absent if it's below the fold | Section present after scroll past its trigger |
 | **Time-based state** (after-N-seconds reveals, scheduled animations) | Pre-reveal state | DOM at t=0, t=1s, t=3s, t=5s |
 
@@ -231,12 +231,13 @@ Few, isolated:
   `states/splash/trajectory.json` to find class transitions, generate
   spec entries for splash reveals automatically. Today the agent
   hand-writes these from incomplete signals.
-- **`transition-compare.sh`** — when comparing scroll-driven entries,
-  use `states/scroll/<pct>pct.json` for ref instead of single snapshot,
-  match against impl screenshot at same `pct`.
-- **`section-compare.sh`** — optionally compare scroll-state slices
-  (`states/scroll/50pct.json` ref-section vs impl-section at 50%)
-  for sections marked `scroll-driven: true`.
+- **`transition-compare.sh` / scroll coverage** — when comparing
+  scroll-driven entries, align by semantic section pair first and sample
+  sticky / pinned / scroll-transition entry-mid-exit phases. Use same-`pct`
+  screenshots only as fallback because unequal section heights put ref and
+  impl on different content.
+- **`section-compare.sh`** — optionally compare scroll-state slices by
+  matched section anchor for sections marked `scroll-driven: true`.
 - **New gate `state-coverage`** — fail post-implement when ref has
   `states/splash/trajectory.json` with N transitions but impl source
   has 0 splash-class hooks (`is-loading`, `is-loaded` selectors absent

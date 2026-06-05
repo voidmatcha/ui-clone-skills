@@ -67,7 +67,7 @@ def read_safe(p: Path) -> str:
 
 def url_ext(u: str) -> str:
     """Return the lowercase file extension of a URL, stripping any
-    `?` querystring or `#` fragment first. Codex audit FN #12 — prior
+    `?` querystring or `#` fragment first. Audit FN #12 — prior
     extension checks used `str.endswith(".svg")` which failed on
     cache-busted URLs like `asset.svg?v=1` or hash-anchored
     `icons.svg#search`.
@@ -157,7 +157,7 @@ if html_dir.is_dir():
 
 
 # 2. Lottie path extraction from bundles/*.js.
-# Codex universality audit HIGH FN: prior pattern assumed
+# Universality audit HIGH FN: prior pattern assumed
 # bodymovin/lottie.loadAnimation({ path: "..." }). Webpack-mangled
 # bundles obscure the method call, and modern Lottie usage includes
 # animationData (inline JSON), .lottie containers (dotLottie format),
@@ -232,7 +232,7 @@ if bundles_dir.is_dir():
                     "offset": m.start(),
                 })
                 seen.add(url)
-        # Codex universality audit HIGH FN — webpack-mangled and
+        # Universality audit HIGH FN — webpack-mangled and
         # Web-Component-form Lottie evidence.
         for m in WEBPACK_MANGLED_RE.finditer(text):
             url = m.group(1).strip()

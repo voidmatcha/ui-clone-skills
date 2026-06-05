@@ -40,9 +40,8 @@ RECATCH_REF="${RECATCH_REF:-1}"
 
 # ── Perceptual-dense PASS (default ON; =0 is the strict escape hatch) ──
 # Promoted to default-ON after a cross-site decision (scratch/perceptual-decide):
-# refStd guard closes the blank-ref hole (juanmora: 4 prior false-passes → 0),
-# clean faithful/wrong separation on ordrhealth+kayiseisagu with an independent
-# vision judge → CROSS-SITE FALSE-PASS COUNT = 0. The content-based matcher
+# refStd guard closes the blank-ref hole, and cross-site validation showed
+# clean faithful/wrong separation with an independent vision judge. The content-based matcher
 # (Fix 22) removed the mis-pairing confound.
 # SECTION_PERCEPTUAL_DENSE=0: strict escape hatch — the strict
 #   AE/Mpx + pass-by-dssim(<=0.015) ladder is the only pass path.
@@ -289,8 +288,7 @@ except Exception:
   # Unicorn Studio ([data-us-project]), Spline (spline-viewer / [data-spline])
   # and Three.js/generic engines ([data-engine]) inject their <canvas> AFTER
   # init — so a faithfully re-embedded WebGL hero diffs catastrophically and
-  # FAILs pixel-AE (observed on raviklaassens, where the hero WAS faithfully
-  # re-embedded via UnicornStudio.init yet scored FAIL). The container element
+  # FAILs pixel-AE even when the hero was faithfully re-embedded. The container element
   # is present in the DOM early, so masking it hides the whole region
   # regardless of when the canvas paints. fix-not-loosen: this masks MORE
   # genuinely-dynamic regions; static sections are unaffected and the masked
@@ -1059,11 +1057,10 @@ ENUMERATE_SECTIONS='(() => {
         const isJumboMain = tag === "main"
           && el.children.length > 3
           && h > window.innerHeight * 1.5;
-        // juanmora iter-2/3/4/5 finding (2026-05-28): Webflow CMS pattern wraps
-        // multiple semantic sub-sections in <section class="section"><div
-        // class="benefits-height-1step">...<div class="main-cont-step1">...
-        // The outer <section> looks like a single container so detector ADDed
-        // it and never descended, missing all 6 named sub-sections. Detect
+        // Webflow CMS patterns can wrap multiple semantic sub-sections in a
+        // generic outer <section>. The outer <section> looks like a single
+        // container, so a shallow detector can add it and never descend,
+        // missing named sub-sections. Detect
         // this shape: a tall <section> whose direct children include ≥2
         // distinctly-named-class divs each large enough to be a section.
         const hasMultipleNamedSubsections = (() => {
@@ -1608,8 +1605,17 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   IMPL_IMG="$DIR/sections/impl/${NAME}.png"
 
   if [ ! -f "$IMPL_IMG" ]; then
-    RESULTS="${RESULTS}| ${NAME} | — | — | — | ⚠️ MISSING impl |\n"
-    SKIP_COUNT=$((SKIP_COUNT + 1))
+    # A4 (Fix 95) — a ref section with no impl crop means the section never
+    # rendered (genuinely missing), not a benign skip. Fail it by default so a
+    # build that drops whole sections can't pass with FAIL_COUNT==0; set
+    # UI_CLONE_ALLOW_MISSING_SECTIONS=1 to downgrade to a non-blocking skip.
+    if [ "${UI_CLONE_ALLOW_MISSING_SECTIONS:-0}" = "1" ]; then
+      RESULTS="${RESULTS}| ${NAME} | — | — | — | ⚠️ MISSING impl (allowed) |\n"
+      SKIP_COUNT=$((SKIP_COUNT + 1))
+    else
+      RESULTS="${RESULTS}| ${NAME} | — | — | — | ❌ FAIL (ref section has no impl crop — section missing) |\n"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
     continue
   fi
 
@@ -1658,6 +1664,25 @@ for REF_IMG in "${REF_IMGS[@]}"; do
 
   if [ "$REF_SIZE" != "$IMPL_SIZE" ]; then
     magick "$IMPL_IMG" -resize "$REF_SIZE!" -quality 95 "$IMPL_IMG" 2>/dev/null
+  fi
+
+  # A4 (Fix 95) — all-black/blank-impl detector. AE/dssim can score a near-black
+  # impl crop as "close enough" against a content-bearing ref; catch the
+  # omx-style black-hero (a section renders as a near-black band) by comparing
+  # luminance directly. Fail ONLY when the impl crop is near-black AND the ref
+  # is NOT — a legitimately dark section (dark in both) does not trip.
+  IMPL_LUM=$(magick "$IMPL_IMG" -colorspace Gray -format "%[fx:mean] %[fx:standard_deviation]" info: 2>/dev/null)
+  REF_LUM=$(magick "$REF_IMG" -colorspace Gray -format "%[fx:mean] %[fx:standard_deviation]" info: 2>/dev/null)
+  if [ -n "$IMPL_LUM" ] && [ -n "$REF_LUM" ] && \
+     awk -v il="$IMPL_LUM" -v rl="$REF_LUM" \
+         -v bm="${UI_CLONE_BLACK_MEAN_MAX:-0.06}" -v bs="${UI_CLONE_BLACK_STD_MAX:-0.06}" '
+       BEGIN { split(il, a, " "); split(rl, b, " ");
+         impl_black = (a[1] + 0 < bm && a[2] + 0 < bs);
+         ref_black  = (b[1] + 0 < bm && b[2] + 0 < bs);
+         exit !(impl_black && !ref_black) }'; then
+    RESULTS="${RESULTS}| ${NAME} | — | — | black | ❌ FAIL (impl section near-black; ref has content) |\n"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    continue
   fi
 
   DIFF_IMG="$DIR/sections/diff/${NAME}.png"
@@ -1764,6 +1789,35 @@ for REF_IMG in "${REF_IMGS[@]}"; do
 
   RESULTS="${RESULTS}| ${NAME} | ${AE} | ${AE_PER_MPX} | ${SEV} | ${STATUS} |\n"
 done
+
+# A3 (Fix 94) — gate large EXTRA_IN_IMPL sections. pair_sections records impl
+# sections that paired with NO ref section as EXTRA_IN_IMPL; the AE loop above
+# iterates only ref crops, so a duplicated/misplaced impl block (a hero
+# re-rendered at the page bottom, or a dedup-renamed "-2" section) never reaches
+# PASS/FAIL and a structurally broken page scores fine. A faithful clone has ~0
+# large extra sections. BOUNDED: fail only on tall extras (absolute px floor),
+# not a general structural/order diff. Raise UI_CLONE_EXTRA_SECTION_MIN_PX to relax.
+EXTRA_SECTION_MIN_PX="${UI_CLONE_EXTRA_SECTION_MIN_PX:-500}"
+EXTRA_OUT=$(python3 - "$DIR/sections/matches.json" "$EXTRA_SECTION_MIN_PX" <<'PY' 2>/dev/null || true
+import json, sys
+from ui_clone.section_compare_sections import find_large_extra_sections
+try:
+    m = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+if not isinstance(m, list):
+    sys.exit(0)
+for name, h in find_large_extra_sections(m, int(sys.argv[2])):
+    print(f"{name}|{h}")
+PY
+)
+if [ -n "$EXTRA_OUT" ]; then
+  while IFS='|' read -r X_NAME X_H; do
+    [ -z "$X_NAME" ] && continue
+    RESULTS="${RESULTS}| ${X_NAME} | — | ${X_H}px | extra | ❌ FAIL (extra impl section absent from ref — duplicate/misplaced) |\n"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  done <<< "$EXTRA_OUT"
+fi
 
 echo ""
 echo "| Section | AE | AE/Mpx | Severity | Status |"

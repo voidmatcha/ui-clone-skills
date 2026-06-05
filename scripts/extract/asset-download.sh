@@ -41,7 +41,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urljoin
 
 vis_img_path = Path(sys.argv[1])
 impl_public = Path(sys.argv[2])
@@ -61,6 +61,29 @@ elif isinstance(data, list):
     items = data
 else:
     items = []
+
+# Harvest image URLs from the captured DOM (structure.json / dom-scaffold.json).
+# visible-images.json only records images that were in-viewport at capture time;
+# lazy-loaded / off-screen images (e.g. realfood's intro/ section) appear in the
+# DOM but not there, so without this they never download and 404 in the clone.
+import re as _re
+# Match absolute (https://…) and root-relative (/cdn-cgi/…, /images/…) image
+# URLs. realfood stores DOM srcs as root-relative cdn-cgi paths; those are
+# resolved against the site origin in the download loop below.
+_IMG_URL_RE = _re.compile(
+    r"(?:https?://[^\"'\s)]+?|/[^\"'\s)]+?)\.(?:webp|png|jpe?g|avif|gif|svg)\b",
+    _re.IGNORECASE,
+)
+for _src_name in ("structure.json", "dom-scaffold.json"):
+    _p = ref_dir / _src_name
+    if not _p.exists():
+        continue
+    try:
+        _text = _p.read_text()
+    except OSError:
+        continue
+    for _u in _IMG_URL_RE.findall(_text):
+        items.append({"src": _u})
 
 attempts = []
 succeeded = 0
@@ -213,6 +236,9 @@ for item in items:
         url = item
     else:
         continue
+    # Resolve root-relative DOM srcs (/cdn-cgi/…, /images/…) against the origin.
+    if url.startswith("/") and not url.startswith("//") and referrer_url:
+        url = urljoin(referrer_url, url)
     if not url or not url.startswith(("http://", "https://", "//")):
         continue
     if url.startswith("//"):
@@ -286,7 +312,10 @@ for item in items:
             dest.unlink()
 
 total = len(attempts)
-success_rate = (succeeded / total * 100) if total else 0.0
+# A skipped-existing file is already present on disk — count it as a success,
+# not a shortfall. Otherwise width-variant duplicates (same local dest) deflate
+# the rate and spuriously suggest asset substitution.
+success_rate = ((succeeded + skipped) / total * 100) if total else 0.0
 
 log = {
     "schemaVersion": 1,

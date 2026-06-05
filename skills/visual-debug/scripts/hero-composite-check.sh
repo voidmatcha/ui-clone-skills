@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hero-composite-check.sh — gate the most common "looks similar but
-# elements don't match" failure mode across 17 codex clone iterations.
+# elements don't match" failure mode observed in clone iterations.
 #
 # Symptom pattern: ref's hero section is a 4-layer composite
 #   <section class="hero">
@@ -11,7 +11,7 @@
 #     </button>
 #     <h1>...</h1>                        ← headline
 #   </section>
-# LLMs (codex/claude) consistently flatten this into a clean React tree
+# LLM-generated clones often flatten this into a clean React tree
 # (e.g. `<HeroSection><video/><h1>...</h1></HeroSection>`) — dropping the
 # overlay button and the label span. tree-diff catches it via unpaired
 # BUTTON/VIDEO/SPAN/H1 elements, but tree-diff is too noisy on the broader
