@@ -122,10 +122,11 @@ fi
 plugin_v=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])" 2>/dev/null || echo "")
 market_v=$(python3 -c "import json; print(json.load(open('.claude-plugin/marketplace.json'))['plugins'][0]['version'])" 2>/dev/null || echo "")
 codex_v=$(python3 -c "import json; print(json.load(open('.codex-plugin/plugin.json'))['version'])" 2>/dev/null || echo "")
+package_v=$(python3 -c "import json; print(json.load(open('package.json'))['version'])" 2>/dev/null || echo "")
 pyproj_v=$(python3 -c "import re; m=re.search(r'^version\s*=\s*\"([^\"]+)\"', open('pyproject.toml').read(), re.M); print(m.group(1) if m else '')" 2>/dev/null || echo "")
 init_v=$(python3 -c "import re; m=re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('ui_clone/__init__.py').read()); print(m.group(1) if m else '')" 2>/dev/null || echo "")
-versions="claude-plugin.json=$plugin_v marketplace.json=$market_v codex-plugin.json=$codex_v pyproject.toml=$pyproj_v ui_clone/__init__.py=$init_v"
-unique=$(printf '%s\n' "$plugin_v" "$market_v" "$codex_v" "$pyproj_v" "$init_v" | sort -u | grep -v '^$' | wc -l | tr -d ' ')
+versions="claude-plugin.json=$plugin_v marketplace.json=$market_v codex-plugin.json=$codex_v package.json=$package_v pyproject.toml=$pyproj_v ui_clone/__init__.py=$init_v"
+unique=$(printf '%s\n' "$plugin_v" "$market_v" "$codex_v" "$package_v" "$pyproj_v" "$init_v" | sort -u | grep -v '^$' | wc -l | tr -d ' ')
 if [ "$unique" != "1" ]; then
   echo "⚠️ Version mismatch on release push (target=$target_branch): $versions" >&2
   echo "All versioned package/plugin files must be bumped together." >&2

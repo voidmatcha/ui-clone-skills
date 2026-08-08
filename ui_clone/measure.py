@@ -33,10 +33,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
+
+from ui_clone.shell import bash_bin, bash_env
 
 # Locked defaults — these override caller env by being injected into the
 # subprocess env explicitly. To opt back into less-strict measurement
@@ -81,13 +82,13 @@ def _bash(script_rel: str, args: list[str], env_overrides: dict[str, str]) -> in
             file=sys.stderr,
         )
         return 2
-    env = dict(os.environ)
+    env = bash_env()
     # Locked defaults: ALWAYS override caller env. The whole point of
     # routing through measure.py is to prevent the agent (or a wrapper
     # shell) from setting these to permissive values.
     for k, v in env_overrides.items():
         env[k] = v
-    cmd = ["bash", str(script), *args]
+    cmd = [bash_bin(), str(script), *args]
     proc = subprocess.run(cmd, env=env)
     return proc.returncode
 

@@ -83,6 +83,7 @@ trap 'rm -f "$TMP_RESULTS"; cleanup' EXIT
 # aggregate with node at the end.
 IFS=',' read -ra VPS <<< "$VIEWPORTS_CSV"
 GLOBAL_STATUS=0
+PROBE_ERROR=0
 
 for VP in "${VPS[@]}"; do
   W="${VP%x*}"
@@ -205,9 +206,19 @@ for VP in "${VPS[@]}"; do
       return map;
     }
 
-    const probeAtMinus150 = await sampleAt(Math.max(0, maxScroll - 150));
-    const probeAtMinus50  = await sampleAt(Math.max(0, maxScroll - 50));
-    const probeAtMax       = await sampleAt(maxScroll);
+    // Growing-page guard (loop-e2e-4): lazy/scroll-activated content can grow
+    // scrollHeight AFTER maxScroll was cached (realfood erf region +180px),
+    // which parks state-machine thresholds (e.g. nav nearBottom at sh-200)
+    // INSIDE the stale minus50..max window and flags ref-faithful behavior as
+    // stuck. Recompute the live bottom before each sample so all three
+    // samples sit at the true end of the document.
+    const liveMax = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    // One full-depth pre-pass so growth has already happened before sampling.
+    window.scrollTo({ top: liveMax(), behavior: 'instant' });
+    await sleep(SETTLE);
+    const probeAtMinus150 = await sampleAt(Math.max(0, liveMax() - 150));
+    const probeAtMinus50  = await sampleAt(Math.max(0, liveMax() - 50));
+    const probeAtMax       = await sampleAt(liveMax());
 
     const stuck = [];
     for (const c of candidates) {
@@ -243,6 +254,17 @@ for VP in "${VPS[@]}"; do
   # Unwrap agent-browser's JSON-as-string output.
   DATA=$(printf '%s' "$RAW" | sed 's/^"//;s/"$//' | sed 's/\\"/"/g; s/\\\\/\\/g')
 
+  # Fail-closed (F3 class): a timed-out or crashed eval returns empty RAW, and
+  # parsing '{}' downstream silently yields stuck:[] -> a false "✅ settled".
+  # A completed probe ALWAYS returns an object carrying the 'candidates' key, so
+  # its absence means the probe never ran here — treat as an error, not a pass.
+  if ! printf '%s' "$DATA" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.exit(o&&typeof o==="object"&&Object.prototype.hasOwnProperty.call(o,"candidates")?0:1)}catch(e){process.exit(1)}})'; then
+    echo "   ❌ scroll-end probe returned no parseable result at ${W}x${H} (eval timeout/crash) — failing closed"
+    GLOBAL_STATUS=1
+    PROBE_ERROR=1
+    continue
+  fi
+
   # Record this viewport's findings as a single JSON object line.
   node -e "
     const d = JSON.parse(process.argv[1] || '{}');
@@ -276,15 +298,17 @@ node -e "
   const lines = fs.readFileSync(process.argv[1], 'utf8').split('\\n').filter(Boolean);
   const viewports = lines.map(l => JSON.parse(l));
   const totalStuck = viewports.reduce((a, v) => a + (v.stuck ? v.stuck.length : 0), 0);
+  const probeError = process.argv[4] === '1';
   const out = {
-    status: totalStuck === 0 ? 'pass' : 'fail',
+    status: probeError ? 'error' : (totalStuck === 0 ? 'pass' : 'fail'),
+    probeError,
     totalStuck,
     viewports,
     generatedAt: process.argv[2],
     url: process.argv[3],
   };
   process.stdout.write(JSON.stringify(out, null, 2));
-" "$TMP_RESULTS" "$NOW" "$URL" > "$OUT"
+" "$TMP_RESULTS" "$NOW" "$URL" "$PROBE_ERROR" > "$OUT"
 
 if [ "$GLOBAL_STATUS" -eq 0 ]; then
   echo "✅ Scroll-end completion: PASS (all viewports settled)"
@@ -303,4 +327,10 @@ else
   echo "        'Viewport-aware scroll-scrub offsets'"
 fi
 
+# exit 2 distinguishes a probe error (eval timeout/crash — nothing measured)
+# from exit 1 (a real stuck element was found), mirroring the setup-error exit 2
+# above so the dispatcher never reads an unrun probe as a settled pass.
+if [ "$PROBE_ERROR" -eq 1 ]; then
+  exit 2
+fi
 exit $GLOBAL_STATUS

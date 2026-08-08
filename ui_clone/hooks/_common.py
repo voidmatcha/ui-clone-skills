@@ -4,12 +4,16 @@ Shared utilities for ui_clone hook modules.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +24,8 @@ YELLOW = "\033[0;33m"
 RED = "\033[0;31m"
 BOLD = "\033[1m"
 NC = "\033[0m"
+
+UTC = timezone.utc  # noqa: UP017 - macOS /usr/bin/python3 is still 3.9.
 
 
 def _plugin_root() -> Path:
@@ -141,17 +147,50 @@ def find_project_root() -> Path:
     return cwd
 
 
+_DEFAULT_STALE_DAYS = 3
+
+
+def stale_seconds() -> float:
+    """WIP-marker stale threshold in seconds (UI_RE_STALE_DAYS env, default 3d).
+
+    An active run re-touches its `.ui-re-active` marker on every gated component
+    write, so a marker not updated within this window belongs to an abandoned /
+    dead run. Shared so EVERY hook (via find_ref_dir) ignores stale markers the
+    same way the Stop-hook reaper already does — not just the reaper.
+    """
+    try:
+        days = float(os.environ.get("UI_RE_STALE_DAYS", _DEFAULT_STALE_DAYS))
+    except (ValueError, TypeError):
+        days = _DEFAULT_STALE_DAYS
+    return days * 24 * 3600
+
+
 def find_ref_dir(search_root: Path) -> Path | None:
-    """Find ref dir: prefer WIP marker, fall back to newest extracted.json mtime."""
+    """Find ref dir: prefer newest FRESH WIP marker, fall back to newest extracted.json mtime."""
     if not search_root.is_dir():
         return None
 
-    # 1. WIP marker
+    # 1. WIP marker — newest FRESH marker wins. A marker older than the stale
+    # threshold is an abandoned/dead run (its owner stopped re-touching it) and
+    # must NOT be treated as an active task: that was the cause of hooks firing
+    # "out of context" off weeks-old markers left in sibling/scratch dirs.
+    cutoff = time.time() - stale_seconds()
+    newest_marker_time = 0.0
+    newest_marker_dir: Path | None = None
     for d in sorted(search_root.iterdir()):
         if not d.is_dir():
             continue
-        if (d / ".ui-re-active").is_file():
-            return d
+        marker = d / ".ui-re-active"
+        if not marker.is_file():
+            continue
+        mtime = marker.stat().st_mtime
+        if mtime < cutoff:
+            continue  # stale: abandoned/dead run, ignore
+        if mtime > newest_marker_time:
+            newest_marker_time = mtime
+            newest_marker_dir = d
+    if newest_marker_dir is not None:
+        return newest_marker_dir
 
     # 2. mtime fallback — only refs with extracted.json
     newest_time = 0.0
@@ -194,6 +233,291 @@ def extract_tool_command(data: dict[str, Any]) -> str:
         if isinstance(candidate, str) and candidate:
             return candidate
     return ""
+
+
+_UI_RE_MODULES = {"ui_clone.pipeline", "ui_clone.gate", "ui_clone.goal"}
+_UI_RE_SCRIPT_RE = re.compile(
+    r"(?:^|[;&|]\s*)"
+    r"(?:(?:bash|sh|zsh)\s+(?:-[A-Za-z]+\s+)*)?"
+    r"['\"]?(?:\./)?(?:skills/visual-debug/scripts|scripts/(?:verify|extract))/"
+    r"[^'\"\s;|&]+\.sh\b"
+)
+
+
+def _shell_tokens(cmd: str) -> list[str]:
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return cmd.split()
+
+
+_ASSIGNMENT_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _maybe_ref_dir_from_token(token: str, base: Path) -> Path | None:
+    cleaned = token.strip().strip("'\"")
+    # `VAR=value` assignment prefix: the ref dir is the value, not the token.
+    cleaned = _ASSIGNMENT_PREFIX_RE.sub("", cleaned, count=1)
+    # This hook reads the command string BEFORE the shell expands it, so a token
+    # carrying `$VAR`, `$(...)` or backticks can never be resolved here. Guessing
+    # materialises the literal string as a directory (mark_ref_session mkdirs the
+    # parent), which both litters the tree and de-scopes the session marker that
+    # should_enforce_ref_for_session reads. Fail closed instead.
+    if "$" in cleaned or "`" in cleaned:
+        return None
+    if "tmp/ref/" not in cleaned and not cleaned.startswith("tmp/ref"):
+        return None
+    # Trim common shell punctuation while preserving paths with dots/dashes.
+    # `;` is included: `tmp/ref/foo;` is the same clone as `tmp/ref/foo`, and
+    # treating them as distinct forks session bookkeeping across two marker dirs.
+    cleaned = cleaned.rstrip(";,:)]}")
+    path = Path(cleaned)
+    if not path.is_absolute():
+        path = base / path
+    for candidate in (path, *path.parents):
+        if (
+            candidate.name
+            and candidate.parent.name == "ref"
+            and candidate.parent.parent.name == "tmp"
+        ):
+            return candidate
+    return None
+
+
+def _ref_dir_from_command_tokens(tokens: list[str], base: Path) -> Path | None:
+    for token in tokens:
+        ref_dir = _maybe_ref_dir_from_token(token, base)
+        if ref_dir is not None:
+            return ref_dir
+    return None
+
+
+def _module_args(tokens: list[str], module_name: str) -> list[str] | None:
+    for index, token in enumerate(tokens[:-1]):
+        if token == "-m" and tokens[index + 1] == module_name:
+            return tokens[index + 2 :]
+    return None
+
+
+_CLI_WRAPPER_VERBS = {
+    "pipeline": "ui_clone.pipeline",
+    "gate": "ui_clone.gate",
+    "goal": "ui_clone.goal",
+    "state": "ui_clone.state",
+}
+
+_WRAPPER_PRECEDING_OK = {"npx", "node", "command", "exec", "time", "env", "uv", "run"}
+
+
+def _cli_wrapper_module_args(tokens: list[str]) -> tuple[str, list[str]] | None:
+    """Map CLI-wrapper invocations onto (module, args).
+
+    `ui-clone ...`, `npx ui-clone-cli ...`, and `node <path>/bin/ui-clone ...`
+    are documented as equivalent to `python -m ui_clone.<module> ...`, but the
+    hooks layer only recognized the python-module form — an agent driving the
+    pipeline through the wrapper never got session-ownership markers, silently
+    scoping away Stop-hook enforcement. Normalize the wrapper here so both
+    command surfaces behave identically.
+    """
+    idx: int | None = None
+    for i, tok in enumerate(tokens):
+        base = tok.rsplit("/", 1)[-1]
+        if base in {"ui-clone", "ui-clone-cli"}:
+            # Only when everything before it is an env assignment, a known
+            # launcher, or a flag — excludes mentions like `cat ui-clone`.
+            prefix_ok = all(
+                "=" in prev or prev.startswith("-")
+                or prev.rsplit("/", 1)[-1] in _WRAPPER_PRECEDING_OK
+                for prev in tokens[:i]
+            )
+            if prefix_ok:
+                idx = i + 1
+                break
+    if idx is None or idx >= len(tokens):
+        return None
+    verb = tokens[idx]
+    module = _CLI_WRAPPER_VERBS.get(verb)
+    if module is not None:
+        return module, tokens[idx + 1:]
+    # Bare pipeline shorthand: ui-clone <url> <component> <session> <action>
+    return "ui_clone.pipeline", tokens[idx:]
+
+
+def _pipeline_ref_dir(args: list[str], project_root: Path) -> Path | None:
+    """Resolve tmp/ref/<component> from pipeline-form args
+    (<url> <component> <session> <action> ...)."""
+    if len(args) < 4:
+        return None
+    component = args[1]
+    action = args[3]
+    if action not in {"run", "verify"}:
+        return None
+    if not component or component.startswith("-") or "/" in component:
+        return None
+    return project_root / "tmp" / "ref" / component
+
+
+def _subshell_command(tokens: list[str]) -> str | None:
+    for index, token in enumerate(tokens[:-1]):
+        if token in {"-c", "-lc"}:
+            return tokens[index + 1]
+        if token.startswith("-") and "c" in token and index + 1 < len(tokens):
+            # Handles compact shell options such as `bash -lc '<cmd>'`.
+            return tokens[index + 1]
+    return None
+
+
+def target_ref_dir_for_ui_re_command(
+    cmd: str, project_root: Path, cwd: Path | None = None
+) -> Path | None:
+    """Return the ref dir targeted by an executing UI-RE command.
+
+    This deliberately excludes read-only development commands that merely
+    mention repo script paths, such as `ruff check scripts/extract/foo.py`,
+    `git diff -- scripts/extract/foo.sh`, or `sed -n ... scripts/extract/foo.sh`.
+    Session ownership markers are meaningful only when a command actually runs
+    the UI-RE pipeline/gate/scripts against a concrete ref.
+    """
+    if not cmd.strip():
+        return None
+    tokens = _shell_tokens(cmd)
+    if not tokens:
+        return None
+
+    nested = _subshell_command(tokens)
+    if nested and nested != cmd:
+        nested_ref = target_ref_dir_for_ui_re_command(nested, project_root, cwd)
+        if nested_ref is not None:
+            return nested_ref
+
+    base = cwd or project_root
+
+    pipeline_args = _module_args(tokens, "ui_clone.pipeline")
+    if pipeline_args is not None:
+        return _pipeline_ref_dir(pipeline_args, project_root)
+
+    for module in ("ui_clone.gate", "ui_clone.goal"):
+        args = _module_args(tokens, module)
+        if args:
+            ref_dir = _ref_dir_from_command_tokens(args[:2], base)
+            if ref_dir is not None:
+                return ref_dir
+
+    wrapper = _cli_wrapper_module_args(tokens)
+    if wrapper is not None:
+        module, args = wrapper
+        if module == "ui_clone.pipeline":
+            ref_dir = _pipeline_ref_dir(args, project_root)
+            if ref_dir is not None:
+                return ref_dir
+        else:
+            # gate <ref-dir> <gate>, goal <ref-dir> ..., state terminal <ref-dir> ...
+            ref_dir = _ref_dir_from_command_tokens(args[:3], base)
+            if ref_dir is not None:
+                return ref_dir
+
+    if not _UI_RE_SCRIPT_RE.search(cmd):
+        return None
+    return _ref_dir_from_command_tokens(tokens, base)
+
+
+def is_ui_re_execution_command(cmd: str) -> bool:
+    """True when `cmd` executes a UI-RE command, not just references files."""
+    return target_ref_dir_for_ui_re_command(cmd, find_project_root()) is not None
+
+
+def session_id_from_payload(data: dict[str, Any] | None = None) -> str:
+    """Return the current agent-session id from hook payload/env.
+
+    Stop hooks should not force one Codex/Claude session to finish a UI-RE
+    clone that another session owns. Both hosts expose the active session id
+    differently across hook events, so centralize the tolerant extraction here.
+    """
+    if isinstance(data, dict):
+        for key in ("session_id", "sessionId"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    for env_name in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID"):
+        value = os.environ.get(env_name, "")
+        if value.strip():
+            return value.strip()
+    return ""
+
+
+_REF_SESSION_DIR = ".ui-re-sessions"
+
+
+def _session_marker_path(ref_dir: Path, session_id: str) -> Path:
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return ref_dir / _REF_SESSION_DIR / f"{digest}.json"
+
+
+def mark_ref_session(ref_dir: Path, session_id: str, *, source: str) -> None:
+    """Record that `session_id` interacted with `ref_dir`.
+
+    The marker is intentionally per-ref and local-only. It lets the Stop hook
+    distinguish "my unfinished clone" from "a sibling session's unfinished
+    clone" without weakening legacy fail-closed behavior when no session id is
+    available.
+    """
+    sid = session_id.strip()
+    if not sid:
+        return
+    marker = _session_marker_path(ref_dir, sid)
+    payload = {
+        "session_id": sid,
+        "source": source,
+        "updatedAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def ref_has_session_markers(ref_dir: Path) -> bool:
+    marker_dir = ref_dir / _REF_SESSION_DIR
+    if not marker_dir.is_dir():
+        return False
+    try:
+        return any(p.is_file() for p in marker_dir.iterdir())
+    except OSError:
+        return False
+
+
+def ref_touched_by_session(ref_dir: Path, session_id: str) -> bool:
+    sid = session_id.strip()
+    if not sid:
+        return False
+    return _session_marker_path(ref_dir, sid).is_file()
+
+
+def should_enforce_ref_for_session(ref_dir: Path, session_id: str) -> bool:
+    """Return True when this hook session should enforce `ref_dir`.
+
+    With a known session id, Stop/declare-done gates are scoped to refs this
+    session touched. That prevents an unrelated Codex/Claude tab from being
+    forced to complete a clone already owned by another tab. When the runtime
+    provides no session id we keep legacy fail-closed behavior.
+    """
+    sid = session_id.strip()
+    force_unowned = os.environ.get("UI_RE_ENFORCE_UNOWNED_ACTIVE", "").strip() == "1"
+    if not sid:
+        # No session id in the payload. Keep the legacy fail-closed behavior for
+        # refs with NO session owner (could be this session's own pre-session-id
+        # work — a genuine in-progress clone). But SKIP a ref whose session
+        # markers all belong to other, identifiable sessions: an unrelated tab
+        # must not be forced to finish another tab's clone (the "fires in
+        # unrelated work" recurrence). The override restores enforce-everything.
+        if force_unowned:
+            return True
+        return not ref_has_session_markers(ref_dir)
+    if ref_touched_by_session(ref_dir, sid):
+        return True
+    return force_unowned
 
 
 def _parse_patch_paths(patch: str) -> list[str]:
@@ -317,6 +641,7 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "typography.json",
         "sizing-expressions.json",
         "detected-breakpoints.json",
+        "ref-viewport-visibility.json",
         "dynamic-regions.json",
         "dynamic-styles.json",
         "element-groups.json",
@@ -335,6 +660,7 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "scroll-engine.json",
         "scroll-library.json",
         "bundle-analysis.json",
+        "bundle-extraction.json",
         "bundle-map.json",
         "paid-features.json",
         "paid-fonts.json",
@@ -360,6 +686,7 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "summary.json",
         "known-artifacts.json",
         "tailwind-conflict.json",
+        "ref-css-sanitize-report.json",
         # Review follow-up: gate.py + verification-plan.sh references that
         # were missing from the initial allowlist — would otherwise
         # false-positive deny on a standard pipeline run.
@@ -546,12 +873,34 @@ def _log_gate_skip(ref_dir: Path, gate_name: str, reason: str) -> None:
     Best-effort — never raises.
     """
     try:
-        from datetime import UTC, datetime
-
         ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         log_path = ref_dir / ".gate-skip-log"
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{ts} gate={gate_name} reason={reason}\n")
+    except OSError:
+        pass
+
+
+def _clear_gate_skip(ref_dir: Path, gate_name: str) -> None:
+    """Drop any prior skip entries for `gate_name` from .gate-skip-log.
+
+    A gate that actually RAN (pass or fail) is no longer "not enforced", so its
+    earlier fail-open skip must stop blocking closeout. This self-heals the
+    run-scoping: the entries that remain are exactly the gates skipped and never
+    since recovered — which is what gate_skip_blocker reports. Best-effort.
+    """
+    try:
+        log_path = ref_dir / ".gate-skip-log"
+        if not log_path.is_file():
+            return
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        kept = [ln for ln in lines if f"gate={gate_name} reason=" not in ln]
+        if len(kept) == len(lines):
+            return
+        if kept:
+            log_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        else:
+            log_path.unlink()
     except OSError:
         pass
 
@@ -588,6 +937,7 @@ def run_gate(ref_dir: Path, gate_name: str) -> dict[str, object]:
         )
         cmd = [sys.executable, "-m", "ui_clone.gate", str(ref_dir), gate_name, "--json"]
 
+    skip_reason = ""
     try:
         result = subprocess.run(
             cmd,
@@ -598,6 +948,9 @@ def run_gate(ref_dir: Path, gate_name: str) -> dict[str, object]:
         raw = result.stdout.strip()
         if raw:
             data: dict[str, object] = json.loads(raw)
+            # The gate actually ran (pass OR fail) — clear any earlier fail-open
+            # skip so it stops blocking closeout (self-healing run-scope).
+            _clear_gate_skip(ref_dir, gate_name)
             return data
         if result.returncode != 0:
             return {
@@ -611,8 +964,300 @@ def run_gate(ref_dir: Path, gate_name: str) -> dict[str, object]:
                     }
                 ],
             }
+        skip_reason = "gate produced no output (exit 0, empty stdout)"
     except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
-        reason = f"{type(exc).__name__}: {exc}"
-        print(f"ui-clone-skills: WARNING: gate not runnable: {exc}", file=sys.stderr)
-        _log_gate_skip(ref_dir, gate_name, reason)
-    return {"passed": True, "fail_count": 0, "failures": []}
+        skip_reason = f"{type(exc).__name__}: {exc}"
+    # Fail-LOUD, not silent fail-open. We keep returning passed=True so a host
+    # missing uv/Pillow is not bricked, but the gate was NOT enforced — mark the
+    # result `skipped`, warn loudly, and record it in .gate-skip-log so
+    # gate_skip_blocker refuses a terminal `done`/push until a capable host
+    # re-runs the gate (which clears the entry) or the user sets gateSkipAck.
+    print(
+        f"ui-clone-skills: ⚠ ENFORCEMENT SKIPPED: gate '{gate_name}' could "
+        f"not run ({skip_reason}). It is NOT enforced this run.",
+        file=sys.stderr,
+    )
+    _log_gate_skip(ref_dir, gate_name, skip_reason)
+    return {
+        "passed": True,
+        "fail_count": 0,
+        "failures": [],
+        "skipped": True,
+        "skip_reason": skip_reason,
+    }
+
+
+def quick_tier_blocker(ref_dir: Path) -> str | None:
+    """Return a closeout blocker when verification-plan.json is tier=quick.
+
+    Shared by BOTH closeout paths — canonical (pipeline verify ->
+    verify-stamp.json) and structural (check-converged.sh ->
+    structural-convergence-stamp.json) — so an agent cannot dodge the
+    blocker by routing through the structural stamp (the benchmark-077d8c3
+    tier=quick gaming vector). Missing/unreadable plans are left to the
+    normal spec gate.
+    """
+    plan_path = Path(ref_dir) / "verification-plan.json"
+    if not plan_path.is_file():
+        return None
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    tier = str(plan.get("tier") or "").lower()
+    if tier != "quick":
+        return None
+    return (
+        "verification-plan.json is tier=quick. Quick plans are for inner "
+        "iteration only — closeout requires tier=standard or "
+        "tier=comprehensive so browser scroll/live parity checks can run. "
+        "Regenerate the plan with: UI_CLONE_VERIFY_TIER=standard bash "
+        "skills/visual-debug/scripts/verification-plan.sh <ref-dir>"
+    )
+
+
+# ── Off-pipeline clone detection (omx postmortem) ─────────────────────────
+# A session that browses an EXTERNAL site via agent-browser and then writes
+# component files without any owned ref dir is doing clone-shaped work
+# outside the pipeline — the failure mode where a "static approximation +
+# smoke check" ships with font/layout drift unmeasured (no gates ever ran).
+
+_EXTERNAL_BROWSE_DIR = "tmp/.ui-re-external-browse"
+# Command-position anchor (orchestrator live-fire false positive 2026-06-12):
+# the previous bare `search()` matched the literal trigger string INSIDE a
+# heredoc body (a commission doc written via `cat <<EOF`) and crumbed the
+# orchestrator session with the placeholder url `https://<external>``. The
+# invocation must start a command: string start or right after a shell
+# connector (&& ; | & newline or subshell paren).
+_AB_OPEN_RE = re.compile(
+    r"(?:^|[;&|(]\s*|&&\s*|\|\|\s*|\n\s*)agent-browser\b[^\n;|&]*\bopen\s+['\"]?(https?://[^'\"\s;|&]+)"
+)
+_LOCAL_HOST_RE = re.compile(
+    r"^https?://(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.|\[::1\])"
+)
+_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?\w")
+_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _sanitize_for_command_match(cmd: str) -> str:
+    """Drop heredoc bodies and quoted text so DATA can never look like a
+    command. Everything after the first heredoc operator is document body
+    until its terminator — for crumb detection, simply stop scanning there."""
+    m = _HEREDOC_RE.search(cmd)
+    if m:
+        cmd = cmd[: m.start()]
+    return _QUOTED_RE.sub("''", cmd)
+
+
+# Command-position anchor shared by every pre_bash deny matcher (82b0a4e class).
+# A tool is INVOKED only at command position: string start, or right after a
+# shell connector (newline ; & | && || or a subshell paren), optionally via
+# xargs. A tool NAME elsewhere — a quoted pgrep pattern, a `command -v` / grep
+# argument — is DATA, not an invocation, and must not trigger a deny.
+# An invocation may be preceded by leading environment assignments and/or `env`
+# (batch-4 review MAJOR 2): `FOO=1 agent-browser open`, `HTTPS_PROXY=x curl ...`,
+# `PORT=5173 npm run dev` are real command-position invocations and must not
+# bypass the deny. The trailing `(?:(?:\w+=\S*|env)\s+)*` consumes those leading
+# KEY=VAL / env tokens; it cannot match a bare tool name (no `=`, not `env`), so
+# the quoted/heredoc/command-v/pgrep-argument exemptions are unaffected.
+CMD_POSITION_PREFIX = r"(?:^|[\n;&|(]\s*|&&\s*|\|\|\s*|\bxargs\s+)(?:(?:\w+=\S*|env)\s+)*"
+
+# Heredoc BODY remover: drops the document body between `<<DELIM` and its
+# terminator line while KEEPING any command after the terminator (unlike
+# _sanitize_for_command_match, which truncates at the first heredoc — fine for
+# crumb detection but it would hide a real extraction placed after a heredoc).
+_HEREDOC_BODY_RE = re.compile(
+    r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2(?=\s|$)",
+    re.DOTALL,
+)
+
+
+def strip_heredoc_bodies(cmd: str) -> str:
+    """Remove heredoc document bodies (between `<<DELIM` and its terminator)
+    while KEEPING any command after the terminator and ALL quoted text. Use
+    this for matchers that must still read quoted arguments (a mirror's quoted
+    impl/public target, a writeFileSync('x.html') path) but must not be fooled
+    by a heredoc body — e.g. a commit message describing `npm run dev`."""
+    if not cmd:
+        return cmd
+    out = cmd
+    prev = ""
+    while prev != out:  # collapse stacked/nested heredocs
+        prev = out
+        out = _HEREDOC_BODY_RE.sub(" ", out, count=1)
+    return out
+
+
+def sanitize_command_for_deny(cmd: str) -> str:
+    """Strip heredoc bodies AND quoted strings so deny matchers see only command
+    structure — tool/script names appearing as DATA (a quoted pgrep pattern, a
+    heredoc document body, a grep/command-v argument) can never trigger a deny.
+    Real commands after a heredoc terminator are preserved, so an extraction
+    hidden after a doc body still matches. Do NOT use for matchers that need to
+    read a quoted argument (paths) — use strip_heredoc_bodies there."""
+    if not cmd:
+        return cmd
+    return _QUOTED_RE.sub("''", strip_heredoc_bodies(cmd))
+
+
+def _is_plausible_external_url(url: str) -> bool:
+    """Placeholder rejection: `https://<external>` (angle brackets, backticks)
+    is doc text, not a navigable URL; require a parseable hostname with at
+    least one dot or a plausible bare host."""
+    if any(ch in url for ch in "<>`"):
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9.-]+", host))
+
+
+def mark_external_browse(cmd: str, base: Path, session_id: str) -> None:
+    """Record that `session_id` opened an external URL via agent-browser."""
+    if not session_id:
+        return
+    m = _AB_OPEN_RE.search(_sanitize_for_command_match(cmd or ""))
+    if not m:
+        return
+    url = m.group(1)
+    if _LOCAL_HOST_RE.match(url):
+        return
+    if not _is_plausible_external_url(url):
+        return
+    try:
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        crumb_dir = base / _EXTERNAL_BROWSE_DIR
+        crumb_dir.mkdir(parents=True, exist_ok=True)
+        (crumb_dir / f"{digest}.json").write_text(
+            json.dumps({"url": url, "source": "pre_bash"}), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def has_external_browse(base: Path, session_id: str) -> bool:
+    if not session_id:
+        return False
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return (base / _EXTERNAL_BROWSE_DIR / f"{digest}.json").is_file()
+
+
+def mark_clone_write(base: Path, session_id: str, paths: list[str]) -> None:
+    """Record that a crumbed session attempted clone-shaped file writes.
+
+    The declaration cascade consults this: external browse + clone-shaped
+    writes + no active ref dir means a completion commit would ship an
+    unverified scratch clone (omx postmortem).
+    """
+    if not session_id or not paths:
+        return
+    try:
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        crumb_dir = base / _EXTERNAL_BROWSE_DIR
+        crumb_dir.mkdir(parents=True, exist_ok=True)
+        marker = crumb_dir / f"{digest}-writes.json"
+        existing: list[str] = []
+        if marker.is_file():
+            try:
+                prev = json.loads(marker.read_text(encoding="utf-8"))
+                existing = [str(p) for p in prev.get("paths", [])]
+            except (json.JSONDecodeError, OSError):
+                existing = []
+        merged = list(dict.fromkeys(existing + [str(p) for p in paths]))[:50]
+        marker.write_text(json.dumps({"paths": merged}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def has_clone_writes(base: Path, session_id: str) -> bool:
+    if not session_id:
+        return False
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return (base / _EXTERNAL_BROWSE_DIR / f"{digest}-writes.json").is_file()
+
+
+def deferred_checks_blocker(ref_dir: Path) -> str | None:
+    """Closeout blocker when the plan deferred checks at a sub-comprehensive
+    tier without an explicit user acknowledgment.
+
+    verification-plan.sh records tier-dropped rows in deferredChecks[] —
+    emitting them is only half the contract; without a consumer an agent can
+    run standard tier, defer every motion-arc compare, and close out green.
+    The plan may carry `deferredAck: "<who/why>"` (set when the USER chose
+    the lower tier) to release this block.
+    """
+    plan_path = Path(ref_dir) / "verification-plan.json"
+    if not plan_path.is_file():
+        return None
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    deferred = plan.get("deferredChecks")
+    if not isinstance(deferred, list) or not deferred:
+        return None
+    if str(plan.get("deferredAck") or "").strip():
+        return None
+    ids = ", ".join(str(d.get("id", "?")) for d in deferred[:8] if isinstance(d, dict))
+    return (
+        f"verification-plan.json defers {len(deferred)} check(s) at tier="
+        f"{plan.get('tier')} ({ids}). Deferred checks are tracked debt — "
+        "closeout requires either re-generating the plan at "
+        "tier=comprehensive (UI_CLONE_VERIFY_TIER=comprehensive bash "
+        "skills/visual-debug/scripts/verification-plan.sh <ref-dir>) and "
+        "running the deferred checks, or an explicit user decision recorded "
+        "as `deferredAck` in the plan."
+    )
+
+
+def gate_skip_blocker(ref_dir: Path) -> str | None:
+    """Closeout blocker when one or more gates could not be ENFORCED this run.
+
+    run_gate is fail-OPEN (missing uv/Pillow or a subprocess error returns
+    passed=True so a dependency-poor host is not bricked) but records every such
+    skip in .gate-skip-log. A gate that later actually runs clears its own entry
+    (see _clear_gate_skip), so the entries that remain are exactly the gates
+    skipped and never recovered — i.e. checks whose green status is unverified.
+    Closing out / pushing on those is the silent-fail-open hole this closes.
+
+    Releasable by `gateSkipAck` in verification-plan.json (the user explicitly
+    accepting an un-enforced run), mirroring deferredAck. Best-effort: never
+    raises.
+    """
+    log_path = Path(ref_dir) / ".gate-skip-log"
+    if not log_path.is_file():
+        return None
+    try:
+        lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    plan_path = Path(ref_dir) / "verification-plan.json"
+    if plan_path.is_file():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            if str(plan.get("gateSkipAck") or "").strip():
+                return None
+        except (json.JSONDecodeError, OSError):
+            pass
+    gates: list[str] = []
+    for ln in lines:
+        m = re.search(r"gate=(\S+)", ln)
+        if m and m.group(1) not in gates:
+            gates.append(m.group(1))
+    listed = ", ".join(gates[:8])
+    return (
+        f"{len(gates)} gate(s) were NOT enforced this run (fail-open: {listed}). "
+        "run_gate could not execute them (missing uv / Pillow / scikit-image, or "
+        "the gate subprocess errored or timed out), so a green result here is "
+        "unverified. Closeout requires re-running on a host with the "
+        "ui-clone-skills environment (uv + deps) so the gates actually execute "
+        "(which clears .gate-skip-log), or an explicit user decision recorded as "
+        "`gateSkipAck` in verification-plan.json."
+    )

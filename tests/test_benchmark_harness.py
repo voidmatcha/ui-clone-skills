@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 
 from ui_clone import benchmark_harness
+from ui_clone.state import POST_IMPL_VERIFY_GATES
 
 
 def _make_ref_dir(tmp_path: Path) -> tuple[Path, Path]:
@@ -37,7 +38,24 @@ def _write_state(ref_dir: Path, current_gate: str, gate_fails: dict | None = Non
     (ref_dir / "pipeline-state.json").write_text(json.dumps(payload))
 
 
-def _write_strict_proofs(ref: Path, *, asset_downloaded: int = 8) -> None:
+def _write_verify_stamp(ref: Path) -> None:
+    """The canonical stamp `check_strict_done` now requires. Written last so it
+    is never older than the impl files the stamp contract compares it against."""
+    import datetime
+
+    (ref / "verify-stamp.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "stampedBy": "pipeline.execute_verify",
+        "verifiedAt": datetime.datetime.now(datetime.UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "gatesPassed": list(POST_IMPL_VERIFY_GATES),
+    }))
+
+
+def _write_strict_proofs(
+    ref: Path, *, asset_downloaded: int = 8, with_stamp: bool = True
+) -> None:
     (ref / "runtime-proof.json").write_text(json.dumps({
         "schemaVersion": 1,
         "status": "pass",
@@ -55,6 +73,8 @@ def _write_strict_proofs(ref: Path, *, asset_downloaded: int = 8) -> None:
         "referenced": asset_downloaded,
         "ratio": 1.0,
     }))
+    if with_stamp:
+        _write_verify_stamp(ref)
 
 
 # ── check_strict_done ─────────────────────────────────────────────────────
@@ -315,6 +335,10 @@ def test_loop_exits_on_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         token_budget=100_000,
         wall_budget_s=60,
         session_id=None,
+        # mock.Mock auto-creates attributes, so getattr(args, ..., None) in
+        # run_loop never falls back — declare the LAND item A flags explicitly.
+        run_dir=None,
+        reuse_frozen_ref=None,
     )
     outcome = benchmark_harness.run_loop(args)
     assert outcome == "DONE"
@@ -339,9 +363,123 @@ def test_loop_hits_max_iter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         token_budget=100_000,
         wall_budget_s=60,
         session_id=None,
+        # mock.Mock auto-creates attributes, so getattr(args, ..., None) in
+        # run_loop never falls back — declare the LAND item A flags explicitly.
+        run_dir=None,
+        reuse_frozen_ref=None,
     )
     outcome = benchmark_harness.run_loop(args)
     assert outcome == "INCOMPLETE_MAX_ITER"
+
+
+def test_strict_done_requires_the_canonical_verify_stamp(tmp_path: Path) -> None:
+    """`check_strict_done` reads state and artifact files but never the verify
+    stamp, so the sha-pinned proof that verification actually ran is absent from
+    the harness's own convergence test. Today the Stop hook backstops that
+    in-band; anything that relaxes the hook headlessly would leave a run able to
+    converge as DONE on a stamp that was never written."""
+    ref, impl = _make_ref_dir(tmp_path)
+    _write_state(ref, "done")
+    (impl / "src" / "app").mkdir(parents=True)
+    (impl / "src" / "app" / "page.tsx").write_text("hi\n")
+    comps = impl / "src" / "components"
+    comps.mkdir()
+    for n in ("A", "B", "C", "D"):
+        (comps / f"{n}.tsx").write_text("x\n")
+    (ref / "sections").mkdir()
+    (ref / "sections" / "result.txt").write_text("**Result: 0 FAIL**\n")
+    (ref / "tree-diff-status.json").write_text(json.dumps({"status": "pass"}))
+    _write_strict_proofs(ref, with_stamp=False)
+    # everything else staged to pass; the canonical stamp is simply absent
+    assert not (ref / "verify-stamp.json").exists()
+
+    done, unmet = benchmark_harness.check_strict_done(ref, impl)
+
+    assert not done, "converged DONE with no canonical verify stamp"
+    assert any("stamp" in u.lower() for u in unmet), unmet
+
+
+def test_empty_driver_response_aborts_instead_of_burning_the_iteration_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An iteration that produces no response is a DRIVER failure, not progress.
+    `invoke_claude` returns the `_raw` fallback when stdout will not parse, and
+    an empty stdout carries no `usage`, so `_extract_tokens` scores it 0 — the
+    token budget never moves and the loop runs every remaining iteration at full
+    API cost while logging exit_code 0. Nothing consumed `is_error` or
+    `_exit_code`, so the burn was invisible. Three consecutive invalid
+    iterations must stop the loop and say why."""
+    ref, impl = _make_ref_dir(tmp_path)
+    _write_state(ref, "reference")
+    calls: list[int] = []
+
+    def fake_invoke(
+        prompt: str, session_id: str, plugin_dir: Path, cwd: Path, iter_count: int
+    ) -> dict:
+        calls.append(iter_count)
+        # exactly the shape invoke_claude builds from empty stdout + exit 0
+        return {"_raw": "", "_stderr": "", "_exit_code": 0, "_iter": iter_count}
+
+    monkeypatch.setattr(benchmark_harness, "invoke_claude", fake_invoke)
+
+    args = mock.Mock(
+        ref_dir=str(ref),
+        impl_dir=str(impl),
+        orig_url="https://example.com",
+        impl_url="http://localhost:3000",
+        max_iter=25,
+        token_budget=100_000,
+        wall_budget_s=60,
+        session_id=None,
+        run_dir=None,
+        reuse_frozen_ref=None,
+    )
+    outcome = benchmark_harness.run_loop(args)
+
+    assert outcome == "ABORTED_DRIVER_FAILURE", (
+        "empty driver responses were treated as ordinary iterations"
+    )
+    assert len(calls) <= 3, f"burned {len(calls)} iterations on a dead driver"
+
+
+def test_valid_iteration_resets_the_consecutive_invalid_counter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The abort must key on CONSECUTIVE failures. A transient empty response
+    between working iterations is a retry, not a dead driver — folding those
+    into a running total would abort a healthy long run."""
+    ref, impl = _make_ref_dir(tmp_path)
+    _write_state(ref, "reference")
+    seen: list[int] = []
+
+    def fake_invoke(
+        prompt: str, session_id: str, plugin_dir: Path, cwd: Path, iter_count: int
+    ) -> dict:
+        seen.append(iter_count)
+        if iter_count % 2:  # every other iteration comes back empty
+            return {"_raw": "", "_stderr": "", "_exit_code": 0, "_iter": iter_count}
+        return _mock_claude_response(tokens=1000)
+
+    monkeypatch.setattr(benchmark_harness, "invoke_claude", fake_invoke)
+
+    args = mock.Mock(
+        ref_dir=str(ref),
+        impl_dir=str(impl),
+        orig_url="https://example.com",
+        impl_url="http://localhost:3000",
+        max_iter=6,
+        token_budget=100_000,
+        wall_budget_s=60,
+        session_id=None,
+        run_dir=None,
+        reuse_frozen_ref=None,
+    )
+    outcome = benchmark_harness.run_loop(args)
+
+    assert outcome == "INCOMPLETE_MAX_ITER", (
+        "alternating failures aborted a driver that was still answering"
+    )
+    assert len(seen) == 6
 
 
 def test_loop_hits_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -364,6 +502,10 @@ def test_loop_hits_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         token_budget=10_000,
         wall_budget_s=60,
         session_id=None,
+        # mock.Mock auto-creates attributes, so getattr(args, ..., None) in
+        # run_loop never falls back — declare the LAND item A flags explicitly.
+        run_dir=None,
+        reuse_frozen_ref=None,
     )
     outcome = benchmark_harness.run_loop(args)
     assert outcome == "INCOMPLETE_BUDGET"
@@ -394,6 +536,10 @@ def test_loop_aborts_on_unclonable(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         token_budget=100_000,
         wall_budget_s=60,
         session_id=None,
+        # mock.Mock auto-creates attributes, so getattr(args, ..., None) in
+        # run_loop never falls back — declare the LAND item A flags explicitly.
+        run_dir=None,
+        reuse_frozen_ref=None,
     )
     outcome = benchmark_harness.run_loop(args)
     assert outcome == "ABORTED"
@@ -423,6 +569,10 @@ def test_log_file_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         token_budget=100_000,
         wall_budget_s=60,
         session_id=None,
+        # mock.Mock auto-creates attributes, so getattr(args, ..., None) in
+        # run_loop never falls back — declare the LAND item A flags explicitly.
+        run_dir=None,
+        reuse_frozen_ref=None,
     )
     benchmark_harness.run_loop(args)
     log = ref / "benchmark-harness.log.jsonl"
@@ -431,3 +581,38 @@ def test_log_file_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     events = [json.loads(line)["event"] for line in lines]
     assert events[0] == "start"
     assert events[-1] == "end"
+
+
+def test_invoke_claude_marks_child_env_as_headless_driver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The driver must tell its own hooks that nobody is watching stdout.
+
+    A Stop-hook block under `claude --print` ends the turn with no printed
+    answer, so the driver burns an iteration on a nudge the Python gates
+    already make between iterations. section_gate demotes the block to an
+    advisory when it sees this flag — but only if the driver actually sets it
+    on the child environment."""
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        return mock.Mock(stdout=json.dumps({"result": "ok"}), stderr="", returncode=0)
+
+    monkeypatch.setattr(benchmark_harness.subprocess, "run", fake_run)
+    monkeypatch.delenv("UI_RE_HEADLESS_DRIVER", raising=False)
+
+    benchmark_harness.invoke_claude(
+        prompt="go",
+        session_id="sess-1",
+        plugin_dir=tmp_path,
+        cwd=tmp_path,
+        iter_count=1,
+    )
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env.get("UI_RE_HEADLESS_DRIVER") == "1", (
+        f"invoke_claude must mark the child env as a headless driver; got: "
+        f"{env.get('UI_RE_HEADLESS_DRIVER')!r}"
+    )

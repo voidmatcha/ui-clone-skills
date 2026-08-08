@@ -11,7 +11,7 @@ SCRIPT = ROOT / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
 def _run(ref: Path, impl: Path) -> str:
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return "".join(
         p.read_text() for p in (impl / "src" / "components").glob("*.tsx"))

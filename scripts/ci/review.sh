@@ -151,89 +151,7 @@ fi
 # ── 4a. Public skill surface ──
 section "Public skill surface"
 
-if python3 - <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-expected = {"ui-reverse-engineering", "ui-capture", "visual-debug"}
-# Internal-only skills (maintainer tooling). Allowed on the development
-# filesystem under skills/ but MUST NOT be registered in Claude's public
-# manifest, referenced from Codex defaultPrompt, or copied into the Codex
-# install projection's public skills directory.
-internal_skills = {"benchmark"}
-errors = []
-
-claude = json.loads(pathlib.Path(".claude-plugin/plugin.json").read_text())
-claude_paths = claude.get("skills")
-if not isinstance(claude_paths, list):
-    errors.append(".claude-plugin/plugin.json skills must be a list")
-else:
-    claude_skills = {pathlib.PurePosixPath(p).name for p in claude_paths if isinstance(p, str)}
-    if claude_skills != expected:
-        errors.append(f"Claude plugin public skills mismatch: {sorted(claude_skills)}")
-
-skill_names = set()
-for path in sorted(pathlib.Path("skills").glob("*/SKILL.md")):
-    text = path.read_text(encoding="utf-8")
-    match = re.search(r"^---\n(.*?)\n---", text, re.S)
-    if not match:
-        errors.append(f"{path}: missing YAML frontmatter")
-        continue
-    name = re.search(r"^name:\s*['\"]?([^'\"\n]+)['\"]?\s*$", match.group(1), re.M)
-    if not name:
-        errors.append(f"{path}: missing frontmatter name")
-        continue
-    skill_names.add(name.group(1).strip())
-extras = skill_names - expected - internal_skills
-missing = expected - skill_names
-if extras:
-    errors.append(f"skills/*/SKILL.md unexpected names (add to internal_skills if internal): {sorted(extras)}")
-if missing:
-    errors.append(f"skills/*/SKILL.md missing public names: {sorted(missing)}")
-# Internal skills must NOT appear in Claude plugin public list
-internal_in_public = internal_skills & claude_skills if isinstance(claude_paths, list) else set()
-if internal_in_public:
-    errors.append(f".claude-plugin/plugin.json leaks internal skills publicly: {sorted(internal_in_public)}")
-
-codex = json.loads(pathlib.Path(".codex-plugin/plugin.json").read_text())
-interface = codex.get("interface", {})
-prompt_value = interface.get("defaultPrompt", "")
-if not isinstance(prompt_value, list):
-    errors.append(".codex-plugin/plugin.json interface.defaultPrompt must be a list")
-    prompt = str(prompt_value)
-else:
-    if len(prompt_value) > 3:
-        errors.append("Codex defaultPrompt has more than 3 entries (Codex ignores extras)")
-    long_items = [idx + 1 for idx, item in enumerate(prompt_value) if len(str(item)) > 128]
-    if long_items:
-        errors.append(f"Codex defaultPrompt entries exceed 128 chars: {long_items}")
-    prompt = "\n".join(str(item) for item in prompt_value)
-codex_text = f"{interface.get('longDescription', '')}\n{prompt}"
-missing_codex = sorted(skill for skill in expected if skill not in codex_text)
-if missing_codex:
-    errors.append(f"Codex prompt/description missing public skill mentions: {missing_codex}")
-codex_internal_mentions = sorted(skill for skill in internal_skills if skill in prompt)
-if codex_internal_mentions:
-    errors.append(f".codex-plugin defaultPrompt leaks internal skills: {codex_internal_mentions}")
-
-install_text = pathlib.Path("install.sh").read_text(encoding="utf-8")
-if re.search(r"for item in [^\n]*\bskills\b", install_text):
-    errors.append("install.sh Codex projection still symlinks the whole skills/ directory")
-for skill in expected:
-    if skill not in install_text:
-        errors.append(f"install.sh CODEX_PUBLIC_SKILLS missing public skill: {skill}")
-for skill in internal_skills:
-    if f"skills/{skill}" in install_text and "maintainer-only" not in install_text:
-        errors.append(f"install.sh may copy internal skill into Codex projection: {skill}")
-
-if errors:
-    for error in errors:
-        print(error, file=sys.stderr)
-    sys.exit(1)
-PY
-then
+if python3 scripts/ci/review_checks.py public-skills; then
   ok "public skill set is ui-reverse-engineering, ui-capture, visual-debug"
 else
   err "public skill surface parity failed"
@@ -242,45 +160,7 @@ fi
 # ── 4b. Trigger boundaries ──
 section "Trigger boundaries"
 
-if python3 - <<'PY'
-import pathlib
-import sys
-
-checks = {
-    "ui-reverse-engineering": {
-        "live URL trigger": ("live", "url"),
-        "React build target": ("react",),
-        "capture route-out": ("ui-capture",),
-        "mismatch route-out": ("visual-debug",),
-    },
-    "ui-capture": {
-        "reference evidence trigger": ("reference", "capture"),
-        "screenshot capture": ("screenshot",),
-        "transition capture": ("transition",),
-        "mismatch diagnosis route-out": ("visual-debug", "mismatch"),
-    },
-    "visual-debug": {
-        "reference implementation comparison": ("reference", "implementation"),
-        "comparison/diff trigger": ("compar",),
-        "build route-out": ("ui-reverse-engineering", "build"),
-        "baseline capture route-out": ("ui-capture", "capture"),
-    },
-}
-
-errors = []
-for skill, groups in checks.items():
-    text = pathlib.Path("skills", skill, "SKILL.md").read_text(encoding="utf-8").lower()
-    for label, tokens in groups.items():
-        missing = [token for token in tokens if token not in text]
-        if missing:
-            errors.append(f"{skill}: missing {label} token(s): {', '.join(missing)}")
-
-if errors:
-    for error in errors:
-        print(error, file=sys.stderr)
-    sys.exit(1)
-PY
-then
+if python3 scripts/ci/review_checks.py trigger-boundaries; then
   ok "public skill trigger boundaries mention required route tokens"
 else
   err "public skill trigger boundary drift detected"
@@ -341,33 +221,7 @@ fi
 # ── 6a. Trigger eval fixture boundaries ──
 section "Trigger fixtures"
 
-if python3 - <<'PY'
-import json
-import pathlib
-import sys
-
-errors: list[str] = []
-
-reverse = json.loads(pathlib.Path("skills/ui-reverse-engineering/evals/trigger-eval.json").read_text())
-for item in reverse:
-    query = item.get("query", "").lower()
-    if any(token in query for token in ("attached screenshot", "figma mockup screenshot", "multiple screenshots")):
-        if item.get("should_trigger") is not False:
-            errors.append(f"ui-reverse screenshot-only prompt should not trigger: {item.get('query')}")
-
-capture = json.loads(pathlib.Path("skills/ui-capture/evals/trigger-eval.json").read_text())
-for item in capture:
-    query = item.get("query", "").lower()
-    if any(token in query for token in ("visual diff", "verify visual match", "show me the differences", "comparison page showing original vs clone")):
-        if item.get("should_trigger") is not False:
-            errors.append(f"ui-capture diff/diagnosis prompt should route to visual-debug: {item.get('query')}")
-
-if errors:
-    for error in errors:
-        print(error, file=sys.stderr)
-    sys.exit(1)
-PY
-then
+if python3 scripts/ci/review_checks.py trigger-fixtures; then
   ok "trigger fixtures preserve public skill boundaries"
 else
   err "trigger fixture boundary drift detected"
@@ -421,12 +275,27 @@ fi
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   "$SH_BIN" -n "$f" 2>/dev/null || SH_BAD="$SH_BAD $f"
-done <<< "$SH_FILES"
+done < <(printf "%s\n" "$SH_FILES")
 if [ -z "$SH_BAD" ]; then
   SH_COUNT=$(printf "%s\n" "$SH_FILES" | grep -c '\.sh$' || true)
   ok "all $SH_COUNT shell scripts pass bash -n"
 else
   err "shell syntax errors in:$SH_BAD"
+fi
+
+# Ratchet: agent-browser `open` silently ignores --viewport/--wait. The dead
+# flags shipped for months and broke motion probes at the default window
+# size; use scripts/lib/viewport.sh ab_open_at_viewport (or open + `set
+# viewport` + sleep). Mirrors tests/test_viewport_regression.py at review
+# time so the pattern cannot reappear via copy-paste.
+DEAD_OPEN=$(printf "%s\n" "$SH_FILES" | while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  sed -e 's/^[[:space:]]*#.*$//' -e 's/ #.*$//' "$f" 2>/dev/null | grep -nE '\bopen\b[^|&;]*--(viewport|wait)\b' >/dev/null 2>&1 && echo "$f"
+done)
+if [ -z "$DEAD_OPEN" ]; then
+  ok "no dead-flag agent-browser opens (--viewport/--wait)"
+else
+  err "dead-flag agent-browser opens (--viewport/--wait are silently ignored; use ab_open_at_viewport): $DEAD_OPEN"
 fi
 
 # ── 10. Language consistency ──
@@ -435,25 +304,7 @@ section "Language"
 # Skill docs, trigger fixtures, and CHANGELOG must be English only — no exclusions.
 # `grep -P` is GNU-only — macOS BSD grep silently no-ops, which made this check
 # pass locally while failing on Linux CI. Use python for a portable Unicode scan.
-KOREAN_HITS=$(python3 - <<'PY' 2>/dev/null || true
-import pathlib, re
-hangul = re.compile(r'[\uAC00-\uD7AF]')
-roots = ['skills', 'CHANGELOG.md', 'README.md', 'AGENTS.md', 'CLAUDE.md']
-hits = []
-for root in roots:
-    rp = pathlib.Path(root)
-    if not rp.exists():
-        continue
-    paths = [rp] if rp.is_file() else sorted(list(rp.rglob('*.md')) + list(rp.rglob('*.json')))
-    for p in paths:
-        try:
-            if hangul.search(p.read_text(encoding='utf-8', errors='ignore')):
-                hits.append(str(p))
-        except OSError:
-            pass
-print('\n'.join(hits))
-PY
-)
+KOREAN_HITS=$(python3 scripts/ci/review_checks.py find-hangul 2>/dev/null || true)
 if [ -z "$KOREAN_HITS" ]; then
   ok "skill docs, trigger fixtures, and changelog are English only"
 else

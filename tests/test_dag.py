@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from ui_clone.dag import StalenessIssue, _assert_no_cycles, check_staleness, stale_set
+from ui_clone.dag import (
+    GENERATION_PLAN_SOURCES,
+    StalenessIssue,
+    _assert_no_cycles,
+    check_staleness,
+    stale_set,
+)
 
 
 def test_stale_set_direct_dependency() -> None:
@@ -40,8 +46,25 @@ def test_interactions_detected_invalidates_hover_css_rules() -> None:
 
 def test_stale_set_no_dependents() -> None:
     """Returns empty list when there are no dependents"""
-    result = stale_set("extracted.json")
+    result = stale_set("generation-plan.json")
     assert result == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    tuple(path for path in GENERATION_PLAN_SOURCES if "*" not in path),
+)
+def test_every_generation_plan_source_invalidates_generation_plan(
+    source: str,
+) -> None:
+    assert "generation-plan.json" in stale_set(source)
+
+
+def test_media_inventories_invalidate_canonical_downstream_artifacts() -> None:
+    assert "required-media.json" in GENERATION_PLAN_SOURCES
+    runtime_dependents = stale_set("runtime-media.json")
+    assert "required-media.json" in runtime_dependents
+    assert "generation-plan.json" in runtime_dependents
 
 
 def test_check_staleness_detects_stale(tmp_path: Path) -> None:

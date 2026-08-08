@@ -1,11 +1,6 @@
 ---
 name: ui-capture
-description: >-
-  Capture reference evidence from a website: baseline screenshots,
-  scroll videos, hover, parallax, transitions. Triggers on "take
-  baseline screenshots of <URL>", "record hover effects", "capture
-  scroll animations". Routes to visual-debug for post-implementation
-  mismatch diagnosis.
+description: "Capture website visuals and behavior: screenshots, scroll, hover, mouse, parallax, timers, and comparison evidence."
 metadata:
   filePattern:
     - "**/tmp/ref/**/regions.json"
@@ -199,7 +194,7 @@ agent-browser --session <name> eval "(() => JSON.stringify({html:document.docume
 
 Anti-pattern: bumping `wait` to 30000 "to be safe" — slows every capture in every iteration without solving the real question (when is content settled?). Measure once, set the smallest correct value.
 
-**Screenshot output rule:** `agent-browser --session <s> screenshot [path]` saves the file itself and prints `Screenshot saved to <path>` on stdout. Relative paths resolve against the *shell's* cwd at invocation time (verified). The failure mode to avoid: `cd` between commands inside a loop, or invoking via a wrapper that changes cwd, so half the screenshots land in one directory and half in another. Two safe patterns: (1) pass an absolute path — `agent-browser --session <s> screenshot "$(pwd)/$OUT_DIR/static/ref/section-${i}.png"`, or (2) keep the loop in one shell with a single `cd` up front. After the loop, sanity-check: `ls "$OUT_DIR/static/ref/" | wc -l` should equal the section count.
+**Screenshot output rule:** `agent-browser --session <s> screenshot [selector] [path]` saves the file itself and prints `Screenshot saved to <path>` on stdout. Omit `selector` for a viewport screenshot; include it before `path` for an element crop. Relative paths resolve against the *shell's* cwd at invocation time (verified). The failure mode to avoid: `cd` between commands inside a loop, or invoking via a wrapper that changes cwd, so half the screenshots land in one directory and half in another. Two safe patterns: (1) pass an absolute path — `agent-browser --session <s> screenshot "$(pwd)/$OUT_DIR/static/ref/section-${i}.png"`, or (2) keep the loop in one shell with a single `cd` up front. After the loop, sanity-check: `ls "$OUT_DIR/static/ref/" | wc -l` should equal the section count.
 
 **Scroll detection:** Run `detection.md` eval → `scrollType`, `scrollSelector`, `sections[]`.
 - **Instant** (screenshots): `scrollTo(0, Y)` on `window` or `scrollSelector`
@@ -256,7 +251,8 @@ after Phase 2B-2E and fix any missing files before handing off.
 
 | Artifact | Minimum | Check |
 |---|---|---|
-| Screenshot | >10KB | Not blank, not bot-challenge, shows expected content |
+| Viewport/full-page screenshot | >10KB | Decodable, not blank or bot-challenge, shows expected content |
+| Selector element crop | Decodable, nonempty image | Expected element is visible; state pairs have a nonzero pixel difference |
 | Eval result | non-null | Valid JSON |
 | Video | >50KB, >1s | Duration reasonable |
 

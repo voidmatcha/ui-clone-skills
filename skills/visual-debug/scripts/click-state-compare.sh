@@ -34,6 +34,14 @@
 
 set -uo pipefail
 
+# W-4 (loop-ebpb-0): the reference follows prefers-color-scheme — a host
+# OS theme flip (macOS auto-dark in the evening) silently captured the ref
+# in dark mode and poisoned an entire compare cycle (footer dSSIM
+# 0.0000065 -> 0.687 reading as catastrophic regression). Pin light unless
+# the caller explicitly overrides.
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_COLOR_SCHEME
+
 MAX_CLICK_TARGETS="${MAX_CLICK_TARGETS:-5}"
 VIEWPORTS="${VIEWPORTS:-}"
 
@@ -169,4 +177,10 @@ done
 } >> "$RESULT"
 
 echo "Wrote $RESULT"
+# severity=block: a diverging click target-run must fail the gate so the
+# dispatcher (which trusts the exit code) blocks. Exiting 0 unconditionally
+# made click-state a gate that could never fail.
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  exit 1
+fi
 exit 0

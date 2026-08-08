@@ -65,6 +65,7 @@ EXCL=(
   --exclude-dir=.mypy_cache
   --exclude-dir=.sisyphus
   --exclude-dir=.claude
+  --exclude-dir=.codex
   --exclude-dir=.codex-plugin
   --exclude-dir=.claude-plugin
   # .omx/ — Codex/OMX runtime state (subagent task transcripts, hud-state.json).
@@ -72,6 +73,15 @@ EXCL=(
   # from in-flight rescue sessions. Excluding here keeps the guard focused on
   # the actual source tree.
   --exclude-dir=.omx
+  # .serena/memories/ — Serena's per-project memory store. Gitignored local
+  # runtime state (never committed), same class as .omx/.claude above: it
+  # legitimately records absolute paths, loop-N workflow recipes, and site
+  # names from in-flight sessions. Excluding it keeps the guard on the source
+  # tree instead of flagging private working notes.
+  --exclude-dir=.serena
+  # TokenSave's local index configuration records the checkout's absolute
+  # path. It is gitignored runtime metadata, not part of the shipped surface.
+  --exclude-dir=.tokensave
   --exclude=CHANGELOG.md
   --exclude=handover
   --exclude=check-universality.sh
@@ -150,48 +160,7 @@ scan "Personal plan files (~/.claude/plans/<name>.md, happy-finding-pelican)" \
 # Use Python instead of grep for this Unicode range. Some local macOS shells can
 # export an invalid C.UTF-8 locale, and grep range matching then reports random
 # non-ASCII punctuation (for example em dashes) as Hangul.
-HANGUL_HITS=$(python3 - <<'PY'
-from pathlib import Path
-import re
-
-excluded_dirs = {
-    ".git",
-    ".venv",
-    "node_modules",
-    "tmp",
-    "scratch",
-    "benchmark",
-    "CHANGELOG_archive",
-    "tests",
-    "research",
-    ".mypy_cache",
-    ".sisyphus",
-    ".claude",
-    ".codex-plugin",
-    ".claude-plugin",
-    ".omx",
-}
-excluded_files = {"CHANGELOG.md", "handover", "check-universality.sh"}
-hangul = re.compile(r"[\uac00-\ud7a3]")
-
-for path in sorted(Path(".").rglob("*")):
-    if not path.is_file():
-        continue
-    if path.suffix not in {".py", ".sh"}:
-        continue
-    if path.name in excluded_files:
-        continue
-    if any(part in excluded_dirs for part in path.parts):
-        continue
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError:
-        continue
-    for lineno, line in enumerate(lines, 1):
-        if hangul.search(line):
-            print(f"{path}:{lineno}: {line}")
-PY
-)
+HANGUL_HITS=$(python3 "$REPO_ROOT/scripts/ci/check_universality_hangul.py")
 if [ -n "$HANGUL_HITS" ]; then
   echo "❌ Hangul (non-English) in production .py/.sh"
   echo "$HANGUL_HITS" | head -20 | sed 's/^/   /'

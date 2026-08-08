@@ -18,6 +18,7 @@ python3 - "$REF_DIR" "$IMPL_ROOT" "$OUT" <<'PY'
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -67,6 +68,46 @@ def read_limited(path: Path, limit: int = 1_000_000) -> str:
         return ""
 
 
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+sanitized_ref_css_hashes: dict[str, str] = {}
+sanitize_report = ref_dir / "ref-css-sanitize-report.json"
+if sanitize_report.is_file():
+    try:
+        report = json.loads(sanitize_report.read_text(encoding="utf-8"))
+        for item in report.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            destination = item.get("destination")
+            digest = item.get("destinationSha256")
+            if isinstance(destination, str) and isinstance(digest, str):
+                rel = destination.replace("\\", "/").lstrip("./")
+                if rel and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                    sanitized_ref_css_hashes[rel] = digest.lower()
+    except (json.JSONDecodeError, OSError):
+        sanitized_ref_css_hashes = {}
+
+
+def is_sanitized_ref_css_file(path: Path) -> bool:
+    try:
+        rel = str(path.relative_to(impl_root)).replace("\\", "/")
+    except ValueError:
+        return False
+    expected = sanitized_ref_css_hashes.get(rel)
+    if not expected:
+        return False
+    try:
+        return sha256_file(path) == expected
+    except OSError:
+        return False
+
+
 def iter_files(root: Path, exts: set[str]) -> list[Path]:
     if not root.exists():
         return []
@@ -93,9 +134,13 @@ ref_text = "\n".join(read_limited(path, 200_000) for path in iter_files(ref_dir,
 dynamic_ref = bool(DYNAMIC_REF_RE.search(ref_text))
 issues: list[dict[str, object]] = []
 active_only_matches: list[dict[str, object]] = []
+sanitized_ref_css_skipped: list[str] = []
 
 if dynamic_ref:
     for path in iter_files(impl_root, IMPL_EXTS):
+        if path.suffix.lower() in {".css", ".scss", ".sass"} and is_sanitized_ref_css_file(path):
+            sanitized_ref_css_skipped.append(str(path.relative_to(impl_root)))
+            continue
         text = read_limited(path)
         rel = str(path.relative_to(impl_root))
         for match in HARDCODED_CLASS_RE.finditer(text):
@@ -156,6 +201,7 @@ artifact = {
     "dynamicRef": dynamic_ref,
     "issueCount": len(issues),
     "activeOnlyClassCount": len(active_only_matches),
+    "sanitizedRefCssSkipped": sorted(sanitized_ref_css_skipped),
     "issues": issues,
     "summary": (
         "Reference has dynamic state classes; implementation must not force final classes/styles."

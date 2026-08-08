@@ -29,7 +29,7 @@
 #   What is NEVER acceptable is missing the entire class.
 #
 # Usage:
-#   bash runtime-spec-coverage.sh <component-dir>
+#   bash runtime-spec-coverage.sh <component-dir> [impl-src]
 #
 # Output: <component-dir>/runtime-spec-coverage.json
 #   { schemaVersion: 1, status: "pass" | "fail",
@@ -44,6 +44,7 @@ COMP_DIR="${1:?Usage: runtime-spec-coverage.sh <component-dir>}"
 DUMP="$COMP_DIR/animation-runtime-dump.json"
 SPEC="$COMP_DIR/transition-spec.json"
 OUT="$COMP_DIR/runtime-spec-coverage.json"
+IMPL_SRC="${2:-}"
 
 if [ ! -f "$DUMP" ]; then
   printf '%s\n' '{"schemaVersion":1,"status":"pass","note":"no runtime dump — nothing to enforce"}' > "$OUT"
@@ -64,11 +65,17 @@ fi
 
 node -e '
 const fs = require("fs");
-let dump, spec;
+const path = require("path");
+let dump, spec, generationPlan = {};
 try { dump = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); }
 catch (e) { console.error("animation-runtime-dump.json parse error: " + e.message); process.exit(2); }
 try { spec = JSON.parse(fs.readFileSync(process.argv[2], "utf8")); }
 catch (e) { console.error("transition-spec.json parse error: " + e.message); process.exit(2); }
+const generationPlanPath = path.join(path.dirname(process.argv[1]), "generation-plan.json");
+if (fs.existsSync(generationPlanPath)) {
+  try { generationPlan = JSON.parse(fs.readFileSync(generationPlanPath, "utf8")); }
+  catch (_) { generationPlan = {}; }
+}
 
 const entries = Array.isArray(spec) ? spec
   : (Array.isArray(spec.transitions) ? spec.transitions
@@ -89,6 +96,144 @@ if (stCount > 0) {
   if (!hasScroll) {
     missing.push(stCount + " ScrollTrigger entry(ies) detected at runtime but transition-spec has zero scroll/intersection entries — see animation-runtime-dump.json scrollTrigger[]");
   }
+}
+
+// Denominator reconciliation (loop-nvti-2 / fable review): every runtime
+// motion check iterates SPEC entries, so the spec author controls the
+// denominator of every downstream "N/N" claim. The class-level check above
+// let 4 scroll entries immunize 22 uncovered div.page-stack triggers (85%
+// of the census) — the bulk of the page scroll choreography shipped dead
+// while every gate passed. Reconcile trigger GROUPS: every runtime trigger
+// selector group must be referenced by a spec entry PLAN FIELD (target /
+// trigger / id — prose notes do not count) or by a named skipped[] row.
+// One state-machine entry may cover all of a group trip lines — the spec
+// stays a plan, not a mirror — but silent omission becomes impossible.
+const skippedRows = Array.isArray(spec.skipped) ? spec.skipped : [];
+const planCorpus = [];
+for (const e of entries) {
+  for (const k of ["target", "selector", "trigger", "id"]) {
+    if (typeof e[k] === "string" && e[k].trim()) planCorpus.push(e[k]);
+  }
+}
+for (const s of skippedRows) {
+  if (typeof s === "string") { planCorpus.push(s); continue; }
+  if (!s || typeof s !== "object") continue;
+  for (const k of ["selector", "target", "sourceId", "id", "reason"]) {
+    if (typeof s[k] === "string" && s[k].trim()) planCorpus.push(s[k]);
+  }
+}
+const planText = planCorpus.join("\n");
+const loadImplementationSource = (root) => {
+  if (!root || !fs.existsSync(root)) return "";
+  const chunks = [];
+  const visit = (path) => {
+    let stat;
+    try { stat = fs.statSync(path); } catch (_) { return; }
+    if (stat.isDirectory()) {
+      const name = path.split(/[\\/]/).pop();
+      if ([".git", "node_modules", "dist", "build", "coverage"].includes(name)) return;
+      for (const child of fs.readdirSync(path)) visit(path + "/" + child);
+      return;
+    }
+    if (!/\.(?:[cm]?[jt]sx?|html?)$/i.test(path) || stat.size > 2_000_000) return;
+    try { chunks.push(fs.readFileSync(path, "utf8")); } catch (_) {}
+  };
+  visit(root);
+  return chunks.join("\n");
+};
+const implSourceText = loadImplementationSource(process.argv[4]);
+const consumesSwiperProgress = /dataset\s*(?:\.\s*swiperProgress|\[\s*["\x27]swiperProgress["\x27]\s*\])/.test(implSourceText);
+const swiperProgressTargets = new Set();
+if (consumesSwiperProgress) {
+  const attrPattern = /data-swiper-progress\s*=\s*(?:\{\s*)?(["\x27])([^"\x27]+)\1(?:\s*\})?/g;
+  for (const match of implSourceText.matchAll(attrPattern)) {
+    if (match[2].trim()) swiperProgressTargets.add(match[2].trim().replace(/\s+/g, " "));
+  }
+}
+const hasSwiperParentPlan = entries.some((entry) => {
+  if (!entry || typeof entry !== "object") return false;
+  return ["target", "selector"].some((key) => {
+    const value = String(entry[key] || "");
+    return /(^|[\s>+~,(])\.swiper(?=$|[\s>+~.[#,:])/.test(value);
+  });
+});
+const isSwiperRuntimeChild = (selector) => {
+  const normalized = String(selector || "").trim().replace(/\s+/g, " ");
+  return /^(?:[A-Za-z][\w-]*)?\.swiper-slide(?:\.swiper-slide-[\w-]+)*$/.test(normalized);
+};
+const isScrollScrubEntry = (entry) => {
+  if (!entry || typeof entry !== "object") return false;
+  const trigger = String(entry.trigger || "").toLowerCase();
+  const type = String(entry.type || (entry.animation && entry.animation.type) || "").toLowerCase();
+  const progress = String(entry.animation && entry.animation.progress || "").toLowerCase();
+  const duration = String(entry.animation && entry.animation.duration || "").toLowerCase();
+  return trigger.includes("scroll")
+    && (/scrub|scroll-bound|use-scroll|framer-motion-scroll/.test(type)
+      || progress.includes("scrollyprogress")
+      || duration === "scroll-bound");
+};
+const scrollScrubPlanTargets = new Set();
+for (const entry of entries) {
+  if (!isScrollScrubEntry(entry)) continue;
+  for (const key of ["target", "selector"]) {
+    const value = String(entry[key] || "").trim().replace(/\s+/g, " ");
+    if (value) scrollScrubPlanTargets.add(value);
+  }
+}
+const scrollScrubSites = (
+  generationPlan
+  && generationPlan.scrollScrub
+  && Array.isArray(generationPlan.scrollScrub.sites)
+) ? generationPlan.scrollScrub.sites : [];
+const scrollScrubSiteCovered = (selector) => {
+  const runtime = String(selector || "").trim().replace(/\s+/g, " ");
+  if (!runtime || scrollScrubPlanTargets.size === 0) return false;
+  return scrollScrubSites.some((site) => {
+    if (!site || typeof site !== "object") return false;
+    if (String(site.source || "") !== "animation-runtime-dump.json:scrollLinkedStyles") return false;
+    if (String(site.selector || "").trim().replace(/\s+/g, " ") !== runtime) return false;
+    const parentCandidates = [site.target, site.scope]
+      .map((value) => String(value || "").trim().replace(/\s+/g, " "))
+      .filter(Boolean);
+    return parentCandidates.some((parent) => scrollScrubPlanTargets.has(parent));
+  });
+};
+const planCovered = (selector) => {
+  if (!selector) return true;
+  if (planText.includes(selector)) return true;
+  if (hasSwiperParentPlan && isSwiperRuntimeChild(selector)) return true;
+  if (scrollScrubSiteCovered(selector)) return true;
+  if (
+    hasSwiperParentPlan
+    && consumesSwiperProgress
+    && swiperProgressTargets.has(String(selector).trim().replace(/\s+/g, " "))
+  ) return true;
+  const tokens = selector.match(/[#.][A-Za-z0-9_-]+/g) || [];
+  return tokens.some(tok => planText.includes(tok));
+};
+const triggerGroups = new Map();
+for (const st of (Array.isArray(dump.scrollTrigger) ? dump.scrollTrigger : [])) {
+  const sel = (st && typeof st === "object")
+    ? String(st.trigger || st.triggerSelector || st.selector || st.target || "").trim()
+    : "";
+  if (!sel) continue; // legacy dumps without selectors: class-level check only
+  triggerGroups.set(sel, (triggerGroups.get(sel) || 0) + 1);
+}
+const slsRows = Array.isArray(dump.scrollLinkedStyles) ? dump.scrollLinkedStyles : [];
+for (const row of slsRows) {
+  const sel = (row && typeof row === "object")
+    ? String(row.selector || row.target || "").trim()
+    : "";
+  if (!sel) continue;
+  if (!triggerGroups.has(sel)) triggerGroups.set(sel, 0);
+}
+const uncoveredGroups = [...triggerGroups.entries()].filter(([sel]) => !planCovered(sel));
+if (uncoveredGroups.length > 0) {
+  missing.push(
+    uncoveredGroups.length + " runtime motion trigger group(s) with no spec entry and no named skipped[] row: "
+    + uncoveredGroups.slice(0, 8).map(([sel, n]) => sel + (n ? " x" + n : "")).join(", ")
+    + " — every trigger group needs a plan (entry target/trigger/id) or a named skip with a reason (denominator reconciliation)"
+  );
 }
 
 const ixCount = (dump.ix2 && typeof dump.ix2.timelineCount === "number") ? dump.ix2.timelineCount : 0;
@@ -113,10 +258,40 @@ for (const tl of timelines) {
   }
 }
 
+const plannedTimelineSelectors = [];
+for (const row of [...entries, ...skippedRows]) {
+  if (!row || typeof row !== "object") continue;
+  for (const key of ["target", "selector"]) {
+    if (typeof row[key] !== "string") continue;
+    for (const selector of row[key].split(",")) {
+      if (selector.trim()) plannedTimelineSelectors.push(selector.trim());
+    }
+  }
+}
+const normalizeSelector = (value) => String(value || "").trim().replace(/\s+/g, " ");
+const explicitGroupCovers = (planned, runtime) => {
+  const match = normalizeSelector(planned).match(/^(.*?)\s*>\s*\*$/);
+  if (!match) return false;
+  const parent = normalizeSelector(match[1]);
+  if (!parent || !runtime.startsWith(parent)) return false;
+  const remainder = runtime.slice(parent.length);
+  const childMatch = remainder.match(/^\s*>\s*(\S.*)$/)
+    || remainder.match(/^\s+(\S.*)$/);
+  const child = childMatch ? childMatch[1].trim() : "";
+  // `.hero > *` covers one child selector segment only. Treating every
+  // descendant prefix as covered lets `.hero .card .title` pass even though
+  // `.title` is not a direct child represented by the plan.
+  return Boolean(child) && !/[\s>+~]/.test(child);
+};
 const selectorCovered = (selector) => {
-  if (specText.includes(selector)) return true;
-  const tokens = selector.match(/[#.][A-Za-z0-9_-]+/g) || [];
-  return tokens.some(token => specText.includes(token) || specText.includes(token.slice(1)));
+  const runtime = normalizeSelector(selector);
+  const runtimeTokens = runtime.match(/[#.][A-Za-z0-9_-]+/g) || [];
+  const runtimeLeaf = runtimeTokens[runtimeTokens.length - 1];
+  return plannedTimelineSelectors.some((plannedValue) => {
+    const planned = normalizeSelector(plannedValue);
+    if (planned === runtime || explicitGroupCovers(planned, runtime)) return true;
+    return /^[#.][A-Za-z0-9_-]+$/.test(planned) && planned === runtimeLeaf;
+  });
 };
 const uniqueTimelineTargets = [...new Set(timelineTargets)];
 const uncoveredTargets = uniqueTimelineTargets.filter(t => !selectorCovered(t));
@@ -133,11 +308,13 @@ if (
   && coveredTargets.length > 0
   && coveredTargets.length / uniqueTimelineTargets.length < 0.5
 ) {
-  warnings.push(
+  missing.push(
     "GSAP timeline target coverage low: "
     + coveredTargets.length + "/" + uniqueTimelineTargets.length
     + " unique runtime target(s) mentioned in transition-spec. Uncovered examples: "
     + uncoveredTargets.slice(0, 5).join(", ")
+    + " — cover the runtime target groups in transitions[] or document each "
+    + "intentional omission in skipped[]"
   );
 }
 
@@ -193,4 +370,4 @@ if (missing.length === 0) {
   for (const m of missing) console.log("  - " + m);
 }
 process.exit(missing.length === 0 ? 0 : 1);
-' "$DUMP" "$SPEC" "$OUT"
+' "$DUMP" "$SPEC" "$OUT" "$IMPL_SRC"

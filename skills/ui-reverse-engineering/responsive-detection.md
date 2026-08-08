@@ -230,6 +230,8 @@ Pixel-match means matching ref's hand-breaks (and ref typos) verbatim, not "fixi
 
 ⛔ **This step recovers original CSS expressions (`calc()`, `vw`, `%`) from computed px values.** `getComputedStyle` always returns resolved px — without this step, `width: calc(100vw - 64px)` becomes `width: 1376px` which breaks at every other viewport.
 
+> **Deterministic path (preferred):** run `bash "$PLUGIN_ROOT/scripts/extract/responsive-sweep.sh" <ref_url> "$(pwd)/tmp/ref/<component>" --session <s>`. It opens the ref at 768/1280/1440, samples the tracked elements' computed metrics at each width, classifies each property (`_responsive_classify.py`), and writes the real selector-keyed `responsive/sizing-expressions.json` (plus per-viewport `responsive/sizing-<vp>.json` and a `responsive/sizing-sweep.json` meta/type histogram). This replaces the manual eval loop below — run the manual steps only to debug or extend the selector set. The script's output is a bare selector-keyed map, so it satisfies the pre-generate responsive gate (it is not the single-viewport finalizer sentinel).
+
 Measure ALL key elements at exactly 3 viewport widths: **768, 1280, 1440**.
 
 ```bash

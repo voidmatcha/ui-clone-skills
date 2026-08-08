@@ -57,13 +57,17 @@ Default stays `comprehensive` so existing callers and CI keep their current safe
 
 ### Naming
 - Python package: `ui_clone`
-- npm package: `agent-browser`
+- npm packages: `ui-clone-cli` (binary `ui-clone`), `agent-browser`
 - GitHub: `vercel-labs/agent-browser`, `rtk-ai/rtk`
 - Owner: `voidmatcha`
 
 ### Pipeline step numbering and gate → artifact mapping
 
-Reference tables moved to `docs/gates.md` to keep `AGENTS.md` thin (re-injected every turn). Read `docs/gates.md` when adding/changing a gate, a sub-doc, or `ui_clone/gate.py` `VALID_GATES`. The dispatch keys (`reference`, `extraction`, `bundle`, `paid-features`, `spec`, `pre-generate`, `post-implement`, `boundary`, `font-parity`, `section-compare`) and the step → sub-doc mapping live there.
+Reference tables moved to `docs/gates.md` to keep `AGENTS.md` thin (re-injected every turn). Read `docs/gates.md` when adding/changing a gate, a sub-doc, or the gate order (`ui_clone/state.py` `GATE_ORDER`, from which `VALID_GATES` derives). The full dispatch-key list and the step → sub-doc mapping live there — do not enumerate gate names here; enumerations drift.
+
+### Agent-readable CLI
+
+Prefer the in-checkout forms — `python -m ui_clone.*` or `node bin/ui-clone ...` — for human/agent pipeline operations while npm publishing is paused (`npx ui-clone-cli` resolves to the published registry copy, which lags this checkout unless npm-linked). Hooks recognize both surfaces identically. The CLI contract for `status --json`, `next --json`, `report --for-llm`, `verify --json`, `gate`, `goal`, and terminal failed/incomplete state is documented in `docs/agent-cli.md`.
 
 ### Sub-doc conventions
 - Title format: `# <Name> — Step <N>` matching SKILL.md pipeline
@@ -73,8 +77,8 @@ Reference tables moved to `docs/gates.md` to keep `AGENTS.md` thin (re-injected 
 - All JS evals must use IIFE: `(() => { ... })()`
 
 ### Version sync
-- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, and `.codex-plugin/plugin.json` versions must match
-- `pyproject.toml` version must be updated on release
+- Six files carry the version and `scripts/ci/pre-push-security.sh` blocks the push unless **all six** match: `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`, `pyproject.toml`, `package.json`, `ui_clone/__init__.py`. Bump them together — the enumeration here is the one agents follow, so a short list guarantees a blocker.
+- Claude caches the plugin per version (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`), so a content change shipped without a version bump installs as stale.
 - `scripts/hooks/pre-push-guard.sh` enforces this automatically
 
 ### Token management
@@ -99,4 +103,3 @@ Reference tables moved to `docs/gates.md` to keep `AGENTS.md` thin (re-injected 
 ## Review checklist
 
 Full checklist lives in `scripts/ci/review.sh` header (automated). Run `bash scripts/ci/review.sh` before push.
-

@@ -1,0 +1,114 @@
+#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const { existsSync, realpathSync } = require("node:fs");
+const { delimiter, dirname, join, resolve } = require("node:path");
+
+const root = resolve(dirname(realpathSync(__filename)), "..");
+const modules = new Map([
+  ["pipeline", "ui_clone.pipeline"],
+  ["state", "ui_clone.state"],
+  ["gate", "ui_clone.gate"],
+  ["goal", "ui_clone.goal"],
+]);
+
+function printHelp() {
+  console.log(`ui-clone — agent-readable ui-clone-skills CLI
+
+Usage:
+  ui-clone pipeline <url> <component-or-run-dir> <session> <action> [options]
+  ui-clone gate <ref-dir> <gate-name> [--json]
+  ui-clone goal <ref-dir> [--json]
+  ui-clone state terminal <ref-dir> --status <status> --category <category> --reason <reason> [--gate <gate>]
+  ui-clone <url> <component-or-run-dir> <session> <action> [options]
+
+Package:
+  npx ui-clone-cli --help
+  npx ui-clone-cli pipeline <url> <component-or-run-dir> <session> status --json
+
+Installed/local binary:
+  ui-clone --help
+  ui-clone pipeline <url> <component-or-run-dir> <session> status --json
+
+Agent-readable actions:
+  status --json       Print run truth/status JSON.
+  next --json         Print next action and safe read paths.
+  report --for-llm    Print compact handoff context.
+  verify --json       Run post-impl gates and print machine-readable result.
+
+Examples:
+  npx ui-clone-cli pipeline https://example.com hero sess status --json
+  ui-clone https://example.com hero sess next --json
+  ui-clone state terminal tmp/ref/hero --status incomplete --category hardening-probe-incomplete --gate section-compare --reason "canonical verify failed"
+
+Dispatch:
+  The wrapper prefers 'uv run --project <package-root> python -m ...'.
+  It falls back to python3/python with PYTHONPATH=<package-root> when uv is unavailable.
+  Set UI_CLONE_CLI_PYTHON_DIRECT=1 to skip uv and dispatch via python3 directly
+  (stdlib-only actions like status/next/report/state need no scientific deps).`);
+}
+
+function isHelp(value) {
+  return value === "-h" || value === "--help" || value === "help";
+}
+
+function commandExists(command) {
+  const result = spawnSync(command, ["--version"], { stdio: "ignore" });
+  return !result.error;
+}
+
+function run(command, args, env) {
+  return spawnSync(command, args, {
+    cwd: process.cwd(),
+    env,
+    stdio: "inherit",
+  });
+}
+
+function pythonEnv() {
+  const env = { ...process.env };
+  const existing = env.PYTHONPATH;
+  env.PYTHONPATH = existing ? `${root}${delimiter}${existing}` : root;
+  return env;
+}
+
+function runPythonModule(moduleName, moduleArgs) {
+  const direct = process.env.UI_CLONE_CLI_PYTHON_DIRECT === "1";
+  if (!direct && existsSync(join(root, "pyproject.toml")) && commandExists("uv")) {
+    const uvResult = run(
+      "uv",
+      ["run", "--project", root, "python", "-m", moduleName, ...moduleArgs],
+      process.env,
+    );
+    if (!uvResult.error) {
+      process.exit(uvResult.status ?? 1);
+    }
+  }
+
+  for (const python of ["python3", "python"]) {
+    const result = run(python, ["-m", moduleName, ...moduleArgs], pythonEnv());
+    if (!result.error) {
+      process.exit(result.status ?? 1);
+    }
+  }
+
+  console.error(
+    "ui-clone: could not find uv, python3, or python. Install uv/Python 3.11+ and retry.",
+  );
+  process.exit(127);
+}
+
+const argv = process.argv.slice(2);
+if (argv.length === 0 || isHelp(argv[0])) {
+  printHelp();
+  process.exit(0);
+}
+
+const [first, ...rest] = argv;
+if (modules.has(first)) {
+  runPythonModule(modules.get(first), rest);
+}
+
+// Default shorthand:
+//   ui-clone <url> <component> <session> status --json
+// maps to ui_clone.pipeline.
+runPythonModule("ui_clone.pipeline", argv);

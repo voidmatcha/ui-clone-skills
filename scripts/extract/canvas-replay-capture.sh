@@ -20,6 +20,13 @@
 # Exit 0 on success, 2 on setup error, 1 on capture/encode failure.
 set -uo pipefail
 
+# W-4 (loop-ebpb-0): pin the light color scheme at CAPTURE time too — a
+# dark-evening Phase-0 capture bakes dark styles into the ref corpus
+# PERMANENTLY, and every light-pinned verify then honestly-fails against
+# poisoned ground truth. Caller override intact (default only when unset).
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_COLOR_SCHEME
+
 REF_DIR="${1:?usage: canvas-replay-capture.sh <ref-dir> <ref-url> <session> [impl-public-dir]}"
 REF_URL="${2:?ref-url required}"
 SESSION="${3:?session required}"

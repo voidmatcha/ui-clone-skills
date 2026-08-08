@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude installs delivered an empty plugin. `claude plugin install` copies the
+  marketplace source into its own per-version cache without following symlinks,
+  and the registered source was the symlink projection — so the cache held zero
+  files and every session outside the checkout loaded no hooks and no skills,
+  while `plugin list` reported the plugin installed and enabled. Claude now gets
+  its own real-file source directory, staged and asserted symlink-free before
+  registration; the projection stays symlinked for Codex, which reads its
+  install in place. The installer additionally runs an installed hook out of the
+  host cache and fails if it does not execute.
+- An install over an existing install refreshes it via `claude plugin update`
+  instead of reporting nothing to do — the host cache is keyed by version, so
+  "present in `plugin list`" meant "cached", not "current".
+
+### Changed
+
+- The benchmark harness marks its `claude --print` children with
+  `UI_RE_HEADLESS_DRIVER=1`, which demotes the section_gate Stop block to a
+  stderr advisory. A Stop block under `--print` ends the turn with no printed
+  answer, costing an iteration for a nudge the between-iteration gates already
+  make. `pre_bash` still blocks.
+
 ## [0.7.24] - 2026-06-05
 
 Gate enforcement on Codex + transition-fidelity hardening.

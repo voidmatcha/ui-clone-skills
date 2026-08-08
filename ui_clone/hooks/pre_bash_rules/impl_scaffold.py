@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ui_clone.hooks._common import sanitize_command_for_deny
 from ui_clone.state import GATE_ORDER, PipelineState
 
 from .ref_state import _candidate_ref_roots
@@ -68,7 +69,9 @@ def _impl_scaffold_violation(
     """
     if not cmd:
         return None
-    if not _IMPL_SCAFFOLD_PATTERNS.search(cmd):
+    # Command-position: a scaffold command quoted as DATA (a diagnostic naming
+    # "npm create vite", a heredoc doc body) must not trigger the gate.
+    if not _IMPL_SCAFFOLD_PATTERNS.search(sanitize_command_for_deny(cmd)):
         return None
 
     # Pick the freshest ref dir from any candidate root the command might
@@ -118,9 +121,7 @@ def _impl_scaffold_violation(
                     "component code is written.\n\n"
                     "Run the canonical gates instead of leaf scripts:\n"
                     f"  python -m ui_clone.gate {freshest} spec\n"
-                    f"  python -m ui_clone.gate {freshest} pre-generate\n\n"
-                    "Emergency bypass (voids measurement signal): "
-                    "UI_RE_SKIP_BASH_GATE=1 <command>"
+                    f"  python -m ui_clone.gate {freshest} pre-generate\n"
                 )
             return None  # pre-generate or later reached — allowed
         if gate == "done":
@@ -134,9 +135,7 @@ def _impl_scaffold_violation(
                     f"Missing required artifact: {missing_spec}\n\n"
                     "A completed pipeline state without transition-spec.json "
                     "is inconsistent; rerun the canonical spec and "
-                    "pre-generate gates before bootstrapping impl/.\n\n"
-                    "Emergency bypass (voids measurement signal): "
-                    "UI_RE_SKIP_BASH_GATE=1 <command>"
+                    "pre-generate gates before bootstrapping impl/.\n"
                 )
             return None  # already converged — re-scaffolding is the agent's call
         gate_label = gate or "missing"
@@ -153,6 +152,5 @@ def _impl_scaffold_violation(
         "Run the pipeline through pre-generate first:\n"
         "  python -m ui_clone.pipeline <URL> <component> <session> run --phases 0A,1,2\n"
         "  python -m ui_clone.pipeline <URL> <component> <session> status\n"
-        "Then the same scaffold command runs unblocked.\n\n"
-        "Emergency bypass (voids measurement signal): UI_RE_SKIP_BASH_GATE=1 <command>"
+        "Then the same scaffold command runs unblocked.\n"
     )

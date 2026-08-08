@@ -8,13 +8,15 @@ Single source of truth for which gate the pipeline is currently at.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 GATE_ORDER: list[str] = [
@@ -31,6 +33,25 @@ GATE_ORDER: list[str] = [
     "section-compare",
 ]
 
+# Canonical terminal status vocabulary. The `state terminal` CLI below
+# validates --status against this tuple (argparse choices) and the Stop hook
+# (hooks/section_gate.py) enforces the same set on persisted terminalState,
+# so writer and enforcer can never drift.
+TERMINAL_STATUSES: tuple[str, ...] = ("failed", "incomplete", "unclonable", "abandoned")
+
+# Gate suite that canonical verify (pipeline_phases/verify.py) runs and that
+# the Stop hook (hooks/section_gate.py) requires in verify-stamp.json
+# gatesPassed. Stamp writer and stamp enforcer import this single tuple so
+# adding a gate to one side cannot deadlock or under-enforce the other.
+# `spec` is re-checked at closeout in addition to the post-implement gates.
+POST_IMPL_VERIFY_GATES: tuple[str, ...] = (
+    "spec",
+    "post-implement",
+    "boundary",
+    "font-parity",
+    "section-compare",
+)
+
 # Hard cap on consecutive failures of any single gate. When mark_failed()
 # pushes gate_fail_counts[<gate>] to this value, the state self-records a
 # canonical `category="hard-cap-fail"` reason into unclonable_reasons so
@@ -39,6 +60,8 @@ GATE_ORDER: list[str] = [
 # instead of inventing terminal semantics independently. goal.py re-exports
 # this constant as `_MAX_GATE_FAILS` for back-compat with benchmark_harness.
 HARD_CAP_GATE_FAILS = 10
+
+UTC = timezone.utc  # noqa: UP017 - macOS /usr/bin/python3 is still 3.9.
 
 # Canonical hard-cap unclonable reason string. Lives next to
 # HARD_CAP_GATE_FAILS so the dedup key (gate, reason) inside
@@ -54,6 +77,29 @@ HARD_CAP_REASON_TEMPLATE = (
 def format_hard_cap_reason(gate: str) -> str:
     """Render the canonical hard-cap unclonable reason for a gate."""
     return HARD_CAP_REASON_TEMPLATE.format(gate=gate, cap=HARD_CAP_GATE_FAILS)
+
+
+# Secondary absolute backstop for signature-aware fail counting. The
+# consecutive counter resets when the failing-check signature changes
+# (progress), so an agent cycling between two failure sets (A/B/A/B) could
+# otherwise evade HARD_CAP_GATE_FAILS forever. Total failures of one gate —
+# regardless of signature churn — terminate at this much-larger cap. 50 is
+# unreachable for legitimate multi-turn convergence but reachable for a
+# cycling loop. Distinct reason wording so operators can tell
+# identical-signature stagnation from signature-cycling exhaustion.
+ABSOLUTE_CAP_GATE_FAILS = 50
+
+ABSOLUTE_CAP_REASON_TEMPLATE = (
+    "absolute cap reached: gate '{gate}' failed {cap} total times across "
+    "changing failure signatures (auto-terminated by state.mark_failed)"
+)
+
+
+def format_absolute_cap_reason(gate: str) -> str:
+    """Render the canonical absolute-cap unclonable reason for a gate."""
+    return ABSOLUTE_CAP_REASON_TEMPLATE.format(
+        gate=gate, cap=ABSOLUTE_CAP_GATE_FAILS
+    )
 
 
 def prerequisite_gates(gate: str) -> list[str]:
@@ -161,6 +207,19 @@ class PipelineState:
     # so external loop drivers (codex /goal, codex exec, headless claude -p) can detect
     # "stuck on same gate" before they exhaust max-iterations.
     gate_fail_counts: dict[str, int] = field(default_factory=dict)
+    # Signature-aware fail counting (2026-06-10): last failing-check
+    # signature per gate, as provided by the gate dispatcher. When a new
+    # failure's signature differs from the stored one, the consecutive
+    # counter RESETS — the failing set changed, so the run is converging
+    # (or at least hitting a different blocker), not stuck. The hard cap
+    # then only fires on HARD_CAP_GATE_FAILS consecutive identical-signature
+    # failures, which is the no-progress loop it was built to stop. The
+    # per-turn Stop-hook gate evaluation of an actively-iterating agent no
+    # longer counts as "stuck" while its failing set keeps shrinking.
+    gate_fail_signatures: dict[str, str] = field(default_factory=dict)
+    # Total failures per gate regardless of signature churn — backs the
+    # ABSOLUTE_CAP_GATE_FAILS anti-cycling backstop.
+    gate_total_fail_counts: dict[str, int] = field(default_factory=dict)
     # Hard-blocker reasons populated by gates/scripts when they detect a
     # condition the pipeline cannot work past (e.g., commercial DRM canvas,
     # auth-gated content, paid font with decision='use' and no substitution).
@@ -168,6 +227,11 @@ class PipelineState:
     # loops stop iterating on an unwinnable target instead of grinding to
     # max-iterations.
     unclonable_reasons: list[dict] = field(default_factory=list)
+    # Audit trail for operator-sanctioned recoveries (see recover_hard_cap).
+    # Each entry records which gate was recovered, the cleared reason entries,
+    # the operator-provided justification, and the timestamp — terminal state
+    # is never erased silently.
+    recoveries: list[dict] = field(default_factory=list)
     # Absolute path to the impl tree this pipeline run targets. Set
     # by pipeline.execute_extract once at Phase 1 start; consumed by
     # find-impl-root.sh as a universal layout-independent resolver.
@@ -182,6 +246,12 @@ class PipelineState:
     # when sections/result.txt shows 0 FAIL. The two stamps are NEVER
     # interchangeable; the field gates which one the Stop hook accepts.
     closeout_policy: str = "canonical"
+    # Explicit terminal outcome for runs that should no longer be treated as
+    # active WIP by agent Stop hooks. This is deliberately separate from
+    # `unclonable_reasons`: reasons explain blockers, while terminal_state is
+    # the machine-readable lifecycle decision (failed/incomplete/unclonable/
+    # abandoned). Empty dict means the run is still active or not yet terminal.
+    terminal_state: dict = field(default_factory=dict)
     # Fail-closed state review: transient flag set to True
     # when PipelineState.load() had to quarantine a corrupt pipeline-state.json.
     # mark_failed() reads this to decide between "advance fail count on fresh
@@ -205,7 +275,10 @@ class PipelineState:
                 current_gate=data.get("current_gate", "reference"),
                 last_updated=data.get("last_updated", ""),
                 gate_fail_counts=data.get("gate_fail_counts", {}) or {},
+                gate_fail_signatures=data.get("gate_fail_signatures", {}) or {},
+                gate_total_fail_counts=data.get("gate_total_fail_counts", {}) or {},
                 unclonable_reasons=data.get("unclonable_reasons", []) or [],
+                recoveries=data.get("recoveries", []) or [],
                 # Accept implRoot OR impl_root from on-disk JSON for
                 # forward-compat with the camelCase field find-impl-
                 # root.sh reads.
@@ -222,6 +295,11 @@ class PipelineState:
                     data.get("closeoutPolicy")
                     or data.get("closeout_policy")
                     or "canonical"
+                ),
+                terminal_state=(
+                    data.get("terminalState")
+                    or data.get("terminal_state")
+                    or {}
                 ),
             )
         except json.JSONDecodeError as exc:
@@ -268,6 +346,16 @@ class PipelineState:
             "gate_fail_counts": self.gate_fail_counts,
             "unclonable_reasons": self.unclonable_reasons,
         }
+        # Signature-aware counting fields persist only when present to keep
+        # legacy state files byte-identical.
+        if self.gate_fail_signatures:
+            payload["gate_fail_signatures"] = self.gate_fail_signatures
+        if self.gate_total_fail_counts:
+            payload["gate_total_fail_counts"] = self.gate_total_fail_counts
+        # Recovery audit entries persist only when present to keep legacy
+        # state files byte-identical.
+        if self.recoveries:
+            payload["recoveries"] = self.recoveries
         # Emit both keys so find-impl-root.sh (camelCase `implRoot`) and any
         # internal reader (snake_case `impl_root`) both work. Omit when empty
         # to keep legacy state files compact.
@@ -278,6 +366,9 @@ class PipelineState:
         # on every save on legacy canonical runs.
         if self.closeout_policy != "canonical":
             payload["closeoutPolicy"] = self.closeout_policy
+        if self.terminal_state:
+            payload["terminalState"] = self.terminal_state
+            payload["terminal_state"] = self.terminal_state
         return payload
 
     def _save_unlocked(self, ref_dir: Path) -> None:
@@ -310,9 +401,131 @@ class PipelineState:
         self.current_gate = other.current_gate
         self.last_updated = other.last_updated
         self.gate_fail_counts = dict(other.gate_fail_counts)
+        self.gate_fail_signatures = dict(other.gate_fail_signatures)
+        self.gate_total_fail_counts = dict(other.gate_total_fail_counts)
         self.unclonable_reasons = [dict(r) for r in other.unclonable_reasons]
+        self.recoveries = [dict(r) for r in other.recoveries]
         self.impl_root = other.impl_root
         self.closeout_policy = other.closeout_policy
+        self.terminal_state = dict(other.terminal_state)
+
+    def _record_terminal_unlocked(
+        self,
+        *,
+        status: str,
+        category: str,
+        reason: str,
+        gate: str | None = None,
+        detail: dict | None = None,
+        next_action: str | None = None,
+        written_by: str = "cli",
+        sections_result_sha256: str | None = None,
+    ) -> None:
+        """Set the explicit terminal lifecycle state in memory.
+
+        Caller holds the state lock and is responsible for saving. The
+        `terminalState` object is the hook/CLI contract; it prevents future
+        code from overloading `unclonable_reasons` as a generic completion
+        release signal.
+
+        `writtenBy` records provenance: gate-bound internal callers pass
+        "pipeline" (verify.execute_verify behind a real gate run, record_unclonable
+        behind a content blocker); the self-attested CLI escape defaults to "cli".
+        A self-attested write also pins `sectionsResultSha256` so the Stop hook can
+        bind the release to the exact evidence snapshot (see _terminal_state_block_reason).
+        """
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        terminal: dict = {
+            "status": status,
+            "category": category,
+            "gate": gate or self.current_gate,
+            "reason": reason,
+            "recorded_at": now,
+            "writtenBy": written_by,
+        }
+        if sections_result_sha256 is not None:
+            terminal["sectionsResultSha256"] = sections_result_sha256
+        if detail is not None:
+            terminal["detail"] = detail
+        if next_action:
+            terminal["next_action"] = next_action
+        self.terminal_state = terminal
+        if not self.started_at:
+            self.started_at = now
+        self.last_updated = now
+
+    def mark_terminal(
+        self,
+        ref_dir: Path,
+        *,
+        status: str,
+        category: str,
+        reason: str,
+        gate: str | None = None,
+        detail: dict | None = None,
+        next_action: str | None = None,
+        written_by: str = "cli",
+    ) -> None:
+        """Persist an explicit terminal lifecycle state.
+
+        Examples:
+        - status="failed", category="canonical-verify-failed" for a verify
+          run that produced reports but no success stamp.
+        - status="incomplete", category="hardening-probe-incomplete" for a
+          harvested probe that should no longer block Stop.
+        - status="unclonable" for genuine content blockers.
+
+        `written_by` defaults to "cli" (the self-attested operator/agent escape);
+        gate-bound internal callers pass "pipeline". For a self-attested write we
+        pin sha256(sections/result.txt) so the Stop hook binds the non-success
+        release to that exact evidence snapshot — a self-attested terminal state
+        recorded against a stale/forged result.txt no longer releases Stop.
+        """
+        sections_sha: str | None = None
+        if written_by != "pipeline":
+            result_txt = ref_dir / "sections" / "result.txt"
+            if result_txt.is_file():
+                try:
+                    sections_sha = hashlib.sha256(result_txt.read_bytes()).hexdigest()
+                except OSError:
+                    sections_sha = None
+        with _pipeline_state_lock(ref_dir):
+            state_path = ref_dir / "pipeline-state.json"
+            authoritative = (
+                PipelineState.load(ref_dir) if state_path.is_file() else self
+            )
+            authoritative._record_terminal_unlocked(
+                status=status,
+                category=category,
+                reason=reason,
+                gate=gate,
+                detail=detail,
+                next_action=next_action,
+                written_by=written_by,
+                sections_result_sha256=sections_sha,
+            )
+            authoritative._save_unlocked(ref_dir)
+            if authoritative is not self:
+                self._mirror_from(authoritative)
+
+    def clear_terminal(self, ref_dir: Path) -> None:
+        """Clear terminal_state after deliberate recovery or successful verify."""
+        with _pipeline_state_lock(ref_dir):
+            state_path = ref_dir / "pipeline-state.json"
+            authoritative = (
+                PipelineState.load(ref_dir) if state_path.is_file() else self
+            )
+            if not authoritative.terminal_state:
+                if authoritative is not self:
+                    self._mirror_from(authoritative)
+                return
+            authoritative.terminal_state = {}
+            authoritative.last_updated = datetime.now(UTC).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            authoritative._save_unlocked(ref_dir)
+            if authoritative is not self:
+                self._mirror_from(authoritative)
 
     def save(self, ref_dir: Path) -> None:
         """Write the current in-memory state to pipeline-state.json atomically.
@@ -462,6 +675,19 @@ class PipelineState:
         False on dedup hit (existing (gate, reason) pair)."""
         for existing in self.unclonable_reasons:
             if existing.get("gate") == gate and existing.get("reason") == reason:
+                if not self.terminal_state:
+                    self._record_terminal_unlocked(
+                        status="unclonable",
+                        category=category or existing.get("category") or "unclonable",
+                        gate=gate,
+                        reason=reason,
+                        detail=detail,
+                        next_action=(
+                            "Resolve or document the blocker, then recover the run before continuing."
+                        ),
+                        written_by="pipeline",
+                    )
+                    return True
                 return False
 
         # Suggestion resolution: explicit > category-default > none.
@@ -485,20 +711,47 @@ class PipelineState:
         if not self.started_at:
             self.started_at = now
         self.last_updated = now
+        # Keep lifecycle state explicit. Downstream hooks no longer infer
+        # terminal completion from the presence of unclonable_reasons alone.
+        self._record_terminal_unlocked(
+            status="unclonable",
+            category=category or "unclonable",
+            gate=gate,
+            reason=reason,
+            detail=detail,
+            next_action="Resolve or document the blocker, then recover the run before continuing.",
+            written_by="pipeline",
+        )
         return True
 
-    def mark_failed(self, gate: str, ref_dir: Path) -> None:
+    def mark_failed(
+        self,
+        gate: str,
+        ref_dir: Path,
+        failure_signature: str | None = None,
+    ) -> None:
         """Increment the consecutive-fail counter for `gate`.
 
         Only bumps when `gate` is the current_gate — failing a gate earlier
         than the cursor (e.g. re-running `reference` after pipeline is at
         `extraction`) does not count as "stuck on the active gate".
 
-        Hard-cap auto-termination: when the bumped counter is at or past
-        HARD_CAP_GATE_FAILS, also writes a canonical `category="hard-cap-fail"`
-        entry into unclonable_reasons. Both the bump and the auto-record
-        happen inside one cross-process write lock so two parallel
-        mark_failed callers cannot lose increments.
+        failure_signature: stable digest of the failing-check set, computed
+        by the gate dispatcher. When provided and DIFFERENT from the stored
+        signature for this gate, the consecutive counter resets to 1 — the
+        failing set changed, so the run is converging or at least facing a
+        different blocker, not retrying the same action. When identical (or
+        when no signature is provided — legacy callers), the counter
+        increments as before. A separate total counter backs the
+        ABSOLUTE_CAP_GATE_FAILS anti-cycling backstop.
+
+        Hard-cap auto-termination: when the bumped consecutive counter is at
+        or past HARD_CAP_GATE_FAILS (identical-signature stagnation), or the
+        total counter reaches ABSOLUTE_CAP_GATE_FAILS (signature cycling),
+        also writes a canonical `category="hard-cap-fail"` entry into
+        unclonable_reasons. Both the bump and the auto-record happen inside
+        one cross-process write lock so two parallel mark_failed callers
+        cannot lose increments.
         """
         if gate not in GATE_ORDER:
             return
@@ -543,8 +796,18 @@ class PipelineState:
                     self._mirror_from(authoritative)
                 return
 
-            authoritative.gate_fail_counts[gate] = (
-                authoritative.gate_fail_counts.get(gate, 0) + 1
+            prev_sig = authoritative.gate_fail_signatures.get(gate)
+            if failure_signature is not None and failure_signature != prev_sig:
+                # Failing set changed → progress (or a new blocker). Reset
+                # the consecutive counter; this failure is #1 of a new run.
+                authoritative.gate_fail_counts[gate] = 1
+                authoritative.gate_fail_signatures[gate] = failure_signature
+            else:
+                authoritative.gate_fail_counts[gate] = (
+                    authoritative.gate_fail_counts.get(gate, 0) + 1
+                )
+            authoritative.gate_total_fail_counts[gate] = (
+                authoritative.gate_total_fail_counts.get(gate, 0) + 1
             )
             now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             if not authoritative.started_at:
@@ -561,6 +824,15 @@ class PipelineState:
                 authoritative._record_unclonable_unlocked(
                     gate=gate,
                     reason=format_hard_cap_reason(gate),
+                    category="hard-cap-fail",
+                )
+            if (
+                authoritative.gate_total_fail_counts[gate]
+                >= ABSOLUTE_CAP_GATE_FAILS
+            ):
+                authoritative._record_unclonable_unlocked(
+                    gate=gate,
+                    reason=format_absolute_cap_reason(gate),
                     category="hard-cap-fail",
                 )
 
@@ -613,3 +885,291 @@ class PipelineState:
                 authoritative._save_unlocked(ref_dir)
             if authoritative is not self:
                 self._mirror_from(authoritative)
+
+    def recover_hard_cap(
+        self,
+        gate: str,
+        operator_reason: str,
+        ref_dir: Path,
+        force: bool = False,
+    ) -> bool:
+        """Operator-sanctioned recovery from a hard-cap termination.
+
+        The hard cap (HARD_CAP_GATE_FAILS consecutive fails of one gate)
+        exists to stop blind impl iteration. When the underlying constraint
+        was found and resolved OUTSIDE the impl loop (e.g. polluted reference
+        capture artifacts, a pipeline-tool bug), the termination is no longer
+        meaningful — but it must be lifted deliberately, with a recorded
+        justification, never silently.
+
+        Clears the gate's `category=="hard-cap-fail"` unclonable entries and
+        resets its fail count. Genuine content blockers (license, DRM, auth —
+        any non-hard-cap category) are NOT cleared unless force=True.
+        Appends an audit entry to `recoveries` so history is preserved.
+        Returns True when anything was cleared.
+        """
+        if not operator_reason.strip():
+            raise ValueError("recover_hard_cap requires a non-empty operator reason")
+        with _pipeline_state_lock(ref_dir):
+            state_path = ref_dir / "pipeline-state.json"
+            authoritative = (
+                PipelineState.load(ref_dir) if state_path.is_file() else self
+            )
+            gate_entries = [
+                r for r in authoritative.unclonable_reasons if r.get("gate") == gate
+            ]
+            if not gate_entries and gate not in authoritative.gate_fail_counts:
+                return False
+            blockers = [
+                r for r in gate_entries if r.get("category") != "hard-cap-fail"
+            ]
+            if blockers and not force:
+                raise ValueError(
+                    f"gate '{gate}' has non-hard-cap unclonable reasons "
+                    f"({[r.get('category') for r in blockers]}); these mark real "
+                    "content blockers — pass force=True only if they are wrong."
+                )
+            cleared = gate_entries if force else [
+                r for r in gate_entries if r.get("category") == "hard-cap-fail"
+            ]
+            keep_ids = {id(r) for r in cleared}
+            authoritative.unclonable_reasons = [
+                r
+                for r in authoritative.unclonable_reasons
+                if not (r.get("gate") == gate and id(r) in keep_ids)
+            ]
+            authoritative.gate_fail_counts.pop(gate, None)
+            authoritative.gate_fail_signatures.pop(gate, None)
+            authoritative.gate_total_fail_counts.pop(gate, None)
+            if (
+                authoritative.terminal_state
+                and authoritative.terminal_state.get("gate") == gate
+                and authoritative.terminal_state.get("category") == "hard-cap-fail"
+            ):
+                authoritative.terminal_state = {}
+            now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            authoritative.recoveries.append(
+                {
+                    "gate": gate,
+                    "cleared": cleared,
+                    "operator_reason": operator_reason,
+                    "forced": bool(force and blockers),
+                    "recovered_at": now,
+                }
+            )
+            authoritative.last_updated = now
+            authoritative._save_unlocked(ref_dir)
+            if authoritative is not self:
+                self._mirror_from(authoritative)
+            return bool(cleared) or True
+
+
+def _last_updated_epoch(state: PipelineState) -> float | None:
+    raw = (state.last_updated or "").strip()
+    if not raw:
+        return None
+    iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
+
+
+def sweep_stale_refs(
+    search_root: Path, older_than_days: float, *, execute: bool = False
+) -> list[dict[str, object]]:
+    """Operator-invoked bulk abandon of stale WIP refs (fix #3).
+
+    DRY-RUN by default (execute=False). For every ref under search_root that is
+    a pipeline ref (has pipeline-state.json), is NOT already terminal or
+    verified, and whose last_updated is older than older_than_days, record an
+    explicit `abandoned`/`stale-reaped` terminal state — UNLESS its
+    sections/result.txt looks success-shaped (no honest ❌/FAIL/MISSING marker),
+    in which case it is REFUSED (a success-claiming ref must not be silently
+    abandoned; it needs real handling). writtenBy stays honestly self-attested
+    ("cli") — never "pipeline". This is NOT wired into the Stop turn-end path;
+    it is a deliberate human maintenance action with an audit trail.
+    """
+    results: list[dict[str, object]] = []
+    if not search_root.is_dir():
+        return results
+    now = time.time()
+    cutoff = now - older_than_days * 86400
+    for ref_dir in sorted(search_root.iterdir()):
+        if not ref_dir.is_dir() or not (ref_dir / "pipeline-state.json").is_file():
+            continue
+        if (ref_dir / "verify-stamp.json").is_file():
+            continue
+        try:
+            state = PipelineState.load(ref_dir)
+        except (OSError, ValueError):
+            continue
+        if state.terminal_state:
+            continue
+        epoch = _last_updated_epoch(state)
+        if epoch is None or epoch > cutoff:
+            continue
+        age_days = int((now - epoch) // 86400)
+        rt = ref_dir / "sections" / "result.txt"
+        if rt.is_file():
+            try:
+                txt = rt.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                txt = ""
+            # Honest-failure signal is the per-row ❌ glyph (or a MISSING-impl
+            # row) that section-compare emits. Deliberately NOT the bare word
+            # "FAIL": a success summary reads "N PASS, 0 FAIL" and must be
+            # refused, not swept. Absent ❌/MISSING → treat as success-shaped.
+            if not any(m in txt for m in ("❌", "MISSING")):
+                results.append(
+                    {"ref": str(ref_dir), "ageDays": age_days,
+                     "action": "refused-success-shaped"}
+                )
+                continue
+        if execute:
+            # A bulk op must be resilient: one ref with malformed legacy state
+            # (e.g. an old string-list unclonable_reasons that _mirror_from can't
+            # coerce) must not abort the whole sweep. Record it as failed and
+            # continue so the rest still get cleaned.
+            try:
+                state.mark_terminal(
+                    ref_dir,
+                    status="abandoned",
+                    category="stale-reaped",
+                    reason=(
+                        f"swept: stale WIP, last_updated {age_days}d ago "
+                        f"(>{older_than_days}d threshold)"
+                    ),
+                )
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                results.append({
+                    "ref": str(ref_dir), "ageDays": age_days,
+                    "action": "failed", "error": f"{type(exc).__name__}: {exc}",
+                })
+                continue
+            action = "abandoned"
+        else:
+            action = "would-abandon"
+        results.append({"ref": str(ref_dir), "ageDays": age_days, "action": action})
+    return results
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Operator CLI: `python -m ui_clone.state recover <ref-dir> --gate g --reason "..."`."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Pipeline state operations")
+    sub = parser.add_subparsers(dest="command", required=True)
+    rec = sub.add_parser(
+        "recover",
+        help=(
+            "Lift a hard-cap termination after the underlying constraint was "
+            "resolved outside the impl loop. Records an audit entry; refuses "
+            "to clear license/DRM/auth blockers without --force."
+        ),
+    )
+    rec.add_argument("ref_dir", type=Path, help="tmp/ref/<component> directory")
+    rec.add_argument("--gate", required=True, help="gate whose hard-cap to lift")
+    rec.add_argument(
+        "--reason", required=True,
+        help="operator justification (what constraint was resolved, where)",
+    )
+    rec.add_argument("--force", action="store_true",
+                     help="also clear non-hard-cap (content blocker) reasons")
+    rec.add_argument(
+        "--demote-to", dest="demote_to", default=None,
+        help="optionally demote current_gate back to this gate after recovery",
+    )
+    term = sub.add_parser(
+        "terminal",
+        help=(
+            "Record an explicit terminal failed/incomplete/unclonable state "
+            "without writing verify-stamp.json."
+        ),
+    )
+    term.add_argument("ref_dir", type=Path, help="tmp/ref/<component> or run directory")
+    term.add_argument(
+        "--status",
+        required=True,
+        choices=list(TERMINAL_STATUSES),
+        help="terminal status (one of: %(choices)s)",
+    )
+    term.add_argument("--category", required=True, help="machine-readable terminal category")
+    term.add_argument("--reason", required=True, help="human-readable terminal reason")
+    term.add_argument("--gate", default=None, help="gate associated with the terminal state")
+    term.add_argument("--next-action", default=None, help="recommended next action")
+    swp = sub.add_parser(
+        "sweep",
+        help=(
+            "Bulk-abandon stale WIP refs (last_updated older than --older-than "
+            "days) as an audited operator action. DRY-RUN unless --yes. Refuses "
+            "refs whose result.txt looks success-shaped."
+        ),
+    )
+    swp.add_argument(
+        "--older-than", dest="older_than", type=float, required=True,
+        help="age threshold in days (last_updated older than this)",
+    )
+    swp.add_argument(
+        "--root", type=Path, default=None,
+        help="search root (default: <cwd>/tmp/ref)",
+    )
+    swp.add_argument(
+        "--yes", action="store_true",
+        help="execute the abandons (default is a dry-run preview)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.command == "sweep":
+        root = args.root if args.root is not None else Path.cwd() / "tmp" / "ref"
+        rows = sweep_stale_refs(root, args.older_than, execute=args.yes)
+        print(json.dumps(
+            {"root": str(root), "dryRun": not args.yes,
+             "olderThanDays": args.older_than, "results": rows},
+            indent=2,
+        ))
+        return 0
+
+    if args.command == "terminal":
+        state = PipelineState.load(args.ref_dir)
+        state.mark_terminal(
+            args.ref_dir,
+            status=args.status,
+            category=args.category,
+            reason=args.reason,
+            gate=args.gate,
+            next_action=args.next_action,
+        )
+        print(json.dumps({
+            "ref_dir": str(args.ref_dir),
+            "terminalState": state.terminal_state,
+        }, indent=2))
+        return 0
+
+    state = PipelineState.load(args.ref_dir)
+    try:
+        changed = state.recover_hard_cap(
+            args.gate, args.reason, args.ref_dir, force=args.force
+        )
+    except ValueError as exc:
+        print(f"recover: {exc}", file=sys.stderr)
+        return 2
+    if not changed:
+        print(f"recover: nothing to clear for gate '{args.gate}'", file=sys.stderr)
+        return 1
+    if args.demote_to:
+        state.demote_to(args.demote_to, args.ref_dir)
+    print(json.dumps({
+        "recovered_gate": args.gate,
+        "current_gate": state.current_gate,
+        "unclonable_reasons": state.unclonable_reasons,
+        "recoveries": state.recoveries[-1:],
+    }, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

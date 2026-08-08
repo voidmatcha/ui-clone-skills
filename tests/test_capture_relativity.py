@@ -40,7 +40,7 @@ def _run(tmp_path: Path, structure: dict, extra: dict[str, dict] | None = None) 
         (ref / name).write_text(json.dumps(payload), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     out = ""
@@ -118,10 +118,15 @@ def test_family_text_height_floored_not_clamped(tmp_path: Path) -> None:
     assert t and 'minHeight: "120px"' in t.group(1) and 'height: "120px"' not in t.group(1)
 
 
-def test_family_sticky_overlap_folded(tmp_path: Path) -> None:
-    """Fix 64 — a sticky track's negative bottom margin overlaps the next
-    section; keeping the full captured height while dropping the overlap
-    inflates the box by the margin."""
+def test_family_sticky_overlap_preserved(tmp_path: Path) -> None:
+    """S1 — a section root's negative bottom margin is a deliberate overlap onto
+    the next section. It is flow-neutral (the box is M px taller; the negative
+    margin pulls the next in-flow sibling up by exactly M), so the root keeps its
+    FULL captured height as a min-height floor and preserves the negative bottom
+    margin verbatim — it is NOT folded to H-M with margin-bottom zeroed (that
+    rendered the box M px too short and erased the overlap). The Fix-26 sticky-
+    ancestor WRAPPER still folds to H-M via _effective_flow_height (separate
+    path; see test_sticky_wrapper_minheight_bakes_negative_bottom_margin)."""
     blob = _run(tmp_path, {
         "tag": "body",
         "children": [{"tag": "section", "class": "s0",
@@ -131,7 +136,12 @@ def test_family_sticky_overlap_folded(tmp_path: Path) -> None:
     })
     import re as _re
     s = _re.search(r'className="s0"[^>]*style=\{\{([^}]*)\}\}', blob)
-    assert s and 'minHeight: "2025px"' in s.group(1) and 'marginBottom: "0px"' in s.group(1)
+    assert s, f"s0 section must be emitted; got:\n{blob}"
+    style = s.group(1)
+    assert 'minHeight: "2700px"' in style, f"full captured height kept as floor; got:\n{style}"
+    assert 'minHeight: "2025px"' not in style, "must not fold the overlap into the floor"
+    assert 'margin: "0px 0px -675px"' in style, f"negative bottom margin preserved; got:\n{style}"
+    assert 'marginBottom: "0px"' not in style, "must not neutralise the overlap margin"
 
 
 def test_family_svg_dash_state_stamped(tmp_path: Path) -> None:

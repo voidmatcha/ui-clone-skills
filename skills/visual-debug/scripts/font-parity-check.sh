@@ -73,12 +73,41 @@ EVAL_PRIMARY_FAMILY='(() => {
   } catch (e) {
     loaded = true; // be conservative: if check throws, do not block
   }
+  // Sampling one element sees one family. A page whose body text is one face
+  // and whose banner is another hides the second entirely, so enumerate every
+  // declared @font-face and report each one with its own load status.
+  const declared = [];
+  try {
+    for (const sheet of Array.from(document.styleSheets)) {
+      let rules = null;
+      try { rules = sheet.cssRules; } catch (e) { continue; } // cross-origin
+      for (const rule of Array.from(rules || [])) {
+        if (rule.type !== 5) continue; // CSSRule.FONT_FACE_RULE
+        const raw = (rule.style && rule.style.getPropertyValue("font-family")) || "";
+        const one = raw.split(",")[0]
+          .replace(/^[\s\u0022\u0027]+|[\s\u0022\u0027]+$/g, "").trim();
+        if (one && declared.indexOf(one) === -1) declared.push(one);
+      }
+    }
+  } catch (e) { /* best-effort: never block on enumeration */ }
+  const families = declared.map(name => {
+    let ok = true;
+    try {
+      ok = document.fonts && typeof document.fonts.check === "function"
+        ? document.fonts.check(fontSize + " " + JSON.stringify(name))
+        : true;
+    } catch (e) {
+      ok = true;
+    }
+    return { family: name, loaded: ok };
+  });
   return JSON.stringify({
     family,
     fullStack: fam,
     targetTag: target.tagName.toLowerCase(),
     fontSize,
     loaded,
+    families,
   });
 })()'
 

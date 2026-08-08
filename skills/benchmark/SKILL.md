@@ -161,11 +161,39 @@ Those details must be learned from the loaded skill docs, hooks, AGENTS.md, and
 repo code. Adding them to the prompt turns the run into a guided diagnostic
 attempt rather than a skill validation.
 
+If an operator feels tempted to add scope paragraphs, script reminders,
+gate-specific remediation hints, or marker schema requirements to the prompt,
+stop and move that requirement into the relevant skill doc, referenced sub-doc,
+hook, gate, test, or benchmark/coordinator validator. The natural prompt should
+stay close to one sentence; the repo-owned skill surface must do the
+remembering.
+
 When a loop exposes a failure pattern, encode the lesson in the repo first:
 update the relevant skill doc, gate script, tests, or hook, verify it, commit
 and push it, then rerun the same natural prompt shape. A bespoke
 feedback-filled or harness-instructed prompt is allowed only for diagnosis, and
 its result must not be compared as a benchmark/history row.
+
+### External harness concepts
+
+External design-to-code arenas are useful operating patterns for this benchmark.
+Keep these transferable ideas:
+
+- **state capsule:** every prep/finalize split should leave one compact file with
+  URLs, viewport, artifact roots, port/PID, report paths, and the metrics needed
+  by later qualitative review;
+- **free-port preview discipline:** outer runners may allocate an OS free port,
+  assert no holder is already listening, poll readiness, capture, then clean up
+  the owning process; never let the prompt text carry those operational details;
+- **ranked summaries first:** compare loops should read `sections/result.txt`,
+  transition reports, and proof rollups before opening raw screenshots or JSON;
+- **archive for drift:** append comparable metrics to `benchmark/history.*` so a
+  prompt, hook, model, browser, or site drift is visible across runs.
+
+Avoid importing fixed design dimensions, fixed y-band section maps, dashboard
+posting, PR-admin worktree policy, or challenge-specific scoring formulas into
+the public clone workflow. Translate those harness details into the existing
+semantic section-compare / runtime-proof / transition-proof metrics instead.
 
 ## Procedure
 

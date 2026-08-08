@@ -1,0 +1,31 @@
+{
+  "name": "ui-clone-cli",
+  "version": "0.7.25",
+  "description": "Agent-readable CLI for ui-clone-skills pipeline, gates, and terminal state.",
+  "license": "Apache-2.0",
+  "bin": {
+    "ui-clone": "bin/ui-clone"
+  },
+  "files": [
+    "bin/",
+    "ui_clone/",
+    "docs/",
+    "scripts/",
+    "hooks/",
+    "skills/",
+    "AGENTS.md",
+    "README.md",
+    "pyproject.toml",
+    "uv.lock",
+    "LICENSE.txt",
+    "!ui_clone/**/__pycache__/",
+    "!ui_clone/**/*.pyc",
+    "!skills/**/__pycache__/",
+    "!skills/**/*.pyc",
+    "!scripts/**/__pycache__/",
+    "!scripts/**/*.pyc"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

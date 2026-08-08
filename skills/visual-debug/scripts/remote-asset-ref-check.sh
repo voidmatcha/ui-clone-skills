@@ -5,7 +5,7 @@
 #
 #
 # Failure pattern this closes:
-#   const A = 'https://navercorp.com';
+#   const A = 'https://example.com';
 #   <img src={`${A}/img/pc/main_visual.webp`} />
 #
 # Why this matters:
@@ -117,7 +117,7 @@ ASSET_REF_PATTERNS = [
 ]
 
 # JSX template literal pattern — catches the heavy-motion site case:
-#   const A = 'https://navercorp.com';
+#   const A = 'https://example.com';
 #   <img src={`${A}/img/pc/x.webp`} />
 HOST_CONST_PATTERN = re.compile(
     r'const\s+\w+\s*=\s*[\"\'](https?://[^\"\'\s]+?)[\"\']'

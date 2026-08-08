@@ -62,6 +62,47 @@ Sanity-check after the batch finishes — if the file count is 1 when you downlo
 □ Each file > 500 bytes (not error pages)
 ```
 
+### Browser resource mirror (recommended recovery evidence)
+
+Run the resource mirror after the page has loaded in the live session:
+
+```bash
+bash "$PLUGIN_ROOT/scripts/extract/resource-mirror.sh" <session> tmp/ref/<component> <url>
+```
+
+Default policy: advisory. The pipeline records/uses `resource-manifest.json`
+when available but does not abort Phase 2 solely because the mirror failed
+(network/CORS/auth volatility can make mirror capture unavailable while DOM/CSS
+extraction still succeeds). For runs where the mirror is mandatory evidence,
+set:
+
+```bash
+UI_CLONE_RESOURCE_MIRROR_REQUIRED=1 \
+  bash "$PLUGIN_ROOT/scripts/extract/resource-mirror.sh" <session> tmp/ref/<component> <url> --required
+```
+
+This writes:
+
+- `tmp/ref/<component>/resources/<host>/<path>` — bounded copies of browser-observed CSS, JS, images, fonts, media, JSON/Lottie, and WASM resources.
+- `tmp/ref/<component>/resource-manifest.json` — URL, local path, content type, byte count, and download status per resource.
+
+Use this as extraction evidence and asset-recovery backup when `visible-images.json`,
+`runtime-media.json`, `required-media.json`, or bundle capture misses runtime-loaded files. Do **not** serve
+`resources/` as the implementation and do not treat a successful mirror as fidelity
+proof; rendered DOM/section/motion verification remains mandatory.
+
+For video backgrounds created only after hydration, run the live DOM inventory
+before `required-media.sh`:
+
+```bash
+bash "$PLUGIN_ROOT/scripts/extract/runtime-media.sh" <url> <session> tmp/ref/<component>
+bash "$PLUGIN_ROOT/scripts/extract/required-media.sh" tmp/ref/<component>
+```
+
+`required-media.sh` merges `runtime-media.json` into `required-media.json`, so
+the generator can emit real `<video autoplay muted playsInline>` runtime proof
+instead of silently shipping an implementation with zero video elements.
+
 ### Extract and preserve CSS variables (MANDATORY)
 
 Before cleaning `:root` blocks from downloaded CSS, extract ALL CSS variables to a separate file:

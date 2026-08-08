@@ -31,6 +31,7 @@ import re
 import shlex
 from pathlib import Path
 
+from ui_clone.hooks._common import CMD_POSITION_PREFIX, sanitize_command_for_deny
 from ui_clone.state import GATE_ORDER, PipelineState
 
 _FRESH_FOLDER_ALLOW_PATTERNS = re.compile(
@@ -47,15 +48,27 @@ _FRESH_FOLDER_ALLOW_PATTERNS = re.compile(
     r")"
 )
 
-_FRESH_FOLDER_DENY_PATTERNS = re.compile(
-    r"\bagent-browser\b"
-    r"|\bwget\b"
-    r"|\bcurl\b[^\n\r]*https?://"
-    r"|\bnode\s+(?:\S+/)?server\.js\b"
+# Tool invocations are denied only at COMMAND POSITION (CMD_POSITION_PREFIX) —
+# a tool NAME inside a quoted pgrep pattern, a `command -v` check, or a grep
+# argument is DATA, not an invocation. (Live-fire false positive 2026-06-12:
+# `pgrep -fl "ci-local|section-compare|video-motion|agent-browser"` was blocked
+# because the bare `\bagent-browser\b` matched inside the quoted argument.)
+_FRESH_FOLDER_DENY_TOOLS = re.compile(
+    CMD_POSITION_PREFIX + r"(?:"
+    r"agent-browser\b"
+    r"|wget\b"
+    r"|curl\b[^\n\r]*https?://"
+    r"|node\s+(?:\S+/)?server\.js\b"
     r"|python(?:3)?\s+-m\s+http\.server\b"
     r"|npx\s+(?:serve|vite|http-server)\b"
     r"|npm\s+run\s+dev\b"
-    r"|/skills/visual-debug/scripts/(?:extract-dom|dom-scaffold|section-compare|"
+    r")"
+)
+# Canonical extraction-script paths. These carry the full plugin path, so a bare
+# script NAME in a diagnostic (pgrep/grep) cannot match; quoted occurrences are
+# stripped by sanitize_command_for_deny before this runs.
+_FRESH_FOLDER_DENY_PATHS = re.compile(
+    r"/skills/visual-debug/scripts/(?:extract-dom|dom-scaffold|section-compare|"
     r"asset-transfer-check|asset-utilization-check|paid-features-detect|"
     r"bundle-impl-coverage-check|hover-state-compare|click-state-compare|"
     r"video-transition-compare|hydration-check|reveal-trigger-check|"
@@ -218,9 +231,19 @@ def _fresh_state_violation(cmd: str) -> bool:
     """
     if not cmd:
         return False
-    if _FRESH_FOLDER_ALLOW_PATTERNS.match(cmd):
-        return False
-    return bool(_FRESH_FOLDER_DENY_PATTERNS.search(cmd))
+    # Strip quoted strings + heredoc bodies so a tool/script name that appears
+    # as DATA (quoted pgrep pattern, heredoc doc body, grep/command-v arg)
+    # cannot deny. The deny matchers are now COMMAND-POSITION anchored, so a
+    # tool name in argument position no longer triggers — which makes the old
+    # start-anchored allow list unnecessary (and unsafe: `ls && agent-browser
+    # open URL` started with an allowed `ls` yet hid a real extraction). Deny
+    # wins on any real invocation, wherever it sits in the command.
+    sanitized = sanitize_command_for_deny(cmd)
+    if _FRESH_FOLDER_DENY_TOOLS.search(sanitized) or _FRESH_FOLDER_DENY_PATHS.search(
+        sanitized
+    ):
+        return True
+    return False
 
 
 def _find_active_ref(search_root: Path) -> Path | None:

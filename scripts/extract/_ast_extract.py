@@ -64,9 +64,9 @@ def _node_to_python(node: Any) -> Any:
     if t == "UnaryExpression":
         operator = getattr(node, "operator", "")
         arg = _node_to_python(getattr(node, "argument", None))
-        if isinstance(arg, (int, float)) and operator == "-":
+        if isinstance(arg, int | float) and operator == "-":
             return -arg
-        if isinstance(arg, (int, float)) and operator == "+":
+        if isinstance(arg, int | float) and operator == "+":
             return arg
         return None
     if t == "ObjectExpression":

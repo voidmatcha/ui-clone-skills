@@ -6,6 +6,7 @@ rebound onto the Gate class in `ui_clone.gates.__init__`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ui_clone import state as _state_mod
+from ui_clone.shell import bash_bin
 
 from .base import CheckResult
 
@@ -159,6 +161,143 @@ def _check_forensic_preservation_compliance(self: Gate) -> CheckResult | None:
         "pass",
         f"✓ forensicPreservation satisfied: {len(css_files)} local CSS file(s), "
         f"{len(class_tokens)} preserved CSS-module className token(s).",
+    )
+
+
+def _check_scaffold_base_stamp(self: Gate) -> CheckResult | None:
+    """Enforce transpiler provenance: the impl base must come from
+    scaffold-to-jsx.sh, not a hand-rolled HTML-to-JSX pass.
+
+    scaffold-to-jsx.sh writes scaffold-base-stamp.json stamped with the sha256
+    of the structure.json it consumed. An agent that bypasses the transpiler and
+    hand-transcribes the page (the ebay convert_html.py/emit_jsx.py path) copies
+    only markup attributes and silently drops every computed-style channel the
+    transpiler preserves (e.g. fontWeight=700 on 29 scaffold nodes → 0 in the
+    hand-written Page.tsx), leaving no stamp behind. Fail at post-implement when
+    the stamp is missing or its structureSha256 does not match the current
+    structure.json, so the bypass is caught while re-running the transpiler is
+    still the remedy.
+
+    Gated on structure.json existing: a run with no extracted DOM (e.g. before
+    Phase 2) has nothing to transpile, so the stamp is not required.
+
+    Reconciliation-aware stamps additionally record baseFile (structure.json or
+    structure.merged.json) so the sha is validated against the exact base the
+    transpiler consumed; legacy stamps without baseFile keep binding to
+    structure.json unchanged.
+    """
+    structure_path = self.ref_dir / "structure.json"
+    if not structure_path.is_file():
+        return None
+
+    fix = (
+        "Regenerate the base with the deterministic transpiler instead of "
+        "hand-authoring JSX: bash \"$PLUGIN_ROOT/skills/visual-debug/scripts/"
+        "scaffold-to-jsx.sh\" <ref-dir>/structure.json <out-dir>. Do not "
+        "hand-transcribe the page — the transpiler preserves the computed "
+        "typography/sizing the hand path drops."
+    )
+
+    stamp_path = self.ref_dir / "scaffold-base-stamp.json"
+    if not stamp_path.is_file():
+        return CheckResult(
+            "scaffold-base-stamp",
+            "fail",
+            "scaffold-base-stamp.json — MISSING. The implementation base was not "
+            "produced by the deterministic transpiler (scaffold-to-jsx.sh); a "
+            "hand-rolled HTML-to-JSX pass drops every computed-style channel the "
+            "transpiler preserves (fontWeight, sizing expressions, etc.).",
+            fix=fix,
+        )
+
+    try:
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return CheckResult(
+            "scaffold-base-stamp",
+            "fail",
+            f"scaffold-base-stamp.json — unreadable/malformed ({exc}). Cannot "
+            "verify transpiler provenance.",
+            fix=fix,
+        )
+
+    recorded = stamp.get("structureSha256") if isinstance(stamp, dict) else None
+    if not isinstance(recorded, str) or not recorded:
+        return CheckResult(
+            "scaffold-base-stamp",
+            "fail",
+            "scaffold-base-stamp.json — missing structureSha256; the stamp does "
+            "not bind to a structure.json, so transpiler provenance is "
+            "unverifiable (hand-written or forged stamp).",
+            fix=fix,
+        )
+
+    # Resolve which file the stamp binds its sha256 to. Legacy stamps carry no
+    # baseFile and bind to structure.json (behavior unchanged). Reconciliation-
+    # aware stamps record baseFile so scaffold-to-jsx can consume the merged
+    # superset DOM (structure.merged.json). Only these two basenames are allowed,
+    # which also rejects any path-traversal value (a ../ or nested path is not in
+    # the set) and keeps the base file under ref_dir.
+    allowed_base_files = {"structure.json", "structure.merged.json"}
+    base_file = stamp.get("baseFile")
+    if base_file is None:
+        base_path = structure_path
+        base_label = "structure.json"
+    elif isinstance(base_file, str) and base_file in allowed_base_files:
+        base_path = self.ref_dir / base_file
+        base_label = base_file
+        if base_file == "structure.merged.json" and not base_path.is_file():
+            return CheckResult(
+                "scaffold-base-stamp",
+                "fail",
+                "scaffold-base-stamp.json records baseFile=structure.merged.json "
+                "but that reconciled base no longer exists — provenance cannot be "
+                "verified against a base that was removed after scaffolding.",
+                fix=(
+                    "Re-run the spec-target reconciliation merge, then the "
+                    "transpiler: bash \"$PLUGIN_ROOT/scripts/extract/"
+                    "reconcile-spec-targets.sh\" <ref-dir> && bash "
+                    "\"$PLUGIN_ROOT/skills/visual-debug/scripts/scaffold-to-jsx.sh"
+                    "\" <ref-dir>/structure.merged.json <out-dir>."
+                ),
+            )
+    else:
+        return CheckResult(
+            "scaffold-base-stamp",
+            "fail",
+            f"scaffold-base-stamp.json records a disallowed baseFile "
+            f"({base_file!r}); the stamp may only bind to structure.json or "
+            "structure.merged.json under the ref dir.",
+            fix=fix,
+        )
+
+    try:
+        actual = hashlib.sha256(base_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        return CheckResult(
+            "scaffold-base-stamp",
+            "fail",
+            f"{base_label} — unreadable ({exc}); cannot verify scaffold stamp.",
+            fix=fix,
+        )
+
+    if recorded != actual:
+        return CheckResult(
+            "scaffold-base-stamp",
+            "fail",
+            "scaffold-base-stamp.json structureSha256 does not match the current "
+            f"{base_label} (stamp {recorded[:12]}… vs actual {actual[:12]}…). "
+            "The transpiler base is stale or was produced from a different "
+            "structure — re-run scaffold-to-jsx.sh so the impl matches the "
+            "extracted DOM.",
+            fix=fix,
+        )
+
+    return CheckResult(
+        "scaffold-base-stamp",
+        "pass",
+        "✓ scaffold-base-stamp.json present and structureSha256 matches "
+        f"{base_label} — implementation base is transpiler-produced.",
     )
 
 
@@ -330,7 +469,7 @@ def _find_impl_root(self: Gate) -> Path | None:
         return None
     try:
         proc = subprocess.run(
-            ["bash", str(resolver), str(self.ref_dir)],
+            [bash_bin(), str(resolver), str(self.ref_dir)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -599,7 +738,7 @@ def _check_visual_debug_stamp(self: Gate) -> CheckResult | None:
         return CheckResult(
             "visual-debug-stamp.json",
             "fail",
-            "sections/result.txt reports ≥1 PASS but visual-debug-stamp.json "
+            "sections/result.txt exists but visual-debug-stamp.json "
             "is missing. The canonical `scripts/verify/auto-verify.sh` entry "
             "was not used — bare section-compare.sh runs cannot clear the "
             "post-implement gate because the HTML-paste / screenshot-asset "
@@ -1001,7 +1140,7 @@ def _check_bundle_grep_context_inject(self: Gate) -> CheckResult | None:
         for pattern in _ref_source_patterns_for_label(self.ref_dir, label):
             try:
                 proc = subprocess.run(
-                    ["bash", str(grep_script), str(self.ref_dir), pattern],
+                    [bash_bin(), str(grep_script), str(self.ref_dir), pattern],
                     capture_output=True,
                     text=True,
                     timeout=_E1_BUNDLE_GREP_TIMEOUT_S,
@@ -1180,6 +1319,9 @@ def gate_post_implement(self: Gate) -> list[CheckResult]:
     forensic_preservation = _check_forensic_preservation_compliance(self)
     if forensic_preservation is not None:
         results.append(forensic_preservation)
+    scaffold_stamp = _check_scaffold_base_stamp(self)
+    if scaffold_stamp is not None:
+        results.append(scaffold_stamp)
     results.extend(self._check_componentization())
     results.extend(self._check_generation_completeness())
     section_health = _check_sections_result_health(self)

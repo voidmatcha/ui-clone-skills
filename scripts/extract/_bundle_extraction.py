@@ -99,7 +99,8 @@ def _extract_gsap(all_text: str, file_offsets: list[tuple[str, int]]) -> list[di
 
 
 _SCRUB_PROPS = (
-    r"scale[XYZ]?|rotate[XYZ]?|opacity|x|y|skew[XY]|filter|backgroundColor"
+    r"scale[XYZ]?|rotate[XYZ]?|opacity|x|y|skew[XY]|filter|"
+    r"backgroundColor|width|height|borderRadius"
 )
 
 
@@ -260,6 +261,156 @@ def _extract_webflow_ix2(all_text: str, file_offsets: list[tuple[str, int]]) -> 
     }
 
 
+_HOVER_SIZE_RE = re.compile(
+    r"className:\s*(?:[\w$]+\(\)\.)?(\w+)\s*,[^{}]{0,120}?"
+    r"initial:\{(width|maxWidth):0\}\s*,\s*animate:\{(?:width|maxWidth):([^{}]+)\}"
+    r"(?:\s*,\s*transition:\{([^{}]*)\})?"
+)
+
+
+def _extract_hover_size_expansions(
+    all_text: str, file_offsets: list[tuple[str, int]]
+) -> list[dict]:
+    """Size-expansion components: initial width/maxWidth 0 animating open on
+    a state flag (nav pill labels, expanding menu chips). Observed failure
+    mode: the expansion lived only in the JS bundle, never reached a spec
+    entry, and the impl shipped the labels baked at width:0 with no hover
+    behavior — unverified by every hover gate. Each match also resolves the
+    CSS-module class token to its concrete class name via the bundle's
+    class-map literal when present, so downstream spec entries get a real
+    selector."""
+    out: list[dict] = []
+    for m in _HOVER_SIZE_RE.finditer(all_text):
+        token, prop, to_expr, transition = (
+            m.group(1), m.group(2), m.group(3), m.group(4) or ""
+        )
+        resolved = None
+        rm = re.search(
+            rf"{re.escape(token)}\s*:\s*\"([A-Za-z0-9_-]+)\"", all_text
+        )
+        if rm:
+            resolved = rm.group(1)
+        out.append(
+            {
+                "kind": "size-expansion",
+                "classToken": token,
+                "resolvedClassName": resolved,
+                "property": prop,
+                "from": "0",
+                "to": to_expr.strip()[:80],
+                "transition": transition.strip()[:120],
+                "source": _find_file_for_offset(file_offsets, m.start()),
+                "confidence": "high",
+                "minified": True,
+            }
+        )
+    return out
+
+
+# Active-state (scroll/active-swap) width reveals: `initial:{width:0},
+# animate:{width:<flag>?"auto"|<n>:0}`. The reveal is gated on a STATE flag
+# (the active-section flag in a nav state machine), not a hover pointer event —
+# so it is invisible to the hover gate. Loop-10/11 defect: scrolling swaps the
+# nav active state but the newly-active button's label never reveals (container
+# baked width:0). Unlike _HOVER_SIZE_RE this does not require the className to be
+# adjacent (real minified state-machine code interleaves layout/style props), so
+# it catches reveals the hover extractor misses; the nearest className is
+# resolved separately.
+_ACTIVE_STATE_SIZE_RE = re.compile(
+    r"initial:\{(width|maxWidth):0\}\s*,\s*animate:\{(?:width|maxWidth):"
+    r"\s*([A-Za-z_$][\w$]*)\s*\?\s*(\"auto\"|'auto'|\d+)\s*:\s*0\s*\}"
+    r"(?:\s*,\s*transition:\{([^{}]*)\})?"
+)
+_CLASSNAME_BEFORE_RE = re.compile(r"className:\s*(?:[\w$]+\(\)\.)?(\w+)")
+
+
+def _extract_active_state_expansions(
+    all_text: str, file_offsets: list[tuple[str, int]]
+) -> list[dict]:
+    """State-flag-driven width reveals (active-section label expansion). The
+    expansion is gated on a state flag, so it fires on a state change (scroll to
+    a section) rather than a hover — the hover gate cannot verify it. Each match
+    resolves the nearest preceding className token to a concrete class via the
+    bundle class-map when present."""
+    out: list[dict] = []
+    for m in _ACTIVE_STATE_SIZE_RE.finditer(all_text):
+        prop, flag, to_expr, transition = (
+            m.group(1), m.group(2), m.group(3), m.group(4) or ""
+        )
+        window = all_text[max(0, m.start() - 200) : m.start()]
+        cn = list(_CLASSNAME_BEFORE_RE.finditer(window))
+        token = cn[-1].group(1) if cn else None
+        resolved = None
+        if token:
+            rm = re.search(rf"{re.escape(token)}\s*:\s*\"([A-Za-z0-9_-]+)\"", all_text)
+            if rm:
+                resolved = rm.group(1)
+        out.append(
+            {
+                "kind": "active-state-expansion",
+                "classToken": token,
+                "resolvedClassName": resolved,
+                "property": prop,
+                "stateFlag": flag,
+                "from": "0",
+                "to": to_expr.strip("\"'")[:80],
+                "transition": transition.strip()[:120],
+                "source": _find_file_for_offset(file_offsets, m.start()),
+                "confidence": "high" if token else "medium",
+                "minified": True,
+            }
+        )
+    return out
+
+
+# Carousel/slider libraries whose construction config the regex parser
+# deliberately does NOT extract: their parameters live in nested option objects
+# with responsive breakpoint maps (slidesPerView/perPage per breakpoint, effect,
+# autoplay, loop) that minified-brace regexes cannot parse reliably. We flag
+# PRESENCE only so Step 5d can dispatch the bundle-analyzer LLM for exactly these
+# gaps (script-first, dispatch-on-gap) instead of silently shipping a carousel
+# with no runtime config. Markers are stable across vanilla + framework builds:
+# the `new <Lib>(` constructor and the DOM class literals the library renders.
+_UNRESOLVED_LIB_MARKERS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    (
+        "swiper",
+        (r"new\s+Swiper\s*\(", r"swiper-slide", r"swiper-wrapper"),
+        "Swiper carousel config (slidesPerView, breakpoints, effect, autoplay, "
+        "loop) — needs bundle-analyzer LLM extraction",
+    ),
+    (
+        "splide",
+        (r"new\s+Splide\s*\(", r"splide__slide", r"splide__track"),
+        "Splide carousel config (perPage, breakpoints, type, autoplay) — needs "
+        "bundle-analyzer LLM extraction",
+    ),
+)
+
+
+def _detect_unresolved_libraries(
+    all_text: str, file_offsets: list[tuple[str, int]]
+) -> list[dict]:
+    """Flag carousel/slider libraries present in the bundle whose config the
+    regex parser does not attempt, so Step 5d dispatches the bundle-analyzer LLM
+    for just these gaps. Presence only — no config is guessed. One entry per
+    library, attributed to the first matching marker's source bundle."""
+    out: list[dict] = []
+    for library, markers, reason in _UNRESOLVED_LIB_MARKERS:
+        hit = None
+        for marker in markers:
+            m = re.search(marker, all_text)
+            if m:
+                hit = m
+                break
+        if hit is not None:
+            out.append({
+                "library": library,
+                "reason": reason,
+                "source": _find_file_for_offset(file_offsets, hit.start()),
+            })
+    return out
+
+
 def parse_bundles(ref_dir: Path) -> dict:
     """Parse all .js files under `ref_dir/bundles/` and return the extraction plan.
 
@@ -296,13 +447,19 @@ def parse_bundles(ref_dir: Path) -> dict:
     ix2 = _extract_webflow_ix2(all_text, file_offsets)
     if ix2 is not None:
         extractions["webflowIX2"] = ix2
+    expansions = _extract_hover_size_expansions(all_text, file_offsets)
+    if expansions:
+        extractions["hoverSizeExpansions"] = expansions
+    active_expansions = _extract_active_state_expansions(all_text, file_offsets)
+    if active_expansions:
+        extractions["activeStateExpansions"] = active_expansions
 
     return {
         "schemaVersion": 1,
         "bundlesScanned": js_count,
         "totalSizeKB": total_size_kb,
         "extractions": extractions,
-        "unresolved": [],
+        "unresolved": _detect_unresolved_libraries(all_text, file_offsets),
     }
 
 
@@ -331,6 +488,11 @@ def main(argv: list[str]) -> int:
         print(f"  {lib}: {count} extractions")
     if not extractions:
         print("  no library construction sites detected")
+    for u in plan.get("unresolved") or []:
+        print(
+            f"  ⚠ unresolved: {u['library']} ({u['source']}) — "
+            "dispatch bundle-analyzer per Step 5d"
+        )
     return 0
 
 

@@ -25,6 +25,23 @@ If you generate a component without its transitions, it is incomplete.
 
 Every `transition-spec.json` entry MUST be implemented with its declared trigger + easing + duration, and is enforced at runtime by the transition-fires gate (post-implement) — a component that imports an animation library but creates no trigger, or whose target does not measurably move at its trigger, FAILS. Per-trigger pattern: IntersectionObserver/whileInView for scroll-into-view reveals; useScroll/scrollYProgress (or rAF + getBoundingClientRect under smooth-scroll) bound to the target's transform/opacity for scroll-scrub; real timeline for splash; autoplay interval for carousel.
 
+**Do not re-derive the scroll/state/swiper parameters — they are already extracted.** For scroll-scrub, scroll-state-machine, and swiper/carousel entries, run `scripts/extract/emit-motion-skeletons.sh <ref-dir> <impl-dir>` to emit `impl/src/generated/motion-skeletons.ts`: one `// spec:<id>`-tagged hook/init per entry with the property list + input range (e.g. `width,height,borderRadius` over `[0,.5,1]` — NOT an approximated `scale`), the state set (`initial → expanded → settled`), and each carousel's EXACT Swiper config including its `breakpoints` object and a `matchMedia` change listener that rebuilds on the mobile query (never a one-shot read). Fill only the TODO wiring (refs, output stops, thresholds); do not rewrite the parameters or collapse the per-carousel configs into one.
+
+The inverse is also mandatory: do not add hover/page motion that the reference did not show. Header links, logos, cards, and media wrappers must not rotate, disappear, scale, or fade on hover unless `states/hover/manifest.json`, `hover-css-rules.json`, or `transition-spec.json` records that exact target and property delta. Comprehensive verification runs `hover-tree-diff.sh` from the implementation side to catch invented hover transforms/opacity changes on otherwise-static reference elements.
+
+### Spec target absent from the scaffold (reconciliation)
+
+A `transition-spec.json` / `hover-css-rules.json` target whose class/id is absent from `structure.json` is an **interaction-revealed** element the single-state capture never saw (dropdown CTA, tab panel, share/sign-in popover). The mirrored CSS ships its `:hover`/transition rules, but the transpiler has no node to attach them to — so the transition later fails `transition-fires` with 'element not found'. Do not hand-guess the markup. Run:
+
+```
+bash scripts/extract/reconcile-spec-targets.sh <ref_url> <ref_dir> [--session S]
+```
+
+It drives the live ref with bounded stimulation (scroll, hover nav, click tabs/expanders — never navigating `<a href>`), captures each revealed element's subtree in `structure.json`'s node shape, and splices placeable ones under their observed parent into `structure.merged.json` (never mutating the provenance-stamped `structure.json`). Then:
+
+1. **Placed targets** (`reconcile-report.json` → `mergedTargets[]`) are already in `structure.merged.json`; transpile from the merged tree so those nodes are emitted and the mirrored hover CSS has something to act on.
+2. **`missingSpecTargets[]`** are the unresolved remainder — either never revealed by stimulation, or revealed only inside an interaction-mounted overlay whose parent is absent from the homepage tree. Each carries its `subtreeHtml` snippet when captured. These are a **Step-7 synthesis obligation**: build the overlay/panel component + its trigger from the snippet, or move the entry to `transition-spec.json` `skipped[]` with a reason if it is genuinely a subpage selector. Do not silently drop them.
+
 ## Bundle → Code translation
 
 ### Scroll-driven animations (GSAP ScrollTrigger / custom)

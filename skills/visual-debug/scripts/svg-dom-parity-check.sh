@@ -43,8 +43,14 @@ if [ ! -d "$REF_DIR" ]; then
 fi
 
 OUT_PATH="$REF_DIR/svg-dom-parity.json"
-REF_TMP="$(mktemp -t svg-parity-ref-XXXXXX.json)"
-IMPL_TMP="$(mktemp -t svg-parity-impl-XXXXXX.json)"
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+REF_TMP="$(mktemp -t svg-parity-ref-XXXXXX)"
+mv "$REF_TMP" "${REF_TMP}.json"
+REF_TMP="${REF_TMP}.json"
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+IMPL_TMP="$(mktemp -t svg-parity-impl-XXXXXX)"
+mv "$IMPL_TMP" "${IMPL_TMP}.json"
+IMPL_TMP="${IMPL_TMP}.json"
 trap 'rm -f "$REF_TMP" "$IMPL_TMP"' EXIT
 
 INVENTORY_JS='(() => {
@@ -127,15 +133,30 @@ INVENTORY_JS='(() => {
       if (svgParent && !isVisible(svgParent)) return;
       useHref++;
     });
+    const hasSvgBg = (bg) => bg && bg.includes("url(") && /\.svg\b/i.test(bg);
     all.forEach((el) => {
+      const isSyntheticPseudo = el.matches && el.matches("[data-pseudo]");
+      if (isSyntheticPseudo) {
+        // Scaffolded clones materialize captured ::before/::after as
+        // <span data-pseudo>. Native pseudo inventory is counted from the
+        // visible parent even when the pseudo layer itself is opacity:0
+        // (for hover/state crossfades). Mirror that behavior here so the
+        // verifier does not treat a duplicate-prevention guard as SVG loss.
+        const parent = el.parentElement;
+        if (parent && isVisible(parent)) {
+          const bg = getComputedStyle(el).backgroundImage;
+          if (hasSvgBg(bg)) pseudoBgSvg++;
+        }
+        return;
+      }
       if (!isVisible(el)) return;
       const bg = getComputedStyle(el).backgroundImage;
-      if (bg && bg.includes("url(") && /\.svg\b/i.test(bg)) bgSvg++;
+      if (hasSvgBg(bg)) bgSvg++;
       try {
         for (const which of ["::before", "::after"]) {
           const ps = getComputedStyle(el, which);
           const psBg = ps.getPropertyValue("background-image");
-          if (psBg && psBg.includes("url(") && /\.svg\b/i.test(psBg)) pseudoBgSvg++;
+          if (hasSvgBg(psBg)) pseudoBgSvg++;
         }
       } catch (e) { /* ignore */ }
     });
@@ -184,11 +205,19 @@ INVENTORY_JS='(() => {
 
 run_capture() {
   local url="$1" out="$2" sess="$3"
-  agent-browser --session "$sess" open "$url" >/dev/null 2>&1 || {
-    echo "{\"error\": \"open failed\"}" > "$out"
-    return 1
-  }
+  local open_status=0
+  # agent-browser can return a timeout for pages that keep network activity
+  # alive even though the document is already usable. Treat the open command
+  # as a navigation attempt, then verify the loaded document directly instead
+  # of failing on the CLI exit code alone.
+  agent-browser --session "$sess" open "$url" >/dev/null 2>&1 || open_status=$?
   agent-browser --session "$sess" wait 2500 >/dev/null 2>&1 || true
+  local href=""
+  href="$(agent-browser --session "$sess" eval '(() => location.href)()' 2>/dev/null || true)"
+  if [ -z "$href" ] || printf '%s' "$href" | grep -Eiq 'about:blank'; then
+    echo "{\"error\": \"open failed\", \"openStatus\": $open_status}" > "$out"
+    return 1
+  fi
   agent-browser --session "$sess" eval 'window.scrollTo(0, document.body.scrollHeight/2)' >/dev/null 2>&1 || true
   agent-browser --session "$sess" wait 400 >/dev/null 2>&1 || true
   agent-browser --session "$sess" eval 'window.scrollTo(0, document.body.scrollHeight)' >/dev/null 2>&1 || true

@@ -16,6 +16,11 @@ import sys
 from ui_clone.hooks._common import extract_tool_command as _extract_tool_command
 from ui_clone.hooks._common import find_project_root as _find_project_root
 from ui_clone.hooks._common import find_ref_dir as _find_ref_dir
+from ui_clone.hooks._common import mark_ref_session as _mark_ref_session
+from ui_clone.hooks._common import session_id_from_payload as _session_id_from_payload
+from ui_clone.hooks._common import (
+    target_ref_dir_for_ui_re_command as _target_ref_dir_for_ui_re_command,
+)
 
 # Word-boundary patterns for English terms to avoid false positives like
 # "let's commit to this" or "commitment" triggering the hook.
@@ -49,12 +54,19 @@ def main() -> None:
 
     # Parse tool input to extract bash command
     bash_cmd = ""
+    session_id = ""
     if raw_input.strip():
         try:
             data = json.loads(raw_input)
-            bash_cmd = _extract_tool_command(data) if isinstance(data, dict) else ""
+            if isinstance(data, dict):
+                bash_cmd = _extract_tool_command(data)
+                session_id = _session_id_from_payload(data)
         except json.JSONDecodeError:
             pass
+
+    target_ref_dir = _target_ref_dir_for_ui_re_command(bash_cmd, project_root)
+    if target_ref_dir is not None:
+        _mark_ref_session(target_ref_dir, session_id, source="post_verify")
 
     if not _is_completion_command(bash_cmd):
         sys.exit(0)

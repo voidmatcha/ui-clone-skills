@@ -11,17 +11,57 @@ Edge direction convention:
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+
+GENERATION_PLAN_SOURCES = (
+    "section-map.json",
+    "styles.json",
+    "css/variables.txt",
+    "signature-effects-candidates.json",
+    "structure.json",
+    "animations-detected.json",
+    "transition-spec.json",
+    "element-roles.json",
+    "element-groups.json",
+    "layout-decisions.json",
+    "component-map.json",
+    "asset-substitution.json",
+    "font-parity.json",
+    "bundle-extraction.json",
+    "sticky-elements.json",
+    "hidden-elements.json",
+    "mobile-swap.json",
+    "animation-init-styles.json",
+    "external-sdks.json",
+    "bundle-map.json",
+    "scroll-engine.json",
+    "paid-features.json",
+    "canvas-webgl-detection.json",
+    "required-media.json",
+    "dom-scaffold.json",
+    "extracted.json",
+    "head.json",
+    "css/*.css",
+)
 
 # Directed edges: artifact → [artifacts that depend on it]
 # Read: "if X changes, these artifacts become stale"
 DEPS: dict[str, list[str]] = {
     "structure.json": ["section-map.json", "extracted.json"],
-    "styles.json": ["extracted.json"],
-    "section-map.json": ["component-map.json", "extracted.json"],
+    "styles.json": ["extracted.json", "generation-plan.json"],
+    "section-map.json": [
+        "component-map.json",
+        "extracted.json",
+        "generation-plan.json",
+    ],
+    "css/variables.txt": ["generation-plan.json"],
     "component-map.json": ["extracted.json"],
     "interactions-detected.json": ["hover-css-rules.json", "extracted.json"],
     "hover-css-rules.json": ["extracted.json"],
@@ -30,18 +70,35 @@ DEPS: dict[str, list[str]] = {
     "svg-text-elements.json": ["extracted.json"],
     "bundle-map.json": ["transition-spec.json"],
     "transition-spec.json": ["extracted.json"],
+    "runtime-media.json": ["required-media.json"],
 }
 
+for _generation_plan_source in GENERATION_PLAN_SOURCES:
+    if "*" in _generation_plan_source:
+        continue
+    _dependents = DEPS.setdefault(_generation_plan_source, [])
+    if "generation-plan.json" not in _dependents:
+        _dependents.append("generation-plan.json")
+
 # Severity: which artifacts are blocking vs advisory when stale
-_BLOCK_ARTIFACTS = {"extracted.json", "transition-spec.json"}
+_BLOCK_ARTIFACTS = {
+    "extracted.json",
+    "generation-plan.json",
+    "transition-spec.json",
+}
 
 # Fix messages per stale artifact
 _FIX_MAP: dict[str, str] = {
     "extracted.json": "Re-run Step 6b: assemble extracted.json from all artifacts",
     "section-map.json": "Re-run Step 2: re-extract DOM structure",
     "component-map.json": "Re-run Step 6c: re-run section audit",
+    "generation-plan.json": (
+        "Re-run generation-plan.sh, then generation-planner enrichment"
+    ),
     "transition-spec.json": "Re-run Step 5d: re-write transition-spec from bundle-map",
 }
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass
@@ -50,6 +107,93 @@ class StalenessIssue:
     because_of: str
     severity: Literal["block", "warn"]
     fix: str
+
+
+def generation_plan_source_hashes(ref_dir: Path) -> dict[str, str | None]:
+    """Hash every deterministic and enriched schema-v2 plan input."""
+    hashes: dict[str, str | None] = {}
+    for relative_path in GENERATION_PLAN_SOURCES:
+        if relative_path == "css/*.css":
+            css_entries = [
+                (
+                    path.relative_to(ref_dir).as_posix(),
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+                for path in sorted((ref_dir / "css").glob("*.css"))
+                if path.is_file()
+            ]
+            hashes[relative_path] = (
+                hashlib.sha256(
+                    json.dumps(
+                        css_entries,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+                if css_entries
+                else None
+            )
+            continue
+        path = ref_dir / relative_path
+        try:
+            hashes[relative_path] = (
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                if path.is_file()
+                else None
+            )
+        except OSError:
+            hashes[relative_path] = "<unreadable>"
+    return hashes
+
+
+def generation_plan_provenance_issues(
+    ref_dir: Path,
+    provenance: Any,
+) -> tuple[list[str], list[str]]:
+    """Return malformed/forged metadata issues and stale source-hash issues."""
+    invalid: list[str] = []
+    stale: list[str] = []
+    if not isinstance(provenance, dict):
+        return ["missing provenance object"], []
+
+    if provenance.get("source") != "generation-planner":
+        invalid.append("source must be generation-planner")
+
+    generated_at = provenance.get("generatedAt")
+    if not isinstance(generated_at, str) or not generated_at.strip():
+        invalid.append("generatedAt must be a timezone-aware ISO-8601 string")
+    else:
+        try:
+            parsed_at = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+            if parsed_at.tzinfo is None:
+                raise ValueError
+        except ValueError:
+            invalid.append("generatedAt must be a timezone-aware ISO-8601 string")
+
+    if provenance.get("hashAlgorithm") != "sha256":
+        invalid.append("hashAlgorithm must be sha256")
+
+    recorded_hashes = provenance.get("sourceHashes")
+    if not isinstance(recorded_hashes, dict):
+        invalid.append("sourceHashes must be an object")
+        return invalid, stale
+
+    current_hashes = generation_plan_source_hashes(ref_dir)
+    for relative_path, current_hash in current_hashes.items():
+        if relative_path not in recorded_hashes:
+            invalid.append(f"sourceHashes missing {relative_path}")
+            continue
+        recorded_hash = recorded_hashes[relative_path]
+        if recorded_hash is not None and (
+            not isinstance(recorded_hash, str)
+            or not _SHA256_RE.fullmatch(recorded_hash)
+        ):
+            invalid.append(f"sourceHashes.{relative_path} is not a SHA-256 digest or null")
+            continue
+        if recorded_hash != current_hash:
+            stale.append(relative_path)
+
+    return invalid, stale
 
 
 def _assert_no_cycles() -> None:

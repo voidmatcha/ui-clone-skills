@@ -117,7 +117,8 @@ PROBE_JS='
 
 probe_url() {
   local session="$1" url="$2" out_file="$3"
-  agent-browser --session "$session" open "$url" --wait 1500 >/dev/null 2>&1 || true
+  agent-browser --session "$session" open "$url" >/dev/null 2>&1 || true
+  sleep 2  # open --wait is not a supported flag; settle explicitly
   agent-browser --session "$session" eval "$PROBE_JS" > "$out_file" 2>/dev/null || true
 }
 

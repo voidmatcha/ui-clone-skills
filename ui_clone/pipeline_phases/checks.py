@@ -8,6 +8,8 @@ changes.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ui_clone import dag as _dag
@@ -21,6 +23,31 @@ from ui_clone.hooks._common import load_json_safe
 if TYPE_CHECKING:
     from ui_clone.pipeline import Pipeline
     from ui_clone.pipeline_phases.types import PhaseResult
+
+
+def _mirror_required() -> bool:
+    return os.environ.get("UI_CLONE_RESOURCE_MIRROR_REQUIRED", "").strip() == "1"
+
+
+def resource_mirror_status_problem(ref_dir: Path) -> str | None:
+    """Return why the resource mirror is incomplete, or None when it is clean.
+
+    The mirror records its own coverage holes (cap truncation, failed downloads)
+    in `status` / `statusReasons`, but nothing read them — the pipeline only
+    checked that the file existed. A mirror that dropped content images therefore
+    resurfaced much later as an image-fidelity defect whose cause was three phases
+    upstream and invisible from the failure site.
+    """
+    payload = load_json_safe(ref_dir / "resource-manifest.json")
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("status") == "pass":
+        return None
+    reasons = payload.get("statusReasons")
+    if isinstance(reasons, list) and reasons:
+        return "; ".join(str(r) for r in reasons)
+    status = payload.get("status")
+    return None if status is None else f"status={status!r}"
 
 
 def check_phase_0a(pipeline: Pipeline) -> PhaseResult:
@@ -48,9 +75,7 @@ def check_phase_0a(pipeline: Pipeline) -> PhaseResult:
             )
             print("       Read canvas-webgl-extraction.md before Phase 2 extraction.")
     else:
-        print(
-            f"  {_YELLOW}○{_NC} canvas-webgl-detection.json missing — run detection FIRST"
-        )
+        print(f"  {_YELLOW}○{_NC} canvas-webgl-detection.json missing — run detection FIRST")
         print(f"     agent-browser --session {pipeline.session} open {pipeline.url}")
         result.checks.append(PhaseCheck("canvas-webgl-detection.json", False))
         if not pipeline.ref_dir.is_dir():
@@ -132,6 +157,17 @@ def check_phase_2(pipeline: Pipeline, has_ref: bool) -> PhaseResult:
         print()
         return result
 
+    try:
+        from ui_clone.extraction_artifacts import finalize_extraction_artifacts
+
+        finalize_extraction_artifacts(pipeline.ref_dir)
+    except Exception as exc:  # pragma: no cover - advisory status hardening
+        print(f"  {_YELLOW}⚠{_NC}  extraction artifact finalizer skipped: {exc}")
+
+    asset_metadata_command = (
+        f'bash "$PLUGIN_ROOT/scripts/extract/extract-asset-metadata.sh" '
+        f"{pipeline.session} {pipeline.ref_dir} {pipeline.url}"
+    )
     extraction_steps: list[tuple[str, str, str]] = [
         (
             "structure.json",
@@ -141,7 +177,12 @@ def check_phase_2(pipeline: Pipeline, has_ref: bool) -> PhaseResult:
         (
             "head.json",
             "fonts.json",
-            "Read asset-extraction.md → extract head, assets, fonts.",
+            f"Run Step 2.5 asset metadata extraction: {asset_metadata_command}",
+        ),
+        (
+            "visible-images.json",
+            "css/variables.txt",
+            f"Run Step 2.5 asset metadata extraction: {asset_metadata_command}",
         ),
     ]
     for file_a, file_b, step_msg in extraction_steps:
@@ -149,6 +190,28 @@ def check_phase_2(pipeline: Pipeline, has_ref: bool) -> PhaseResult:
         pipeline._check(f"{file_a} + {file_b}", passed)
         if not passed:
             pipeline._set_next("2", step_msg)
+
+    resource_manifest_ok = (pipeline.ref_dir / "resource-manifest.json").is_file()
+    mirror_problem = resource_mirror_status_problem(pipeline.ref_dir)
+    if resource_manifest_ok and mirror_problem and _mirror_required():
+        # Required mode: an incomplete mirror is a coverage hole, not a pass.
+        resource_manifest_ok = False
+    pipeline._check(
+        "Step 2.5b: resource-manifest.json (browser resource mirror, advisory by default)",
+        resource_manifest_ok,
+    )
+    if mirror_problem:
+        # Even in advisory mode, say it out loud here. The manifest recorded the
+        # hole, but nothing read it — so a capped mirror surfaced only as a missing
+        # image several phases later, where the cap is no longer visible.
+        print(f"  {_YELLOW}↳{_NC}  resource mirror incomplete: {mirror_problem}")
+    if not resource_manifest_ok:
+        print(
+            f"  {_YELLOW}↳{_NC}  Optional recovery evidence: run "
+            f"bash \"$PLUGIN_ROOT/scripts/extract/resource-mirror.sh\" "
+            f"{pipeline.session} {pipeline.ref_dir} {pipeline.url}"
+            " (set UI_CLONE_RESOURCE_MIRROR_REQUIRED=1 to make this a hard extraction gate)"
+        )
 
     single_file_steps: list[tuple[str, str, str]] = [
         (
@@ -183,10 +246,23 @@ def check_phase_2(pipeline: Pipeline, has_ref: bool) -> PhaseResult:
         pipeline._set_next("2", "Read responsive-detection.md → sweep viewports.")
 
     sizing_ok = (pipeline.ref_dir / "responsive" / "sizing-expressions.json").is_file()
-    pipeline._check("Step 4-C2: sizing-expressions.json", sizing_ok)
+    # An unfilled single-viewport sentinel must not count as a completed sweep
+    # when the ref responds to viewport (see responsive_sweep_remediation).
+    sizing_sentinel = False
+    if sizing_ok:
+        from ui_clone.extraction_artifacts import responsive_sweep_remediation
+
+        sizing_sentinel = responsive_sweep_remediation(pipeline.ref_dir) is not None
+    pipeline._check("Step 4-C2: sizing-expressions.json", sizing_ok and not sizing_sentinel)
     if not sizing_ok:
         pipeline._set_next(
             "2", "Read responsive-detection.md Step 4-C2 → multi-viewport element sizing."
+        )
+    elif sizing_sentinel:
+        pipeline._set_next(
+            "2",
+            "Read responsive-detection.md Step 4-C2 → re-run multi-viewport sweep "
+            "(sizing-expressions.json is an unfilled single-viewport sentinel).",
         )
 
     # Step 5: Interactions
@@ -199,16 +275,12 @@ def check_phase_2(pipeline: Pipeline, has_ref: bool) -> PhaseResult:
     bundles_ok = _has_files(pipeline.ref_dir / "bundles", "*.js", 1)
     pipeline._check("Step 5c: bundles/ (≥1 JS file)", bundles_ok)
     if not bundles_ok:
-        pipeline._set_next(
-            "2", "Read bundle-analysis.md → download ALL JS chunks. Gate: bundle"
-        )
+        pipeline._set_next("2", "Read bundle-analysis.md → download ALL JS chunks. Gate: bundle")
 
     # Advisory: warn when <3 chunks
     if bundles_ok and not _has_files(pipeline.ref_dir / "bundles", "*.js", 3):
         js_count = sum(1 for _ in (pipeline.ref_dir / "bundles").rglob("*.js"))
-        print(
-            f"  {_YELLOW}⚠{_NC}  Only {js_count} JS chunk(s) — typical SPAs have ≥3."
-        )
+        print(f"  {_YELLOW}⚠{_NC}  Only {js_count} JS chunk(s) — typical SPAs have ≥3.")
 
     sdks_ok = (pipeline.ref_dir / "external-sdks.json").is_file()
     pipeline._check("Step 5c: external-sdks.json", sdks_ok)
@@ -231,7 +303,10 @@ def check_phase_2(pipeline: Pipeline, has_ref: bool) -> PhaseResult:
     pipeline._check("Step 5d-2b: hover-css-rules.json", hover_ok)
     if not hover_ok:
         pipeline._set_next(
-            "2", "Read interaction-detection.md Step 5d-2b → extract ALL :hover CSS rules."
+            "2",
+            "Run scripts/extract/extract-hover-css-rules.sh <session> <ref-dir> "
+            "[url] (bounded live CSSOM + downloaded-CSS fallback), then read "
+            "interaction-detection.md Step 5d-2b.",
         )
 
     # Step 6b: Assembled extraction

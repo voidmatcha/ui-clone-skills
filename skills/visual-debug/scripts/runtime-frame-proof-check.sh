@@ -41,15 +41,100 @@ fi
 OUT="$REF_DIR/runtime-frame-proof.json"
 
 # ── Detect whether ref signals canvas/webgl/lottie ────────────────────
-REF_NEEDS="false"
-for name in canvas-webgl-detection.json required-media.json animations-detected.json transition-spec.json; do
-  p="$REF_DIR/$name"
-  [ -f "$p" ] || continue
-  if grep -Eiq '\"hasCanvas\":\s*true|\"hasWebGL\":\s*true|lottie|bodymovin|dotlottie|canvas|webgl' "$p" 2>/dev/null; then
+REF_NEEDS="$(python3 - "$REF_DIR" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+ref_dir = Path(sys.argv[1])
+markers = re.compile(r"(?:lottie|bodymovin|dotlottie|<canvas)", re.IGNORECASE)
+
+
+def load(name: str) -> Any:
+    try:
+        return json.loads((ref_dir / name).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def present(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value > 0
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "none", "false", "0"}
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return False
+
+
+def contains_signal(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(markers.search(value))
+    if isinstance(value, list):
+        return any(contains_signal(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    for key, item in value.items():
+        if markers.search(str(key)) and present(item):
+            return True
+        if contains_signal(item):
+            return True
+    return False
+
+
+canvas = load("canvas-webgl-detection.json")
+if isinstance(canvas, dict):
+    try:
+        canvas_count = int(canvas.get("canvasCount", 0) or 0)
+    except (TypeError, ValueError):
+        canvas_count = 0
+    if (
+        canvas.get("hasCanvas") is True
+        or canvas.get("hasWebGL") is True
+        or canvas_count > 0
+        or str(canvas.get("primaryRenderType", "")).strip().lower()
+        in {"canvas", "webgl"}
+    ):
+        print("true")
+        raise SystemExit(0)
+
+required_media = load("required-media.json")
+if isinstance(required_media, dict):
+    lottie = required_media.get("lottie")
+    totals = required_media.get("totals")
+    try:
+        lottie_total = int(totals.get("lottie", 0) or 0) if isinstance(totals, dict) else 0
+    except (TypeError, ValueError):
+        lottie_total = 0
+    if (isinstance(lottie, list) and bool(lottie)) or lottie_total > 0:
+        print("true")
+        raise SystemExit(0)
+
+for name in ("animations-detected.json", "transition-spec.json"):
+    if contains_signal(load(name)):
+        print("true")
+        raise SystemExit(0)
+
+print("false")
+PY
+)"
+
+# Video-only refs: when the ref's motion surface is a promoted <video>
+# (required-media.json), the frame proof must run and verify the impl's
+# video advances — instead of skipping and leaving runtime-proof blind.
+if [ "$REF_NEEDS" != "true" ] && [ -f "$REF_DIR/required-media.json" ]; then
+  if python3 -c "
+import json, sys
+d = json.load(open('$REF_DIR/required-media.json'))
+sys.exit(0 if (isinstance(d, dict) and d.get('videos')) else 1)
+" 2>/dev/null; then
     REF_NEEDS="true"
-    break
   fi
-done
+fi
 
 if [ "$REF_NEEDS" != "true" ]; then
   python3 - "$OUT" <<'PY'
@@ -73,7 +158,8 @@ PROBE_SESSION="${SESSION}-rfp"
 PROBE_RAW=$(mktemp -t rfp.XXXX.json)
 trap 'rm -f "$PROBE_RAW"; agent-browser --session "$PROBE_SESSION" close >/dev/null 2>&1 || true' EXIT
 
-agent-browser --session "$PROBE_SESSION" open "$IMPL_URL" --wait 2000 >/dev/null 2>&1 || true
+agent-browser --session "$PROBE_SESSION" open "$IMPL_URL" >/dev/null 2>&1 || true
+sleep 2  # open --wait is not a supported flag; settle explicitly
 
 agent-browser --session "$PROBE_SESSION" eval '
 (async () => {
@@ -94,6 +180,20 @@ agent-browser --session "$PROBE_SESSION" eval '
     const r = el.getBoundingClientRect();
     return r.width > 10 && r.height > 10;
   };
+  const sample2DRegions = (ctx, c) => {
+    const stripH = Math.min(c.height, 64);
+    const stripW = Math.min(c.width, 64);
+    const ys = [0, Math.max(0, Math.floor((c.height - stripH) / 2)), Math.max(0, c.height - stripH)];
+    const xs = [0, Math.max(0, Math.floor((c.width - stripW) / 2)), Math.max(0, c.width - stripW)];
+    const hashes = [];
+    for (const y of [...new Set(ys)]) {
+      hashes.push(hashBytes(ctx.getImageData(0, y, c.width, stripH).data));
+    }
+    for (const x of [...new Set(xs)]) {
+      hashes.push(hashBytes(ctx.getImageData(x, 0, stripW, c.height).data));
+    }
+    return hashes.join(":");
+  };
 
   // ── Canvas sampling (2D context — getImageData)
   const canvases = Array.from(document.querySelectorAll("canvas")).filter(visible);
@@ -111,8 +211,7 @@ agent-browser --session "$PROBE_SESSION" eval '
       origErr.apply(console, args);
     };
     try {
-      const data = ctx.getImageData(0, 0, Math.min(c.width, 100), Math.min(c.height, 100)).data;
-      return { hash: hashBytes(data), width: c.width, height: c.height, kind: "2d", tainted: false };
+      return { hash: sample2DRegions(ctx, c), width: c.width, height: c.height, kind: "2d", tainted: false };
     } catch (e) {
       const tainted = /SecurityError|tainted|cross-origin/i.test(String(e));
       return { hash: null, kind: tainted ? "tainted" : "error", error: String(e).slice(0, 80), tainted };
@@ -202,6 +301,16 @@ agent-browser --session "$PROBE_SESSION" eval '
   };
   const videoBefore = videos.map(sampleVideo);
 
+  if (lottieBefore.some((sample) => sample.hasInstance)) {
+    const maxScrollForLottie = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    if (maxScrollForLottie > 0) {
+      const targetY = Math.max(1, Math.floor(maxScrollForLottie * 0.92));
+      window.scrollTo(0, targetY);
+      window.dispatchEvent(new Event("scroll"));
+      await new Promise(r => setTimeout(r, 260));
+    }
+  }
+
   await new Promise(r => setTimeout(r, 1500));
 
   const videoAfter = videos.map(sampleVideo);
@@ -214,8 +323,7 @@ agent-browser --session "$PROBE_SESSION" eval '
     try {
       const ctx = c.getContext("2d", { willReadFrequently: true });
       if (!ctx) return { hash: null };
-      const data = ctx.getImageData(0, 0, Math.min(c.width, 100), Math.min(c.height, 100)).data;
-      return { hash: hashBytes(data) };
+      return { hash: sample2DRegions(ctx, c) };
     } catch (e) {
       return { hash: null };
     }
@@ -322,6 +430,7 @@ lottie_inst = int(probe.get("lottieInstances", 0))
 lottie_adv = int(probe.get("lottieAdvanced", 0))
 video_total = int(probe.get("videoTotal", 0))
 video_adv = int(probe.get("videoAdvanced", 0))
+video_frame_proof_kind = ""
 
 
 def _load_replay_plan() -> dict | None:
@@ -361,6 +470,27 @@ def ref_has_real_canvas() -> bool:
         pass
     return str(data.get("primaryRenderType", "")).strip().lower() in {"webgl", "canvas"}
 
+def ref_video_is_motion_surface() -> bool:
+    """True when the ref's own evidence names <video> as a motion surface:
+    required-media.json carries promoted video entries, or a video-play
+    proof passed. Gives plain video-hero refs (no canvas/lottie anywhere)
+    a legitimate validity path instead of the unreachable informational
+    branch + rollup invalidation ("pass but no animation surface")."""
+    ref_dir = Path(out_path).parent
+    try:
+        rm = json.loads((ref_dir / "required-media.json").read_text(encoding="utf-8"))
+        if isinstance(rm, dict) and isinstance(rm.get("videos"), list) and rm["videos"]:
+            return True
+    except Exception:
+        pass
+    try:
+        vp = json.loads((ref_dir / "video-play-proof.json").read_text(encoding="utf-8"))
+        if isinstance(vp, dict) and str(vp.get("status", "")).lower() == "pass":
+            return True
+    except Exception:
+        pass
+    return False
+
 
 if probe.get("error"):
     status = "fail"
@@ -371,6 +501,7 @@ elif (
     and ref_has_real_canvas()
     and _replay_satisfies_blank_hero(_load_replay_plan(), video_adv)
 ):
+    video_frame_proof_kind = "canvas-replay-video"
     # Ref renders WebGL/canvas and the impl mounts 0 canvases, BUT a declared
     # canvas-replay <video> is advancing frames — the hero now renders the
     # ref's OWN recorded motion (origin-locked engine could not be re-embedded,
@@ -393,6 +524,32 @@ elif canvas_total == 0 and lottie_inst == 0 and ref_has_real_canvas():
         "WebGL surface, yet the impl mounted none — the hero is not "
         "reproduced (origin-locked engine, missing mount, or init failure)."
     )
+elif canvas_total == 0 and lottie_inst == 0 and ref_video_is_motion_surface():
+    # Plain video-hero ref: no canvas/lottie anywhere, but the ref's own
+    # evidence (required-media.json / video-play proof) names <video> as the
+    # motion surface. Count an advancing impl <video> as the animation
+    # surface so video-only sites have a legitimate runtime-proof path.
+    if video_total > 0 and video_adv > 0:
+        video_frame_proof_kind = "video-surface"
+        status = "pass"
+        reasons.append(
+            f"video-surface: the ref's motion surface is <video> and the "
+            f"impl's video is advancing ({video_adv}/{video_total}) — "
+            "counted as the animation surface."
+        )
+    elif video_total > 0:
+        status = "fail"
+        reasons.append(
+            f"ref's motion surface is <video> but none of the impl's "
+            f"{video_total} video(s) advanced frames in the probe window "
+            "(autoplay blocked, paused, or React muted-attr hydration bug)."
+        )
+    else:
+        status = "fail"
+        reasons.append(
+            "ref's motion surface is <video> (required-media.json / "
+            "video-play proof) but the impl mounts no <video> element."
+        )
 elif canvas_total == 0 and lottie_inst == 0:
     # Ref signaled canvas/webgl/lottie but impl has neither surface, and the
     # ref has no genuine canvas/WebGL evidence (the signal might be a lottie
@@ -432,12 +589,14 @@ payload = {
     "lottieAdvanced": lottie_adv,
     "videoTotal": video_total,
     "videoAdvanced": video_adv,
+    "videoFrameProofKind": video_frame_proof_kind,
+    "videoCountsAsAnimationSurface": video_frame_proof_kind in ("canvas-replay-video", "video-surface"),
     "reasons": reasons,
     "nextAction": (
         "Start the animation loop. For canvas/WebGL: confirm requestAnimationFrame "
         "is wired and the engine init runs in useEffect. For Lottie: ensure "
-        "autoplay=true OR call instance.play() in onLoad. Frame-delta proof "
-        "is stricter than DOM mutation — needs actual paint each tick."
+        "autoplay/play() advances autonomous animations, or expose the instance "
+        "and update currentFrame when this probe drives scroll for scroll-scrubbed refs."
         if (status == "fail") else "all animation surfaces advancing"
     ),
     "rule": (

@@ -71,6 +71,19 @@ fi
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)" || { echo "bench-verification.sh: cannot resolve repo root" >&2; exit 2; }
 cd "$REPO_ROOT" || exit 2
 
+# Bash 5.1+ can deadlock this bench's nested background jobs while writing
+# heredocs for child Bash/Node/Python scripts. Bash 5.0 compatibility preserves
+# the older heredoc behavior; honor an explicit project/user override.
+if [ -z "${BASH_COMPAT+x}" ]; then
+  _bench_bash_major="${BASH_VERSINFO[0]:-0}"
+  _bench_bash_minor="${BASH_VERSINFO[1]:-0}"
+  if [ "$_bench_bash_major" -gt 5 ] || { [ "$_bench_bash_major" -eq 5 ] && [ "$_bench_bash_minor" -ge 1 ]; }; then
+    BASH_COMPAT=5.0
+    export BASH_COMPAT
+  fi
+  unset _bench_bash_major _bench_bash_minor
+fi
+
 VP="$REPO_ROOT/skills/visual-debug/scripts/verification-plan.sh"
 SIC="$REPO_ROOT/skills/visual-debug/scripts/spec-implementation-coverage.sh"
 RSC="$REPO_ROOT/skills/visual-debug/scripts/runtime-spec-coverage.sh"
@@ -79,16 +92,23 @@ for s in "$VP" "$SIC" "$RSC"; do
   [ -f "$s" ] || { echo "ERROR: missing $s" >&2; exit 2; }
 done
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "ERROR: python3 required for fixture writes + median calc" >&2
-  exit 2
-fi
 # Resolve the real interpreter once. On pyenv/asdf systems, every `python3`
 # invocation may traverse a shell shim; this bench runs many tiny Python
 # snippets and the shim overhead can dominate enough to trip the 60s smoke
 # tests. Calling sys.executable directly keeps the benchmark about the
 # verification scripts, not the version-manager startup path.
-PYTHON_BIN=$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || command -v python3)
+if [ -z "${PYTHON_BIN:-}" ]; then
+  if [ -x "$REPO_ROOT/.venv/bin/python3" ]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python3"
+  elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN=$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || command -v python3)
+  else
+    echo "ERROR: python3 required for fixture writes + median calc" >&2
+    exit 2
+  fi
+fi
 [ -n "$PYTHON_BIN" ] || { echo "ERROR: cannot resolve python3 executable" >&2; exit 2; }
 export PYTHON_BIN
 

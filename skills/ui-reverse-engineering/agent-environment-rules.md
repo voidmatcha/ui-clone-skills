@@ -71,6 +71,16 @@ Common mistakes from prior sessions:
 
 Unknown verbs typically exit with an error rather than silently no-op, but the error is easy to miss in long Bash chains; check exit codes when in doubt.
 
+## agent-browser daemon hygiene rule
+
+`agent-browser` spawns one Chrome per `--session` under a temp `agent-browser-chrome-<uuid>` user-data-dir. Two things accumulate and never self-clean: `close` does not always reap the Chrome Helper (Renderer) child processes, and `~/.agent-browser/*.engine` session registrations pile up (100+ after a few loops). Under sustained heavy load — live sites + 60fps video record + many concurrent sessions — this degrades the daemon and surfaces as `Failed to read: Resource temporarily unavailable (os error 35)`, a transient CDP-read EAGAIN. It is **load/health dependent, not a per-op bug**: a fresh session works reliably even with 100+ stale engines present, and it does not reproduce under synthetic load. So handle it at the session/batch layer, never by retrying an individual eval (many evals scroll / finish animations / click, and a read-side EAGAIN may have already committed the write — a retry double-fires it and silently corrupts the captured motion frame).
+
+Practical rules:
+
+- **One fresh session per capture, closed after.** A freshly-opened `--session` gets a clean browser and is the reliable path; reuse across a long loop is what accumulates state. This is also why a subagent / new tab opening its own session can capture even when a prior session is wedged.
+- **Reap between loop iterations, not mid-capture.** `skills/visual-debug/scripts/lib/agent-browser-preflight.sh` provides `ab_reap` (`agent-browser close --all` + kill orphan `agent-browser-chrome-` processes + prune stale `*.engine`) and `ab_health <session>` (a side-effect-free `document.readyState` probe). `batch-scroll.sh` calls `ab_reap` at entry by default.
+- **`ab_reap` is DESTRUCTIVE** — it cannot target one loop's sessions (the marker is a per-Chrome uuid, not the `--session` name), so it tears down **every** agent-browser session on the machine, including a concurrently-running sibling capture and any unrelated browser work. Only run it at a serial boundary (loop-iteration start). Set `UI_CLONE_AB_REAP=0` to disable it for a run that shares the daemon with other agent-browser work.
+
 ## Pipeline directory layout rule
 
 `tmp/ref/<component>/` is **flat**. Sub-dirs live directly under it:

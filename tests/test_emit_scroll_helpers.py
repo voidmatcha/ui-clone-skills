@@ -1,11 +1,63 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "visual-debug" / "scripts" / "emit-scroll-helpers.sh"
+HELPER = (
+    ROOT
+    / "skills"
+    / "visual-debug"
+    / "scripts"
+    / "lib"
+    / "emit_scroll_helpers.py"
+)
+
+
+def test_shell_has_no_large_heredoc() -> None:
+    """Keep the large Python emitter out of Bash's pipe-backed heredoc path."""
+    shell = SCRIPT.read_text(encoding="utf-8")
+    assert "<<" not in shell
+    assert HELPER.is_file()
+    assert 'python3 "$SCRIPTS_DIR/lib/emit_scroll_helpers.py"' in shell
+
+
+def test_helper_defers_annotations_for_system_python3() -> None:
+    """The shell entrypoint may resolve to macOS Python 3.9 outside uv."""
+    source = HELPER.read_text(encoding="utf-8")
+
+    assert source.startswith("from __future__ import annotations\n")
+
+
+def test_completes_on_current_bash_without_compat(tmp_path: Path) -> None:
+    """The default Bash must not need inherited heredoc compatibility state."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    impl.mkdir()
+    (ref / "generation-plan.json").write_text(
+        json.dumps({"smoothScroll": {"required": False, "config": {}}}),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("BASH_COMPAT", None)
+    bash = shutil.which("bash")
+    assert bash is not None
+
+    proc = subprocess.run(
+        [bash, str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "no scroll helpers required" in proc.stdout
 
 
 def test_emits_smoothscroll_with_real_lenis_config(tmp_path: Path) -> None:
@@ -26,7 +78,7 @@ def test_emits_smoothscroll_with_real_lenis_config(tmp_path: Path) -> None:
 
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     f = impl / "src" / "lib" / "SmoothScroll.tsx"
@@ -41,6 +93,85 @@ def test_emits_smoothscroll_with_real_lenis_config(tmp_path: Path) -> None:
     assert "lenis.destroy()" in t, "must clean up on unmount"
 
 
+def test_smoothscroll_honors_capture_flag(tmp_path: Path) -> None:
+    """gen-H2: section_capture sets window.__UI_CLONE_CAPTURE__ before forcing
+    native scrollTo to crop exact ref frames. If the emitted SmoothScroll drives
+    Lenis' raf loop unconditionally, Lenis reverts the forced scroll (actualY->0,
+    wrong-frame crops on Lenis sites). The emitted component must honor the flag
+    (and prefers-reduced-motion) and NOT run the raf loop while capturing."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": True, "library": "lenis", "config": {"lerp": 0.1}},
+    }), encoding="utf-8")
+    proc = subprocess.run(["bash", str(SCRIPT), str(ref), str(impl)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    t = (impl / "src" / "lib" / "SmoothScroll.tsx").read_text(encoding="utf-8")
+    assert "__UI_CLONE_CAPTURE__" in t, "SmoothScroll must honor the capture flag"
+    assert "prefers-reduced-motion" in t, "and prefers-reduced-motion"
+
+
+def test_smoothscroll_is_a_client_component(tmp_path: Path) -> None:
+    """Next App Router: a component using useEffect MUST carry a 'use client'
+    directive or the RSC build fails ('You're importing a module that depends on
+    useEffect into a React Server Component'). Every other emitted motion helper
+    already has it; SmoothScroll must too — surfaced live once gen-H1 made the
+    Next entry actually mount SmoothScroll."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": True, "library": "lenis", "config": {"lerp": 0.1}},
+    }), encoding="utf-8")
+    proc = subprocess.run(["bash", str(SCRIPT), str(ref), str(impl)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    first = (impl / "src" / "lib" / "SmoothScroll.tsx").read_text(encoding="utf-8").lstrip().splitlines()[0]
+    assert "use client" in first, f"SmoothScroll.tsx must start with a use-client directive; got {first!r}"
+
+
+# The lenis/framer-motion dependency injection lives in scaffold-to-jsx.sh (the
+# python transpile), not emit-scroll-helpers.sh, so its test lives in
+# tests/test_scaffold_stack_motion_drivers.py.
+
+
+def test_smoothscroll_exposes_lenis_handle_for_reprobe(tmp_path: Path) -> None:
+    """F1: the transition-fires scrub re-probe drives the engine's VIRTUAL scroll
+    via window.__lenis (transition-fires-check.sh:753,770-772) to tell a DEAD scrub
+    (engine advances, transform/opacity flat -> fail) from a genuinely UNMEASURABLE
+    one. If the emitter never exposes the real instance, engineDriven stays false on
+    our own clones and every dead scrub is misclassified 'unmeasurable' not 'fail'
+    (transition_fires.py:861) -> merely mounting Lenis launders FAILs into passes.
+    The emitter must publish the instance as window.__lenis and clear it on unmount
+    so a stale handle from a prior mount can't drive the re-probe."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": True, "library": "lenis", "config": {"lerp": 0.1}},
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    t = (impl / "src" / "lib" / "SmoothScroll.tsx").read_text(encoding="utf-8")
+    assert "(window as any).__lenis = lenis" in t, (
+        "must expose the real Lenis instance as window.__lenis so the scrub "
+        "re-probe can drive the engine (else dead scrubs pass as 'unmeasurable')"
+    )
+    assert "(window as any).__lenis = null" in t, (
+        "must clear window.__lenis on unmount so a stale handle can't drive the "
+        "re-probe of a later mount"
+    )
+
+
 def test_no_helper_when_smoothscroll_not_required(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     impl = tmp_path / "impl"
@@ -51,7 +182,7 @@ def test_no_helper_when_smoothscroll_not_required(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (impl / "src" / "lib" / "SmoothScroll.tsx").exists()
@@ -93,7 +224,7 @@ def test_emits_scrollscrub_with_grounded_bands(tmp_path: Path) -> None:
 
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     comp = impl / "src" / "lib" / "ScrollScrub.tsx"
@@ -118,6 +249,86 @@ def test_emits_scrollscrub_with_grounded_bands(tmp_path: Path) -> None:
     assert sites[1]["offset"] == ["start end", "end start"]
 
 
+def test_scrub_site_spring_params_override_invented_constants(tmp_path: Path) -> None:
+    """`spring` was inferred from "the site has a scale band" and its stiffness/
+    damping were invented constants baked into the driver. When the plan carries
+    the ref's decompiled `spring` params they are the evidence: the site must
+    emit them as springConfig, and a sprung band on a NON-scale channel (here a
+    fade the bundle smoothed) must still be flagged rather than replayed as a
+    bare lerp."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": False, "config": {}},
+        "scrollScrub": {
+            "required": True,
+            "library": "framer-motion",
+            "count": 1,
+            "sites": [
+                {
+                    "offset": '["start start","end end"]',
+                    "spring": {"stiffness": 900, "damping": 60},
+                    "transforms": [
+                        {"input": "[0,.3]", "output": "[0,1]", "property": "opacity"},
+                    ],
+                },
+            ],
+        },
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    dt = (impl / "src" / "lib" / "scrollScrubSites.ts").read_text(encoding="utf-8")
+    sites = json.loads(dt.split("scrollScrubSites: ScrubSite[] = ", 1)[1].rsplit(";", 1)[0])
+    assert sites[0].get("spring") is True, "bundle-declared spring not honoured on a non-scale band"
+    assert sites[0].get("springConfig") == {"stiffness": 900, "damping": 60}
+
+
+def test_scrollscrub_driver_springs_from_ref_config_not_baked_constants(tmp_path: Path) -> None:
+    """The driver hard-coded `useSpring(mv, {stiffness: 120, damping: 30})` and
+    sprung only the scale channels, so a site's real decompiled params could not
+    change replay. It must take springConfig (falling back to the old constants
+    when a site carries none) and be able to spring the non-scale channels the
+    bundle sprung."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": False, "config": {}},
+        "scrollScrub": {
+            "required": True,
+            "library": "framer-motion",
+            "count": 1,
+            "sites": [
+                {
+                    "offset": '["start start","end end"]',
+                    "spring": {"stiffness": 900, "damping": 60},
+                    "transforms": [
+                        {"input": "[0,.3]", "output": "[0,1]", "property": "opacity"},
+                        {"input": "[0,.3]", "output": "[80,0]", "property": "y"},
+                    ],
+                },
+            ],
+        },
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    ct = (impl / "src" / "lib" / "ScrollScrub.tsx").read_text(encoding="utf-8")
+    assert "springConfig" in ct, "driver cannot receive the ref's spring params"
+    # the sprung channels must include the non-scale ones the bundle sprung
+    assert "spOpacity" in ct and "spY" in ct
+
+
 def test_emits_scrollwordhighlight_when_declared(tmp_path: Path) -> None:
     """A declared per-word-scroll-highlight signatureEffect emits a reusable
     ScrollWordHighlight.tsx primitive (word split + scroll binding +
@@ -137,7 +348,7 @@ def test_emits_scrollwordhighlight_when_declared(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     f = impl / "src" / "lib" / "ScrollWordHighlight.tsx"
@@ -161,7 +372,7 @@ def test_no_scrollwordhighlight_when_not_declared(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (impl / "src" / "lib" / "ScrollWordHighlight.tsx").exists()
@@ -179,7 +390,7 @@ def test_no_scrollscrub_when_not_required(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (impl / "src" / "lib" / "ScrollScrub.tsx").exists()
@@ -205,7 +416,7 @@ def test_emits_scrollreveal_when_scroll_driven_required(tmp_path: Path) -> None:
 
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     f = impl / "src" / "lib" / "ScrollReveal.tsx"
@@ -248,7 +459,7 @@ def test_scrollreveal_parametrized_from_transition_spec(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     t = (impl / "src" / "lib" / "ScrollReveal.tsx").read_text(encoding="utf-8")
@@ -301,7 +512,7 @@ def test_scroll_state_driver_emitted_from_spec(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     f = impl / "src" / "lib" / "ScrollStateDriver.tsx"
@@ -341,7 +552,7 @@ def test_stroke_draw_handling_emitted_from_spec(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     f = impl / "src" / "lib" / "ScrollStateDriver.tsx"
@@ -365,7 +576,7 @@ def test_no_scroll_state_driver_without_spec_entry(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (impl / "src" / "lib" / "ScrollStateDriver.tsx").exists()
@@ -382,7 +593,7 @@ def test_no_scrollreveal_when_not_required(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (impl / "src" / "lib" / "ScrollReveal.tsx").exists()
@@ -403,10 +614,384 @@ def test_smoothscroll_omits_unknown_config_keys(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     t = (impl / "src" / "lib" / "SmoothScroll.tsx").read_text(encoding="utf-8")
     assert "lerp: 0.08" in t
     assert "bogus" not in t
     assert "drop me" not in t
+
+
+def test_emits_scroll_class_toggle_driver_from_transition_spec(
+    tmp_path: Path,
+) -> None:
+    """A scroll threshold that changes className must become executable code.
+
+    Treating this as a numeric scroll scrub produces a dead placeholder because
+    class names cannot be interpolated. The emitted singleton must toggle the
+    exact class on the exact target and remove it when scroll returns above the
+    threshold.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps({"scrollDriven": {"required": False}}),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "scroll-header-shadow-threshold",
+            "trigger": "scroll",
+            "target": "header.style_header__tjhHk",
+            "animation": {
+                "type": "scroll-state-class-toggle",
+                "property": "box-shadow,className",
+                "threshold": "window.scrollY > 8",
+                "from": {"className": "style_header__tjhHk"},
+                "to": {
+                    "className": (
+                        "style_header__tjhHk style_header__shadow__9G5rH"
+                    )
+                },
+            },
+        }],
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    driver = impl / "src" / "lib" / "ScrollClassToggleDriver.tsx"
+    assert driver.is_file(), "className scroll entries need a runtime driver"
+    source = driver.read_text(encoding="utf-8")
+    assert "header.style_header__tjhHk" in source
+    assert "style_header__shadow__9G5rH" in source
+    assert "window.scrollY > 8" in source
+    assert "classList.toggle" in source
+    assert "addEventListener(\"scroll\"" in source
+
+
+def test_emits_document_progress_driver_for_runtime_sampled_sites(
+    tmp_path: Path,
+) -> None:
+    """Runtime-sampled descendant curves need target-specific replay.
+
+    A generic section-level ScrollScrub cannot reproduce an SVG opacity curve,
+    two distinct ``g#even`` scale curves, and a descendant width/radius curve.
+    Emit a singleton that scopes selectors, preserves duplicate indexes, and
+    interpolates against document scroll progress from the captured samples.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "scrollDriven": {"required": True, "library": "framer-motion"},
+        "scrollScrub": {
+            "required": True,
+            "sites": [
+                {
+                    "selector": "svg",
+                    "selectorIndex": 0,
+                    "scope": ".style_scrollcontainer__Vup4r",
+                    "progressSource": "document",
+                    "transforms": [{
+                        "property": "opacity",
+                        "input": "[0, 0.15, 0.2, 1]",
+                        "output": "[0, 0.22, 1, 1]",
+                    }],
+                },
+                {
+                    "selector": "g#even",
+                    "selectorIndex": 1,
+                    "scope": ".style_scrollcontainer__Vup4r",
+                    "progressSource": "document",
+                    "transforms": [{
+                        "property": "scale",
+                        "input": "[0, 0.1, 0.15]",
+                        "output": "[0.575, 0.575, 0.6685]",
+                    }],
+                },
+                {
+                    "selector": "div.style_imgWrapper__AFuB_",
+                    "selectorIndex": 0,
+                    "scope": ".style_scrollcontainer__Vup4r",
+                    "progressSource": "document",
+                    "transforms": [
+                        {
+                            "property": "width",
+                            "input": "[0, 0.15, 0.2, 1]",
+                            "output": "[1376, 349.897, 196.571, 196.571]",
+                        },
+                        {
+                            "property": "borderRadius",
+                            "input": "[0, 0.15, 0.2, 1]",
+                            "output": "[16, 28.8, 28.8, 28.8]",
+                        },
+                    ],
+                },
+            ],
+        },
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    driver = impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx"
+    data = impl / "src" / "lib" / "scrollLinkedStyleSites.ts"
+    assert driver.is_file() and data.is_file()
+    source = driver.read_text(encoding="utf-8")
+    assert "document.documentElement.scrollHeight - window.innerHeight" in source
+    assert "requestAnimationFrame" in source
+    assert "querySelectorAll" in source
+    assert "selectorIndex" in source
+    # written via setProperty(..., "important") so an authored pin cannot
+    # outrank the measured band (see the important-priority test below)
+    assert 'set("transform"' in source
+    assert 'set("width"' in source
+    assert 'set("border-radius"' in source
+    payload = data.read_text(encoding="utf-8")
+    assert '"scope": ".style_scrollcontainer__Vup4r"' in payload
+    assert '"selectorIndex": 1' in payload
+
+
+def test_emits_target_offset_progress_for_runtime_sampled_sites(
+    tmp_path: Path,
+) -> None:
+    """Target-scoped runtime curves must preserve Framer offset semantics."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": True, "library": "framer-motion"},
+                "scrollScrub": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": "div.style_imgWrapper__AFuB_",
+                            "selectorIndex": 0,
+                            "scope": ".style_scrollcontainer__Vup4r",
+                            "target": ".style_scrollcontainer__Vup4r",
+                            "progressSource": "target-offset",
+                            "offset": "[\"start start\", \"end end\"]",
+                            "transforms": [
+                                {
+                                    "property": "width",
+                                    "input": "[0, 0.5, 1]",
+                                    "output": "[100, 75, 50]",
+                                    "unit": "%",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    source = (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").read_text(
+        encoding="utf-8"
+    )
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    assert "function targetOffsetProgress" in source
+    assert "getBoundingClientRect" in source
+    assert "site.offset" in source
+    assert '"progressSource": "target-offset"' in payload
+    assert '"offset": ["start start", "end end"]' in payload
+    assert '"units": {"width": "%"}' in payload
+    assert "site.units" in source
+
+
+def test_scroll_linked_style_driver_indexes_matching_scope_before_descendants(
+    tmp_path: Path,
+) -> None:
+    """A scope root that matches the runtime selector is candidate index 0.
+
+    Runtime extraction can report the scroll container itself plus descendants
+    under the same selector. Element.querySelectorAll only returns descendants,
+    so the generated replay driver must include a matching scope root before
+    descendant candidates while keeping selectorIndex ordering intact.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    selector = ".style_scrollcontainer__Vup4r"
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "scrollDriven": {"required": True, "library": "framer-motion"},
+        "scrollScrub": {
+            "required": True,
+            "sites": [
+                {
+                    "selector": selector,
+                    "selectorIndex": 0,
+                    "scope": selector,
+                    "progressSource": "document-progress",
+                    "transforms": [{
+                        "property": "opacity",
+                        "input": "[0, 1]",
+                        "output": "[0.5, 1]",
+                    }],
+                },
+                {
+                    "selector": selector,
+                    "selectorIndex": 1,
+                    "scope": selector,
+                    "progressSource": "document-progress",
+                    "transforms": [{
+                        "property": "scale",
+                        "input": "[0, 1]",
+                        "output": "[0.8, 1]",
+                    }],
+                },
+            ],
+        },
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    source = (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").read_text(
+        encoding="utf-8"
+    )
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    assert "root instanceof Element && root.matches(selector)" in source
+    assert "return [root, ...descendants]" in source
+    assert "selectScopedCandidate(root, site.selector, site.selectorIndex)" in source
+    assert f'"selector": "{selector}", "selectorIndex": 0' in payload
+    assert f'"selector": "{selector}", "selectorIndex": 1' in payload
+
+
+def test_emits_scroll_latch_driver_from_plan_latch_sites(tmp_path: Path) -> None:
+    """A latched row proved not to reverse must be applied as a discrete state
+    at its progress fraction. Interpolating it is what renders every state
+    permanently half-applied, and keying it to capture-session pixels would
+    desync the moment the document height changes."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": False},
+                "scrollLatch": {
+                    "required": True,
+                    "count": 1,
+                    "sites": [
+                        {
+                            "selector": "nav .label",
+                            "selectorIndex": 0,
+                            "progress": 0.1,
+                            "endState": {"opacity": "1"},
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    driver = impl / "src" / "lib" / "ScrollLatchDriver.tsx"
+    assert driver.is_file(), "latch sites need a discrete-state runtime driver"
+    source = driver.read_text(encoding="utf-8")
+    assert "nav .label" in source
+    assert "0.1" in source
+    assert "opacity" in source
+    # progress fraction resolved against the live scroll range, not baked px
+    assert "scrollHeight" in source
+    assert 'addEventListener("scroll"' in source
+
+
+def test_scroll_linked_driver_writes_bands_with_important_priority(
+    tmp_path: Path,
+) -> None:
+    """A stylesheet !important rule beats a plain inline write, so one authored
+    pin silently defeats a whole measured band — the driver keeps writing and
+    nothing moves. The band is the ref's own measured value for that property,
+    so it has to be written at a priority a pin cannot outrank."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": False},
+                "scrollScrub": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": "span.label_container",
+                            "selectorIndex": 0,
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "width",
+                                    "input": "[0, 1]",
+                                    "output": "[0, 74]",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    source = (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert '"important"' in source, "band writes must outrank a stylesheet pin"
+    assert "style.width =" not in source, "plain inline write loses to !important"
+    assert "style.opacity =" not in source

@@ -65,7 +65,8 @@ CONTAINER_ID_RES = [
     re.compile(r"\b(?P<id>[A-Za-z_$][\w$]*Lottie\w*)\s*=\s*(?:lottie|bodymovin)\.loadAnimation\s*\(", re.IGNORECASE),
 ]
 IMPL_LOTTIE_CONTAINER_RE = re.compile(
-    r"(?:loadAnimation\s*\(|<\s*Lottie\b|lottie-player|dotlottie-player|\blottie\s*:)",
+    r"(?:loadAnimation\s*\(|<\s*Lottie\b|lottie-player|dotlottie-player|\blottie\s*:)"
+    r"|data-lottie(?:-id|-src)?|data-animation-path|/[^'\"\s]*lottie[^'\"\s]*\.(?:json|lottie)",
     re.IGNORECASE,
 )
 

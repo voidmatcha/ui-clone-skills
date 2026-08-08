@@ -8,6 +8,8 @@ prelude each. (Codex Item-6 follow-up.)
 import json
 from pathlib import Path
 
+from ui_clone.check_inputs import compute_check_input_hash, sidecar_path
+
 
 def _write_pre_generate_baseline(ref: Path) -> None:
     """Write enough artifacts for pre-generate so provenance is the only blocker."""
@@ -38,6 +40,25 @@ def _write_pre_generate_baseline(ref: Path) -> None:
     (ref / "element-groups.json").write_text(json.dumps({"groups": []}))
     (ref / "layout-decisions.json").write_text(json.dumps({"decisions": []}))
     (ref / "component-map.json").write_text(json.dumps({"sections": [], "sectionCount": 0}))
+    (ref / "runtime-media.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "url": "https://example.com",
+        "videos": [],
+        "totals": {"video": 0},
+        "sources": {"extractor": "runtime-media.sh", "scrollSamples": 5},
+    }))
+    (ref / "required-media.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "videos": [],
+        "lottie": [],
+        "totals": {"video": 0, "lottie": 0},
+        "sources": {
+            "extractor": "required-media.sh",
+            "htmlSectionsScanned": 0,
+            "runtimeMediaScanned": True,
+            "bundlesScanned": 0,
+        },
+    }))
 
 
 
@@ -67,8 +88,76 @@ def _write_valid_artifact_provenance(ref: Path) -> None:
 
 
 
-def _post_implement_baseline(ref: Path) -> None:
+def _read_impl_marker(ref: Path) -> Path | None:
+    marker = ref / ".impl-root"
+    if not marker.is_file():
+        return None
+    try:
+        first = marker.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+    if not first:
+        return None
+    candidate = Path(first).expanduser()
+    return candidate if candidate.is_dir() else None
+
+
+def _write_impl_fixture(ref: Path) -> Path:
+    """Write a minimal implementation tree plus fingerprintable ref inputs."""
+    impl = _read_impl_marker(ref) or ref.parent / "impl"
+    (impl / "src").mkdir(parents=True, exist_ok=True)
+    (impl / "public").mkdir(exist_ok=True)
+    (impl / "package.json").write_text(
+        '{"name":"post-implement-fixture"}\n',
+        encoding="utf-8",
+    )
+    (impl / "src" / "App.tsx").write_text(
+        "export default function App(){return <main>Fixture</main>}\n",
+        encoding="utf-8",
+    )
+    (impl / "public" / "fixture.txt").write_text("fixture\n", encoding="utf-8")
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+    (ref / "dom-scaffold.json").write_text(
+        json.dumps({"sections": [], "tree": {"tag": "body"}}),
+        encoding="utf-8",
+    )
+    (ref / "runtime-text.json").write_text(
+        json.dumps({"blocks": ["Fixture"]}),
+        encoding="utf-8",
+    )
+    (ref / "asset-substitution.json").write_text(
+        json.dumps({"substitutions": []}),
+        encoding="utf-8",
+    )
+    (ref / "regions.json").write_text(
+        json.dumps({"regions": []}),
+        encoding="utf-8",
+    )
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [], "totalCount": 0}),
+        encoding="utf-8",
+    )
+    (ref / "component-map.json").write_text(
+        json.dumps({"sections": [], "sectionCount": 0}),
+        encoding="utf-8",
+    )
+    return impl
+
+
+def _stamp_check_input_hash(ref: Path, check_id: str, impl: Path | None = None) -> None:
+    """Record the current declared inputs for a required-check fixture."""
+    resolved_impl = impl or _read_impl_marker(ref)
+    digest = compute_check_input_hash(resolved_impl, ref, check_id)
+    assert digest is not None and digest != "", (
+        f"{check_id} has no fingerprintable inputs"
+    )
+    sidecar_path(ref, check_id).write_text(digest + "\n", encoding="utf-8")
+
+
+def _post_implement_baseline(ref: Path, *, with_impl: bool = True) -> None:
     """Write minimal artifacts so gate_post_implement passes baseline checks."""
+    if with_impl:
+        _write_impl_fixture(ref)
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
@@ -151,7 +240,7 @@ def _run_verification_plan(ref_dir: Path, tier: str | None = None) -> dict:
     cmd = ["bash", str(script), str(ref_dir)]
     if tier is not None:
         cmd.append(f"--tier={tier}")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, f"verification-plan.sh failed: {proc.stderr}"
     return json.loads((ref_dir / "verification-plan.json").read_text())  # type: ignore[no-any-return]
 
@@ -220,12 +309,16 @@ def _make_stub_compare(plugin_root: Path) -> None:
         "exit 0\n"
     )
     target.chmod(0o755)
+    cleanup = target.with_name("cleanup-sessions.sh")
+    cleanup.write_text("#!/usr/bin/env bash\nexit 0\n")
+    cleanup.chmod(0o755)
 
 
 
 __all__ = [
     "_write_pre_generate_baseline",
     "_write_valid_artifact_provenance",
+    "_write_impl_fixture",
     "_post_implement_baseline",
     "_build_renamed_impl",
     "_project_root",

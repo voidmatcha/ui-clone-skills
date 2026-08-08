@@ -20,10 +20,37 @@
 - `tmp/ref/<component>/source-forensics.json` — optional source-backed guidance returned by the `source-forensics` worker after raw HTML/CSS/JS fallback
 - `impl/src/` — the implementation source (read freely; edit only what the failing row points at)
 
+## Verification cost discipline (inner iterations)
+
+Re-running the full comprehensive sweep after every edit is the dominant
+wall-clock sink (~5min+/cycle). Closeout safety is enforced elsewhere
+(quick-tier closeout blocker, deferredChecks, canonical verify re-runs the
+full suite), so inner iterations are SAFE to scope:
+
+1. **Tier:** `UI_CLONE_VERIFY_TIER=standard` while iterating (one-shot browser
+   checks, no 60fps video). Comprehensive ONLY for the closeout verify.
+2. **Sections:** `UI_CLONE_VERIFY_SECTIONS=<failing,csv>` re-compares only the
+   sections you just fixed (read the failing list from `sections/result.json`).
+3. **Transitions:** `UI_CLONE_FIRES_IDS=<id1,id2>` re-probes only the spec
+   entries you just wired — writes `transition-fires.scoped.json` so the
+   canonical artifact is never clobbered by a partial measurement.
+4. **Batch:** fix EVERY failing section/transition in the current list, then
+   run ONE scoped sweep — never edit→sweep→edit per item.
+5. **Closeout:** the final `pipeline ... verify` must run full comprehensive —
+   scoped/standard artifacts cannot satisfy the Stop hook by design.
+6. **Dynamic-reference pinning:** sites with carousels / auto-rotating banners /
+   lazy content change between ref captures, so re-capturing the ref every
+   compare diffs a MOVING target (impl can never converge on it). After the
+   FIRST full ref capture, iterate with `RECATCH_REF=0` (frozen-ref reuse —
+   compares against the same frozen ref crops every cycle); re-capture
+   explicitly only when the ref evidence is genuinely stale. Carousel state is
+   pinned automatically (Swiper/Splide stop + slide 0, videos at frame 0) on
+   BOTH sides, so freeze your impl's initial carousel index at 0 to match.
+
 ## Discipline
 
 1. **VISION-FREE — strict.** Do NOT `Read` any `.png` / `.jpg` / `.jpeg` / `.webp` / `.gif` file. The plugin's value prop is "near-zero vision tokens"; reading diff images here defeats the entire purpose AND introduces host vision-model interpretation variance. Use the text-based signals in order:
-   - **1st: `auto-diagnose.sh`** — `bash $PLUGIN_ROOT/skills/visual-debug/scripts/auto-diagnose.sh "$(pwd)/tmp/ref/<component>" <impl>` returns root-cause class + impl file:line, all text.
+   - **1st: `auto-diagnose.sh`** — `bash $PLUGIN_ROOT/skills/visual-debug/scripts/auto-diagnose.sh <session> <ref-url> <impl-url> tmp/ref/<component>/sections/diff/<worst-failing-section>.png` — hotspot selectors via elementFromPoint + per-selector computed-style diff, all text. (4 args; the diff crop comes from section-compare's `sections/diff/`.)
    - **2nd: `tree-diff-status.json` + `tree-diff.json`** — DOM/style mismatches in text form (display, flex-direction, position, dimensions, font props). This catches structural fails that pixel diff can't explain.
    - **3rd: `computed-diff.sh`** — per-element computed-style comparison, text only.
    - **4th: `diagnosis.md` catalog (Root Cause A-R)** — classify by symptom, apply by class.

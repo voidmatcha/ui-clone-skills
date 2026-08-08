@@ -84,6 +84,46 @@ def needs_canvas_replay(
     return (False, "reembed-ok")
 
 
+def physics_repro(detection: dict) -> dict | None:
+    """Behavioral-reproduction descriptor for an INTERACTIVE-physics canvas.
+
+    A matter.js/verlet/planck canvas (drop-in letters, cloth, falling bodies)
+    is defined by its running simulation — it spawns, drops and appends bodies,
+    often in response to interaction. Routing it to the canvas-replay path (a
+    static recorded ``<video>`` loop) ships dead motion: the loop cannot respond
+    or append. Instead reproduce it with the SAME engine library plus the ref's
+    constants (or library defaults when the engine is closure-scoped).
+
+    Positively gated on ``hasPhysics`` + a ``physicsEngine`` descriptor, so a
+    decorative WebGL shader / Spline scene (no physics engine) is untouched and
+    keeps the video-replay path (no brick). Returns None when no physics engine
+    was detected.
+    """
+    if not isinstance(detection, dict) or not detection.get("hasPhysics"):
+        return None
+    # Defensive: physics routing only applies to a real canvas surface. Guards a
+    # malformed detection that set hasPhysics without a canvas (the detector
+    # gates on hasCanvas too).
+    if not ref_is_canvas_driven(detection):
+        return None
+    eng = detection.get("physicsEngine")
+    if not isinstance(eng, dict) or not eng.get("name"):
+        return None
+    live = eng.get("liveEngine") if isinstance(eng.get("liveEngine"), dict) else None
+    constants: dict | None = None
+    if isinstance(live, dict) and isinstance(live.get("gravity"), dict):
+        constants = {
+            "gravity": live.get("gravity"),
+            "bodyCount": live.get("bodyCount"),
+        }
+    return {
+        "engine": eng.get("name"),
+        "version": eng.get("version"),
+        "constantsSource": "runtime-engine" if constants else "library-default+bundle-grep",
+        "constants": constants,
+    }
+
+
 def build_replay_plan(
     *,
     url: str,
@@ -102,7 +142,38 @@ def build_replay_plan(
     ref canvas selector/region, the trigger reason, and the recorded replay
     asset + poster the generator must emit. When not needed, ``decision`` is
     "none" and ``sections`` is empty.
+
+    An interactive-physics canvas short-circuits to ``decision:
+    "behavioral-repro"`` — it must be rebuilt with the physics engine, not
+    replayed as a video. It deliberately does NOT get the blank-hero video pass
+    (``replay_satisfies_blank_hero``), so a blank impl still fails: physics has
+    to actually run.
     """
+    repro = physics_repro(detection)
+    if repro is not None:
+        return {
+            "schemaVersion": 1,
+            "generatedBy": "ui_clone.policies.canvas_replay_auto",
+            "url": url,
+            "decision": "behavioral-repro",
+            "reason": "interactive-physics",
+            "implCanvasCount": int(impl_canvas_count or 0),
+            "reembedBlocked": bool(reembed_blocked),
+            "sections": [],
+            "behavioralRepro": {
+                "section": section,
+                "refCanvasSelector": ref_canvas_selector,
+                "region": region,
+                "note": (
+                    "Interactive physics canvas: reproduce with the named engine "
+                    "(spawn/drop/append behavior), NOT a recorded video loop. "
+                    "Physics is non-deterministic (spawn randomness, frame timing) "
+                    "so exact-frame compare is unmeasurable — require a live canvas "
+                    "that runs and responds."
+                ),
+                **repro,
+            },
+        }
     needed, reason = needs_canvas_replay(
         detection, impl_canvas_count, reembed_blocked
     )

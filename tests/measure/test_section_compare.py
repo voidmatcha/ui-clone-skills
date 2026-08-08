@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from unittest import mock
@@ -15,6 +16,10 @@ from ._helpers import (
 )
 
 
+def _is_bash_major_probe(cmd: list[str]) -> bool:
+    return len(cmd) >= 3 and cmd[1:3] == ["-c", 'printf %s "${BASH_VERSION%%.*}"']
+
+
 def test_section_compare_locks_exclude_dynamic_and_threshold(capsys: pytest.CaptureFixture[str]) -> None:
     """`measure section-compare` MUST invoke bash with EXCLUDE_DYNAMIC=1
     and SECTION_THRESHOLD=2000, even when the parent shell sets them to
@@ -23,7 +28,14 @@ def test_section_compare_locks_exclude_dynamic_and_threshold(capsys: pytest.Capt
     """
     captured_env: dict[str, str] = {}
 
-    def fake_run(cmd: list[str], env: dict[str, str], **kw: object) -> subprocess.CompletedProcess[str]:  # noqa: ARG001
+    def fake_run(
+        cmd: list[str],
+        env: dict[str, str] | None = None,
+        **kw: object,  # noqa: ARG001
+    ) -> subprocess.CompletedProcess[str]:
+        if _is_bash_major_probe(cmd):
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="5")
+        assert env is not None, f"script subprocess must pass locked env: {cmd}"
         captured_env.update(env)
         return subprocess.CompletedProcess(args=cmd, returncode=0)
 
@@ -65,7 +77,14 @@ def test_all_runs_section_compare_first(capsys: pytest.CaptureFixture[str], tmp_
 
     call_order: list[str] = []
 
-    def fake_run(cmd: list[str], env: dict[str, str], **kw: object) -> subprocess.CompletedProcess[str]:  # noqa: ARG001
+    def fake_run(
+        cmd: list[str],
+        env: dict[str, str] | None = None,
+        **kw: object,  # noqa: ARG001
+    ) -> subprocess.CompletedProcess[str]:
+        if _is_bash_major_probe(cmd):
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="5")
+        assert env is not None, f"script subprocess must pass locked env: {cmd}"
         # Extract script name from the bash invocation
         for c in cmd:
             if "section-compare.sh" in c:
@@ -126,6 +145,47 @@ def test_section_compare_synthesis_uses_correct_section_map_keys() -> None:
         "section-compare.sh synthesis must read s.get('cls') with fallback to "
         "s.get('className') / s.get('class') — section-map.json writes 'cls', "
         "not just 'class'"
+    )
+
+
+def test_section_compare_synthesis_uses_active_viewport_width() -> None:
+    """Full-bleed section-map rows must not stay frozen at 1440px in fan-out."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert 'active_view_width = int(os.environ.get("VIEW_W") or 1440)' in text
+    assert 's.get("width") or s.get("w") or active_view_width' in text
+    assert "ref-semantic-candidates.json" in text
+    assert (
+        'cp "$DIR/sections/ref-sections.json" '
+        '"$DIR/sections/ref-runtime-sections.json"'
+    ) in text
+    assert '"$DIR/sections/ref-runtime-sections.json"' in text
+    assert "synthesize-ref" in text
+
+
+def test_section_compare_semantic_candidates_include_short_landmarks() -> None:
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "const isLandmark = landmarkTags.has(el.tagName.toLowerCase());" in text
+    assert "rect.height < (isLandmark ? 24 : 50)" in text
+    assert '[id], [class]' in text
+
+
+def test_section_compare_frozen_reuse_preserves_expanded_ref_sections() -> None:
+    """Frozen passes must not collapse the pass-1 ref baseline back to section-map rows."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+
+    guarded_legacy_synthesis = (
+        'if [ "$REUSE_FROZEN_REF" != "1" ]; then\n'
+        '    python3 - "$SECTION_MAP_FILE" "$DIR/sections/ref-sections.json"'
+    )
+    assert guarded_legacy_synthesis in text, (
+        "the legacy section-map synthesis must not rewrite ref-sections.json "
+        "during frozen calibration/measurement passes; pass 1 already merged "
+        "the authoritative map with live runtime descendants"
     )
 
 
@@ -213,21 +273,55 @@ def test_section_compare_descends_main_wrappers_with_section_descendants() -> No
     one giant main element and agents can add invisible sentinel children to
     game enumeration.
     """
-    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
-    text = script.read_text(encoding="utf-8")
+    # The enumerator JS is single-sourced in lib/enumerate-sections.js
+    # (consumed by both section-compare.sh and alignment-sweep-check.sh).
+    enum_js = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "lib"
+        / "enumerate-sections.js"
+    )
+    text = enum_js.read_text(encoding="utf-8")
 
     assert "structuralDescendantCount" in text, (
-        "section-compare.sh must count nested section/main descendants, not just "
-        "direct structural children"
+        "the section enumerator must count nested section/main descendants, not "
+        "just direct structural children"
     )
     assert "hasWrappedStructuralDescendants" in text, (
-        "section-compare.sh must descend <main> wrapper divs that contain real "
-        "section/main descendants"
+        "the section enumerator must descend <main> wrapper divs that contain "
+        "real section/main descendants"
     )
     assert "structuralDescendantCount >= 2" in text, (
         "the wrapper descent must require multiple nested structural sections so "
         "ordinary one-section mains are not over-split"
     )
+    depth_match = re.search(r"const MAX_COLLECT_DEPTH = (\d+);", text)
+    assert depth_match and int(depth_match.group(1)) >= 10, (
+        "deep React/Next wrapper stacks must not truncate real sections on the "
+        "reference side while a shallower generated DOM still enumerates them"
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    assert "lib/enumerate-sections.js" in script.read_text(encoding="utf-8"), (
+        "section-compare.sh must load the single-sourced enumerator"
+    )
+
+
+def test_section_enumerator_ignores_anonymous_capture_overlays() -> None:
+    """Capture instrumentation must not become reference-only sections.
+
+    Some browser full-page capture paths append an anonymous, aria-hidden,
+    pointer-inert absolute wrapper whose 150vh chunk children span the page.
+    Those chunks have section-sized geometry but are not site content.
+    """
+    enum_js = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "lib"
+        / "enumerate-sections.js"
+    )
+    text = enum_js.read_text(encoding="utf-8")
+
+    assert "isAnonymousCaptureOverlay" in text
+    assert 'node.getAttribute("aria-hidden") !== "true"' in text
+    assert 'style.pointerEvents === "none"' in text
+    assert 'style.position === "absolute" || style.position === "fixed"' in text
+    assert "if (isAnonymousCaptureOverlay(el)) return;" in text
 
 
 def test_section_compare_script_has_viewport_fanout_wrapper() -> None:
@@ -300,6 +394,62 @@ def test_section_compare_fans_out_per_viewport_with_stub_inner(tmp_path: Path) -
     assert (ref / "sections" / "viewports" / "1280x800" / "viewport.txt").read_text().strip() == "1280x800"
 
 
+def test_section_compare_fanout_result_json_sums_five_viewports(tmp_path: Path) -> None:
+    """The canonical JSON summary covers all viewport result blocks."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    stub = tmp_path / "stub-section-compare.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "out=\"${4:?out}\"\n"
+        "mkdir -p \"$out/sections\"\n"
+        "{\n"
+        "  echo '| Section | AE | AE/Mpx | Severity | Status |'\n"
+        "  echo '|---------|-----|--------|----------|--------|'\n"
+        "  i=1\n"
+        "  while [ \"$i\" -le 8 ]; do\n"
+        "    echo \"| Section $i | 0 | 0 | ok | ✅ |\"\n"
+        "    i=$((i + 1))\n"
+        "  done\n"
+        "  echo '**Result: 8 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**'\n"
+        "} > \"$out/sections/result.txt\"\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    agent_browser = fake_bin / "agent-browser"
+    agent_browser.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    agent_browser.chmod(0o755)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "VIEWPORTS": "375x812,768x1024,1280x800,1600x900,1920x1080",
+        "SECTION_COMPARE_INNER_CMD": str(stub),
+        "UI_CLONE_SESSION_SETTLE_SEC": "0",
+    }
+    proc = subprocess.run(
+        ["bash", str(script), "https://ref.example", "https://impl.example", "five-vp", str(ref)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result_json = json.loads((ref / "sections" / "result.json").read_text(encoding="utf-8"))
+    assert result_json["summary"] == {
+        "pass": 40,
+        "fail": 0,
+        "skip": 0,
+        "structuralOnly": 0,
+    }
+    assert len(result_json["sections"]) == 40
+
+
 def test_pair_sections_uses_text_content_when_class_signatures_differ() -> None:
     """A faithful Tailwind clone of a CSS-Modules reference shares ZERO class
     tokens with the ref, so class-signature pairing is blind. The ref
@@ -369,6 +519,333 @@ def test_pair_sections_uses_text_content_when_class_signatures_differ() -> None:
     ), "decoy (impl index 0) must not steal the ref hero pairing"
 
 
+def test_pair_sections_duplicate_id_disambiguates_by_class_signature() -> None:
+    """tools-batch-11 ITEM 4(a): two ref sections both carry id="footer"
+    (dga_end CTA + dga_eatReal). With no distinctive text overlap the matcher
+    falls to the semantic-key (id-overlap) stage, where the OLD greedy
+    index-proximity tiebreak cross-paired ref dga_end(CTA) -> impl blank footer
+    (nearest by index) and stranded the real CTA. The id token "footer" overlaps
+    EVERY footer, so id alone cannot disambiguate — the class signature (and
+    rect/order) must. Each ref footer must pair to the impl footer that shares
+    its class signature, not the nearest-by-index blank.
+    """
+    from ui_clone.section_compare_sections import pair_sections
+
+    ref = [
+        {  # dga_end CTA, FIRST in DOM order
+            "index": 0, "tag": "footer", "id": "footer",
+            "className": "dga_end__cta footer", "fingerprint": "", "textWords": "",
+            "rect": {"top": 8000, "left": 0, "width": 1440, "height": 400},
+            "childCount": 3,
+        },
+        {  # dga_eatReal, SECOND
+            "index": 1, "tag": "footer", "id": "footer",
+            "className": "dga_eatReal__food footer", "fingerprint": "", "textWords": "",
+            "rect": {"top": 8400, "left": 0, "width": 1440, "height": 600},
+            "childCount": 4,
+        },
+    ]
+    impl = [
+        {  # blank generic footer FIRST — nearest by index to ref dga_end (the trap)
+            "index": 0, "tag": "footer", "id": "footer",
+            "className": "footer", "fingerprint": "", "textWords": "",
+            "rect": {"top": 8000, "left": 0, "width": 1440, "height": 400},
+            "childCount": 0,
+        },
+        {  # the real CTA, under a later key — class signature matches ref dga_end
+            "index": 1, "tag": "footer", "id": "footer",
+            "className": "dga_end__cta footer", "fingerprint": "", "textWords": "",
+            "rect": {"top": 8000, "left": 0, "width": 1440, "height": 400},
+            "childCount": 3,
+        },
+        {  # eatReal — class signature matches ref dga_eatReal
+            "index": 2, "tag": "footer", "id": "footer",
+            "className": "dga_eatReal__food footer", "fingerprint": "", "textWords": "",
+            "rect": {"top": 8400, "left": 0, "width": 1440, "height": 600},
+            "childCount": 4,
+        },
+    ]
+    matches = pair_sections(ref, impl)
+    by_ref = {m["ref"]["index"]: m for m in matches if m.get("ref")}
+    assert by_ref[0].get("impl") and by_ref[0]["impl"]["index"] == 1, (
+        "ref dga_end(CTA) must pair to the impl footer sharing its class "
+        f"signature (index 1), not the nearest-by-index blank footer; got "
+        f"{by_ref[0].get('impl')}"
+    )
+    assert by_ref[1].get("impl") and by_ref[1]["impl"]["index"] == 2, (
+        "ref dga_eatReal must pair to its own class-matching footer (index 2); "
+        f"got {by_ref[1].get('impl')}"
+    )
+    # the blank generic footer (impl index 0) must be the unpaired EXTRA, not a
+    # cross-pair that strands the CTA.
+    assert not any(
+        m.get("ref") and m.get("impl") and m["impl"]["index"] == 0 for m in matches
+    ), "blank footer (impl 0) must not steal a ref pairing"
+
+
+def test_pair_sections_single_id_match_still_pairs() -> None:
+    """Guard: the global semantic-key assignment must not regress the ordinary
+    single-candidate id-overlap pairing (one ref, one impl, shared id token,
+    no text)."""
+    from ui_clone.section_compare_sections import pair_sections
+
+    ref = [{
+        "index": 0, "tag": "section", "id": "resources",
+        "className": "dga_resources__deck", "fingerprint": "", "textWords": "",
+        "rect": {"top": 2000, "left": 0, "width": 1440, "height": 700}, "childCount": 5,
+    }]
+    impl = [{
+        "index": 0, "tag": "section", "id": "resources",
+        "className": "dga_resources__deck", "fingerprint": "", "textWords": "",
+        "rect": {"top": 2000, "left": 0, "width": 1440, "height": 700}, "childCount": 5,
+    }]
+    matches = pair_sections(ref, impl)
+    pair = next(m for m in matches if m.get("ref") and m["ref"]["index"] == 0)
+    assert pair.get("impl") and pair["impl"]["index"] == 0, pair
+
+
+def test_pair_sections_disambiguates_duplicate_textwords_by_position() -> None:
+    """batch-13 ITEM 1 sub-fix 3: the realfood self-pass swap.
+
+    The ref section-map inherits the LIVE ref's innerText, and on adjacent
+    same-class sections it duplicates the SAME text onto two rows (observed:
+    the `dga_cta` row and the `faqs` row both carry the faqs paragraph; the
+    `dga_eatReal` footer and the `dga_end` footer both carry the dga_end
+    paragraph). Two ref rows then text-match ONE impl row at sim=1.0, and the
+    impl side enumerates more rows than the ref (food cards / hero-video), so
+    DOM indices are OFFSET. The OLD index-distance tiebreak picked the wrong ref
+    (nearer index), swapping faqs<->cta and the two footers. rect.top position —
+    exact in self-pass, ordered in a faithful clone — is the correct
+    disambiguator. Pairing only; the AE/structure compare downstream is
+    unchanged, so this never eases a pass.
+    """
+    from ui_clone.section_compare_sections import pair_sections
+
+    FAQ_TEXT = "frequently asked questions what is the new pyramid avoid sugar"
+    END_TEXT = "the government message is simple what we eat shapes health nation"
+
+    ref = [
+        {  # faqs
+            "index": 0, "tag": "section", "id": "faqs",
+            "className": "dga_section__k3uwv", "fingerprint": "faqs",
+            "textWords": FAQ_TEXT,
+            "rect": {"top": 15824, "left": 0, "width": 1440, "height": 1192},
+            "childCount": 1,
+        },
+        {  # dga_end footer (id=footer #1)
+            "index": 1, "tag": "footer", "id": "footer",
+            "className": "dga_end___VNIF", "fingerprint": "footer",
+            "textWords": END_TEXT,
+            "rect": {"top": 17016, "left": 0, "width": 1440, "height": 1149},
+            "childCount": 1,
+        },
+        {  # dga_cta — section-map DUPLICATED the faqs text onto it
+            "index": 2, "tag": "section", "id": None,
+            "className": "dga_section__k3uwv dga_cta__6_hMx", "fingerprint": "",
+            "textWords": FAQ_TEXT,
+            "rect": {"top": 18165, "left": 0, "width": 1440, "height": 900},
+            "childCount": 1,
+        },
+        {  # dga_eatReal footer (id=footer #2) — DUPLICATED the dga_end text
+            "index": 3, "tag": "footer", "id": "footer",
+            "className": "dga_eatReal__hUKXz", "fingerprint": "footer",
+            "textWords": END_TEXT,
+            "rect": {"top": 19065, "left": 0, "width": 1440, "height": 1068},
+            "childCount": 2,
+        },
+    ]
+    # impl enumerates two extra leading rows (food cards) -> DOM indices offset
+    # by 2 vs the ref, defeating the index-distance tiebreak.
+    impl = [
+        {
+            "index": 0, "tag": "section", "id": None,
+            "className": "dga_sections_section__tSzh_", "fingerprint": "",
+            "textWords": "protein dairy healthy fats ending chronic disease",
+            "rect": {"top": 8313, "left": 0, "width": 1440, "height": 1062},
+            "childCount": 2,
+        },
+        {
+            "index": 1, "tag": "section", "id": None,
+            "className": "dga_sections_section__tSzh_", "fingerprint": "",
+            "textWords": "vegetables fruits whole grains encouraged daily",
+            "rect": {"top": 9375, "left": 0, "width": 1440, "height": 1062},
+            "childCount": 2,
+        },
+        {  # real faqs — same top as ref faqs
+            "index": 2, "tag": "section", "id": "faqs",
+            "className": "dga_section__k3uwv", "fingerprint": "",
+            "textWords": FAQ_TEXT,
+            "rect": {"top": 15824, "left": 0, "width": 1440, "height": 1192},
+            "childCount": 1,
+        },
+        {  # real dga_end footer
+            "index": 3, "tag": "footer", "id": "footer",
+            "className": "dga_end___VNIF", "fingerprint": "",
+            "textWords": END_TEXT,
+            "rect": {"top": 17016, "left": 0, "width": 1440, "height": 1149},
+            "childCount": 1,
+        },
+        {  # real dga_cta — its OWN (distinct) text
+            "index": 4, "tag": "section", "id": None,
+            "className": "dga_section__k3uwv dga_cta__6_hMx", "fingerprint": "",
+            "textWords": "eat real food spread the word partner with us",
+            "rect": {"top": 18165, "left": 0, "width": 1440, "height": 900},
+            "childCount": 1,
+        },
+        {  # real dga_eatReal footer — its OWN (distinct) text
+            "index": 5, "tag": "footer", "id": "footer",
+            "className": "dga_eatReal__hUKXz", "fingerprint": "",
+            "textWords": "designed engineered in dc by national digital",
+            "rect": {"top": 19065, "left": 0, "width": 1440, "height": 1068},
+            "childCount": 2,
+        },
+    ]
+
+    matches = pair_sections(ref, impl)
+    by_ref = {m["ref"]["index"]: m for m in matches if m.get("ref")}
+
+    def impl_top(ridx: int) -> object:
+        m = by_ref[ridx]
+        return (m.get("impl") or {}).get("rect", {}).get("top")
+
+    assert impl_top(0) == 15824, f"ref faqs must pair to impl faqs (top 15824); got {impl_top(0)}"
+    assert impl_top(1) == 17016, f"ref dga_end must pair to impl dga_end (top 17016); got {impl_top(1)}"
+    assert impl_top(2) == 18165, f"ref dga_cta must pair to impl dga_cta (top 18165); got {impl_top(2)}"
+    assert impl_top(3) == 19065, f"ref dga_eatReal must pair to impl dga_eatReal (top 19065); got {impl_top(3)}"
+
+
+def test_pair_sections_rejects_gross_drift_outlier_mispairs() -> None:
+    """Drift-outlier repair: a high-text/identity-score pairing whose vertical
+    drift is a gross outlier vs the per-page median is rejected for the
+    position-consistent candidate.
+
+    Grounded in the realfood regen mispairs: a CTA section whose section-map
+    `textWords` were captured from a shared-base-class FAQ sibling text-matches
+    the FAQ impl block (drift -1906) instead of the real CTA impl (drift +375);
+    a broken-system section semantic-key-matches a far-away CTA block (drift
+    +16192) instead of the anonymous impl div at its own position (drift 0).
+
+    Correct pairings (drift ~ +375, the page's consistent intro offset) are
+    untouched. PAIRING only — better position consistency yields more accurate
+    measurement, never an easier pass.
+    """
+    from ui_clone.section_compare_sections import pair_sections
+
+    FAQ = "frequently asked questions what is the new pyramid avoid sugar daily"
+    ref = [
+        {"index": 0, "tag": "section", "id": None, "className": "ref_broken_system__a",
+         "fingerprint": "", "textWords": "1992 food pyramid misled by guidance decades",
+         "rect": {"top": 2348, "left": 0, "width": 1440, "height": 1800}, "childCount": 3},
+        {"index": 1, "tag": "div", "id": None, "className": "ref_container__b",
+         "fingerprint": "", "textWords": "official guidance calls on americans avoid processed",
+         "rect": {"top": 5948, "left": 0, "width": 1440, "height": 1011}, "childCount": 2},
+        {"index": 2, "tag": "section", "id": "faqs", "className": "ref_section__k",
+         "fingerprint": "", "textWords": FAQ,
+         "rect": {"top": 15824, "left": 0, "width": 1440, "height": 1192}, "childCount": 1},
+        {"index": 3, "tag": "section", "id": None, "className": "ref_section__k ref_cta__c",
+         "fingerprint": "", "textWords": FAQ,  # shared-base-class collision: CTA carries FAQ text
+         "rect": {"top": 18165, "left": 0, "width": 1440, "height": 900}, "childCount": 1},
+    ]
+    impl = [
+        {"index": 0, "tag": "div", "id": None, "className": "",
+         "fingerprint": "", "textWords": "1992 food pyramid misled by guidance decades",
+         "rect": {"top": 2348, "left": 0, "width": 1440, "height": 1800}, "childCount": 3},
+        {"index": 1, "tag": "div", "id": None, "className": "impl_container__x",
+         "fingerprint": "", "textWords": "official guidance calls on americans avoid processed",
+         "rect": {"top": 6173, "left": 0, "width": 1440, "height": 1011}, "childCount": 2},
+        {"index": 2, "tag": "div", "id": None, "className": "",
+         "fingerprint": "", "textWords": FAQ,  # FAQ duplicate-text enumeration artifact
+         "rect": {"top": 16259, "left": 0, "width": 1440, "height": 1192}, "childCount": 1},
+        {"index": 3, "tag": "section", "id": "faqs", "className": "impl_section__k",
+         "fingerprint": "", "textWords": FAQ,
+         "rect": {"top": 16259, "left": 0, "width": 1440, "height": 1192}, "childCount": 1},
+        {"index": 4, "tag": "section", "id": None, "className": "impl_section__k impl_cta__c",
+         "fingerprint": "", "textWords": "eat real food spread the word partner champion",
+         "rect": {"top": 18540, "left": 0, "width": 1440, "height": 900}, "childCount": 1},
+    ]
+
+    matches = pair_sections(ref, impl)
+    by_ref = {m["ref"]["index"]: m for m in matches if m.get("ref")}
+
+    def impl_top(ridx: int) -> object:
+        return (by_ref[ridx].get("impl") or {}).get("rect", {}).get("top")
+
+    # broken-system must pair to its own-position impl (drift 0), not a far block.
+    assert impl_top(0) == 2348, f"broken-system mispaired; impl top {impl_top(0)}"
+    # container is a correct pairing (drift +225) — untouched.
+    assert impl_top(1) == 6173, f"container pairing must be untouched; got {impl_top(1)}"
+    # faqs is a correct pairing (drift +435) — untouched.
+    assert impl_top(2) == 16259, f"faqs pairing must be untouched; got {impl_top(2)}"
+    # CTA must pair to the real CTA impl (drift +375), NOT the FAQ block (drift -1906).
+    assert impl_top(3) == 18540, (
+        f"CTA must re-pair to the real CTA impl at 18540 (drift +375), not the "
+        f"FAQ block; got impl top {impl_top(3)}"
+    )
+
+
+def test_pair_sections_drift_repair_is_noop_in_ref_vs_ref_self_pass() -> None:
+    """Achievability meta-gate: in ref-vs-ref self-pass impl == ref, so every
+    drift is 0. The drift-outlier repair must NEVER fire at zero/near-zero drift
+    (no pair can exceed the 300px floor), so the self-pass stays green. No match
+    may carry the `position-repaired` label."""
+    from ui_clone.section_compare_sections import pair_sections
+
+    ref = [
+        {"index": i, "tag": "section", "id": f"s{i}", "className": f"sec_{i}__cls",
+         "fingerprint": "", "textWords": f"section number {i} distinctive heading copy",
+         "rect": {"top": 1000 * i, "left": 0, "width": 1440, "height": 800}, "childCount": 2}
+        for i in range(6)
+    ]
+    impl = [dict(r) for r in ref]  # identical — every drift is exactly 0
+
+    matches = pair_sections(ref, impl)
+    assert not any(m.get("pairing") == "position-repaired" for m in matches), (
+        "drift-outlier repair must be a NO-OP in the zero-drift ref-vs-ref self-pass"
+    )
+    # every ref still pairs to its own-index impl
+    by_ref = {m["ref"]["index"]: m for m in matches if m.get("ref")}
+    for i in range(6):
+        assert (by_ref[i].get("impl") or {}).get("index") == i, by_ref[i]
+
+
+def test_section_compare_crop_scale_tolerance_is_bounded_and_keeps_stretch() -> None:
+    """tools-batch-11 ITEM 4(c): the crop-scale tolerance must be a BOUNDED,
+    env-knobbed cover-fit CANDIDATE — the legacy exact-stretch stays the primary
+    resize (so the localized-defect band check stays valid), and the AE step
+    takes the min of stretch-vs-cover so it can only lower AE, never raise it."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "SECTION_CROP_SCALE_TOL" in text, "crop-scale tolerance knob missing"
+    # legacy exact-stretch must still be present (primary resize / wrong-size fallback)
+    assert '-resize "$REF_SIZE!"' in text, "legacy exact-stretch resize removed"
+    # cover-fit candidate uses aspect-preserving fill + centre extent to ref dims
+    assert '-extent "${_R_W}x${_R_H}"' in text, "cover-fit extent-to-ref-dims missing"
+
+
+def test_section_compare_scroll_phase_tolerance_is_bounded_min_ae() -> None:
+    """tools-batch-11 ITEM 4(b): the scroll-phase tolerance must be a BOUNDED,
+    env-knobbed vertical-offset sweep that keeps the MINIMUM AE (it can only
+    lower AE on a global translation; a defect-scale shift is never aligned
+    away)."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "SECTION_SCROLL_PHASE_TOL_PX" in text, "scroll-phase tolerance knob missing"
+    # bounded sweep (seq ... PX) keeping the lower AE candidate
+    assert 'seq 2 2 "$SCROLL_PHASE_TOL_PX"' in text, "bounded 2px phase sweep missing"
+    assert '"$c" -lt "$AE"' in text, "min-AE keep-lower comparison missing"
+
+
+def test_section_compare_dssim_cap_still_authoritative() -> None:
+    """The batch-11 4(b)/4(c) tolerances are MEASUREMENT corrections, not cap
+    changes: the dssim_cap (THRESHOLD x SECTION_DSSIM_AE_CAP_MULT) must still
+    gate the leniency paths so extreme AE cannot pass without a fresh judge."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+    assert text.count("dssim_cap_allows") >= 2, (
+        "dssim_cap_allows must still gate BOTH leniency branches"
+    )
+
+
 def test_section_compare_failure_guidance_avoids_sigpipe_prone_head_pipelines() -> None:
     """Regression: the failure-report path runs with `set -o pipefail`.
 
@@ -398,6 +875,28 @@ def test_section_compare_delegates_capture_to_safe_python_module() -> None:
     assert "python3 -m ui_clone.section_capture" in text
     assert "subprocess.run(cmd_scroll, shell=True" not in text
     assert "subprocess.run(cmd_crop, shell=True" not in text
+
+
+def test_frozen_section_compare_preserves_reference_mask_geometry() -> None:
+    """The measurement pass reuses frozen reference crops and must also reuse
+    the mask rectangles captured with them.
+
+    Replacing mask-elements.json with [] in pass 2B made mask coverage appear
+    to be zero even when videos/canvases were hidden in every reference crop.
+    """
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "section-compare.sh"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'elif [ "$REUSE_FROZEN_REF" = "1" ] '
+        '&& [ -s "$MASK_ELEMENTS_FILE" ]; then'
+    ) in script
+    assert "Reusing frozen reference mask geometry" in script
 
 
 def test_section_capture_sanitizes_section_filenames() -> None:
@@ -453,6 +952,14 @@ def test_section_capture_runs_commands_as_argv(monkeypatch: pytest.MonkeyPatch, 
     joined = "\n".join(" ".join(cmd) for cmd, _kwargs in calls)
     assert "hero_touch_tmp_pwned.png" in joined
     assert 'document.querySelector("main[data-x=\\"quoted\\"]")' in joined
+    frozen_matches = json.loads(
+        (tmp_path / "sections" / "frozen-capture-matches.json").read_text()
+    )
+    assert frozen_matches[0]["name"] == 'hero"; touch /tmp/pwned #'
+    impl_positions = json.loads(
+        (tmp_path / "sections" / "impl-scroll-positions.json").read_text()
+    )
+    assert "hero_touch_tmp_pwned" in impl_positions
 
 
 def test_find_large_extra_sections_flags_tall_unpaired_impl() -> None:
@@ -473,3 +980,109 @@ def test_find_large_extra_sections_flags_tall_unpaired_impl() -> None:
     assert flagged == [("dga_eatReal-2", 1062)]
     # Raising the floor above the dup height clears it (env-tunable knob).
     assert find_large_extra_sections(matches, 2000) == []
+
+
+def test_pair_sections_off_canvas_ref_pairs_to_synthetic_rect() -> None:
+    """loop-e2e-4/5 intro overlay: the ref UNMOUNTS its splash overlay after
+    settle, so the impl (faithfully unmounting too, or keeping only a hidden
+    shell the enumerator excludes) has NO candidate — the matcher then
+    garbage-matches the overlay to the hero video (score 0.1) and the compare
+    crops painted content against the ref's off-canvas transparent 1x1.
+
+    A ref row whose stored rect lies entirely above the canvas (top + height
+    <= 0) must pair to a SYNTHETIC impl entry carrying the same rect, so both
+    sides crop the same off-canvas region (deterministic transparent stubs,
+    AE 0) and no real impl section is consumed by a garbage match."""
+    from ui_clone.section_compare_sections import pair_sections
+
+    ref = [
+        {
+            "index": 0,
+            "tag": "div",
+            "id": None,
+            "className": "intro-animation_overlay___QI3A",
+            "fingerprint": "introanimationoverlayqi3a",
+            "textWords": "intro animation overlay",
+            "rect": {"top": -900, "left": 0, "width": 1440, "height": 900},
+            "childCount": 1,
+        },
+    ]
+    impl = [
+        {
+            "index": 0,
+            "tag": "div",
+            "id": "hero-video",
+            "className": "dga_hero_video__SoTy9",
+            "fingerprint": "",
+            "textWords": "",
+            "rect": {"top": 680, "left": 144, "width": 1152, "height": 666},
+            "childCount": 2,
+        },
+    ]
+    matches = pair_sections(ref, impl)
+    overlay = next(m for m in matches if m.get("ref") and "intro" in str(m["ref"].get("className")))
+    assert overlay.get("pairing") == "off-canvas", overlay
+    assert overlay["impl"]["rect"] == {"top": -900, "left": 0, "width": 1440, "height": 900}
+    assert overlay["impl"].get("offCanvas") is True
+    # the real impl section must remain available (EXTRA_IN_IMPL), not consumed
+    extras = [m for m in matches if m.get("status") == "EXTRA_IN_IMPL"]
+    assert extras, matches
+
+
+def test_extra_impl_contained_in_matched_section_not_flagged() -> None:
+    """Un-consuming a garbage match (off-canvas pre-pass) orphans impl
+    sub-blocks that previously absorbed it — e.g. the hero-video block whose
+    rect sits fully INSIDE the matched hero/dark section. A contained extra is
+    enumeration granularity, not a duplicated/misplaced block; only extras
+    outside every matched impl rect signal real structural drift."""
+    from ui_clone.section_compare_sections import find_large_extra_sections
+
+    matches = [
+        {
+            "name": "dga_dark",
+            "score": 1.0,
+            "ref": {"index": 0, "rect": {"top": 42, "left": 0, "width": 1440, "height": 11152}},
+            "impl": {"index": 0, "rect": {"top": 42, "left": 0, "width": 1440, "height": 11190}},
+        },
+        {
+            "name": "hero",
+            "score": 1.0,
+            "ref": {"index": 1, "rect": {"top": 42, "left": 0, "width": 1440, "height": 638}},
+            "impl": {"index": 1, "rect": {"top": 42, "left": 0, "width": 1440, "height": 638}},
+        },
+        {
+            "name": "problem",
+            "score": 1.0,
+            "ref": {"index": 2, "rect": {"top": 1345, "left": 0, "width": 1440, "height": 1002}},
+            "impl": {"index": 2, "rect": {"top": 1345, "left": 0, "width": 1440, "height": 1002}},
+        },
+        {
+            "name": "hero-video",
+            "score": 0,
+            "ref": None,
+            "impl": {"index": 5, "rect": {"top": 680, "left": 144, "width": 1152, "height": 666}},
+            "status": "EXTRA_IN_IMPL",
+        },
+        {
+            "name": "stray-bottom-hero",
+            "score": 0,
+            "ref": None,
+            "impl": {"index": 9, "rect": {"top": 30000, "left": 0, "width": 1440, "height": 800}},
+            "status": "EXTRA_IN_IMPL",
+        },
+    ]
+    matches.append({
+        "name": "dup-over-ref",
+        "score": 0,
+        "ref": None,
+        "impl": {"index": 11, "rect": {"top": 50, "left": 0, "width": 1440, "height": 600}},
+        "status": "EXTRA_IN_IMPL",
+    })
+    out = find_large_extra_sections(matches, floor_px=300)
+    names = [n for n, _h in out]
+    # in-span ref-coverage gap -> enumeration granularity, suppressed
+    assert "hero-video" not in names, out
+    # appended past the matched span -> still a duplicated/misplaced block
+    assert "stray-bottom-hero" in names, out
+    # overlapping an existing ref region -> still flagged (dedup "-2" case)
+    assert "dup-over-ref" in names, out

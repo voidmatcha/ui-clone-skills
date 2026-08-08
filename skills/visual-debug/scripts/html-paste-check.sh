@@ -10,7 +10,7 @@
 #
 #   2. SCRIPT THEFT: <script src="..."> in impl entry HTML pointing at
 #      anything resembling the ref's bundle filenames captured in
-#      bundle-map.json (e.g. /js/navercorp.min.js, /assets/main.*.js).
+#      bundle-map.json (e.g. /js/app.min.js, /assets/main.*.js).
 #      Hot-loading the ref's bundle bypasses every other gate.
 #
 #   3. INLINE CSS theft: <style> blocks in impl entry HTML byte-similar

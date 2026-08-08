@@ -120,8 +120,11 @@ class TestPreBashPipelineStateStaticMirror:
         assert "impl/index.html" in reason
         assert "static mirror" in reason
 
-    def test_static_server_blocked_until_post_implement_gate(self, tmp_path: Path) -> None:
-        """Loop-61: serving copied public files before implementation gate → deny."""
+    def test_static_server_before_post_implement_warns_not_blocks(self, tmp_path: Path) -> None:
+        """Hook slimming B: serving copied public files before the implementation
+        gate is now an advisory WARNING, not a deny — the Stop verify-stamp gate
+        is the real ship-short backstop. The command is allowed; the warning
+        (naming the gate) goes to stderr."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root, name="realfood")
         _set_extraction_state(ref_dir)
@@ -136,19 +139,16 @@ class TestPreBashPipelineStateStaticMirror:
         )
 
         assert result.returncode == 0
-        out = result.stdout.strip()
-        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
-        data = json.loads(out)
-        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
-        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "post-implement" in reason
+        # Not blocked: no deny payload on stdout.
+        assert result.stdout.strip() == "", f"expected no block, got: {result.stdout}"
+        # Advisory warning surfaced to stderr, still pointing at the gate.
+        assert "post-implement" in result.stderr
 
-    def test_static_server_blocked_at_state_coverage_points_to_gate_not_source(
+    def test_static_server_at_state_coverage_warns_points_to_gate(
         self, tmp_path: Path
     ) -> None:
-        """RealFood JSONL: agents inspected hook internals after server block.
-        The denial should point at the next gate command instead.
-        """
+        """Demoted static-server warning still points at the next gate command
+        (not hook source) so a curious agent is redirected, not blocked."""
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root, name="realfood")
         (ref_dir / "pipeline-state.json").write_text(
@@ -174,12 +174,9 @@ class TestPreBashPipelineStateStaticMirror:
         )
 
         assert result.returncode == 0
-        data = json.loads(result.stdout.strip())
-        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
-        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "python -m ui_clone.gate" in reason
-        assert "state-coverage" in reason
-        assert "Do not inspect hook or gate source" in reason
+        assert result.stdout.strip() == "", f"expected no block, got: {result.stdout}"
+        assert "python -m ui_clone.gate" in result.stderr
+        assert "state-coverage" in result.stderr
 
     def test_dev_server_allowed_after_pre_generate_passes(self, tmp_path: Path) -> None:
         """After current_gate=post-implement, dev-server commands are normal verification."""

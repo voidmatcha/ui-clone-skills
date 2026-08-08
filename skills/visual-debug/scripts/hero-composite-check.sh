@@ -153,6 +153,10 @@ HERO_CLASS_RE = re.compile(
     r"hero|banner|masthead|intro|fold-?1|first-?view|\bkv\b|key[-_]?visual|page-?top",
     re.IGNORECASE,
 )
+STRONG_HERO_RE = re.compile(
+    r"hero|masthead|fold-?1|first-?view|\bkv\b|key[-_]?visual|page-?top",
+    re.IGNORECASE,
+)
 
 
 def collect_hero_subtrees(node, hits=None):
@@ -198,6 +202,18 @@ def fallback_top_section(node):
 
 
 hero_subtrees = collect_hero_subtrees(structure)
+strong_hero_subtrees = [
+    node for node in hero_subtrees
+    if STRONG_HERO_RE.search(
+        f"{node.get('class') or node.get('className') or ''} {node.get('id') or ''}"
+    )
+]
+if strong_hero_subtrees:
+    # Generic banners (cookie notices, flash alerts, promo strips) frequently
+    # contain buttons and otherwise pollute a real hero's element inventory.
+    # Once a strong hero/key-visual match exists, broad "banner"/"intro"
+    # fallbacks must not be unioned into the same composite.
+    hero_subtrees = strong_hero_subtrees
 if not hero_subtrees:
     write_artifact({
         "schemaVersion": 1,
@@ -262,8 +278,16 @@ HERO_FILE_RE = re.compile(r"hero", re.IGNORECASE)
 DATA_SECTION_HERO_RE = re.compile(
     r"""data-section\s*=\s*[\"']hero[\"']""", re.IGNORECASE
 )
+HERO_REGION_MARKER_RE = re.compile(
+    r"""(?:data-testid\s*=\s*[\"']hero[\"']|"""
+    r"""id\s*=\s*[\"']landing[\"']|"""
+    r"""class(?:Name)?\s*=\s*[\"'][^\"']*\bhero\b)""",
+    re.IGNORECASE,
+)
 
 # Priority 1: explicit `data-section="hero"` marker (strongest signal).
+# Priority 1 also accepts grounded semantic hero-region markers emitted by
+# common design systems (`data-testid="Hero"`, `id="landing"`, hero class).
 # Priority 2: file path/name contains "hero" (case-insensitive).
 # Priority 3: file contains `<video` anywhere (catches Banner/Cover/Splash).
 def file_text(p: Path) -> str:
@@ -280,7 +304,7 @@ for p in ts_files:
     if "node_modules" in p.parts:
         continue
     text = file_text(p)
-    if DATA_SECTION_HERO_RE.search(text):
+    if DATA_SECTION_HERO_RE.search(text) or HERO_REGION_MARKER_RE.search(text):
         candidates_p1.append(p)
         continue
     if HERO_FILE_RE.search(str(p.relative_to(impl_dir))):
@@ -301,8 +325,9 @@ if not hero_files:
         "missingInImpl": ["hero-component-file"],
         "implCandidateFiles": [],
         "rule": (
-            "Impl must have at least one hero-named component or a component "
-            "containing <video>. None found in impl/src/."
+            "Impl must have at least one hero-named component, a grounded "
+            "hero-region marker, or a component containing <video>. None "
+            "found in impl/src/."
         ),
     })
     print("hero-composite: FAIL (no hero candidate file in impl)")
@@ -310,10 +335,11 @@ if not hero_files:
 
 
 # Inventory element kinds across the union of hero candidate files.
-# Button gets a proximity check: a `<button` only counts when there's
-# also a `<video` within 500 characters (forward or back). That excludes
-# the false-positive where a navbar / footer button happens to live in
-# the same file as the hero video.
+# When the reference hero contains video, button gets a proximity check:
+# a `<button` only counts when there's also a `<video` within 500
+# characters (forward or back). That excludes the false-positive where a
+# navbar / footer button happens to live in the same file as the hero
+# video. Non-video hero regions still count their real button candidates.
 VIDEO_RE = re.compile(r"<\s*video\b", re.IGNORECASE)
 BUTTON_RE = re.compile(r"<\s*button\b", re.IGNORECASE)
 HEADLINE_RE = re.compile(r"<\s*h[12]\b", re.IGNORECASE)
@@ -337,12 +363,19 @@ def has_button_near_video(text: str) -> bool:
     return False
 
 
+def has_relevant_button(text: str) -> bool:
+    """Apply video proximity only to video-backed reference heroes."""
+    if ref_kinds["video"]:
+        return has_button_near_video(text)
+    return BUTTON_RE.search(text) is not None
+
+
 impl_kinds = {"video": False, "button": False, "h1OrH2": False, "label": False, "canvas": False}
 for p in hero_files:
     text = file_text(p)
     if VIDEO_RE.search(text):
         impl_kinds["video"] = True
-    if has_button_near_video(text):
+    if has_relevant_button(text):
         impl_kinds["button"] = True
     if HEADLINE_RE.search(text):
         impl_kinds["h1OrH2"] = True

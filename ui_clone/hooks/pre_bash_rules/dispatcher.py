@@ -16,20 +16,32 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from ui_clone.hooks._common import extract_tool_command, find_project_root, find_ref_dir, run_gate
+from ui_clone.hooks._common import (
+    extract_tool_command,
+    find_project_root,
+    find_ref_dir,
+    has_clone_writes,
+    has_external_browse,
+    mark_external_browse,
+    mark_ref_session,
+    run_gate,
+    session_id_from_payload,
+    should_enforce_ref_for_session,
+    target_ref_dir_for_ui_re_command,
+)
 from ui_clone.state import PipelineState
 
 from .bash_write import (
     _bash_adhoc_ref_target,
+    _bash_enforcement_state_target,
     _bash_scratch_nested_ref_target,
+    _bash_verification_plan_ack_target,
     _bash_write_target,
 )
 from .declaration import _is_declaration_command
 from .impl_scaffold import _impl_scaffold_violation
 from .ref_state import (
     _find_active_ref,
-    _fresh_state_violation,
-    _is_fresh_state,
     _ref_dir_for_static_guard,
     _state_before_gate,
 )
@@ -62,6 +74,14 @@ def _emit_block(reason: str) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
 
+def _emit_warn(reason: str) -> None:
+    """Non-blocking advisory to stderr — surfaces to the agent transcript
+    without denying the command. Used for demoted guards (hook slimming B)
+    where the concern is real but the hard block was disproportionate and has a
+    downstream backstop (the Stop verify-stamp gate)."""
+    print(reason, file=sys.stderr)
+
+
 def _resolve_payload_cwd(data: dict) -> Path | None:
     payload_cwd_raw = data.get("cwd", "")
     if isinstance(payload_cwd_raw, str) and payload_cwd_raw:
@@ -69,6 +89,14 @@ def _resolve_payload_cwd(data: dict) -> Path | None:
         if candidate.is_dir():
             return candidate.resolve()
     return None
+
+
+def _mark_ui_re_session(
+    cmd: str, project_root: Path, session_id: str, payload_cwd: Path | None
+) -> None:
+    ref_dir = target_ref_dir_for_ui_re_command(cmd, project_root, cwd=payload_cwd)
+    if ref_dir is not None:
+        mark_ref_session(ref_dir, session_id, source="pre_bash")
 
 
 def _guard_whole_document_mirror(cmd: str) -> str | None:
@@ -112,8 +140,57 @@ def _guard_scratch_nested_ref(cmd: str) -> str | None:
         f"scratch/. Run the pipeline driver with cwd = <repo> (not a "
         f"scratch subdir):\n"
         f"  cd <repo>\n"
-        f"  python -m ui_clone.pipeline <url> <component> <session> run\n\n"
-        f"Bypass (emergency only): UI_RE_SKIP_BASH_GATE=1 <command>"
+        f"  python -m ui_clone.pipeline <url> <component> <session> run\n"
+    )
+
+
+def _guard_enforcement_state_rm(cmd: str) -> str | None:
+    """Block targeted deletion/truncation/overwrite/move of a guard's own state file.
+
+    The fail-LOUD ledger (.gate-skip-log) and the off-pipeline activation crumbs
+    (.ui-re-external-browse/, .ui-re-active) are checked by EXISTENCE/CONTENT:
+    destroying or clobbering them silently releases an un-enforced or off-pipeline
+    run. A whole-dir reset (`rm -rf tmp/ref/<c>`) does not name these files and is
+    unaffected.
+    """
+    target = _bash_enforcement_state_target(cmd)
+    if target is None:
+        return None
+    return (
+        f"⛔ UI-RE enforcement-state write blocked: '{target}' is gate state "
+        "(the fail-LOUD .gate-skip-log ledger or an off-pipeline activation "
+        "crumb). Destroying, truncating, overwriting, or editing it in place by "
+        "any means (rm/mv/cp/tee/ln/dd/truncate/install/rsync/sed/perl/ex, python "
+        "file APIs, or shell redirect — among others) silently disables a gate "
+        "that would otherwise block closeout. Do not destroy it.\n\n"
+        "If you are genuinely resetting a run, remove the whole ref dir "
+        "(`rm -rf tmp/ref/<component>`), which re-runs every gate from clean — "
+        "do not single out the enforcement file. To re-enforce a skipped gate, "
+        "re-run it on a host with the ui-clone-skills env (which clears the "
+        "ledger entry), or record `gateSkipAck` in verification-plan.json.\n\n"
+        "Only READING it? This guard also over-blocks a read (a python "
+        "`open(...)` is blocked in any mode because distinguishing read from "
+        "write reopens truncate-bypasses). Use a sanctioned read instead — it "
+        "is not blocked: `cat <file>`, `jq . <file>`, `grep <pat> <file>`, or "
+        "`python -m ui_clone.pipeline <ref> status --json` for pipeline state."
+    )
+
+
+def _guard_verification_plan_ack(cmd: str) -> str | None:
+    """Block a Bash write that sets gateSkipAck/deferredAck in
+    verification-plan.json — the ack keys release closeout blockers, and a
+    self-granted ack closes out an un-enforced/deferred run."""
+    target = _bash_verification_plan_ack_target(cmd)
+    if target is None:
+        return None
+    return (
+        f"⛔ UI-RE closeout-ack write blocked: '{target}' write sets an ack key "
+        "(gateSkipAck/deferredAck) that dissolves a closeout blocker "
+        "(gate_skip_blocker / deferred_checks_blocker). That ack is an explicit "
+        "USER decision accepting an un-enforced or deferred run — not an agent "
+        "edit. Re-run the gate on a host with the ui-clone-skills env (which "
+        "clears .gate-skip-log) or regenerate the plan at the required tier "
+        "instead of self-granting the ack."
     )
 
 
@@ -139,30 +216,6 @@ def _guard_adhoc_redirect(cmd: str) -> str | None:
         f"script (skills/visual-debug/scripts/*.sh) instead of "
         f"hand-dumping JSON into tmp/ref/<c>/. See SKILL.md "
         f"Pipeline section for the step → artifact mapping."
-    )
-
-
-def _guard_fresh_state(
-    cmd: str, project_root: Path, payload_cwd: Path | None
-) -> str | None:
-    if not _is_fresh_state(project_root, cwd=payload_cwd):
-        return None
-    if not _fresh_state_violation(cmd):
-        return None
-    example_component = "site"
-    example_session = "ref-capture"
-    return (
-        f"⛔ UI-RE fresh-folder enforcement: tmp/ref/ has no Phase 1 "
-        f"evidence yet, so direct extraction commands are blocked.\n"
-        f"Run the pipeline driver FIRST:\n"
-        f"  python -m ui_clone.pipeline <URL> {example_component} "
-        f"{example_session} run --phases 0A,1,2\n"
-        f"It invokes capture.sh + extract-dom.sh + dom-scaffold.sh "
-        f"in the right order and produces canonical artifacts.\n"
-        f"Inspection commands (which / command -v / ls / cat / "
-        f"`python -m ui_clone.pipeline ... status`) still pass.\n"
-        f"Bypass (emergency only, voids measurement signal): "
-        f"UI_RE_SKIP_BASH_GATE=1 <command>"
     )
 
 
@@ -242,7 +295,7 @@ def _resolve_ref_dir_for_write(bash_write: str, project_root: Path) -> Path | No
 
 
 def _guard_bash_write_component(
-    bash_write: str, project_root: Path
+    bash_write: str, project_root: Path, session_id: str
 ) -> tuple[str | None, bool]:
     """Run the pre-generate gate when a Bash redirect targets a component file.
 
@@ -256,6 +309,7 @@ def _guard_bash_write_component(
         return None, True
     gate_result = run_gate(ref_dir, "pre-generate")
     if gate_result.get("passed", True):
+        mark_ref_session(ref_dir, session_id, source="pre_bash_component_write")
         return None, False
     failures: list[dict[str, str]] = cast(
         list[dict[str, str]], gate_result.get("failures", [])
@@ -268,7 +322,6 @@ def _guard_bash_write_component(
             f"extraction incomplete ({fail_count} artifacts missing: {missing}).\n"
             f"This bypass route (cat>/tee/sed -i) goes through the same gate as Edit/Write.\n"
             f"Complete Phase 2 extraction before writing components.\n"
-            f"Bypass (emergency only): UI_RE_SKIP_BASH_GATE=1 <command>"
         ),
         True,
     )
@@ -309,12 +362,11 @@ def _build_gate_failure_block(
             parts.append(f"    → {f['fix']}")
     parts.append(
         f"\nFix and re-run: python -m ui_clone.gate {ref_dir} {gate_name}\n"
-        f"Bypass (emergency only): UI_RE_SKIP_BASH_GATE=1 <command>"
     )
     return "\n".join(parts)
 
 
-def _run_declaration_cascade(cmd: str, project_root: Path) -> None:
+def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> None:
     """Final flow: declaration + section-compare result.txt + gate fallback.
 
     Exits the process (`sys.exit(0)`) when it emits a block or decides the
@@ -324,6 +376,33 @@ def _run_declaration_cascade(cmd: str, project_root: Path) -> None:
     """
     ref_dir = _find_active_ref(project_root / "tmp" / "ref")
     if ref_dir is None:
+        # Off-pipeline completion closure (omx postmortem): the session
+        # browsed an external site AND wrote clone-shaped files, but owns no
+        # ref dir — a declaration command (commit/push/PR) here ships a
+        # scratch clone no gate ever measured. Same bootstrap guidance and
+        # escape hatch as the pre_generate guard.
+        if (
+            os.environ.get("UI_RE_SKIP_BASH_GATE") != "1"
+            and os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1"
+            and session_id
+            and _is_declaration_command(cmd)
+            and has_external_browse(project_root, session_id)
+            and has_clone_writes(project_root, session_id)
+        ):
+            _emit_block(
+                "UI Reverse Engineering: completion command in a session that "
+                "browsed an external site and wrote clone-shaped files with NO "
+                "tmp/ref/<component> evidence directory — committing an "
+                "unverified scratch clone is the documented ship-short failure "
+                "mode (omx postmortem). Enter the pipeline first: "
+                "`python -m ui_clone.pipeline <url> <component> <session> run "
+                "--phases 0A,1,2`. (Non-clone work: the off-pipeline escape "
+                "hatch is documented for HUMANS in docs/agent-cli.md — ask the "
+                "user.)"
+            )
+            sys.exit(0)
+        sys.exit(0)
+    if not should_enforce_ref_for_session(ref_dir, session_id):
         sys.exit(0)
 
     state = PipelineState.load(ref_dir)
@@ -388,6 +467,14 @@ def main() -> None:
 
     payload_cwd = _resolve_payload_cwd(data)
     project_root = find_project_root()
+    session_id = session_id_from_payload(data)
+    _mark_ui_re_session(cmd, project_root, session_id, payload_cwd)
+    # Off-pipeline clone detection: remember external agent-browser browsing
+    # so pre_generate can recognize clone-shaped work without a ref dir.
+    # Always anchored at project_root — pre_generate reads from project_root,
+    # and a cwd-anchored breadcrumb written from a subdirectory would be
+    # invisible to enforcement (Codex review).
+    mark_external_browse(cmd, project_root, session_id)
 
     # Each guard returns a block reason string or None. First match wins.
     skip = os.environ.get("UI_RE_SKIP_BASH_GATE") == "1"
@@ -397,6 +484,8 @@ def main() -> None:
             _guard_whole_document_mirror,
             _guard_static_html_mirror,
             _guard_scratch_nested_ref,
+            _guard_enforcement_state_rm,
+            _guard_verification_plan_ack,
             _guard_adhoc_redirect,
         ):
             reason = guard_fn(cmd)
@@ -404,10 +493,17 @@ def main() -> None:
                 _emit_block(reason)
                 sys.exit(0)
 
-        reason = _guard_fresh_state(cmd, project_root, payload_cwd)
-        if reason is not None:
-            _emit_block(reason)
-            sys.exit(0)
+        # Hook slimming B (Fable+Codex review): the fresh-folder guard is
+        # retired. Out-of-order extraction is self-correcting — pre-generate
+        # blocks component writes without artifacts and every gate fails on
+        # missing artifacts — and the degenerate "mirror the live site into
+        # impl/public" case it partly covered is fully caught by the retained
+        # static-mirror family (verified: wget/curl mirrors still deny). The
+        # guard's cost was a broad ordering-nanny that false-positived on
+        # inspection commands (visual-judge blocked via a persisted cwd). The
+        # onboarding nudge ("run the pipeline driver first") lives in the
+        # SessionStart session_resume path. The _is_fresh_state /
+        # _fresh_state_violation predicates stay (public API, unit-tested).
 
         reason = _impl_scaffold_violation(cmd, project_root, cwd=payload_cwd)
         if reason is not None:
@@ -419,10 +515,16 @@ def main() -> None:
             _emit_block(reason)
             sys.exit(0)
 
+        # Hook slimming B: demoted from a hard block to an advisory warning. A
+        # local server started before post-implement is a verification surface,
+        # not itself a shipped clone — and the real ship-short risk (declaring
+        # done on an HTTP-200 / mirror) is backstopped by the Stop verify-stamp
+        # gate, which still requires a passing verify before closeout. Kept as a
+        # warning (not deleted) because the static-mirror family does NOT cover
+        # "server started too early", so the nudge still has unique value.
         reason = _guard_static_server(cmd, project_root, payload_cwd)
         if reason is not None:
-            _emit_block(reason)
-            sys.exit(0)
+            _emit_warn(reason)
 
     reason = _guard_section_compare(cmd, project_root)
     if reason is not None:
@@ -435,11 +537,11 @@ def main() -> None:
         sys.exit(0)
 
     if bash_write is not None:
-        reason, halt = _guard_bash_write_component(bash_write, project_root)
+        reason, halt = _guard_bash_write_component(bash_write, project_root, session_id)
         if reason is not None:
             _emit_block(reason)
             sys.exit(0)
         if halt and not is_decl:
             sys.exit(0)
 
-    _run_declaration_cascade(cmd, project_root)
+    _run_declaration_cascade(cmd, project_root, session_id)

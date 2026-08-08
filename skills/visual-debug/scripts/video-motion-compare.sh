@@ -36,6 +36,14 @@
 
 set -uo pipefail
 
+# W-4 (loop-ebpb-0): the reference follows prefers-color-scheme — a host
+# OS theme flip (macOS auto-dark in the evening) silently captured the ref
+# in dark mode and poisoned an entire compare cycle (footer dSSIM
+# 0.0000065 -> 0.687 reading as catastrophic regression). Pin light unless
+# the caller explicitly overrides.
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_COLOR_SCHEME
+
 # Source the timeout shim so macOS gets a working `timeout` cmd even when
 # coreutils isn't installed. See scripts/lib/timeout-shim.sh.
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,6 +66,16 @@ if [ -z "$PROJECT_ROOT" ]; then
 fi
 COMPARE="$PROJECT_ROOT/scripts/verify/video-transition-compare.sh"
 
+# Spec-declared dynamic regions (transition-spec dynamic:true targets) are
+# masked identically on both sides during scroll-position capture — the
+# position-compare analogue of section-compare's EXCLUDE_DYNAMIC. The
+# selector list rides an env var because video-transition-compare.sh only
+# receives an out-dir, not the ref dir.
+# shellcheck source=../../../scripts/verify/lib/position-compare.sh
+. "$PROJECT_ROOT/scripts/verify/lib/position-compare.sh"
+VIDEO_COMPARE_DYNAMIC_SELECTORS="$(dynamic_selectors_from_spec "$REF_DIR/transition-spec.json")"
+export VIDEO_COMPARE_DYNAMIC_SELECTORS
+
 if [ ! -x "$COMPARE" ] && [ ! -f "$COMPARE" ]; then
   echo "ERROR: video-transition-compare.sh not found at $COMPARE" >&2
   exit 2
@@ -67,10 +85,25 @@ PLAN="$REF_DIR/verification-plan.json"
 HAS_SCROLL="false"
 HAS_SPLASH="false"
 HAS_IO="false"
-if [ -f "$PLAN" ] && command -v jq >/dev/null 2>&1; then
-  HAS_SCROLL=$(jq -r '.signals.hasScrollScrub // false' "$PLAN" 2>/dev/null || echo "false")
-  HAS_SPLASH=$(jq -r '.signals.hasSplash // false' "$PLAN" 2>/dev/null || echo "false")
-  HAS_IO=$(jq -r '.signals.hasIOReveal // false' "$PLAN" 2>/dev/null || echo "false")
+# F13: read the plan signals with python (always present), NOT jq. Gating this on
+# `command -v jq` meant that on a host without jq the signals stayed "false", every
+# mode loop was skipped, RUN_COUNT hit 0, and the script wrote "no motion signals —
+# skipped" + exit 0 EVEN WHEN the plan declared scroll/splash — a silent clean pass
+# for an unmeasured motion page. python is already a hard dependency of this script.
+if [ -f "$PLAN" ]; then
+  read -r HAS_SCROLL HAS_SPLASH HAS_IO < <(python3 - "$PLAN" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    d = {}
+s = d.get("signals") if isinstance(d.get("signals"), dict) else {}
+out = ["true" if s.get(k) else "false"
+       for k in ("hasScrollScrub", "hasSplash", "hasIOReveal")]
+print(*out)
+PY
+)
+  HAS_SCROLL="${HAS_SCROLL:-false}"; HAS_SPLASH="${HAS_SPLASH:-false}"; HAS_IO="${HAS_IO:-false}"
 fi
 
 OUT_DIR="$REF_DIR/transitions/video-motion"
@@ -144,6 +177,7 @@ if [ "$PRE_FILTER" = "1" ] \
         echo "✅ structural motion trajectory passed — skipping full-frame SSIM because section-compare is STRUCTURAL_ONLY"
         echo
         echo "✅ all 1 mode(s) within structural trajectory threshold"
+        echo "# video-motion-compare: COMPLETE"
       } >> "$RESULT"
       echo "Wrote $RESULT (structural trajectory closeout)"
       exit 0
@@ -153,6 +187,7 @@ if [ "$PRE_FILTER" = "1" ] \
       echo
       echo "❌ trajectory pre-filter FAILED — gross motion mismatch, skipping expensive video step"
       echo "Re-run with \`PRE_FILTER=0 bash video-motion-compare.sh ...\` to bypass."
+      echo "# video-motion-compare: COMPLETE"
     } >> "$RESULT"
     echo "Wrote $RESULT (early-exit on trajectory fail)"
     exit 1
@@ -172,12 +207,52 @@ run_mode() {
     echo "## $label ($mode)"
     echo
   } >> "$RESULT"
-  if bash "$COMPARE" "$SESSION-vm-$mode" "$ORIG_URL" "$IMPL_URL" "$mode_dir" "$mode" >> "$RESULT" 2>&1; then
-    echo "✅ $label clean" >> "$RESULT"
+  local mode_log
+  mode_log="$(mktemp "${TMPDIR:-/tmp}/video-motion-mode.XXXXXX")"
+  # Chunked-resume aggregation (batch-4 item 2): a scroll sweep captured under
+  # UI_CLONE_VMC_SCROLL_CHUNK exits cleanly after one chunk with a
+  # scroll-resume.json and no verdict. Re-invoke until the recorder produces a
+  # verdict (resume.json gone). Each invocation captures one foreground-safe
+  # chunk and resumes from the persisted manifest, so a lost wake-up costs at
+  # most one chunk. The default (full-sweep chunk) completes in one pass, so
+  # this loop runs exactly once and the verdict is identical to the monolithic
+  # run.
+  local code attempt=0 max_resume="${UI_CLONE_VMC_MAX_RESUME:-500}"
+  while :; do
+    bash "$COMPARE" "$SESSION-vm-$mode" "$ORIG_URL" "$IMPL_URL" "$mode_dir" "$mode" > "$mode_log" 2>&1
+    code=$?
+    if [ "$code" -eq 0 ] && [ -f "$mode_dir/scroll-resume.json" ]; then
+      attempt=$((attempt + 1))
+      echo "↻ $label resume $attempt — captured a chunk, continuing" >> "$RESULT"
+      if [ "$attempt" -ge "$max_resume" ]; then
+        echo "❌ $label did not converge after $attempt resume invocations — aborting" >> "$RESULT"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        rm -f "$mode_log"
+        echo >> "$RESULT"
+        return
+      fi
+      continue
+    fi
+    break
+  done
+  cat "$mode_log" >> "$RESULT"
+  if [ "$code" -eq 0 ]; then
+    # Loop-10 fix (c): exit 0 must come with measurement evidence — a
+    # truncated/empty run that still exits clean is the empty-success class.
+    if ! grep -qE "^(Pass|Total frames compared):" "$mode_log"; then
+      echo "❌ $label produced no measurement rows despite a clean exit — treating as hard failure (truncation/empty-success class)" >> "$RESULT"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    else
+      echo "✅ $label clean" >> "$RESULT"
+    fi
+  elif [ "$code" -eq 2 ]; then
+    echo "❌ $label UNMEASURABLE (setup/extraction/window error, exit 2) — the recording must be re-run; this is never a pass" >> "$RESULT"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
   else
     echo "❌ $label divergence — inspect $mode_dir/diff-frames/" >> "$RESULT"
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
+  rm -f "$mode_log"
   echo >> "$RESULT"
 }
 
@@ -202,7 +277,17 @@ fi
   else
     echo "❌ $FAIL_COUNT/$RUN_COUNT mode(s) diverged — tighten easing / threshold params"
   fi
+  # Completion sentinel: a result file WITHOUT this line was truncated by a
+  # dispatcher timeout/kill — consumers must treat its absence as
+  # "check did not finish", never as a clean run.
+  echo "# video-motion-compare: COMPLETE"
 } >> "$RESULT"
 
 echo "Wrote $RESULT"
+# Exit-code contract: dispatchers (run-required-checks.sh) and exit-code-based
+# tooling must see divergence as failure — the text-scan gate already does,
+# but `exit 0` on ❌ rows left every exit-code consumer reporting clean.
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  exit 1
+fi
 exit 0

@@ -15,6 +15,10 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/ae-quantum.sh
+. "$SCRIPT_DIR/lib/ae-quantum.sh"
+
 DIR="${1:?Usage: batch-compare.sh <dir> [threshold] [dynamic-regions.json]}"
 THRESHOLD="${THRESHOLD:-${2:-500}}"  # env var overrides positional arg
 DYNAMIC_REGIONS="${3:-}"
@@ -103,21 +107,26 @@ for REF_FILE in "${_ref_check[@]}"; do
   # Check size match, resize if needed
   REF_SIZE=$(identify -format "%wx%h" "$REF_FILE" 2>/dev/null)
   IMPL_SIZE=$(identify -format "%wx%h" "$IMPL_FILE" 2>/dev/null)
+  W_PX="${REF_SIZE%x*}"
+  H_PX="${REF_SIZE#*x}"
 
   COMPARE_IMPL="$IMPL_FILE"
   if [ "$REF_SIZE" != "$IMPL_SIZE" ]; then
     W=$(echo "$REF_SIZE" | cut -dx -f1)
     H=$(echo "$REF_SIZE" | cut -dx -f2)
-    RESIZED=$(mktemp /tmp/batch-compare-XXXXXX.png)
+    # L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+    RESIZED="$(mktemp /tmp/batch-compare-XXXXXX)"
+    mv "$RESIZED" "${RESIZED}.png"
+    RESIZED="${RESIZED}.png"
     convert "$IMPL_FILE" -resize "${W}x${H}!" "$RESIZED" 2>/dev/null
     TMPFILES+=("$RESIZED")
     COMPARE_IMPL="$RESIZED"
   fi
 
   # AE diff
-  AE=$(compare -metric AE "$REF_FILE" "$COMPARE_IMPL" "$DIFF_FILE" 2>&1 || true)
-  AE=$(echo "$AE" | awk '{printf "%d", $1}')
-  AE="${AE:-0}"
+  RAW_AE=$(compare -metric AE "$REF_FILE" "$COMPARE_IMPL" "$DIFF_FILE" 2>&1 || true)
+  RAW_AE=$(echo "$RAW_AE" | awk '{print $1}')
+  AE=$(_ae_normalize "${RAW_AE:-0}" "$W_PX" "$H_PX")
 
   THRESH_LABEL="$POS_THRESHOLD"
   if [ "$POS_THRESHOLD" -gt "$THRESHOLD" ]; then
@@ -129,8 +138,6 @@ for REF_FILE in "${_ref_check[@]}"; do
     PASS=$((PASS + 1))
   else
     # Identify worst region
-    H_PX=$(identify -format "%h" "$REF_FILE" 2>/dev/null)
-    W_PX=$(identify -format "%w" "$REF_FILE" 2>/dev/null)
     THIRD=$((H_PX / 3))
     WORST=""
     WORST_AE=0
@@ -140,12 +147,12 @@ for REF_FILE in "${_ref_check[@]}"; do
         mid) OFF=$THIRD ;;
         bot) OFF=$((THIRD * 2)) ;;
       esac
-      PAE=$(compare -metric AE \
+      RAW_PAE=$(compare -metric AE \
         -extract "${W_PX}x${THIRD}+0+${OFF}" "$REF_FILE" \
         -extract "${W_PX}x${THIRD}+0+${OFF}" "$COMPARE_IMPL" \
         /dev/null 2>&1 || true)
-      PAE=$(echo "$PAE" | awk '{printf "%d", $1}')
-      PAE="${PAE:-0}"
+      RAW_PAE=$(echo "$RAW_PAE" | awk '{print $1}')
+      PAE=$(_ae_normalize "${RAW_PAE:-0}" "$W_PX" "$THIRD")
       if [ "$PAE" -gt "$WORST_AE" ]; then WORST_AE=$PAE; WORST=$PART; fi
     done
     echo "| $POS | $AE | $THRESH_LABEL | ❌ | $WORST ($WORST_AE) |"

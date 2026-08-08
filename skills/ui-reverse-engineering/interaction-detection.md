@@ -81,13 +81,17 @@ agent-browser --session <s> eval "
 "
 
 # 2. Scroll through the page
-agent-browser scroll down 300
+# --session is MANDATORY on the scroll too: the IntersectionObserver recorder
+# was installed in <s>, so a session-less scroll moves the DEFAULT session's
+# page while the instrumented page never scrolls — retrieval then returns [],
+# and the clone ships with zero scroll reveals with nothing flagging it.
+agent-browser --session <s> scroll down 300
 agent-browser --session <s> wait 800
-agent-browser scroll down 300
+agent-browser --session <s> scroll down 300
 agent-browser --session <s> wait 800
-agent-browser scroll down 300
+agent-browser --session <s> scroll down 300
 agent-browser --session <s> wait 800
-agent-browser scroll down 300
+agent-browser --session <s> scroll down 300
 agent-browser --session <s> wait 800
 
 # 3. Retrieve results
@@ -220,6 +224,18 @@ agent-browser --session <s> eval "
 #### Step 5d-2b: Extract ALL hover CSS rules from page (MANDATORY)
 
 CSS files alone do NOT contain all hover rules. Webflow and many CMS platforms inject hover CSS via **inline `<style>` tags** that aren't in downloaded `.css` files. This is the #1 reason hover transitions are silently missed.
+
+Use the bounded extractor first. It reads live CSSOM for inline `<style>` rules and
+falls back to downloaded `css/*.css` with a deterministic scanner if the browser
+command times out or fails.
+
+```bash
+bash scripts/extract/extract-hover-css-rules.sh <session> tmp/ref/<component> <url>
+```
+
+Do not replace this with ad-hoc Python regex over minified CSS. The extractor is
+timeout-bounded (`UI_CLONE_HOVER_CSS_TIMEOUT`, default 20s) and writes the
+canonical top-level artifact.
 
 ```bash
 agent-browser --session <s> eval "
@@ -409,7 +425,7 @@ agent-browser --session <s> eval "
 
 ### Save interaction detection results (MANDATORY)
 
-Save a summary to `tmp/ref/<component>/interactions-detected.json`. Include all discovered interactions from the evals above. If zero found, save `{ "interactions": [], "note": "static component" }`. This file is required by the Phase 2 Gate and by Step 9.
+Save a summary to `tmp/ref/<component>/interactions-detected.json`. Include all discovered interactions from the evals above. If zero found, save `{ "interactions": [], "note": "static component" }`. This file is required by the Phase 2 Gate and by Step 9. Every interaction saved here MUST later map to a transition-spec entry or a `skipped[]` reason — the Step 5d spec gate enforces this (spec-inventory-coverage).
 
 ### Capture idle + active states (MANDATORY for hover/click)
 

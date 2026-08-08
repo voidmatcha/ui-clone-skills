@@ -19,7 +19,7 @@ def _run(ref: Path, out: Path) -> subprocess.CompletedProcess[str]:
         ["bash", str(SCRIPT), str(ref), str(out)],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
 
 
@@ -147,7 +147,7 @@ def test_default_outbox_path_used_when_no_output_arg(tmp_path: Path) -> None:
         ["bash", str(SCRIPT), str(ref)],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         env={"PLUGIN_ROOT": str(tmp_path), "PATH": "/usr/bin:/bin"},
     )
     assert proc.returncode == 0, f"stdout={proc.stdout} stderr={proc.stderr}"

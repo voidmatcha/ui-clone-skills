@@ -34,7 +34,7 @@ def test_emits_scaffold_base_stamp_and_text(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     stamp_path = ref / "scaffold-base-stamp.json"

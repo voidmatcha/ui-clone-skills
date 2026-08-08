@@ -23,7 +23,7 @@ Every component verification requires these **three distinct captures**, both fr
 |---|---|---|---|
 | **C1** | Full-page static screenshots | Screenshot at each scroll position (top, 25%, 50%, 75%, 100%) | Catches layout, spacing, color, typography mismatches |
 | **C2** | Full-page scroll video | Continuous video recording while scrolling top to bottom | Catches scroll-triggered animations, parallax, sticky elements, reveal transitions |
-| **C3** | Transition/interaction captures | Per-region capture by triggerType: clip screenshots (css-hover, js-class, intersection) or video (scroll-driven, mousemove, auto-timer) | Catches timing, easing, state changes, interaction behavior |
+| **C3** | Transition/interaction captures | Per-region capture by triggerType: selector screenshots (css-hover, js-class, intersection) or video (scroll-driven, mousemove, auto-timer) | Catches timing, easing, state changes, interaction behavior |
 
 **All three are mandatory. C1 alone (static screenshots) is NOT sufficient.** C2 catches what C1 misses (scroll-triggered motion), and C3 catches what C2 misses (hover/click/scroll interactions).
 
@@ -44,7 +44,7 @@ ffmpeg -i <input>.webm -vf fps=60 <output-dir>/frame-%06d.png -y
 > holds, and transition boundaries. AE diff costs zero tokens (pure CLI).
 > Disk usage: ~300KB/frame × 60fps × duration. Clean up frames after analysis.
 >
-> **css-hover / js-class / intersection:** no frame extraction needed — these use clip screenshots directly.
+> **css-hover / js-class / intersection:** no frame extraction needed — these use selector screenshots directly.
 
 ## Shared scroll sequence (use identically in Phase A and B)
 
@@ -202,8 +202,8 @@ ffmpeg -i tmp/ref/<component>/ref-scroll.webm -vf fps=60 tmp/ref/<component>/fra
 
 | triggerType | Method |
 |---|---|
-| `css-hover`, `js-class` | eval + clip screenshot (idle + active states) |
-| `intersection` | eval classList.add + clip screenshot (before + after states) |
+| `css-hover`, `js-class` | eval + selector screenshot (idle + active states) |
+| `intersection` | eval classList.add + selector screenshot (before + after states) |
 | `scroll-driven` | video recording (continuous change) |
 | `mousemove` | video recording (cursor-coordinate reaction) |
 | `auto-timer` | video recording (time-based loop) |
@@ -221,7 +221,7 @@ agent-browser --session <s> eval "(() => {
 agent-browser --session <s> wait 500
 
 # 2. idle state
-agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/ref/<name>-idle.png
+agent-browser --session <s> screenshot '<selector>' tmp/ref/<component>/transitions/ref/<name>-idle.png
 
 # 3. active state
 # css-hover: CDP hover
@@ -230,8 +230,23 @@ agent-browser --session <s> hover <selector>
 # agent-browser --session <s> eval "document.querySelector('<sel>').classList.add('<cls>')"
 # intersection: classList.add('in-view')
 agent-browser --session <s> wait <transitionDuration + 100>
-agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/ref/<name>-active.png
+agent-browser --session <s> screenshot '<selector>' tmp/ref/<component>/transitions/ref/<name>-active.png
 ```
+
+The current interface is `screenshot [selector] [path]`. If a visual subregion
+cannot be addressed by a selector, take a viewport screenshot and post-crop the
+measured rectangle:
+
+```bash
+agent-browser --session <s> screenshot /tmp/<name>-viewport.png
+magick /tmp/<name>-viewport.png -crop <width>x<height>+<x>+<y> +repage \
+  tmp/ref/<component>/transitions/ref/<name>.png
+```
+
+Selector crops only need to be decodable and nonempty; they may legitimately
+be smaller than 10KB. A state pair is valid only when the expected state is
+visible and its pixel difference is nonzero. Retain the >10KB floor for
+viewport and full-page screenshots.
 
 **For scroll-driven / mousemove / auto-timer regions (video):**
 
@@ -319,7 +334,7 @@ ffmpeg -i tmp/ref/<component>/impl-scroll.webm -vf fps=60 tmp/ref/<component>/fr
 
 **Same method as A-C3 — identical triggerType classification, identical selectors and timing.**
 
-**For css-hover / js-class / intersection regions (clip screenshot):**
+**For css-hover / js-class / intersection regions (selector screenshot):**
 
 ```bash
 agent-browser --session <s> eval "(() => {
@@ -330,11 +345,11 @@ agent-browser --session <s> eval "(() => {
 })()"
 agent-browser --session <s> wait 500
 
-agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/impl/<name>-idle.png
+agent-browser --session <s> screenshot '<selector>' tmp/ref/<component>/transitions/impl/<name>-idle.png
 
 agent-browser --session <s> hover <selector>  # or classList.add for js-class/intersection
 agent-browser --session <s> wait <transitionDuration + 100>
-agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> tmp/ref/<component>/transitions/impl/<name>-active.png
+agent-browser --session <s> screenshot '<selector>' tmp/ref/<component>/transitions/impl/<name>-active.png
 ```
 
 **For scroll-driven / mousemove / auto-timer regions (video — identical to A-C3):**
@@ -387,7 +402,7 @@ Live services (streaming, news feeds, etc.) change thumbnail URLs frequently. Do
 1. **Select elements**: layout containers, typography carriers, visually distinct elements from each section
 2. **Define states per triggerType**: static → idle; css-hover/js-class → idle + active; intersection → before + after; scroll-driven → before + mid + after
 3. **Measure rect** via `getBoundingClientRect()` on both ref and impl, activating each state first (hover, classList.add, scrollTo)
-4. **Clip screenshot** each element per state: `agent-browser --session <s> screenshot --clip <x>,<y>,<w>,<h> <path>`
+4. **Selector screenshot** each element per state: `agent-browser --session <s> screenshot '<selector>' <path>`
 5. **Diff**: `compare -metric AE ref.png impl.png diff.png` (ImageMagick) or `ffmpeg -lavfi "ssim"` — AE = 0 or SSIM >= 0.995 = PASS
 
 ### Phase D2: Numerical Diagnosis

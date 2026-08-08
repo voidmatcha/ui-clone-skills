@@ -4,6 +4,7 @@ ui-skills-workspace/
 .superpowers/
 .sisyphus/
 .serena/
+.tokensave/
 .omx/
 .claude/
 __pycache__/
@@ -46,6 +47,7 @@ research/
 
 # Outbox / handoff drops — per-session outbound artifacts
 outbox/
+.codex/artifacts/
 
 # Local docs review artifacts — keep curated docs trackable while hiding
 # per-run clone reviews and single-site E1 audit drops.

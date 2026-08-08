@@ -12,6 +12,7 @@
 #   --no-marketplace skip all marketplace registrations
 #   --claude-only    register Claude Code marketplace only (skip Codex)
 #   --codex-only     register Codex marketplace only (skip Claude); --codex is an alias
+#   --uninstall      remove ui-clone-skills-owned registrations and projections
 #   --yes            assume yes for prompts (e.g. apt sudo install)
 #
 # Default registers BOTH Claude Code and Codex marketplaces. Each registration
@@ -21,6 +22,13 @@
 #   UI_CLONE_REPO    git URL to clone (default: https://github.com/voidmatcha/ui-clone-skills.git)
 #   UI_CLONE_REF     branch/tag/sha to checkout after clone (default: leave on default branch)
 #   INSTALL_DIR      where to clone when running via curl-pipe (default: ~/.local/share/ui-clone-skills)
+#   UI_CLONE_SKIP_HOOK_PROBE=1
+#                    skip the post-install probe that runs an installed hook out
+#                    of the Claude plugin cache. The probe is what proves the
+#                    plugin was actually DELIVERED (an install can report success
+#                    while caching an empty directory) — set this only if the
+#                    probe itself is broken on your host, never to get past a
+#                    genuine delivery failure.
 set -euo pipefail
 
 # --- curl-pipe bootstrap -----------------------------------------------------
@@ -64,7 +72,26 @@ CODEX_PERSONAL_MARKETPLACE="$HOME/.agents/plugins/marketplace.json"
 CODEX_PLUGIN_DIR="$HOME/plugins/$PLUGIN_NAME"
 CODEX_PLUGIN_SOURCE_PATH="./plugins/$PLUGIN_NAME"
 CODEX_NATIVE_AGENTS_DIR="${CODEX_HOME:-$HOME/.codex}/agents"
+LOCAL_BIN_DIR="${UI_CLONE_LOCAL_BIN_DIR:-$HOME/.local/bin}"
+LOCAL_CLI_BIN="$LOCAL_BIN_DIR/ui-clone"
 CODEX_PUBLIC_SKILLS="ui-reverse-engineering ui-capture visual-debug"
+AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
+PUBLIC_SKILLS_OWNERSHIP="$HOME/.config/ui-clone-skills/public-skills.json"
+CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex bin hooks scripts ui_clone docs AGENTS.md README.md package.json pyproject.toml uv.lock LICENSE.txt"
+CODEX_PLUGIN_PROJECTION_KEEP="$CODEX_PLUGIN_PROJECTION_ITEMS skills"
+# Claude and Codex cannot share one source directory. Codex reads its install
+# in place, so symlinks keep it live with the checkout; `claude plugin install`
+# copies the source into ~/.claude/plugins/cache WITHOUT following symlinks, so
+# the same directory caches as an empty shell. Claude gets its own real-file
+# staging dir; the symlink projection stays for Codex and the local bin.
+CLAUDE_PLUGIN_SRC="${UI_CLONE_CLAUDE_SRC_DIR:-$HOME/.local/share/$PLUGIN_NAME/claude-src}"
+# Build residue that must never reach a published plugin source.
+CLAUDE_PLUGIN_SRC_PRUNE="__pycache__ .pytest_cache .mypy_cache .ruff_cache node_modules .venv venv .DS_Store"
+# Secondary tripwire. The clean set measures ~6.4MiB; the repo root is ~50GB of
+# scratch runs and caches, and .gitignore does not apply to a `cp`. This catches
+# an item list that starts sweeping the checkout — it would NOT have caught the
+# symlink incident, which is why the symlink assertion is the primary guard.
+CLAUDE_PLUGIN_SRC_MAX_KIB="${UI_CLONE_CLAUDE_SRC_MAX_KIB:-40960}"
 
 NO_DEPS=0
 NO_MARKETPLACE=0
@@ -214,6 +241,105 @@ uv_sync() {
   ok "Python deps resolved"
 }
 
+python_candidates() {
+  # Resolve each launcher to the interpreter it actually runs, reject unsupported
+  # Python versions, and emit each interpreter once. UI_CLONE_PYTHON_CANDIDATES
+  # is an internal/test override containing a colon-separated candidate list.
+  local candidates="" candidate resolved seen=""
+  if [ "${UI_CLONE_PYTHON_CANDIDATES+x}" = x ]; then
+    candidates="${UI_CLONE_PYTHON_CANDIDATES//:/$'\n'}"
+  else
+    if have python3; then
+      candidates="$(command -v python3)"
+    fi
+    if have pyenv; then
+      candidate="$(pyenv which python3 2>/dev/null || true)"
+      [ -z "$candidate" ] || candidates="${candidates}${candidates:+$'\n'}${candidate}"
+    fi
+    for candidate in \
+      "$HOME/.local/bin/python3" \
+      /opt/homebrew/bin/python3 \
+      /usr/local/bin/python3 \
+      /home/linuxbrew/.linuxbrew/bin/python3
+    do
+      [ -x "$candidate" ] || continue
+      candidates="${candidates}${candidates:+$'\n'}${candidate}"
+    done
+  fi
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if [[ "$candidate" != */* ]]; then
+      candidate="$(command -v "$candidate" 2>/dev/null || true)"
+    fi
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    resolved="$("$candidate" -c '
+import sys
+from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    print(Path(sys.executable).resolve())
+' 2>/dev/null || true)"
+    [ -n "$resolved" ] && [ -x "$resolved" ] || continue
+    case $'\n'"$seen"$'\n' in
+      *$'\n'"$resolved"$'\n'*) continue ;;
+    esac
+    seen="${seen}${seen:+$'\n'}${resolved}"
+    printf '%s\n' "$resolved"
+  done <<< "$candidates"
+}
+
+python_resolves_repo() {
+  local python="$1"
+  (
+    cd /
+    REPO_ROOT="$REPO_ROOT" "$python" -c '
+import os
+from pathlib import Path
+import ui_clone
+
+repo_package = (Path(os.environ["REPO_ROOT"]) / "ui_clone").resolve()
+installed_package = Path(ui_clone.__file__).resolve().parent
+raise SystemExit(0 if installed_package == repo_package else 1)
+' >/dev/null 2>&1
+  )
+}
+
+editable_install() {
+  # Make `python3 -m ui_clone.*` importable from ANY cwd. The skill scripts run the
+  # gates via bare `python3 -m ui_clone` (not the repo .venv), and cold clone loops
+  # run OUTSIDE the repo (scratch / loop dirs) — so ui_clone must be installed
+  # EDITABLE into every supported local python3, tracking the local checkout.
+  # Idempotent; safe to run under --no-deps.
+  [ -f "$REPO_ROOT/pyproject.toml" ] || return 0
+  local python found=0 pip_log
+  while IFS= read -r python; do
+    [ -n "$python" ] || continue
+    found=1
+    if python_resolves_repo "$python"; then
+      skip "ui_clone editable ($python resolves to this repo)"
+      continue
+    fi
+
+    act "Editable-installing ui_clone into $python"
+    pip_log="$(mktemp)"
+    if "$python" -m pip install --quiet --user -e "$REPO_ROOT" \
+         >"$pip_log" 2>&1 &&
+       python_resolves_repo "$python"; then
+      ok "ui_clone editable-installed in $python"
+    elif "$python" -m pip install --quiet --user --break-system-packages \
+         -e "$REPO_ROOT" >"$pip_log" 2>&1 &&
+         python_resolves_repo "$python"; then
+      ok "ui_clone editable-installed in $python"
+    else
+      warn "ui_clone install in $python did not resolve to $REPO_ROOT from /"
+      tail -n 12 "$pip_log" | sed 's/^/    /'
+    fi
+    rm -f "$pip_log"
+  done < <(python_candidates)
+  [ "$found" -eq 1 ] || warn "Python >=3.11 not found — skipping ui_clone editable install"
+}
+
 cache_ttl_notice() {
   # Print an opt-in notice if ENABLE_PROMPT_CACHING_1H isn't set. Never writes
   # to the user's shell rc — that's their decision. Enterprise/Pro/Max apply
@@ -249,7 +375,7 @@ loop_setup_notice() {
 
   Claude Code — open a session with the plugin loaded, then describe the goal.
   The ui-reverse-engineering skill is auto-loaded so the prompt can be terse:
-      claude --plugin-dir "$REPO_ROOT"
+      claude --plugin-dir "$CODEX_PLUGIN_DIR"
       > Drive the ui-clone-skills pipeline for tmp/ref/<component> until
       > python -m ui_clone.goal tmp/ref/<component> --check-done exits 0.
 
@@ -272,19 +398,159 @@ register_marketplace() {
     warn "Install Claude Code, then re-run with --no-deps to register the plugin."
     return
   fi
+  # Decide whether we may own this marketplace name BEFORE staging anything or
+  # issuing a single host command: a name already claimed by a foreign source
+  # must be left exactly as found, with no side effects on the way out.
+  local current_source="" marketplace_action="add"
+  current_source="$(claude_marketplace_source 2>/dev/null || true)"
+  if [ -n "$current_source" ]; then
+    if [ ! -d "$current_source" ]; then
+      err "Refusing to replace marketplace '$MARKETPLACE_NAME': registered source is unavailable: $current_source"
+      return 1
+    fi
+    local resolved_current resolved_target
+    resolved_current="$(cd "$current_source" && pwd -P)"
+    resolved_target="$CLAUDE_PLUGIN_SRC"
+    if [ -d "$resolved_target" ]; then
+      resolved_target="$(cd "$resolved_target" && pwd -P)"
+    fi
+    if [ "$resolved_current" = "$resolved_target" ]; then
+      marketplace_action="skip"
+    elif is_ui_clone_plugin_source "$current_source"; then
+      marketplace_action="replace"
+    else
+      err "Refusing to replace marketplace '$MARKETPLACE_NAME': $current_source is not a validated ui-clone-skills source"
+      return 1
+    fi
+  fi
+
+  prepare_plugin_projection || return
+  prepare_claude_plugin_source || return
+  install_public_agent_skills || return
+  install_local_cli_bin || return
+
+  # An unchanged marketplace path still needs the staging above to have run:
+  # the registration is a pointer, and the content behind it is what changed.
+  if [ "$marketplace_action" = "skip" ]; then
+    skip "marketplace '$MARKETPLACE_NAME' already points to Claude source $CLAUDE_PLUGIN_SRC"
+    return
+  fi
+  if [ "$marketplace_action" = "replace" ]; then
+    warn "Refreshing Claude marketplace '$MARKETPLACE_NAME' from $current_source to $CLAUDE_PLUGIN_SRC"
+    claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+  fi
+
   # `claude plugin marketplace add` is idempotent in recent CLI versions; tolerate either outcome.
-  act "Registering local repo as marketplace '$MARKETPLACE_NAME'"
-  if claude plugin marketplace add "$REPO_ROOT" >/dev/null 2>&1; then
+  act "Registering Claude plugin source as marketplace '$MARKETPLACE_NAME'"
+  if claude plugin marketplace add "$CLAUDE_PLUGIN_SRC" >/dev/null 2>&1; then
     ok "marketplace '$MARKETPLACE_NAME' registered"
   else
     skip "marketplace '$MARKETPLACE_NAME' already registered (or CLI declined re-add)"
   fi
 }
 
-prepare_codex_plugin_projection() {
-  # Codex installs a local plugin by copying its source path into a cache. Point
-  # that source at a small projection instead of the development checkout; the
-  # repo can contain local scratch runs, screenshots, venvs, and caches.
+install_claude_plugin() {
+  # Marketplace registration alone never loads the plugin — it must be
+  # installed once (user scope). The CLI's install step COPIES the marketplace
+  # source into ~/.claude/plugins/cache/<owner>/<plugin>/<version> and the
+  # runtime loads from that cache, not from the marketplace path — which is why
+  # the source must be real files (prepare_claude_plugin_source) and why an
+  # existing install still has to be refreshed: the cache is keyed by version,
+  # so 'present in plugin list' means 'cached', not 'current'.
+  have claude || return
+  if claude plugin list 2>/dev/null | grep -qF "$PLUGIN_NAME@$MARKETPLACE_NAME"; then
+    act "Refreshing installed Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
+    # `plugin update`, never uninstall+install: uninstall rewrites
+    # enabledPlugins in ~/.claude/settings.json, and a failure between the two
+    # steps leaves no plugin where a stale one stood.
+    if claude plugin update "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+      ok "Claude plugin refreshed from $CLAUDE_PLUGIN_SRC"
+    else
+      warn "claude plugin update failed — run inside the app: /plugin update $PLUGIN_NAME@$MARKETPLACE_NAME"
+    fi
+    return
+  fi
+  act "Installing Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME (user scope)"
+  if claude plugin install "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+    ok "Claude plugin installed — new Claude Code sessions load it automatically"
+  else
+    warn "claude plugin install failed — run inside the app: /plugin install $PLUGIN_NAME@$MARKETPLACE_NAME"
+  fi
+}
+
+plugin_manifest_version() {
+  [ -f "$REPO_ROOT/.claude-plugin/plugin.json" ] || return 1
+  sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "$REPO_ROOT/.claude-plugin/plugin.json" | head -1
+}
+
+verify_claude_plugin_delivery() {
+  # The install step is not the delivery. The host COPIES the marketplace source
+  # into its own per-version cache and loads from there, so 'install succeeded'
+  # says nothing about whether the plugin has any content. Version 0.7.24 sat
+  # installed and enabled for weeks with an empty cache directory: no hooks, no
+  # skills, and not one line of output saying so.
+  have claude || return 0
+  if [ "${UI_CLONE_SKIP_HOOK_PROBE:-0}" = "1" ]; then
+    skip "Claude hook delivery probe (UI_CLONE_SKIP_HOOK_PROBE=1)"
+    return 0
+  fi
+
+  local version cache_dir
+  version="$(plugin_manifest_version)" || return 0
+  [ -n "$version" ] || return 0
+  cache_dir="$HOME/.claude/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME/$version"
+
+  if [ ! -d "$cache_dir" ]; then
+    # The cache layout is the host's private detail; a version we cannot find
+    # is unverifiable, not proven broken.
+    warn "Cannot locate the host plugin cache for $PLUGIN_NAME $version — skipping the delivery probe."
+    warn "  looked in: $cache_dir"
+    return 0
+  fi
+
+  local rel missing=""
+  for rel in hooks/hooks.json hooks/shim.sh .claude-plugin/plugin.json ui_clone/__init__.py; do
+    [ -f "$cache_dir/$rel" ] || missing="$missing $rel"
+  done
+  if [ -n "$missing" ]; then
+    err "Hook delivery probe FAILED: the host cached $PLUGIN_NAME $version without:$missing"
+    err "  cache: $cache_dir"
+    err "  The host copies the marketplace source WITHOUT following symlinks, so a"
+    err "  symlinked source caches as an empty shell and the plugin loads nothing."
+    err "  This is a real delivery failure — fix the source, do not skip the probe."
+    err "  (override, for a broken probe only: UI_CLONE_SKIP_HOOK_PROBE=1)"
+    return 1
+  fi
+
+  # Run a hook the way hooks.json runs it. File counts cannot prove this:
+  # hooks are discovered by directory convention with no manifest field to
+  # check, and the first execution is also what builds the uv environment —
+  # left cold, its first fire inside a real session can time out silently.
+  local probe_dir probe_status=0
+  probe_dir="$(mktemp -d 2>/dev/null)" || return 0
+  mkdir -p "$probe_dir/tmp/ref"
+  # stop_hook_active short-circuits section_gate to a clean exit, so the probe
+  # exercises loading without evaluating anybody's pipeline state.
+  CLAUDE_PROJECT_DIR="$probe_dir" PLUGIN_ROOT="$cache_dir" \
+    bash "$cache_dir/hooks/shim.sh" ui_clone.hooks.section_gate \
+    <<< '{"hook_event_name":"Stop","stop_hook_active":true}' \
+    >/dev/null 2>&1 || probe_status=$?
+  rm -rf "$probe_dir"
+
+  if [ "$probe_status" -ne 0 ]; then
+    err "Hook delivery probe FAILED: the installed Stop hook did not run from the host cache (exit $probe_status)."
+    err "  cache: $cache_dir"
+    err "  reproduce: CLAUDE_PROJECT_DIR=<dir containing tmp/ref> bash $cache_dir/hooks/shim.sh ui_clone.hooks.section_gate"
+    err "  (override, for a broken probe only: UI_CLONE_SKIP_HOOK_PROBE=1)"
+    return 1
+  fi
+  ok "hook delivery probe: section_gate ran from the host cache"
+}
+
+prepare_plugin_projection() {
+  # Local plugin hosts install by copying/scanning the source path. Point that
+  # source at a small projection instead of the development checkout; the repo
+  # can contain local scratch runs, screenshots, venvs, and caches.
   local plugin_dir="$CODEX_PLUGIN_DIR"
   local resolved_repo
   resolved_repo="$(cd "$REPO_ROOT" && pwd -P)"
@@ -297,7 +563,7 @@ prepare_codex_plugin_projection() {
     local resolved_plugin
     resolved_plugin="$(cd "$plugin_dir" && pwd -P)"
     if [ "$resolved_plugin" = "$resolved_repo" ]; then
-      err "Refusing to use Codex plugin projection at repo root: $plugin_dir"
+      err "Refusing to use plugin projection at repo root: $plugin_dir"
       return 1
     fi
   elif [ -e "$plugin_dir" ]; then
@@ -307,8 +573,21 @@ prepare_codex_plugin_projection() {
 
   mkdir -p "$plugin_dir"
 
+  local existing name
+  for existing in "$plugin_dir"/* "$plugin_dir"/.[!.]* "$plugin_dir"/..?*; do
+    # `-e` follows the link, so a symlink left dangling by a source rename reads
+    # as absent and is skipped — exempting from the prune exactly the stale
+    # entries it exists to remove. Match on the link itself as well.
+    [ -e "$existing" ] || [ -L "$existing" ] || continue
+    name="$(basename "$existing")"
+    case " $CODEX_PLUGIN_PROJECTION_KEEP " in
+      *" $name "*) ;;
+      *) rm -rf "$existing" ;;
+    esac
+  done
+
   local item src dst
-  for item in .codex-plugin .codex hooks scripts ui_clone docs AGENTS.md README.md pyproject.toml uv.lock LICENSE.txt; do
+  for item in $CODEX_PLUGIN_PROJECTION_ITEMS; do
     src="$REPO_ROOT/$item"
     dst="$plugin_dir/$item"
     if [ ! -e "$src" ]; then
@@ -335,7 +614,282 @@ prepare_codex_plugin_projection() {
     ln -s "$src" "$dst"
   done
 
-  ok "Codex plugin projection → $plugin_dir (source: $REPO_ROOT)"
+  ok "plugin projection → $plugin_dir (source: $REPO_ROOT)"
+}
+
+prepare_claude_plugin_source() {
+  # Real-file staging for Claude. `cp -RL` dereferences: the checkout carries no
+  # symlinks inside the projected items today, but a skill that adds one must
+  # not be able to reintroduce the empty-cache failure.
+  local dst="$CLAUDE_PLUGIN_SRC"
+  local resolved_repo
+  resolved_repo="$(cd "$REPO_ROOT" && pwd -P)"
+
+  if [ -L "$dst" ]; then
+    rm -f "$dst"
+  fi
+  if [ -d "$dst" ]; then
+    local resolved_dst
+    resolved_dst="$(cd "$dst" && pwd -P)"
+    if [ "$resolved_dst" = "$resolved_repo" ]; then
+      err "Refusing to stage the Claude plugin source at the repo root: $dst"
+      return 1
+    fi
+  elif [ -e "$dst" ]; then
+    err "Claude plugin source path exists but is not a directory: $dst"
+    return 1
+  fi
+
+  # Rebuild from scratch: a stale file left by a previous item list would ship
+  # forever otherwise, and the whole point of this directory is that its
+  # contents are exactly what the host will cache.
+  rm -rf "$dst"
+  mkdir -p "$dst"
+
+  local item src
+  for item in $CODEX_PLUGIN_PROJECTION_ITEMS; do
+    src="$REPO_ROOT/$item"
+    [ -e "$src" ] || continue
+    mkdir -p "$(dirname "$dst/$item")"
+    if ! cp -RL "$src" "$dst/$item"; then
+      err "Failed to stage $item into the Claude plugin source"
+      return 1
+    fi
+  done
+
+  local skill
+  mkdir -p "$dst/skills"
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    src="$REPO_ROOT/skills/$skill"
+    if [ ! -d "$src" ]; then
+      err "Missing public skill directory: $src"
+      return 1
+    fi
+    if ! cp -RL "$src" "$dst/skills/$skill"; then
+      err "Failed to stage skill $skill into the Claude plugin source"
+      return 1
+    fi
+  done
+
+  local prune
+  for prune in $CLAUDE_PLUGIN_SRC_PRUNE; do
+    find "$dst" -name "$prune" -prune -exec rm -rf {} + 2>/dev/null || true
+  done
+  find "$dst" \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
+
+  assert_claude_plugin_source_sane || return 1
+
+  ok "Claude plugin source → $dst (real files, source: $REPO_ROOT)"
+}
+
+assert_claude_plugin_source_sane() {
+  # Runs BEFORE the marketplace is registered. Everything below is a property
+  # the host silently depends on: it copies without following symlinks, it
+  # loads hooks by directory convention, and it exposes whatever skills/ holds.
+  local dst="$CLAUDE_PLUGIN_SRC"
+
+  local links
+  links="$(find "$dst" -type l 2>/dev/null | head -5)"
+  if [ -n "$links" ]; then
+    err "Claude plugin source contains symlinks — the host caches it without following them, producing an empty plugin:"
+    printf '  %s\n' $links >&2
+    return 1
+  fi
+
+  if [ ! -f "$dst/.claude-plugin/plugin.json" ]; then
+    err "Claude plugin source is missing .claude-plugin/plugin.json: $dst"
+    return 1
+  fi
+  if [ ! -f "$dst/hooks/hooks.json" ]; then
+    err "Claude plugin source is missing hooks/hooks.json — hooks load by directory convention, so this installs a silently hook-less plugin: $dst"
+    return 1
+  fi
+
+  local staged expected skill
+  staged="$(cd "$dst/skills" 2>/dev/null && ls -1 | sort | tr '\n' ' ')"
+  expected="$(printf '%s\n' $CODEX_PUBLIC_SKILLS | sort | tr '\n' ' ')"
+  if [ "$staged" != "$expected" ]; then
+    err "Claude plugin source skills/ must hold exactly the public skills."
+    err "  expected: $expected"
+    err "  staged:   $staged"
+    return 1
+  fi
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    if [ ! -f "$dst/skills/$skill/SKILL.md" ]; then
+      err "Staged skill $skill has no SKILL.md: $dst/skills/$skill"
+      return 1
+    fi
+  done
+
+  local kib
+  kib="$(du -sk "$dst" 2>/dev/null | awk '{print $1}')"
+  if [ -n "$kib" ] && [ "$kib" -gt "$CLAUDE_PLUGIN_SRC_MAX_KIB" ]; then
+    err "Claude plugin source is ${kib}KiB, over the ${CLAUDE_PLUGIN_SRC_MAX_KIB}KiB tripwire — the item list is sweeping the checkout: $dst"
+    return 1
+  fi
+
+  if have claude && ! claude plugin validate "$dst" >/dev/null 2>&1; then
+    warn "claude plugin validate declined $dst — continuing, but the host may reject this plugin"
+  fi
+}
+
+
+
+record_public_skill_ownership() {
+  local skill="$1"
+  local installed_path="$2"
+  mkdir -p "$(dirname "$PUBLIC_SKILLS_OWNERSHIP")"
+
+  OWNERSHIP_PATH="$PUBLIC_SKILLS_OWNERSHIP" SKILL_NAME="$skill" \
+    INSTALLED_PATH="$installed_path" SOURCE_ROOT="$REPO_ROOT" \
+    PLUGIN_MANIFEST="$REPO_ROOT/.claude-plugin/plugin.json" python3 - <<'PY'
+import hashlib
+import json
+import os
+import stat
+import tempfile
+from pathlib import Path
+
+
+def tree_hash(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode()
+        if path.is_symlink():
+            kind, content = b"L", os.readlink(path).encode()
+        elif path.is_dir():
+            kind, content = b"D", b""
+        else:
+            kind = b"X" if path.stat().st_mode & 0o111 else b"F"
+            content = path.read_bytes()
+        digest.update(kind + b"\0" + relative + b"\0")
+        digest.update(str(len(content)).encode() + b"\0" + content + b"\0")
+    return digest.hexdigest()
+
+
+def atomic_write_json(path: Path, data: object) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", delete=False,
+        ) as handle:
+            temp_name = handle.name
+            os.fchmod(handle.fileno(), mode)
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+ownership_path = Path(os.environ["OWNERSHIP_PATH"])
+try:
+    data = json.loads(ownership_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+data["schemaVersion"] = 1
+skills = data.get("skills")
+if not isinstance(skills, dict):
+    skills = {}
+    data["skills"] = skills
+
+installed = Path(os.environ["INSTALLED_PATH"]).resolve()
+source_root = Path(os.environ["SOURCE_ROOT"]).resolve()
+try:
+    plugin = json.loads(Path(os.environ["PLUGIN_MANIFEST"]).read_text(encoding="utf-8"))
+    version = plugin.get("version") if isinstance(plugin, dict) else None
+except (OSError, json.JSONDecodeError):
+    version = None
+
+skills[os.environ["SKILL_NAME"]] = {
+    "path": str(installed),
+    "sha256": tree_hash(installed),
+    "source": str(source_root),
+    "version": version,
+}
+atomic_write_json(ownership_path, data)
+PY
+}
+
+install_public_agent_skills() {
+  mkdir -p "$AGENTS_SKILLS_DIR"
+
+  local skill src dst
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    src="$REPO_ROOT/skills/$skill"
+    dst="$AGENTS_SKILLS_DIR/$skill"
+    if [ ! -d "$src" ]; then
+      err "Missing public Codex skill directory: $src"
+      return 1
+    fi
+
+    rm -rf "$dst"
+    cp -R "$src" "$dst"
+    if ! record_public_skill_ownership "$skill" "$dst"; then
+      rm -rf "$dst"
+      return 1
+    fi
+    ok "Codex public skill $skill → $dst"
+  done
+}
+
+install_local_cli_bin() {
+  # Deliberately points into the Codex projection, NOT at $REPO_ROOT/bin.
+  # ~/.local/bin/ui-clone -> $CODEX_PLUGIN_DIR/bin/ui-clone -> $REPO_ROOT/bin/ui-clone:
+  # every hop is a symlink, so the CLI always runs the live checkout and cannot
+  # serve a stale snapshot. Reviewed and left alone deliberately — do not
+  # "fix" it by repointing at REPO_ROOT.
+  #
+  # This holds ONLY while the Codex projection stays symlinks. If anyone ever
+  # converts $CODEX_PLUGIN_DIR to real files (as the Claude source at
+  # $CLAUDE_PLUGIN_SRC is), this silently starts running a frozen copy and the
+  # repoint to "$REPO_ROOT/bin/ui-clone" becomes required — along with the
+  # uninstall bookkeeping in remove_owned_symlink for LOCAL_CLI_BIN.
+  local src="$CODEX_PLUGIN_DIR/bin/ui-clone"
+  local dst="$LOCAL_CLI_BIN"
+
+  if [ ! -x "$src" ]; then
+    warn "ui-clone local bin source missing or not executable: $src"
+    return 0
+  fi
+
+  mkdir -p "$LOCAL_BIN_DIR"
+
+  if [ -L "$dst" ]; then
+    local existing
+    existing="$(readlink "$dst")"
+    if [ "$existing" = "$src" ]; then
+      skip "local ui-clone bin $dst"
+    else
+      rm -f "$dst"
+      ln -s "$src" "$dst"
+      ok "local ui-clone bin → $dst"
+    fi
+  elif [ -e "$dst" ]; then
+    warn "local ui-clone bin exists and is not a symlink — leaving in place: $dst"
+    return 0
+  else
+    ln -s "$src" "$dst"
+    ok "local ui-clone bin → $dst"
+  fi
+
+  if "$dst" --help >/dev/null 2>&1; then
+    ok "local ui-clone bin smoke"
+  else
+    warn "local ui-clone bin smoke failed: $dst --help"
+  fi
+
+  case ":$PATH:" in
+    *":$LOCAL_BIN_DIR:"*) ;;
+    *) warn "$LOCAL_BIN_DIR is not on PATH; run directly as $dst or add it to PATH." ;;
+  esac
 }
 
 install_codex_native_agents() {
@@ -360,6 +914,13 @@ install_codex_native_agents() {
         continue
       fi
     fi
+    # A rename of the checkout leaves this link dangling at the old path.
+    # `-e` follows the link, so a broken one reads as absent and slips past the
+    # user-copy guard below straight into `ln -s`, which then fails because the
+    # path does exist. Clear it first so the reinstall can repair it.
+    if [ -L "$dst" ] && [ ! -e "$dst" ]; then
+      rm -f "$dst"
+    fi
     if [ -e "$dst" ]; then
       warn "Codex native agent $(basename "$dst") already exists — leaving user copy"
       continue
@@ -373,10 +934,17 @@ write_codex_personal_marketplace() {
   local marketplace="$CODEX_PERSONAL_MARKETPLACE"
   mkdir -p "$(dirname "$marketplace")"
 
-  if have python3; then
-    MARKETPLACE_PATH="$marketplace" PLUGIN_NAME="$PLUGIN_NAME" PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" python3 - <<'PY'
+  if ! have python3; then
+    warn "python3 absent — cannot atomically update $marketplace"
+    return 1
+  fi
+
+  if ! MARKETPLACE_PATH="$marketplace" PLUGIN_NAME="$PLUGIN_NAME" \
+       PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" python3 - <<'PY'
 import json
 import os
+import stat
+import tempfile
 from pathlib import Path
 
 path = Path(os.environ["MARKETPLACE_PATH"]).expanduser()
@@ -395,11 +963,25 @@ entry = {
     "category": "Developer Tools",
 }
 
-if path.exists():
+if path.is_symlink():
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        write_path = path.resolve(strict=True)
+    except OSError as error:
+        raise SystemExit(f"refusing invalid marketplace symlink {path}: {error}")
+    if not stat.S_ISREG(write_path.stat().st_mode):
+        raise SystemExit(f"refusing non-regular marketplace target: {write_path}")
+elif path.exists():
+    write_path = path
+    if not stat.S_ISREG(write_path.stat().st_mode):
+        raise SystemExit(f"refusing non-regular marketplace file: {write_path}")
+else:
+    write_path = path
+
+if write_path.exists():
+    try:
+        data = json.loads(write_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        data = {}
+        raise SystemExit(f"refusing to replace invalid marketplace JSON: {write_path}")
 else:
     data = {}
 
@@ -419,31 +1001,27 @@ plugins = [item for item in plugins if not (isinstance(item, dict) and item.get(
 plugins.append(entry)
 data["plugins"] = plugins
 
-path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+mode = stat.S_IMODE(write_path.stat().st_mode) if write_path.exists() else 0o600
+temp_name = None
+try:
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=write_path.parent,
+        prefix=f".{write_path.name}.", delete=False,
+    ) as handle:
+        temp_name = handle.name
+        os.fchmod(handle.fileno(), mode)
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_name, write_path)
+finally:
+    if temp_name and os.path.exists(temp_name):
+        os.unlink(temp_name)
 PY
-  else
-    cat > "$marketplace" <<EOF
-{
-  "name": "local",
-  "interface": {
-    "displayName": "Local Plugins"
-  },
-  "plugins": [
-    {
-      "name": "$PLUGIN_NAME",
-      "source": {
-        "source": "local",
-        "path": "$CODEX_PLUGIN_SOURCE_PATH"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Developer Tools"
-    }
-  ]
-}
-EOF
+  then
+    warn "could not atomically update $marketplace"
+    return 1
   fi
 
   ok "Codex personal marketplace → $marketplace"
@@ -457,7 +1035,9 @@ register_codex_marketplace() {
   fi
 
   act "Preparing Codex personal plugin source"
-  prepare_codex_plugin_projection || return
+  prepare_plugin_projection || return
+  install_public_agent_skills || return
+  install_local_cli_bin || return
   install_codex_native_agents || return
   write_codex_personal_marketplace || return
 
@@ -496,42 +1076,675 @@ merge_codex_hooks() {
   fi
 }
 
+path_present() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+mark_uninstall_incomplete() {
+  UNINSTALL_INCOMPLETE=1
+  warn "$*"
+}
+
+claude_marketplace_source() {
+  have python3 || return 1
+
+  MARKETPLACE_NAME="$MARKETPLACE_NAME" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+name = os.environ["MARKETPLACE_NAME"]
+known = Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
+try:
+    data = json.loads(known.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    data = None
+
+if isinstance(data, dict) and name in data:
+    entry = data.get(name)
+    source = entry.get("source") if isinstance(entry, dict) else None
+    path = source.get("path") if isinstance(source, dict) and source.get("source") == "directory" else None
+    if not isinstance(path, str) and isinstance(entry, dict):
+        path = entry.get("installLocation")
+    if isinstance(path, str):
+        print(path)
+    raise SystemExit(0)
+
+settings = Path.home() / ".claude" / "settings.json"
+try:
+    data = json.loads(settings.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+
+entry = data.get("extraKnownMarketplaces", {}).get(name, {}) if isinstance(data, dict) else {}
+source = entry.get("source") if isinstance(entry, dict) else None
+path = source.get("path") if isinstance(source, dict) and source.get("source") == "directory" else None
+if isinstance(path, str):
+    print(path)
+PY
+}
+
+is_ui_clone_plugin_source() {
+  local source_path="$1"
+  [ -d "$source_path" ] || return 1
+  have python3 || return 1
+
+  SOURCE_PATH="$source_path" PLUGIN_NAME="$PLUGIN_NAME" \
+    MARKETPLACE_NAME="$MARKETPLACE_NAME" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["SOURCE_PATH"]).expanduser()
+try:
+    plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    marketplace = json.loads((root / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+plugin_name = os.environ["PLUGIN_NAME"]
+plugins = marketplace.get("plugins") if isinstance(marketplace, dict) else None
+valid = (
+    isinstance(plugin, dict)
+    and plugin.get("name") == plugin_name
+    and isinstance(marketplace, dict)
+    and marketplace.get("name") == os.environ["MARKETPLACE_NAME"]
+    and isinstance(plugins, list)
+    and any(isinstance(item, dict) and item.get("name") == plugin_name for item in plugins)
+)
+raise SystemExit(0 if valid else 1)
+PY
+}
+
+remove_owned_symlink() {
+  local path="$1"
+  local expected_target="$2"
+  local label="$3"
+
+  if [ -L "$path" ] && [ "$(readlink "$path")" = "$expected_target" ]; then
+    rm -f "$path"
+    ok "removed $label $path"
+  elif path_present "$path"; then
+    warn "preserving user-owned path: $path"
+  fi
+}
+
+public_skill_ownership_status() {
+  local skill="$1"
+  local dst="$AGENTS_SKILLS_DIR/$skill"
+  local src="$REPO_ROOT/skills/$skill"
+  local marketplace_source="${CLAUDE_UNINSTALL_SOURCE:-}"
+  if [ -z "$marketplace_source" ]; then
+    marketplace_source="$(claude_marketplace_source 2>/dev/null || true)"
+  fi
+
+  if ! path_present "$dst"; then
+    printf '%s\n' "absent"
+    return 0
+  fi
+  if [ -L "$dst" ]; then
+    if [ "$(readlink "$dst")" = "$src" ]; then
+      printf '%s\n' "removable:symlink"
+    else
+      printf '%s\n' "unproven"
+    fi
+    return 0
+  fi
+  [ -d "$dst" ] || { printf '%s\n' "unproven"; return 0; }
+
+  local validated_marketplace=""
+  if is_ui_clone_plugin_source "$marketplace_source"; then
+    validated_marketplace="$marketplace_source"
+  fi
+
+  OWNERSHIP_PATH="$PUBLIC_SKILLS_OWNERSHIP" SKILL_NAME="$skill" \
+    INSTALLED_PATH="$dst" CURRENT_SOURCE="$src" \
+    MARKETPLACE_SOURCE="$validated_marketplace/skills/$skill" \
+    REPO_ROOT="$REPO_ROOT" python3 - <<'PY'
+import hashlib
+import io
+import json
+import os
+import subprocess
+import tarfile
+from pathlib import Path
+
+
+def tree_hash(root: Path) -> str | None:
+    if not root.is_dir():
+        return None
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode()
+        if path.is_symlink():
+            kind, content = b"L", os.readlink(path).encode()
+        elif path.is_dir():
+            kind, content = b"D", b""
+        else:
+            kind = b"X" if path.stat().st_mode & 0o111 else b"F"
+            content = path.read_bytes()
+        digest.update(kind + b"\0" + relative + b"\0")
+        digest.update(str(len(content)).encode() + b"\0" + content + b"\0")
+    return digest.hexdigest()
+
+
+def archive_hash(repo: Path, tree_oid: str) -> str | None:
+    try:
+        archive = subprocess.check_output(
+            ["git", "-C", str(repo), "archive", "--format=tar", tree_oid],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    entries = []
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+        for member in tar.getmembers():
+            relative = member.name.rstrip("/")
+            if not relative:
+                continue
+            if member.issym():
+                kind, content = b"L", member.linkname.encode()
+            elif member.isdir():
+                kind, content = b"D", b""
+            elif member.isfile():
+                kind = b"X" if member.mode & 0o111 else b"F"
+                extracted = tar.extractfile(member)
+                content = extracted.read() if extracted else b""
+            else:
+                continue
+            entries.append((relative, kind, content))
+    digest = hashlib.sha256()
+    for relative, kind, content in sorted(entries):
+        digest.update(kind + b"\0" + relative.encode() + b"\0")
+        digest.update(str(len(content)).encode() + b"\0" + content + b"\0")
+    return digest.hexdigest()
+
+
+def matches_repo_history(repo: Path, skill: str, expected_hash: str | None) -> bool:
+    if expected_hash is None or not (repo / ".git").exists():
+        return False
+    skill_path = f"skills/{skill}"
+    try:
+        commits = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-list", "--all", "--", skill_path],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    tree_oids = set()
+    for commit in commits:
+        try:
+            tree_oids.add(
+                subprocess.check_output(
+                    ["git", "-C", str(repo), "rev-parse", f"{commit}:{skill_path}"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            )
+        except subprocess.CalledProcessError:
+            continue
+    return any(archive_hash(repo, oid) == expected_hash for oid in tree_oids)
+
+
+skill = os.environ["SKILL_NAME"]
+installed = Path(os.environ["INSTALLED_PATH"])
+installed_hash = tree_hash(installed)
+ownership_path = Path(os.environ["OWNERSHIP_PATH"])
+try:
+    ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+except FileNotFoundError:
+    ownership = {}
+except (OSError, json.JSONDecodeError):
+    print("unproven")
+    raise SystemExit(0)
+
+entry = ownership.get("skills", {}).get(skill) if isinstance(ownership, dict) else None
+if isinstance(entry, dict) and entry.get("path") == str(installed.resolve()):
+    print("removable:receipt" if entry.get("sha256") == installed_hash else "customized")
+    raise SystemExit(0)
+
+for source_name in ("CURRENT_SOURCE", "MARKETPLACE_SOURCE"):
+    source = Path(os.environ[source_name])
+    source_hash = tree_hash(source)
+    if source_hash and source_hash == installed_hash:
+        print("removable:source")
+        raise SystemExit(0)
+
+repo = Path(os.environ["REPO_ROOT"])
+print("removable:history" if matches_repo_history(repo, skill, installed_hash) else "unproven")
+PY
+}
+
+verify_public_skills_removable() {
+  local skill status
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    status="$(public_skill_ownership_status "$skill")"
+    case "$status" in
+      absent|removable:*) ;;
+      customized)
+        mark_uninstall_incomplete "preserving post-install edits in $AGENTS_SKILLS_DIR/$skill"
+        ;;
+      *) mark_uninstall_incomplete "cannot prove ownership of $AGENTS_SKILLS_DIR/$skill" ;;
+    esac
+  done
+}
+
+clear_public_skill_ownership() {
+  local skill="$1"
+  [ -f "$PUBLIC_SKILLS_OWNERSHIP" ] || return 0
+
+  OWNERSHIP_PATH="$PUBLIC_SKILLS_OWNERSHIP" SKILL_NAME="$skill" python3 - <<'PY'
+import json
+import os
+import stat
+import tempfile
+from pathlib import Path
+
+path = Path(os.environ["OWNERSHIP_PATH"])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+skills = data.get("skills") if isinstance(data, dict) else None
+if not isinstance(skills, dict) or os.environ["SKILL_NAME"] not in skills:
+    raise SystemExit(0)
+skills.pop(os.environ["SKILL_NAME"])
+if not skills:
+    path.unlink()
+    raise SystemExit(0)
+
+mode = stat.S_IMODE(path.stat().st_mode)
+temp_name = None
+try:
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=f".{path.name}.", delete=False,
+    ) as handle:
+        temp_name = handle.name
+        os.fchmod(handle.fileno(), mode)
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_name, path)
+finally:
+    if temp_name and os.path.exists(temp_name):
+        os.unlink(temp_name)
+PY
+}
+
+remove_installed_public_skills() {
+  local skill dst status
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    dst="$AGENTS_SKILLS_DIR/$skill"
+    status="$(public_skill_ownership_status "$skill")"
+    case "$status" in
+      absent)
+        if ! clear_public_skill_ownership "$skill"; then
+          mark_uninstall_incomplete "could not clear stale ownership receipt for $skill"
+        fi
+        ;;
+      removable:*)
+        rm -rf "$dst"
+        if clear_public_skill_ownership "$skill"; then
+          ok "removed Codex public skill $dst"
+        else
+          mark_uninstall_incomplete "removed $dst but could not update its ownership receipt"
+        fi
+        ;;
+    esac
+  done
+}
+
+remove_codex_native_agents() {
+  local src_dir="$REPO_ROOT/.codex/agents"
+  local src dst
+  [ -d "$src_dir" ] || return 0
+
+  for src in "$src_dir"/*.toml; do
+    [ -e "$src" ] || continue
+    dst="$CODEX_NATIVE_AGENTS_DIR/$(basename "$src")"
+    remove_owned_symlink "$dst" "$src" "Codex native agent"
+  done
+}
+
+remove_owned_editable_install() {
+  local python ownership found=0
+  while IFS= read -r python; do
+    [ -n "$python" ] || continue
+    found=1
+    if ! ownership="$(
+      REPO_ROOT="$REPO_ROOT" DISTRIBUTION_NAME="$PLUGIN_NAME" "$python" - <<'PY'
+import importlib.metadata
+import json
+import os
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
+
+try:
+    distribution = importlib.metadata.distribution(os.environ["DISTRIBUTION_NAME"])
+except importlib.metadata.PackageNotFoundError:
+    print("absent")
+    raise SystemExit(0)
+
+try:
+    direct_url = json.loads(distribution.read_text("direct_url.json") or "")
+except (TypeError, json.JSONDecodeError):
+    print("preserved: missing or invalid direct_url.json")
+    raise SystemExit(0)
+
+dir_info = direct_url.get("dir_info") if isinstance(direct_url, dict) else None
+url = direct_url.get("url") if isinstance(direct_url, dict) else None
+if not isinstance(dir_info, dict) or dir_info.get("editable") is not True:
+    print("preserved: distribution is not editable")
+    raise SystemExit(0)
+if not isinstance(url, str):
+    print("preserved: editable distribution has no source URL")
+    raise SystemExit(0)
+
+parsed = urlparse(url)
+if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+    print("preserved: editable source is not a local file URL")
+    raise SystemExit(0)
+
+source = Path(url2pathname(unquote(parsed.path))).resolve()
+repo = Path(os.environ["REPO_ROOT"]).resolve()
+if source != repo:
+    print(f"preserved: editable source is {source}")
+    raise SystemExit(0)
+
+print("owned")
+PY
+    )"; then
+      mark_uninstall_incomplete "could not inspect the ui-clone-skills editable install in $python"
+      continue
+    fi
+
+    case "$ownership" in
+      owned)
+        if "$python" -m pip uninstall -y "$PLUGIN_NAME" >/dev/null 2>&1; then
+          ok "removed editable install $PLUGIN_NAME from $python"
+        elif "$python" -m pip uninstall -y --break-system-packages \
+            "$PLUGIN_NAME" >/dev/null 2>&1; then
+          ok "removed editable install $PLUGIN_NAME from $python"
+        else
+          mark_uninstall_incomplete "could not uninstall editable install $PLUGIN_NAME from $python"
+        fi
+        ;;
+      absent) ;;
+      preserved:*) warn "$python: $ownership" ;;
+      *) warn "could not determine ui-clone-skills editable install ownership in $python" ;;
+    esac
+  done < <(python_candidates)
+
+  if [ "$found" -eq 0 ]; then
+    mark_uninstall_incomplete "Python >=3.11 absent — could not inspect ui-clone-skills editable installs"
+  fi
+}
+
+remove_codex_personal_marketplace_entry() {
+  local marketplace="$CODEX_PERSONAL_MARKETPLACE"
+  path_present "$marketplace" || return 0
+
+  if ! have python3; then
+    warn "python3 absent — could not remove $PLUGIN_NAME from $marketplace"
+    return 1
+  fi
+
+  local result
+  if ! result="$(
+    MARKETPLACE_PATH="$marketplace" PLUGIN_NAME="$PLUGIN_NAME" \
+      PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" python3 - <<'PY'
+import json
+import os
+import stat
+import tempfile
+from pathlib import Path
+
+path = Path(os.environ["MARKETPLACE_PATH"]).expanduser()
+plugin = os.environ["PLUGIN_NAME"]
+source_path = os.environ["PLUGIN_SOURCE_PATH"]
+
+if path.is_symlink():
+    try:
+        write_path = path.resolve(strict=True)
+    except OSError as error:
+        raise SystemExit(f"refusing invalid marketplace symlink {path}: {error}")
+    if not stat.S_ISREG(write_path.stat().st_mode):
+        raise SystemExit(f"refusing non-regular marketplace target: {write_path}")
+elif path.exists():
+    write_path = path
+    if not stat.S_ISREG(write_path.stat().st_mode):
+        raise SystemExit(f"refusing non-regular marketplace file: {write_path}")
+else:
+    raise SystemExit(f"marketplace disappeared before update: {path}")
+
+try:
+    data = json.loads(write_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("preserved")
+    raise SystemExit(0)
+
+if not isinstance(data, dict) or not isinstance(data.get("plugins"), list):
+    print("preserved")
+    raise SystemExit(0)
+
+plugins = data["plugins"]
+kept = []
+removed = 0
+for item in plugins:
+    source = item.get("source") if isinstance(item, dict) else None
+    if (
+        isinstance(item, dict)
+        and item.get("name") == plugin
+        and isinstance(source, dict)
+        and source.get("source") == "local"
+        and source.get("path") == source_path
+    ):
+        removed += 1
+    else:
+        kept.append(item)
+
+if not removed:
+    print("unchanged")
+    raise SystemExit(0)
+
+data["plugins"] = kept
+mode = stat.S_IMODE(write_path.stat().st_mode)
+temp_name = None
+try:
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=write_path.parent,
+        prefix=f".{write_path.name}.", delete=False,
+    ) as handle:
+        temp_name = handle.name
+        os.fchmod(handle.fileno(), mode)
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_name, write_path)
+finally:
+    if temp_name and os.path.exists(temp_name):
+        os.unlink(temp_name)
+print("removed")
+PY
+  )"; then
+    warn "could not atomically update $marketplace"
+    return 1
+  fi
+
+  case "$result" in
+    removed) ok "removed Codex personal marketplace entry from $marketplace" ;;
+    preserved) warn "preserving user-owned or invalid marketplace file: $marketplace" ;;
+  esac
+}
+
+codex_personal_marketplace_entry_owned() {
+  local marketplace="$CODEX_PERSONAL_MARKETPLACE"
+  [ -f "$marketplace" ] || return 1
+  have python3 || return 1
+
+  MARKETPLACE_PATH="$marketplace" PLUGIN_NAME="$PLUGIN_NAME" \
+    PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["MARKETPLACE_PATH"]).expanduser()
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+for item in data.get("plugins", []) if isinstance(data, dict) else []:
+    source = item.get("source") if isinstance(item, dict) else None
+    if (
+        isinstance(item, dict)
+        and item.get("name") == os.environ["PLUGIN_NAME"]
+        and isinstance(source, dict)
+        and source.get("source") == "local"
+        and source.get("path") == os.environ["PLUGIN_SOURCE_PATH"]
+    ):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+claude_marketplace_owned() {
+  local source_path="${CLAUDE_UNINSTALL_SOURCE:-}"
+  if [ -z "$source_path" ]; then
+    source_path="$(claude_marketplace_source 2>/dev/null || true)"
+  fi
+  [ -n "$source_path" ] || return 1
+  if [ -d "$source_path" ]; then
+    is_ui_clone_plugin_source "$source_path"
+  else
+    [ "$(basename "$source_path")" = "$PLUGIN_NAME" ]
+  fi
+}
+
+remove_plugin_projection() {
+  local item src dst skill
+
+  if [ -L "$CODEX_PLUGIN_DIR" ]; then
+    local projection_target
+    projection_target="$(readlink "$CODEX_PLUGIN_DIR")"
+    if [ "$projection_target" = "$REPO_ROOT" ] ||
+       is_ui_clone_plugin_source "$CODEX_PLUGIN_DIR"; then
+      rm -f "$CODEX_PLUGIN_DIR"
+      ok "removed legacy projection symlink $CODEX_PLUGIN_DIR"
+    else
+      warn "preserving user-owned path: $CODEX_PLUGIN_DIR"
+    fi
+    return 0
+  fi
+
+  for item in $CODEX_PLUGIN_PROJECTION_ITEMS; do
+    src="$REPO_ROOT/$item"
+    dst="$CODEX_PLUGIN_DIR/$item"
+    remove_owned_symlink "$dst" "$src" "projection item"
+  done
+
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    src="$REPO_ROOT/skills/$skill"
+    dst="$CODEX_PLUGIN_DIR/skills/$skill"
+    remove_owned_symlink "$dst" "$src" "projection skill"
+  done
+
+  rmdir "$CODEX_PLUGIN_DIR/skills" 2>/dev/null || true
+  if ! rmdir "$CODEX_PLUGIN_DIR" 2>/dev/null && path_present "$CODEX_PLUGIN_DIR"; then
+    warn "preserving user-owned path: $CODEX_PLUGIN_DIR"
+  fi
+}
+
+remove_install_marker() {
+  local marker="$HOME/.config/ui-clone-skills/root"
+  local installed_root=""
+
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    IFS= read -r installed_root < "$marker" || true
+    if [ "$installed_root" = "$REPO_ROOT" ]; then
+      rm -f "$marker"
+      ok "removed install marker"
+      rmdir "$HOME/.config/ui-clone-skills" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  if path_present "$marker"; then
+    warn "preserving user-owned path: $marker"
+  fi
+}
+
 uninstall_all() {
   section "Uninstall ui-clone-skills"
-  if have codex; then
-    local hooks_file
-    hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
-    if [ -f "$hooks_file" ]; then
-      if uv run --project "$REPO_ROOT" python -m ui_clone.codex_hooks_install remove \
-           --hooks-file "$hooks_file"; then
-        ok "stripped ui-clone gate hooks from $hooks_file"
-      else
-        warn "could not strip gate hooks from $hooks_file"
-      fi
+  local hooks_file codex_entry_owned=0 claude_plugin_removed=0
+  local CLAUDE_UNINSTALL_SOURCE=""
+  local UNINSTALL_INCOMPLETE=0
+  hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
+  CLAUDE_UNINSTALL_SOURCE="$(claude_marketplace_source 2>/dev/null || true)"
+  verify_public_skills_removable
+  if [ -f "$hooks_file" ] && grep -qF "ui_clone.hooks" "$hooks_file"; then
+    if ! have uv; then
+      mark_uninstall_incomplete "uv absent — could not strip ui-clone gate hooks from $hooks_file"
+    elif uv run --project "$REPO_ROOT" python -m ui_clone.codex_hooks_install remove \
+         --hooks-file "$hooks_file"; then
+      ok "stripped ui-clone gate hooks from $hooks_file"
+    else
+      mark_uninstall_incomplete "could not strip gate hooks from $hooks_file"
     fi
-    if codex plugin remove "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME" >/dev/null 2>&1; then
+  fi
+  remove_owned_editable_install
+  if codex_personal_marketplace_entry_owned; then
+    codex_entry_owned=1
+    if ! have codex; then
+      mark_uninstall_incomplete "codex absent — could not remove plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+    elif codex plugin remove "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME" >/dev/null 2>&1; then
       ok "removed Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
     else
-      skip "Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+      mark_uninstall_incomplete "could not remove Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
     fi
   fi
-  if [ -e "$CODEX_PLUGIN_DIR" ]; then
-    rm -rf "$CODEX_PLUGIN_DIR" && ok "removed projection $CODEX_PLUGIN_DIR"
-  fi
-  if have claude; then
-    if claude plugin uninstall "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+  if claude_marketplace_owned; then
+    if ! have claude; then
+      mark_uninstall_incomplete "claude absent — could not remove plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
+    elif claude plugin uninstall "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
       ok "uninstalled Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
+      claude_plugin_removed=1
     else
-      skip "Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
+      mark_uninstall_incomplete "could not uninstall Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
     fi
-    if claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+    if [ "$claude_plugin_removed" -eq 1 ] &&
+       claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1; then
       ok "removed Claude marketplace $MARKETPLACE_NAME"
-    else
-      skip "Claude marketplace $MARKETPLACE_NAME"
+    elif [ "$claude_plugin_removed" -eq 1 ]; then
+      mark_uninstall_incomplete "could not remove Claude marketplace $MARKETPLACE_NAME"
     fi
   fi
-  rm -f "$HOME/.config/ui-clone-skills/root" 2>/dev/null && ok "removed install marker" || true
-  warn "Left in place: Codex native agents (~/.codex/agents/*.toml) and any config.toml [plugins] block — remove manually if desired."
+
+  if [ "$UNINSTALL_INCOMPLETE" -ne 0 ]; then
+    warn "Uninstall incomplete; retained local artifacts and marketplace metadata for a safe retry."
+    return 1
+  fi
+
+  if [ "$codex_entry_owned" -eq 1 ]; then
+    if ! remove_codex_personal_marketplace_entry; then
+      mark_uninstall_incomplete "could not remove Codex personal marketplace entry"
+      return 1
+    fi
+  fi
+  remove_owned_symlink "$LOCAL_CLI_BIN" "$CODEX_PLUGIN_DIR/bin/ui-clone" "local ui-clone bin"
+  remove_installed_public_skills
+  if [ "$UNINSTALL_INCOMPLETE" -ne 0 ]; then
+    warn "Uninstall incomplete; retained remaining local artifacts for a safe retry."
+    return 1
+  fi
+  remove_codex_native_agents
+  remove_plugin_projection
+  remove_install_marker
+  warn "System dependencies and user-managed Codex config.toml settings were not installed by this script and were left in place."
   ok "Uninstall complete."
 }
 
@@ -561,9 +1774,16 @@ main() {
     warn "--no-deps: skipping system dependency bootstrap"
   fi
 
+  # ui_clone must import from ANY cwd — cold clone loops + gates run outside the
+  # repo. Runs even under --no-deps (cheap + idempotent once installed).
+  section "ui_clone (editable, importable anywhere)"
+  editable_install
+
   if [ "$NO_MARKETPLACE" -eq 0 ] && [ "$INSTALL_CLAUDE" -eq 1 ]; then
     section "Claude Code plugin"
     register_marketplace
+    install_claude_plugin
+    verify_claude_plugin_delivery || return 1
   fi
 
   if [ "$NO_MARKETPLACE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 1 ]; then
@@ -595,7 +1815,7 @@ main() {
   Next step:
 
       Add this checkout as a plugin source for your agent host.
-      Claude Code: run install.sh without --no-marketplace, then /plugin install ${PLUGIN_NAME}@${MARKETPLACE_NAME}
+      Claude Code: run install.sh without --no-marketplace (registers the marketplace and installs the plugin)
       Codex:       run install.sh --codex-only, then verify codex plugin list shows ${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME} installed
 
   Verify deps:
@@ -606,8 +1826,9 @@ EOF
     if [ "$INSTALL_CLAUDE" -eq 1 ]; then
       cat <<EOF
 
-      Claude Code (inside the app):
-          /plugin install ${PLUGIN_NAME}@${MARKETPLACE_NAME}
+      Claude Code: plugin installed (user scope) — restart sessions to load it.
+          Verify: claude plugin list | grep ${PLUGIN_NAME}@${MARKETPLACE_NAME}
+          Source: ${CODEX_PLUGIN_DIR} is a lean projection symlinked to ${REPO_ROOT}
 EOF
     fi
     if [ "$INSTALL_CODEX" -eq 1 ]; then

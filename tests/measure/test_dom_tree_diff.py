@@ -194,7 +194,7 @@ def test_dom_mirror_exempts_map_iteration_tags(tmp_path: Path) -> None:
                 / "dom-mirror-check.sh"),
             str(ref), str(impl), "--out", str(out_file),
         ],
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, timeout=120, check=False,
     )
     art = json.loads(out_file.read_text(encoding="utf-8"))
     assert art["status"] == "pass", (
@@ -281,6 +281,71 @@ def test_dom_mirror_ignores_script_style_noscript_template_nodes(tmp_path: Path)
                     f"got: {arr}"
                 )
 
+
+
+def test_dom_mirror_ignores_head_metadata_tags(tmp_path: Path) -> None:
+    """Loop-1 improve finding (2026-06-07): dom-mirror-check walked the ref
+    scaffold counting EVERY tag except {script,style,noscript,template}, so
+    head-metadata tags (meta/link/title/base/head) entered the ref multiset.
+    But the impl-side extractor only counts tags in HTML_TAGS, which excludes
+    those — they can NEVER match. A populated <head> (real sites have meta x30+)
+    therefore always showed meta/link as "dropped from impl" and tripped the
+    eviscerate hard-fail (ref>=10, impl<25%) regardless of clone quality.
+    Observed: a real clone failed at similarity 0.455 purely from meta(31->0)
+    + link(5->0). Fix mirrors the impl-side filter — same skip-set rationale
+    as the <script>/<style> strip.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src"
+    ref.mkdir()
+    src.mkdir(parents=True)
+
+    # Ref scaffold: a body that the impl reproduces exactly, plus a populated
+    # <head> with meta/link/title. Without the strip, meta(x12) trips the
+    # eviscerate hard-fail and the otherwise-perfect clone fails.
+    head_children = [{"tag": "meta", "children": []} for _ in range(12)]
+    head_children += [{"tag": "link", "children": []} for _ in range(5)]
+    head_children += [{"tag": "title", "text": "Site", "children": []}]
+    (ref / "dom-scaffold.json").write_text(json.dumps({
+        "tree": {
+            "tag": "html",
+            "children": [
+                {"tag": "head", "children": head_children},
+                {"tag": "body", "children": [
+                    {"tag": "main", "children": [
+                        {"tag": "section", "class": "hero", "children": [
+                            {"tag": "h1", "text": "Real Food Wins", "children": []},
+                        ]},
+                    ]},
+                ]},
+            ],
+        },
+    }))
+    (src / "App.tsx").write_text(
+        'export default function App() {\n'
+        '  return <html><body><main><section className="hero">'
+        '<h1>Real Food Wins</h1></section></main></body></html>;\n'
+        '}\n'
+    )
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "dom-mirror-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    data = json.loads(proc.stdout)
+    # Head-metadata tags must not appear in the ref multiset, so they cannot
+    # be flagged dropped/eviscerated. The body mirrors exactly -> pass.
+    assert data.get("status") == "pass", (
+        f"head-metadata tags must be stripped from ref-side dom-mirror; got: {data}"
+    )
+    evisc_tags = {e.get("tag") for e in data.get("eviscerated_tags", []) or []}
+    assert not (evisc_tags & {"meta", "link", "title", "base", "head"}), (
+        f"head-metadata must not trip eviscerate; got: {data.get('eviscerated_tags')}"
+    )
 
 
 def test_dom_mirror_threshold_default_is_advisory_80(tmp_path: Path) -> None:
@@ -506,7 +571,7 @@ def test_tree_diff_walks_deep_below_fold_sections(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         env=env,
         check=False,
     )

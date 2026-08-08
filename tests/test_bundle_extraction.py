@@ -135,6 +135,44 @@ def test_parse_bundles_integration(fixture_ref_dir: Path) -> None:
     assert "webflowIX2" in libs
     ix2 = plan["extractions"]["webflowIX2"]
     assert ix2["totalActions"] == 2
+    # Lenis/GSAP/Framer/Webflow are fully regex-parsed → no unresolved gap flag.
+    assert plan["unresolved"] == []
+
+
+def test_parse_bundles_flags_swiper_as_unresolved(tmp_path: Path) -> None:
+    """A1 dispatch-on-gap: Swiper carousel config (nested breakpoint maps) is not
+    regex-extractable, so the parser flags its PRESENCE under `unresolved` for the
+    bundle-analyzer LLM instead of silently shipping a config-less carousel."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "slider.js").write_text(
+        'var s=new Swiper(".swiper",'
+        "{slidesPerView:1,breakpoints:{768:{slidesPerView:3}},loop:true});"
+        'e.createElement("div",{className:"swiper-slide"});'
+    )
+    plan = mod.parse_bundles(tmp_path)
+    # Presence flagged, but no construction-site config was guessed.
+    assert "swiper" not in plan["extractions"]
+    swiper = next(u for u in plan["unresolved"] if u["library"] == "swiper")
+    assert swiper["source"] == "bundles/slider.js"
+    assert "bundle-analyzer" in swiper["reason"]
+
+
+def test_parse_bundles_flags_splide_via_dom_class_marker(tmp_path: Path) -> None:
+    """Splide presence flagged from the stable `splide__track` DOM class literal
+    even when the minified constructor name is mangled away."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "carousel.js").write_text(
+        'r.createElement("div",{className:"splide__track"},'
+        'r.createElement("ul",{className:"splide__list"}))'
+    )
+    plan = mod.parse_bundles(tmp_path)
+    libs = [u["library"] for u in plan["unresolved"]]
+    assert libs == ["splide"]
+    assert plan["unresolved"][0]["source"] == "bundles/carousel.js"
 
 
 def test_extract_framer_minified_scroll_scrub(tmp_path: Path) -> None:
@@ -167,3 +205,86 @@ def test_extract_framer_minified_scroll_scrub(tmp_path: Path) -> None:
     assert "opacity" in props
     scale_t = next(t for t in site["transforms"] if t["property"] == "scale")
     assert scale_t["output"] == "[.9,1,1,1]"  # band straddling 1.0 = the zoom
+
+
+def test_hover_size_expansion_extracted(tmp_path: Path) -> None:
+    """Loop-9 regression class (item 6b): the nav pill label expansion
+    (initial:{width:0} → animate:{width:active?"auto":0}, spring) lived only
+    in the JS bundle and never reached a spec entry — so its absence in the
+    impl (labels baked width:0, no hover expansion) was never verified.
+    The extractor must surface size-expansion components."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "page-x.js").write_text(
+        '(0,n.jsx)(c.P.span,{className:O().label_container,layout:!0,'
+        'initial:{width:0},animate:{width:a?"auto":0},'
+        'transition:{type:"spring",stiffness:120,damping:20},'
+        'children:(0,n.jsx)(c.P.span,{className:O().label})});'
+        'let m={pill:"nav_pill__LWSDc",dot_button:"nav_dot_button__kZB4V",'
+        'label_container:"nav_label_container__okVKb"};',
+        encoding="utf-8",
+    )
+    plan = mod.parse_bundles(tmp_path)
+    expansions = plan["extractions"].get("hoverSizeExpansions")
+    assert expansions, plan["extractions"].keys()
+    entry = expansions[0]
+    assert entry["classToken"] == "label_container"
+    assert entry["property"] == "width"
+    assert entry["from"] == "0"
+    assert "auto" in entry["to"]
+    assert "spring" in str(entry.get("transition", ""))
+    # the class-map resolution turns the token into the concrete class name
+    assert entry.get("resolvedClassName") == "nav_label_container__okVKb"
+
+
+def test_hover_size_expansion_max_width_variant(tmp_path: Path) -> None:
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "chunk.js").write_text(
+        'x.jsx(M.div,{className:s().menu_label,initial:{maxWidth:0},'
+        'animate:{maxWidth:h?160:0},transition:{duration:.3}})',
+        encoding="utf-8",
+    )
+    plan = mod.parse_bundles(tmp_path)
+    expansions = plan["extractions"].get("hoverSizeExpansions")
+    assert expansions and expansions[0]["property"] == "maxWidth"
+
+
+def test_active_state_expansion_extracted(tmp_path: Path) -> None:
+    """Loop-10/11 (item 7): the nav active-section label reveal lives in the
+    bundle as initial:{width:0} -> animate:{width:<activeFlag>?"auto":0}. It is
+    gated on a state flag (active section), not a hover, so the hover gate cannot
+    verify it — and real minified state-machine code interleaves layout props
+    between className and initial, which the hover extractor's adjacency regex
+    misses. The active-state extractor must still surface it."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    # className is separated from initial by an interleaved object literal, so
+    # the hover adjacency regex would miss it.
+    (bundles / "nav.js").write_text(
+        '(0,n.jsx)(c.P.span,{className:O().label_container,'
+        'style:{color:"#111"},layout:!0,transition:{type:"spring"},'
+        'initial:{width:0},animate:{width:a?"auto":0}});'
+        'let m={label_container:"nav_label_container__okVKb"};',
+        encoding="utf-8",
+    )
+    plan = mod.parse_bundles(tmp_path)
+    active = plan["extractions"].get("activeStateExpansions")
+    assert active, plan["extractions"].keys()
+    entry = active[0]
+    assert entry["property"] == "width"
+    assert entry["stateFlag"] == "a"
+    assert entry["to"] == "auto"
+    assert entry["resolvedClassName"] == "nav_label_container__okVKb"
+
+
+def test_no_expansions_no_key(tmp_path: Path) -> None:
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "plain.js").write_text("console.log(1)", encoding="utf-8")
+    plan = mod.parse_bundles(tmp_path)
+    assert "hoverSizeExpansions" not in plan["extractions"]

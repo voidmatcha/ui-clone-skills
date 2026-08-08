@@ -33,6 +33,11 @@ REPORT="$SNAPDIR/verify-report.json"
 SPLASH_JSON="$SNAPDIR/splash-state.json"
 REF_SESSION="loop${N}-ref"
 IMPL_SESSION="loop${N}-impl"
+# Reap every loop${N}-* browser session on exit (ref/impl + their -splash
+# variants). These self-owned sessions otherwise leak one Chrome instance per
+# invocation; orphan accumulation from exactly this class of no-close probe
+# once starved a motion baseline into 0 PASS. Prefix sweep is safe (>=5 chars).
+trap 'bash "$REPO_ROOT/scripts/verify/cleanup-sessions.sh" "loop${N}" >/dev/null 2>&1 || true' EXIT
 
 echo "=== verify-loop $N ==="
 echo "  ref:  $REF_URL"

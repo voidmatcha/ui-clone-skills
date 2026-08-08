@@ -82,11 +82,14 @@ def test_parse_page_height_custom_fallback() -> None:
 
 
 def test_write_regions_json_shape(tmp_path: Path) -> None:
-    """Produces the exact JSON shape capture.sh wrote inline."""
+    """Minimal placeholder shape, self-incriminating so the reference gate
+    can fail it on motion sites (Phase 2 detection must replace it)."""
     mod = _load_module()
     mod.write_regions_json(tmp_path, page_height=4200)
     payload = json.loads((tmp_path / "regions.json").read_text())
     assert payload == {
+        "placeholder": True,
+        "detectionRan": False,
         "regions": [
             {
                 "name": "full-page",
@@ -164,6 +167,37 @@ def test_summarize_artifacts_ignores_hidden_files(tmp_path: Path) -> None:
     assert summary["static_ref_screenshots"] == 1
 
 
+# ── write_capture_error ──
+
+
+def test_write_capture_error_shape_and_summary(tmp_path: Path) -> None:
+    """Recorder lifecycle failures are persisted with actionable context."""
+    mod = _load_module()
+    screenshots = tmp_path / "static" / "ref"
+    screenshots.mkdir(parents=True)
+    for i in range(5):
+        (screenshots / f"section-{i}.png").write_bytes(b"x")
+
+    payload = mod.write_capture_error(
+        tmp_path,
+        stage="scroll-video:record-stop",
+        exit_code=1,
+        artifact=str(tmp_path / "scroll-video" / "ref" / "full-scroll.webm"),
+        command="agent-browser --session demo record stop",
+        message="✗ No recording in progress",
+    )
+
+    saved = json.loads((tmp_path / "capture-error.json").read_text())
+    assert saved == payload
+    assert payload["error"] == "capture-step-failed"
+    assert payload["stage"] == "scroll-video:record-stop"
+    assert payload["artifact"] == "scroll-video/ref/full-scroll.webm"
+    assert payload["exitCode"] == 1
+    assert payload["message"] == "✗ No recording in progress"
+    assert payload["summary"]["static_ref_screenshots"] == 5
+    assert payload["summary"]["scroll_video_ref_videos"] == 0
+
+
 # ── CLI ──
 
 
@@ -208,6 +242,29 @@ def test_main_summarize(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert "regions.json: ok" in captured.out
 
 
+def test_main_write_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """write-error subcommand writes capture-error.json and prints its path."""
+    mod = _load_module()
+    rc = mod.main(
+        [
+            "write-error",
+            str(tmp_path),
+            "transition-placeholder:record-stop",
+            "1",
+            "transitions/ref/placeholder.webm",
+            "agent-browser record stop",
+            "No recording in progress",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads((tmp_path / "capture-error.json").read_text())
+    assert payload["stage"] == "transition-placeholder:record-stop"
+    assert payload["artifact"] == "transitions/ref/placeholder.webm"
+    assert payload["message"] == "No recording in progress"
+    captured = capsys.readouterr()
+    assert str(tmp_path / "capture-error.json") in captured.out
+
+
 def test_main_rejects_no_args() -> None:
     """Bare invocation → exit 2 (usage)."""
     mod = _load_module()
@@ -233,3 +290,8 @@ def test_main_write_regions_bad_height() -> None:
     """Non-int page_height → exit 2."""
     mod = _load_module()
     assert mod.main(["write-regions", "/tmp/x", "not-a-number"]) == 2
+
+
+def test_main_write_error_bad_exit_code(tmp_path: Path) -> None:
+    mod = _load_module()
+    assert mod.main(["write-error", str(tmp_path), "scroll-video:record-stop", "bad"]) == 2

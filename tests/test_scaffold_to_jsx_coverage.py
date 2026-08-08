@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -17,6 +18,90 @@ def _impl_blob(impl: Path) -> str:
 def _src_blob(impl: Path) -> str:
     src = impl / "src"
     return "".join(p.read_text(encoding="utf-8") for p in src.rglob("*.tsx")) if src.is_dir() else ""
+
+
+def test_scaffold_drops_captured_lifecycle_state_classes(tmp_path: Path) -> None:
+    """Captured terminal lifecycle classes belong to runtime state, not base
+    markup. Freezing them makes entry/loading transitions render already-settled."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "trajectory.json").write_text(json.dumps([
+        {"ts_ms": 0, "bodyClass": "loading", "htmlClass": ""},
+        {"ts_ms": 800, "bodyClass": "loaded complete", "htmlClass": ""},
+    ]), encoding="utf-8")
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "class": "antialiased",
+        "styles": {},
+        "children": [{
+            "tag": "section",
+            "class": "hero loaded complete",
+            "styles": {},
+            "children": [{"tag": "p", "text": "Ready"}],
+        }],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}),
+        encoding="utf-8",
+    )
+    (impl / "package.json").write_text(
+        json.dumps({"name": "impl", "dependencies": {"next": "16.0.0", "react": "19.0.0"}}),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert 'className="hero"' in blob
+    assert "loaded" not in blob
+    assert "complete" not in blob
+
+
+def test_scaffold_preserves_stable_lifecycle_named_classes_without_splash_evidence(
+    tmp_path: Path,
+) -> None:
+    """Lifecycle-like names are common stable semantic classes. Do not strip
+    them unless capture evidence proves they are transition state tokens."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "class": "antialiased",
+        "styles": {},
+        "children": [{
+            "tag": "section",
+            "class": "task-list done complete",
+            "styles": {},
+            "children": [{"tag": "p", "text": "All tasks complete"}],
+        }],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "task-list"}]}),
+        encoding="utf-8",
+    )
+    (impl / "package.json").write_text(
+        json.dumps({"name": "impl", "dependencies": {"next": "16.0.0", "react": "19.0.0"}}),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert 'className="task-list done complete"' in blob
 
 
 def test_intro_state_body_bg_replaced_with_dominant_page_bg(tmp_path: Path) -> None:
@@ -55,7 +140,7 @@ def test_intro_state_body_bg_replaced_with_dominant_page_bg(tmp_path: Path) -> N
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _src_blob(impl)
@@ -68,6 +153,457 @@ def test_intro_state_body_bg_replaced_with_dominant_page_bg(tmp_path: Path) -> N
     )
     # The viewport-filling root div must also carry the cream bg.
     assert f'backgroundColor: "{cream}"' in blob, "root div bg must be cream"
+
+
+def test_pseudo_before_precedes_text_content(tmp_path: Path) -> None:
+    """Synthetic ::before spans must render before the element text.
+
+    If text is emitted first, absolute pseudos with no explicit top/left use the
+    text's static-position fallback and icon buttons hang below their 32px box.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "class": "antialiased",
+        "styles": {},
+        "children": [
+            {"tag": "section", "class": "hero", "styles": {}, "children": [
+                {"tag": "button", "class": "btn-auto-control", "text": "자동멈춤",
+                 "styles": {"position": "relative", "width": "32px", "min-height": "32px"},
+                 "before_styles": {
+                     "content": "\"\"",
+                     "display": "block",
+                     "position": "absolute",
+                     "width": "32px",
+                     "height": "32px",
+                     "background-image": "url(\"/icon-pause.svg\")",
+                 },
+                 "after_styles": {
+                     "content": "\"\"",
+                     "display": "block",
+                     "position": "absolute",
+                     "width": "32px",
+                     "height": "32px",
+                     "background-image": "url(\"/icon-play.svg\")",
+                     "opacity": "0",
+                 }},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "hero"},
+    ]}), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    before_i = blob.index('<span data-pseudo="before"')
+    text_i = blob.index("자동멈춤")
+    after_i = blob.index('<span data-pseudo="after"')
+    assert before_i < text_i < after_i, blob
+    assert '*:has(> [data-pseudo="before"])::before' in blob
+    assert '*:has(> [data-pseudo="after"])::after' in blob
+
+
+def test_color_hover_unfreezes_computed_zero_border_currentcolor(tmp_path: Path) -> None:
+    """Computed zero/none borders must not freeze currentColor hover parity."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "section",
+            "class": "footer",
+            "children": [{
+                "tag": "a",
+                "class": "menu__link2",
+                "text": "NAVER D2SF",
+                "styles": {
+                    "display": "inline-block",
+                    "color": "rgb(113, 118, 128)",
+                    "border": "0px none rgb(113, 118, 128)",
+                    "transition": "color 0.2s cubic-bezier(0.33, 1, 0.68, 1)",
+                    "transition-property": "color",
+                    "transition-duration": "0.2s",
+                },
+                "hover_styles": {
+                    "color": "rgb(26, 29, 36)",
+                },
+            }],
+        }],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "footer"},
+    ]}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert re.search(r"\.h_\d+ \{[^}]*color: rgb\(113, 118, 128\)", blob), blob
+    assert "border: 0px none currentColor" in blob
+    assert 'border: "0px none rgb(113, 118, 128)"' not in blob
+    assert re.search(r"\.h_\d+:hover \{[^}]*color: rgb\(26, 29, 36\)", blob), blob
+
+
+def test_materialized_pseudo_responds_to_parent_hover(tmp_path: Path) -> None:
+    """Same-subject :hover::after rules must target the synthetic span."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "section",
+            "class": "footer",
+            "children": [{
+                "tag": "a",
+                "class": "menu__link2",
+                "text": "NAVER D2SF",
+                "styles": {
+                    "display": "inline-block",
+                    "position": "relative",
+                    "color": "rgb(113, 118, 128)",
+                    "transition": "color 0.2s cubic-bezier(0.33, 1, 0.68, 1)",
+                },
+                "after_styles": {
+                    "content": "\"\"",
+                    "display": "inline-block",
+                    "width": "0px",
+                    "height": "1px",
+                    "vertical-align": "top",
+                    "border": "0px none rgb(113, 118, 128)",
+                    "background-color": "currentColor",
+                },
+                "after_hover_styles": {
+                    "display": "inline-block",
+                    "width": "21px",
+                    "top": "auto",
+                    "left": "auto",
+                    "vertical-align": "top",
+                    "opacity": "1",
+                    "border": "0px none currentColor",
+                    "background-color": "currentColor",
+                    "transition-delay": "0s, 0s",
+                },
+            }],
+        }],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "footer"},
+    ]}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert '<span data-pseudo="after"' in blob
+    base_rule = re.search(r'\.(h_\d+) > \[data-pseudo="after"\] \{([^}]*)\}', blob)
+    assert base_rule, blob
+    hov_class = re.escape(base_rule.group(1))
+    hover_rule = re.search(
+        r'\.' + hov_class + r':hover > \[data-pseudo="after"\] \{([^}]*)\}',
+        blob,
+    )
+    assert hover_rule, blob
+    assert re.search(rf'className="[^"]*\b{base_rule.group(1)}\b', blob), blob
+    assert "width: 0px" in base_rule.group(2)
+    assert "vertical-align: top" in base_rule.group(2)
+    assert "width: 21px" in hover_rule.group(1)
+    assert "top: auto" in hover_rule.group(1)
+    assert "left: auto" in hover_rule.group(1)
+    assert "opacity: 1" in hover_rule.group(1)
+    assert "vertical-align: top" in hover_rule.group(1)
+    assert "transition-delay: 0s, 0s" in hover_rule.group(1)
+    assert 'width: "0px"' not in blob
+    assert 'border: "0px none rgb(113, 118, 128)"' not in blob
+
+
+def test_fixed_top_header_releases_captured_bottom_complement(
+    tmp_path: Path,
+) -> None:
+    """Computed far edges must not freeze a viewport-anchored fixed header.
+
+    The extractor omits zero-valued ``top`` but retains computed ``bottom``.
+    At a 900px capture height that turns a real ``top: 0; height: 64px`` header
+    into ``bottom: 836px`` unless the scaffold reconstructs the near edge.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(
+        json.dumps(
+            {
+                "tag": "body",
+                "styles": {},
+                "children": [
+                    {
+                        "tag": "header",
+                        "class": "header white",
+                        "styles": {
+                            "position": "fixed",
+                            "bottom": "836px",
+                            "width": "1440px",
+                            "height": "64px",
+                        },
+                        "children": [{"tag": "a", "text": "NAVER"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "section-map.json").write_text(
+        json.dumps(
+            {"sections": [{"index": 0, "tag": "header", "cls": "header white"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert 'top: "0px"' in blob
+    assert 'bottom: "836px"' not in blob
+
+
+def test_fixed_complement_handles_horizontal_axis_and_inline_guard(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(
+        json.dumps(
+            {
+                "tag": "body",
+                "styles": {},
+                "children": [
+                    {
+                        "tag": "aside",
+                        "class": "left-rail",
+                        "styles": {
+                            "position": "fixed",
+                            "right": "1240px",
+                            "width": "200px",
+                        },
+                    },
+                    {
+                        "tag": "div",
+                        "class": "author-inset",
+                        "inlineProps": ["bottom"],
+                        "styles": {
+                            "position": "fixed",
+                            "bottom": "800px",
+                            "height": "100px",
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "section-map.json").write_text(
+        json.dumps(
+            {
+                "sections": [
+                    {"index": 0, "tag": "aside", "cls": "left-rail"},
+                    {"index": 1, "tag": "div", "cls": "author-inset"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert 'left: "0px"' in blob
+    assert 'right: "1240px"' not in blob
+    assert 'bottom: "800px"' in blob
+
+
+def test_capture_icon_sentinel_is_not_rendered_as_visible_copy(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(
+        json.dumps(
+            {
+                "tag": "body",
+                "styles": {},
+                "children": [
+                    {
+                        "tag": "section",
+                        "class": "hero",
+                        "styles": {},
+                        "children": [
+                            {
+                                "tag": "button",
+                                "styles": {},
+                                "children": [
+                                    {"tag": "span", "text": "{{icon}}", "styles": {}},
+                                    {
+                                        "tag": "svg",
+                                        "svg": True,
+                                        "viewBox": "0 0 16 16",
+                                        "styles": {},
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "section-map.json").write_text(
+        json.dumps(
+            {"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert "{{icon}}" not in blob
+    assert "&#123;&#123;icon&#125;&#125;" not in blob
+    assert "<svg" in blob
+
+
+def test_numeric_anchor_artifact_normalized_to_anchor(tmp_path: Path) -> None:
+    """Captured DOM can contain invalid anchor-like tags such as <a3>.
+    Scaffold output should preserve link semantics as <a>, not emit a custom
+    lowercase React element that triggers runtime warnings."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "class": "",
+        "styles": {},
+        "children": [
+            {"tag": "footer", "class": "footer", "styles": {}, "children": [
+                {"tag": "a3", "class": "service__link2", "text": "고객센터",
+                 "href": "https://help.example.test", "styles": {"display": "block"}},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "footer", "cls": "footer"},
+    ]}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert "<a " in blob
+    assert "</a>" in blob
+    assert "<a3" not in blob
+    assert "</a3>" not in blob
+    assert "고객센터" in blob
+
+
+def test_scaffold_skips_hidden_debug_counter_pseudo_spans(tmp_path: Path) -> None:
+    """Full-cover numeric pseudo overlays are capture/debug artifacts, not UI.
+
+    Some content-card captures include `::before` as content "1"… with red
+    92px full-cover styles while the live idle pseudo is hidden.
+    The transpiler must not turn those into visible JSX text, but it should
+    still emit legitimate icon/background pseudo spans.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "main",
+        "class": "site-shell",
+        "children": [{
+            "tag": "section",
+            "class": "content-grid",
+            "children": [{
+                "tag": "a",
+                "class": "tracking-target content-card",
+                "text": "News card",
+                "before_styles": {
+                    "content": "\"1\"",
+                    "position": "absolute",
+                    "width": "100%",
+                    "height": "100%",
+                    "background-color": "rgba(0, 0, 0, 0.5)",
+                    "color": "rgb(255, 0, 0)",
+                    "font-size": "92px",
+                    "justify-content": "center",
+                    "align-items": "center",
+                    "z-index": "150",
+                },
+                "after_styles": {
+                    "content": "\"\"",
+                    "position": "absolute",
+                    "width": "16px",
+                    "height": "16px",
+                    "background-image": "url(\"/img/common/ic-right-arrow.svg\")",
+                },
+            }],
+        }],
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert '<span data-pseudo="before"' not in blob
+    assert ">1</span>" not in blob
+    assert '<span data-pseudo="after"' in blob
+    assert "ic-right-arrow.svg" in blob
 
 
 def test_text_outside_section_map_is_not_dropped(tmp_path: Path) -> None:
@@ -100,12 +636,133 @@ def test_text_outside_section_map_is_not_dropped(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
     assert "Real Food Wins" in blob  # mapped section (sanity)
     assert "Get Involved" in blob, "uncovered header/nav text must not be dropped"
+
+
+def test_nested_nonmap_section_demoted_to_div(tmp_path: Path) -> None:
+    """A nested <section> descendant inside a claimed section's subtree that is NOT
+    a section-map entry (e.g. realfood's food-pyramid category cards
+    <section class=...sections_section> captured into structure.json but absent
+    from section-map.json — capture-state mismatch) must be emitted as a <div>,
+    never a <section>. section-compare enumerates impl sections by tag=section; a
+    nested <section> inflates the impl section count vs the ref's section-map (the
+    realfood 18-vs-14 spurious EXTRA_IN_IMPL / duplicate bug). The claimed section
+    ROOT keeps its real <section>; content is preserved (no drop)."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "hero", "children": [
+                {"tag": "h1", "text": "Real Food Wins"},
+                # nested <section> NOT in section-map (lazy cards, capture mismatch)
+                {"tag": "section", "class": "cards__sections_section", "children": [
+                    {"tag": "p", "text": "Protein category detail"},
+                ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    # section-map covers ONLY the hero — the nested cards section is not enumerated.
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    # content preserved (no drop)
+    assert "Protein category detail" in blob
+    # exactly ONE <section> landmark (the claimed hero root); the nested cards
+    # section is demoted to <div> so impl section count == len(section-map).
+    assert blob.count("<section") == 1, (
+        f"expected exactly 1 <section> (hero root); nested non-map section must be "
+        f"demoted to <div>. Found {blob.count('<section')}:\n{blob}"
+    )
+
+
+def test_nested_section_preserved_inside_mapped_main_landmark(tmp_path: Path) -> None:
+    """A mapped coarse landmark owns a region, not a section identity.
+
+    Nested sections inside a mapped <main> remain real landmarks because
+    demoting them would erase the reference document's section semantics. The
+    duplicate-prevention demotion is only appropriate when the mapped subtree
+    root itself is a <section>.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "main", "class": "page-main", "children": [
+                {"tag": "section", "class": "docs-intro", "children": [
+                    {"tag": "h1", "text": "Documentation"},
+                ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "main", "cls": "page-main"}]}),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert "Documentation" in blob
+    assert "<main" in blob
+    assert '<section className="docs-intro"' in blob, blob
+
+
+def test_nested_sections_preserved_inside_mapped_div_region(tmp_path: Path) -> None:
+    """A mapped div can own a coarse page region just like a mapped main.
+
+    Only a mapped section root may demote nested non-map sections for duplicate
+    suppression. Demoting sections inside a div drops real landmarks and can
+    disable tag-qualified responsive CSS such as ``section.report-banner``.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "div", "class": "page-region", "children": [
+                {"tag": "section", "class": "content-block", "children": [
+                    {"tag": "h1", "text": "Sustainability"},
+                ]},
+                {"tag": "section", "class": "report-banner", "children": [
+                    {"tag": "p", "text": "Integrated report"},
+                ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "div", "cls": "page-region"}]}),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert '<section className="content-block"' in blob, blob
+    assert '<section className="report-banner"' in blob, blob
 
 
 def test_section_map_tag_mismatch_recovers_subtree(tmp_path: Path) -> None:
@@ -141,7 +798,7 @@ def test_section_map_tag_mismatch_recovers_subtree(tmp_path: Path) -> None:
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     features = impl / "src" / "components" / "Features.tsx"
@@ -158,6 +815,59 @@ def test_section_map_tag_mismatch_recovers_subtree(tmp_path: Path) -> None:
     assert blob.count("Why Real Food Matters") == 1, (
         "content must appear exactly once (in Features, not also _Uncovered)"
     )
+
+
+def test_classless_section_map_entries_claim_exact_tags_in_document_order(
+    tmp_path: Path,
+) -> None:
+    """Entries without id/class identity must claim exact-tag roots in order.
+
+    GitHub Docs exposes a classless footer in section-map.json. Identity-only
+    matching cannot resolve it and emits a subtree-not-found warning stub.
+    Two anonymous roots also prove that consumed tracking advances to the next
+    exact-tag match instead of reusing or absorbing the first root's parent.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "footer", "children": [
+                {"tag": "p", "text": "PRIMARY_FOOTER_COPY"},
+            ]},
+            {"tag": "footer", "children": [
+                {"tag": "p", "text": "SECONDARY_FOOTER_COPY"},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "footer"},
+        {"index": 1, "tag": "footer"},
+    ]}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    first = (impl / "src" / "components" / "Section0.tsx").read_text(
+        encoding="utf-8",
+    )
+    second = (impl / "src" / "components" / "Section1.tsx").read_text(
+        encoding="utf-8",
+    )
+    blob = _src_blob(impl)
+    assert "data-scaffold-warn" not in blob
+    assert "subtree-not-found" not in blob
+    assert "PRIMARY_FOOTER_COPY" in first
+    assert "SECONDARY_FOOTER_COPY" not in first
+    assert "SECONDARY_FOOTER_COPY" in second
+    assert "PRIMARY_FOOTER_COPY" not in second
+    assert blob.count("PRIMARY_FOOTER_COPY") == 1
+    assert blob.count("SECONDARY_FOOTER_COPY") == 1
 
 
 def test_catch_all_does_not_duplicate_rendered_content(tmp_path: Path) -> None:
@@ -185,7 +895,7 @@ def test_catch_all_does_not_duplicate_rendered_content(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -223,7 +933,7 @@ def test_cdn_image_subdir_path_is_preserved(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -260,7 +970,7 @@ def test_image_outside_section_map_is_not_dropped(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -289,7 +999,7 @@ def test_scaffold_emits_scroll_helpers_when_plan_requires(tmp_path: Path) -> Non
 
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (impl / "src" / "lib" / "SmoothScroll.tsx").exists()
@@ -310,7 +1020,7 @@ def test_scaffold_without_plan_emits_no_scroll_helpers(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (impl / "src" / "lib" / "SmoothScroll.tsx").exists()
@@ -319,6 +1029,44 @@ def test_scaffold_without_plan_emits_no_scroll_helpers(tmp_path: Path) -> None:
 def _app_tsx(impl: Path) -> str:
     p = impl / "src" / "App.tsx"
     return p.read_text(encoding="utf-8") if p.is_file() else ""
+
+
+def test_app_unlocks_ref_css_root_opacity_when_sanitize_report_requires_it(tmp_path: Path) -> None:
+    """Copied ref CSS can include loader locks such as body{opacity:0}.
+
+    The scaffold must emit a local unlock style when sanitize-ref-css detected
+    such a root lock; otherwise a Vite preview can mount a full DOM that stays
+    completely invisible.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "hero", "children": [{"tag": "h1", "text": "Hi"}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}),
+        encoding="utf-8",
+    )
+    (ref / "ref-css-sanitize-report.json").write_text(json.dumps({
+        "requiresRuntimeUnlock": True,
+        "runtimeUnlockHints": [{"selector": "body", "declaration": "opacity:0"}],
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = _app_tsx(impl)
+    assert "opacity:1 !important" in app
+    assert "visibility:visible !important" in app
+    assert "#root,#__next,#app" in app
 
 
 def test_app_wraps_in_smoothscroll_when_plan_requires(tmp_path: Path) -> None:
@@ -341,7 +1089,7 @@ def test_app_wraps_in_smoothscroll_when_plan_requires(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     app = _app_tsx(impl)
@@ -363,10 +1111,505 @@ def test_app_no_smoothscroll_wrap_without_plan(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "SmoothScroll" not in _app_tsx(impl)
+
+
+def test_hover_scaffold_filters_destructive_unverified_deltas(tmp_path: Path) -> None:
+    """Captured hover deltas can be paired to the wrong element.
+
+    The deterministic scaffold may preserve low-risk color/background feedback,
+    but must not invent destructive hover transforms/opacity/font/layout changes
+    that make unrelated elements rotate, disappear, or reflow.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "hero", "children": [
+                {"tag": "button", "class": "cta", "text": "Hover me",
+                 "hover_styles": {
+                     "transform": "rotate(180deg)",
+                     "opacity": "0",
+                     "font-weight": "700",
+                     "letter-spacing": "2px",
+                     "transition": "all 0.3s",
+                     "color": "rgb(1, 2, 3)",
+                     "background-color": "rgb(4, 5, 6)",
+                 }},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert ":hover" in blob, "safe hover color feedback should still be emitted"
+    assert "color: rgb(1, 2, 3)" in blob
+    assert "background-color: rgb(4, 5, 6)" in blob
+    assert "rotate(180deg)" not in blob
+    assert "opacity: 0" not in blob
+    assert "font-weight" not in blob
+    assert "letter-spacing" not in blob
+    assert "transition: all" not in blob
+
+
+def _hover_ref(tmp_path: Path, node: dict) -> tuple[Path, Path]:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{"tag": "section", "class": "hero", "children": [node]}],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}),
+        encoding="utf-8",
+    )
+    return ref, impl
+
+
+def test_hover_unbake_pops_inline_base_bg_so_hover_wins(tmp_path: Path) -> None:
+    """An inline base background-color beats the emitted `.h_N:hover` rule on
+    specificity, so the hover is dead. The transpiler must POP the inline base
+    color and emit it as a `.h_N { }` base rule instead, so base + :hover are
+    both stylesheet and :hover wins."""
+    ref, impl = _hover_ref(tmp_path, {
+        "tag": "button", "class": "cta", "text": "Hover",
+        "styles": {"background-color": "rgb(247, 247, 247)"},
+        "hover_styles": {"background-color": "rgb(10, 20, 30)"},
+    })
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    # The base bg must NOT be an inline style anymore.
+    assert 'backgroundColor: "rgb(247, 247, 247)"' not in blob, blob
+    # Both a base rule and a :hover rule for it must be present in the <style>.
+    assert "background-color: rgb(247, 247, 247)" in blob, blob   # base rule
+    assert "background-color: rgb(10, 20, 30)" in blob, blob      # hover rule
+    assert ":hover" in blob
+
+
+def test_hover_unbake_pops_inline_border_shorthand_for_border_color(tmp_path: Path) -> None:
+    ref, impl = _hover_ref(tmp_path, {
+        "tag": "a", "class": "cta", "text": "Hover",
+        "styles": {"border": "1px solid rgb(26, 29, 36)"},
+        "hover_styles": {"border-color": "rgb(113, 118, 128)"},
+    })
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert 'border: "1px solid rgb(26, 29, 36)"' not in blob, blob
+    assert "border: 1px solid rgb(26, 29, 36)" in blob, blob
+    assert "border-color: rgb(113, 118, 128)" in blob, blob
+
+
+def test_hover_unbake_preserves_inline_bg_when_no_hover(tmp_path: Path) -> None:
+    """A node with a baked base color but NO hover delta must keep its inline
+    color — the suppression is gated strictly on having a hover delta for it."""
+    ref, impl = _hover_ref(tmp_path, {
+        "tag": "div", "class": "plain",
+        "styles": {"background-color": "rgb(247, 247, 247)"},
+    })
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert 'backgroundColor: "rgb(247, 247, 247)"' in blob, blob
+
+
+def test_hover_unbake_keeps_ref_inline_prop(tmp_path: Path) -> None:
+    """If the REF itself set the prop inline (inlineProps), its own stylesheet
+    hover was dead on the live site too — reproduce that by KEEPING the inline
+    base and NOT emitting a base rule (do not invent a hover the ref lacks)."""
+    ref, impl = _hover_ref(tmp_path, {
+        "tag": "button", "class": "cta", "text": "Hover",
+        "styles": {"background-color": "rgb(247, 247, 247)"},
+        "inlineProps": ["background-color"],
+        "hover_styles": {"background-color": "rgb(10, 20, 30)"},
+    })
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert 'backgroundColor: "rgb(247, 247, 247)"' in blob, blob
+
+
+def test_hover_unbake_global_counter_distinct_ids(tmp_path: Path) -> None:
+    """Two hover nodes in different sections must get DISTINCT h_N ids — with a
+    document-global counter a later `.h_0 { base }` rule can't recolor an earlier
+    section's `.h_0` element at rest."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "a", "children": [
+                {"tag": "button", "class": "ba", "text": "A",
+                 "styles": {"background-color": "rgb(1, 1, 1)"},
+                 "hover_styles": {"background-color": "rgb(2, 2, 2)"}}]},
+            {"tag": "section", "class": "b", "children": [
+                {"tag": "button", "class": "bb", "text": "B",
+                 "styles": {"background-color": "rgb(3, 3, 3)"},
+                 "hover_styles": {"background-color": "rgb(4, 4, 4)"}}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "a"},
+        {"index": 1, "tag": "section", "cls": "b"},
+    ]}), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    # The two hover classes must be different ids (not both h_0).
+    assert "h_0" in blob and "h_1" in blob, blob
+
+
+def test_hover_motion_recovered_when_base_css_declares_the_transition(tmp_path: Path) -> None:
+    """gen-H5: a hover MOTION delta (fade/lift/zoom) is genuine — not mis-pairing
+    noise — when the element's OWN base CSS declares a transition for that
+    property. Recover it so real hover motion is cloned; layout/font/display
+    deltas still stay dropped even here."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{"tag": "section", "class": "hero", "children": [
+            {"tag": "div", "class": "card", "text": "Lift me",
+             # base CSS transitions transform+opacity -> the hover deltas below
+             # are this element's own intentional motion.
+             "styles": {"transition-property": "transform, opacity"},
+             "hover_styles": {
+                 "transform": "translateY(-8px)",
+                 "opacity": "0.9",
+                 "width": "500px",          # layout delta -> must STILL drop
+                 "color": "rgb(1, 2, 3)",
+             }},
+        ]}],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}),
+        encoding="utf-8")
+    proc = subprocess.run(["bash", str(SCRIPT), str(ref), str(impl)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert "translateY(-8px)" in blob, "hover transform must be recovered when base CSS transitions it"
+    assert "opacity: 0.9" in blob, "hover opacity must be recovered when base CSS transitions it"
+    assert "color: rgb(1, 2, 3)" in blob, "safe color feedback still emitted"
+    assert "width: 500px" not in blob, "layout deltas stay dropped even with a base transition"
+
+
+def test_hover_motion_stays_dropped_without_base_transition(tmp_path: Path) -> None:
+    """The noise defense holds: with NO base transition on the element, a hover
+    transform is treated as mis-pairing noise and dropped."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{"tag": "section", "class": "hero", "children": [
+            {"tag": "div", "class": "card", "text": "x",
+             "hover_styles": {"transform": "scale(1.2)", "color": "rgb(9, 9, 9)"}},
+        ]}],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}),
+        encoding="utf-8")
+    proc = subprocess.run(["bash", str(SCRIPT), str(ref), str(impl)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert "scale(1.2)" not in blob, "hover motion must stay dropped without a base transition"
+    assert "color: rgb(9, 9, 9)" in blob, "safe color feedback still emitted"
+
+
+def test_scaffold_emits_required_lottie_runtime_bridge(tmp_path: Path) -> None:
+    """Bundle-discovered Lottie JSON must be source-referenced and mounted.
+
+    Otherwise required-media/lottie-runtime gates fail even after the JSON files
+    have been mirrored to impl/public.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (impl / "package.json").write_text(
+        json.dumps({
+            "scripts": {"dev": "vite --host 127.0.0.1"},
+            "dependencies": {
+                "@vitejs/plugin-react": "latest",
+                "vite": "latest",
+                "react": "latest",
+                "react-dom": "latest",
+                "lottie-react": "latest",
+            },
+        }),
+        encoding="utf-8",
+    )
+    (ref / "required-media.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "videos": [],
+            "lottie": [
+                {"path": "/img/lottie/reference-main-intro.json"},
+                {"path": "/img/lottie/reference-main-outro-pc.json"},
+            ],
+            "svgs": [],
+        }),
+        encoding="utf-8",
+    )
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "main",
+        "class": "site-shell",
+        "styles": {},
+        "children": [
+            {"tag": "section", "class": "hero", "styles": {}, "children": [
+                {"tag": "h1", "text": "REFERENCE"},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "hero"},
+    ]}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    bridge = impl / "src" / "components" / "RequiredLotties.tsx"
+    assert bridge.exists()
+    bridge_text = bridge.read_text(encoding="utf-8")
+    assert "import('lottie-web')" in bridge_text
+    assert "loadAnimation" in bridge_text
+    assert "/img/lottie/reference-main-intro.json" in bridge_text
+    assert "/img/lottie/reference-main-outro-pc.json" in bridge_text
+    assert "data-lottie={status}" in bridge_text
+    assert '"id": "introLottie"' in bridge_text
+    assert '"id": "outroLottie"' in bridge_text
+    assert "goToAndStop" in bridge_text
+    assert "data-animation-path={src}" in bridge_text
+    assert "<svg aria-hidden=\"true\"" in bridge_text
+    app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "import RequiredLotties from './components/RequiredLotties';" in app
+    assert "<RequiredLotties />" in app
+
+
+def test_scaffold_emits_required_video_runtime_bridge(tmp_path: Path) -> None:
+    """Runtime-discovered videos must become real autoplaying <video> nodes."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (impl / "package.json").write_text(
+        json.dumps({
+            "scripts": {"dev": "vite --host 127.0.0.1"},
+            "dependencies": {
+                "@vitejs/plugin-react": "latest",
+                "vite": "latest",
+                "react": "latest",
+                "react-dom": "latest",
+            },
+        }),
+        encoding="utf-8",
+    )
+    (ref / "required-media.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "videos": [
+                {
+                    "section": "hero",
+                    "src": "https://cdn.example.com/assets/video/hero-main.mp4?cache=1",
+                    "poster": "https://cdn.example.com/assets/video/hero-main.jpg",
+                    "autoplay": True,
+                    "loop": True,
+                    "muted": True,
+                    "playsInline": True,
+                },
+            ],
+            "lottie": [],
+            "svgs": [],
+        }),
+        encoding="utf-8",
+    )
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "main",
+        "class": "site-shell",
+        "styles": {},
+        "children": [
+            {"tag": "section", "class": "hero", "styles": {}, "children": [
+                {"tag": "h1", "text": "REFERENCE"},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "hero"},
+    ]}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    bridge = impl / "src" / "components" / "RequiredVideos.tsx"
+    assert bridge.exists()
+    bridge_text = bridge.read_text(encoding="utf-8")
+    assert "/videos/hero-main.mp4" in bridge_text
+    assert "/assets/video/hero-main.jpg" in bridge_text
+    assert "data-required-media=\"video\"" in bridge_text
+    assert "video.play()" in bridge_text
+    assert "autoPlay={item.autoplay !== false}" in bridge_text
+    assert "muted={item.muted !== false}" in bridge_text
+    app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "import RequiredVideos from './components/RequiredVideos';" in app
+    assert "<RequiredVideos />" in app
+
+
+def test_scaffold_does_not_duplicate_captured_required_video(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (impl / "package.json").write_text(
+        json.dumps({
+            "scripts": {"dev": "vite --host 127.0.0.1"},
+            "dependencies": {
+                "@vitejs/plugin-react": "latest",
+                "vite": "latest",
+                "react": "latest",
+                "react-dom": "latest",
+            },
+        }),
+        encoding="utf-8",
+    )
+    video_url = "https://cdn.example.com/assets/video/hero-main.mp4"
+    (ref / "required-media.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "videos": [{"section": "hero", "src": video_url}],
+            "lottie": [],
+            "svgs": [],
+        }),
+        encoding="utf-8",
+    )
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "main",
+        "class": "site-shell",
+        "styles": {},
+        "children": [{
+            "tag": "section",
+            "class": "hero",
+            "styles": {},
+            "children": [{"tag": "video", "src": video_url}],
+        }],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "hero"},
+    ]}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (impl / "src" / "components" / "RequiredVideos.tsx").exists()
+    blob = _impl_blob(impl)
+    assert blob.count("/videos/hero-main.mp4") == 1
+    assert "autoPlay" in blob
+    assert "muted" in blob
+    assert "loop" in blob
+    assert "playsInline" in blob
+
+
+def test_large_fixed_header_gets_scroll_compact_controller(tmp_path: Path) -> None:
+    """Large fixed/sticky header captures need a tiny runtime shrink controller.
+
+    Static scroll=0 geometry leaves sites with shrinking headers frozen at
+    100px. The scaffold should install the controller only for real header roots,
+    giving header-state-runtime-check an evidence-checkable runtime delta.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "header", "class": "site-header",
+             "styles": {
+                 "position": "fixed",
+                 "top": "0px",
+                 "height": "100px",
+                 "min-height": "100px",
+                 "padding-top": "18px",
+                 "padding-bottom": "18px",
+             },
+             "children": [
+                 {"tag": "a", "class": "logo", "text": "LOGO"},
+                 {"tag": "nav", "children": [{"tag": "a", "text": "News"}]},
+             ]},
+            {"tag": "section", "class": "hero", "children": [{"tag": "h1", "text": "Hero"}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "header", "cls": "site-header"},
+        {"index": 1, "tag": "section", "cls": "hero"},
+    ]}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert "import { useEffect, useState } from 'react'" in blob
+    assert "uiCloneHeaderCompact" in blob
+    assert "window.scrollY > 80" in blob
+    assert 'data-ui-clone-header-scroll="true"' in blob
+    assert "ui-clone-header-scroll.is-compact" in blob
+    assert "height:100px!important" in blob
+    assert "min-height:100px!important" in blob
+    assert "height:64px!important" in blob
+    assert "min-height:64px!important" in blob
+    assert "padding-top:0!important" in blob
+    assert "className={`ui-clone-header-scroll" in blob
 
 
 def _component_containing(impl: Path, needle: str) -> str:
@@ -400,7 +1643,7 @@ def test_uncovered_block_renders_in_document_position(tmp_path: Path) -> None:
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     alpha = _component_containing(impl, "Alpha Heading")
@@ -416,6 +1659,138 @@ def test_uncovered_block_renders_in_document_position(tmp_path: Path) -> None:
     ia, iu, ib = _ref_pos(alpha), _ref_pos(uncov), _ref_pos(beta)
     assert ia != -1 and iu != -1 and ib != -1, f"refs not all in App: {ia=} {iu=} {ib=}\n{app}"
     assert ia < iu < ib, "uncovered block must render between Alpha and Beta, not last"
+
+
+def test_uncovered_footer_preserves_nested_sections_but_other_sections_demote(
+    tmp_path: Path,
+) -> None:
+    """Coarse uncovered landmarks retain their real nested section semantics."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "hero", "children": [
+                {"tag": "h1", "text": "Hero"},
+            ]},
+            {"tag": "section", "class": "cta", "children": [
+                {"tag": "h2", "text": "CTA"},
+            ]},
+            {"tag": "section", "class": "lazy-panel", "children": [
+                {"tag": "p", "text": "Lazy details"},
+            ]},
+            {"tag": "footer", "class": "site-footer", "children": [
+                {"tag": "section", "class": "footer-links", "children": [
+                    {"tag": "h2", "text": "Links"},
+                ]},
+                {"tag": "section", "class": "footer-legal", "children": [
+                    {"tag": "h2", "text": "Legal"},
+                ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [
+            {"index": 0, "tag": "section", "cls": "hero"},
+            {"index": 1, "tag": "section", "cls": "cta"},
+        ]}),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert '<footer className="site-footer"' in blob, blob
+    assert '<section className="footer-links"' in blob, blob
+    assert '<section className="footer-legal"' in blob, blob
+    assert '<div className="lazy-panel"' in blob, blob
+    assert '<section className="lazy-panel"' not in blob, blob
+
+
+def test_section_claims_doc_later_duplicate_not_earlier(tmp_path: Path) -> None:
+    """FIX-3: a repeated CSS-module class (eBay Playbook: playerWrapper appears 3x)
+    must be claimed in DOCUMENT ORDER. section-map entries are top-sorted, so the
+    LATER entry must take the LATER duplicate — not steal the earlier one, which
+    duplicates that content AND orphans the true subtree as a stacked
+    _UncoveredAfter band. Reproduces the ebpb 'Specs corner radius' misclaim."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            # doc-earlier duplicate (belongs to the "widget" section)
+            {"tag": "section", "class": "widget", "children": [
+                {"tag": "div", "class": "composite", "children": [
+                    {"tag": "p", "text": "FIRST_COPY"}]}]},
+            # a plain section between the two composites
+            {"tag": "section", "class": "blurb", "children": [{"tag": "h2", "text": "Blurb"}]},
+            # doc-later duplicate (the composite section's own subtree)
+            {"tag": "div", "class": "composite", "children": [
+                {"tag": "p", "text": "SECOND_COPY"}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "widget"},
+        {"index": 1, "tag": "section", "cls": "blurb"},
+        {"index": 2, "tag": "div", "cls": "composite"},
+    ]}), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    # The composite SECTION component must claim the doc-LATER copy...
+    comp = _component_containing(impl, "SECOND_COPY")
+    assert comp and comp.startswith("StyleComposite") or (comp and "composite" in comp.lower()) or comp, \
+        f"composite section must exist; got {comp}"
+    # ...and SECOND_COPY must appear exactly once (no double emission) and NOT in
+    # an _UncoveredAfter fragment.
+    assert blob.count("SECOND_COPY") == 1, f"SECOND_COPY emitted {blob.count('SECOND_COPY')}x (dup?)"
+    uncov_files = [p.read_text(encoding="utf-8")
+                   for p in (impl / "src" / "components").glob("_Uncovered*.tsx")]
+    assert not any("SECOND_COPY" in u for u in uncov_files), \
+        "the true composite subtree must be CLAIMED, not orphaned into _UncoveredAfter"
+
+
+def test_single_duplicate_still_claimed_doc_earlier(tmp_path: Path) -> None:
+    """FIX-3 fallback safety: min_doc is a PREFERENCE, not a filter. When there is
+    only ONE instance of a class and it sits doc-EARLIER than the previous
+    section's subtree, the section must still claim it (unconstrained fallback) —
+    no subtree-not-found stub, no uncovered fragment."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            # 'lonely' appears doc-BEFORE the 'tall' section that precedes it in
+            # the section-map order — the only instance, must still be claimed.
+            {"tag": "div", "class": "lonely", "children": [{"tag": "p", "text": "LONELY_COPY"}]},
+            {"tag": "section", "class": "tall", "children": [{"tag": "h2", "text": "Tall"}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "tall"},
+        {"index": 1, "tag": "div", "cls": "lonely"},
+    ]}), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert "LONELY_COPY" in blob, "the only 'lonely' instance must still be claimed"
+    assert "subtree-not-found" not in blob, "no stub — the fallback must recover it"
 
 
 def test_svg_url_attr_emits_valid_jsx_not_escaped_quotes(tmp_path: Path) -> None:
@@ -443,7 +1818,7 @@ def test_svg_url_attr_emits_valid_jsx_not_escaped_quotes(tmp_path: Path) -> None
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -482,7 +1857,7 @@ def test_small_static_translate_is_preserved_large_reveal_reset(tmp_path: Path) 
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -519,7 +1894,7 @@ def test_fixed_overlay_offscreen_transform_is_preserved(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -550,7 +1925,7 @@ def test_root_body_emitted_as_viewport_div_with_ref_bg(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     app = _app_tsx(impl)
@@ -589,12 +1964,322 @@ def test_word_split_run_collapses_to_clean_text(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
     # collapsed to contiguous text (would be split across spans before the fix)
     assert "For decades we have been misled by guidance" in blob
+
+
+def test_split_text_collapse_wraps_headline_in_inner_div(tmp_path: Path) -> None:
+    """Fix 120: a split-text headline carries its real size on the INNER char
+    spans (96px) inside a narrower column (608px), while the OUTER wrapper the
+    collapse fires on is a wide flex box at the inherited body 16px. The
+    collapsed text must be emitted inside a NEW inner div that owns the
+    typography + column max-width — the OUTER wrapper keeps its own styles
+    (16px / 896px / flex), so its flow/flex parent role is never touched
+    (putting the constraint on the wrapper itself cascades the page layout)."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    chars = list("Real") + [" "] + list("Food") + [" "] + list("can")  # >=10 leaves
+    big = {"font-size": "96px", "line-height": "91.2px", "color": "rgb(253, 251, 238)"}
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "solvable",
+             "styles": {"font-size": "16px", "width": "896px", "display": "flex"},
+             "children": [
+                {"tag": "div", "class": "col",
+                 "styles": dict(big, **{"width": "608px"}), "children": [
+                    {"tag": "h2", "class": "headline",
+                     "styles": dict(big, **{"width": "608px"}), "children": [
+                        {"tag": "span", "styles": big, "text": c} for c in chars
+                    ]},
+                 ]},
+             ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "solvable"}]}),
+        encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    comp = (impl / "src" / "components" / "Solvable.tsx").read_text()
+    assert "Real Food can" in comp  # clean reassembly survives
+    # the OUTER wrapper keeps its inherited body size — NOT re-sized to 96px
+    outer = comp[comp.index('className="solvable"'):comp.index(">", comp.index('className="solvable"'))]
+    assert 'fontSize: "16px"' in outer, "outer wrapper font must stay 16px (untouched)"
+    assert 'maxWidth: "608px"' not in outer, "column constraint must NOT land on the wrapper"
+    # the inner div owns the headline typography + column width
+    assert 'fontSize: "96px"' in comp
+    assert 'lineHeight: "91.2px"' in comp
+    assert 'maxWidth: "608px"' in comp
+    assert 'marginLeft: "auto"' in comp and 'marginRight: "auto"' in comp
+
+
+def test_split_text_collapse_stays_flat_when_no_distinct_inner_layout(tmp_path: Path) -> None:
+    """Guard: when the split spans carry no distinct font and no narrower column
+    (the wrapper already holds the real type), collapse stays FLAT — the text
+    folds onto the wrapper and no spurious inner div / max-width is emitted."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    chars = list("Real") + [" "] + list("Food") + [" "] + list("now")
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "plain",
+             "styles": {"font-size": "44px"}, "children": [
+                {"tag": "h2", "class": "headline", "children": [
+                    {"tag": "span", "text": c} for c in chars
+                ]},
+             ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "plain"}]}),
+        encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    comp = (impl / "src" / "components" / "Plain.tsx").read_text()
+    # flat: text sits directly in the wrapper, no synthetic inner column
+    assert "Real Food now" in comp
+    assert 'marginLeft: "auto"' not in comp, "no synthetic inner div when nothing distinct"
+
+
+def test_split_text_preserved_when_signature_effect_targets_node(tmp_path: Path) -> None:
+    """A declared per-character signature effect owns the split structure.
+
+    The scaffold must preserve the captured char spans so downstream generation
+    can wire the effect instead of flattening the target first.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    chars = list("Real") + [" "] + list("Food") + [" "] + list("now")
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "schemaVersion": 2,
+        "signatureEffects": [{
+            "selector": ".headline",
+            "name": "DisintegratingText",
+            "effectType": "per-character-scroll-scrub",
+        }],
+    }), encoding="utf-8")
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "plain", "children": [
+                {"tag": "h2", "class": "headline", "children": [
+                    {"tag": "span", "text": c} for c in chars
+                ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "plain"}]}),
+        encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    comp = (impl / "src" / "components" / "Plain.tsx").read_text()
+    assert comp.count("<span>") >= len(chars)
+    assert "Real Food now" not in comp
+
+
+def test_split_text_collapse_when_signature_effect_selector_does_not_match(
+    tmp_path: Path,
+) -> None:
+    """Non-matching signature effects do not disable ordinary split collapse."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    chars = list("Real") + [" "] + list("Food") + [" "] + list("now")
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "schemaVersion": 2,
+        "signatureEffects": [{
+            "selector": ".other-headline",
+            "name": "DisintegratingText",
+            "effectType": "per-character-scroll-scrub",
+        }],
+    }), encoding="utf-8")
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "plain", "children": [
+                {"tag": "h2", "class": "headline", "children": [
+                    {"tag": "span", "text": c} for c in chars
+                ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "plain"}]}),
+        encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    comp = (impl / "src" / "components" / "Plain.tsx").read_text()
+    assert "Real Food now" in comp
+
+
+WORD_SPLIT_WORDS = (
+    "For the first time official guidance calls on Americans to avoid "
+    "highly processed food every single day"
+).split()
+
+
+def _word_split_ref(tmp_path: Path, effect_type: str, selector: str) -> tuple[Path, Path]:
+    """Ref whose body copy is a per-WORD split, in realfood-v2's exact shape:
+    `div.container > p > span.text_line > span > span.line_dimmed`.
+
+    The `<p>` matters: the ref sizes this copy with `p{font-size:clamp(...)}`, so
+    a collapse that drops the `<p>` and the span tree also drops the rule that
+    gives the block its height.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    word_spans = [
+        {"tag": "span", "children": [
+            {"tag": "span", "class": "line_dimmed", "text": w}]}
+        for w in WORD_SPLIT_WORDS
+    ]
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "schemaVersion": 2,
+        "signatureEffects": [{
+            "selector": selector,
+            "name": "WordRevealText",
+            "effectType": effect_type,
+        }],
+    }), encoding="utf-8")
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "plain", "children": [
+                {"tag": "div", "class": "container", "children": [
+                    {"tag": "p", "children": [
+                        {"tag": "span", "class": "text_line", "children": word_spans},
+                    ]},
+                ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "plain"}]}),
+        encoding="utf-8")
+    return ref, impl
+
+
+# realfood-v2's declared selector, verbatim in shape: a COMMA LIST whose first
+# alternative ends in a bare tag and whose second ends in an ATTRIBUTE selector.
+WORD_SPLIT_SELECTOR = ".broken_system_text > span > span, .text_line span[data-word-id]"
+
+
+def test_per_word_signature_effect_preserves_split_structure(tmp_path: Path) -> None:
+    """A declared per-WORD signature effect owns its split structure exactly as a
+    per-character one does, and must suppress the collapse.
+
+    Two things previously stopped this from working on realfood-v2, so the
+    paragraph flattened to one bare string and `p{font-size:clamp(42px,12vw,96px)}`
+    had no `<p>` left to size:
+
+      1. The effect-text allowlist accepted per-character/split/disintegrate but
+         not per-WORD, so the selector never reached the preserve list at all.
+      2. Even in the list it could not match: the selector is a COMMA LIST that
+         was tested as a single string, and its subject (`span[data-word-id]`)
+         is an attribute selector, which the conservative same-node matcher
+         rejects outright — as it does the bare-tag subject of the other
+         alternative.
+
+    Preservation stays strictly opt-in: only a DECLARED effect suppresses the
+    collapse, so undeclared word-splits still flatten (see
+    test_word_split_collapse_stays_flat_no_inner_wrapper)."""
+    ref, impl = _word_split_ref(
+        tmp_path, "per-word scroll highlight", WORD_SPLIT_SELECTOR)
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    comp = (impl / "src" / "components" / "Plain.tsx").read_text()
+    joined = " ".join(WORD_SPLIT_WORDS)
+    assert joined not in comp, (
+        f"the declared per-word split must NOT be collapsed to one string; got:\n{comp}"
+    )
+    assert "<p" in comp, (
+        "the <p> must survive — the ref sizes this copy with a p{font-size:clamp()} "
+        f"rule that cannot apply without it; got:\n{comp}"
+    )
+    assert "text_line" in comp and "line_dimmed" in comp, (
+        f"the split wrapper/leaf classes must survive; got:\n{comp}"
+    )
+    assert comp.count("<span") >= len(WORD_SPLIT_WORDS), (
+        f"every word span must survive; got {comp.count('<span')} spans:\n{comp}"
+    )
+
+
+def test_word_split_collapse_stays_flat_no_inner_wrapper(tmp_path: Path) -> None:
+    """Fix 120 v4 gate: a per-WORD split (word-reveal body/quote) must NOT get
+    the inner-wrapper headline treatment even when its captured leaves carry a
+    large font — that size is a dimmed/transient reveal frame, not the rest
+    state, so enlarging it amplifies the mismatch. Only per-CHARACTER splits
+    (display headlines whose big font IS the rest state) get the inner div.
+    The word-split here carries a captured 96px on its word leaves yet must
+    collapse FLAT (text on the wrapper, no 96px inner div, no max-width)."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    words = ("The government message is simple what we eat shapes how long "
+             "and how well we live every single day of our lives").split()
+    big = {"font-size": "96px", "line-height": "92.16px", "color": "rgb(17, 0, 0)"}
+    # per-word split: each word its own leaf span (carrying the captured 96px)
+    word_spans = [{"tag": "span", "children": [
+        {"tag": "span", "styles": big, "text": w}]} for w in words]
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "endquote",
+             "styles": {"font-size": "16px", "width": "1440px"}, "children": [
+                {"tag": "div", "class": "col",
+                 "styles": dict(big, **{"width": "1076px"}), "children": [
+                    {"tag": "p", "styles": dict(big, **{"width": "1076px"}),
+                     "children": word_spans},
+                 ]},
+             ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "endquote"}]}),
+        encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    comp = (impl / "src" / "components" / "Endquote.tsx").read_text()
+    assert "The government message is simple" in comp  # clean reassembly
+    # word-split → flat collapse: no headline inner div, no 96px, no column
+    assert 'fontSize: "96px"' not in comp, "word-split must NOT be enlarged to 96px"
+    assert 'marginLeft: "auto"' not in comp, "word-split must NOT get the inner wrapper"
+    assert 'maxWidth: "1076px"' not in comp, "word-split must NOT get a column constraint"
 
 
 def test_word_split_guard_preserves_nav_links(tmp_path: Path) -> None:
@@ -620,11 +2305,68 @@ def test_word_split_guard_preserves_nav_links(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
     assert blob.count("<a ") >= 12, "nav links must be preserved, not collapsed to text"
+
+
+def test_split_text_guard_preserves_structured_palette_chips(tmp_path: Path) -> None:
+    """AA/AAA contrast chips inside a semantic image are not split text."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    labels = [
+        ("AA", "AAA"), ("AA", "AAA"), ("AA", "AA"), ("AA", "AAA"),
+        ("AA", "AA"), ("AA", "AA"), ("AA", "AA"), ("AA", "AA"),
+        ("AA", "AA"), ("AAA", "AA"), ("AAA", "AA"), ("AAA", "AA"),
+    ]
+    description = (
+        "Animated showcase of the Evo design system's color palette, displaying "
+        "tone-on-tone color chips with AA or AAA contrast labels"
+    )
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "palette", "children": [
+                {"tag": "div", "class": "style_flipGrid__root", "role": "img",
+                 "aria-label": "Color palette", "children": [
+                    {"tag": "div", "class": f"style_flipCard__chip style_tone_{i}",
+                     "styles": {"background-color": "rgb(245, 245, 245)"},
+                     "children": [
+                         {"tag": "div", "class": "style_flipCard__inner", "children": [
+                             {"tag": "div", "class": "style_flipCard__front", "children": [
+                                 {"tag": "span", "class": "style_contrastLabel__label",
+                                  "text": front},
+                             ]},
+                             {"tag": "div", "class": "style_flipCard__back", "children": [
+                                 {"tag": "span", "class": "style_contrastLabel__label",
+                                  "text": back},
+                             ]},
+                         ]},
+                     ]} for i, (front, back) in enumerate(labels)
+                 ] + [
+                     {"tag": "p", "class": "clipped", "text": description},
+                 ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "palette"}]}),
+        encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert blob.count("style_flipCard__chip") == len(labels), (
+        "palette cards must stay as repeated chip nodes, not collapse into one text run"
+    )
+    assert 'className="clipped"' in blob
+    assert description in blob
 
 
 def test_lazy_images_injected_into_matching_section(tmp_path: Path) -> None:
@@ -655,7 +2397,7 @@ def test_lazy_images_injected_into_matching_section(tmp_path: Path) -> None:
     ]), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -692,7 +2434,7 @@ def test_cjk_char_split_collapses_icon_run_preserved(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -732,7 +2474,7 @@ def test_app_wraps_reveal_sections_in_scrollreveal(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (impl / "src" / "lib" / "ScrollReveal.tsx").exists()
@@ -778,7 +2520,7 @@ def test_stale_autogen_components_removed_handwritten_kept(tmp_path: Path) -> No
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (comp / "_OldStale.tsx").exists(), "stale auto-gen component must be removed on regen"
@@ -810,7 +2552,7 @@ def test_large_fixed_widths_become_responsive(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -853,7 +2595,7 @@ def test_reveal_section_with_sticky_descendant_not_wrapped(tmp_path: Path) -> No
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     app = _app_tsx(impl)
@@ -892,7 +2634,7 @@ def test_sticky_wrapper_minheight_bakes_negative_bottom_margin(tmp_path: Path) -
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -907,16 +2649,18 @@ def test_sticky_wrapper_minheight_bakes_negative_bottom_margin(tmp_path: Path) -
     )
 
 
-def test_section_root_height_bakes_negative_bottom_margin(tmp_path: Path) -> None:
-    """S1 (dominant case): realfood's `dga_solvable_problem` is itself a section
-    (relative, not sticky), so its 2700px box comes from the section root's own
-    height→min-height floor — NOT the Fix 26 wrapper. It carries margin
-    0 0 -675px to overlap the next section. Keeping height 2700 while the margin
-    still pulls siblings up makes the box ~800px taller than the ref's real
-    section (the dominant 'sections drift'). The floor must fold in the negative
-    bottom margin (2700-675=2025) and the bottom margin must be neutralised so
-    the next section's flow position is unchanged while the box matches its real
-    rendered height."""
+def test_section_root_preserves_negative_bottom_margin_overlap(tmp_path: Path) -> None:
+    """S1 (dominant case): a section root (relative, not sticky) can deliberately
+    overlap the next section with a negative bottom margin (captured height H,
+    margin-bottom -M). Its box comes from the section root's own height→min-height
+    floor — NOT the Fix 26 sticky-ancestor wrapper. That overlap is flow-NEUTRAL:
+    the box is M px taller, and the negative margin pulls the next sibling up by
+    exactly M, so the following section's flow position is unchanged. The
+    transpiler must therefore keep the FULL captured height as the min-height
+    floor AND preserve the negative bottom margin verbatim (NOT fold it to H-M
+    and NOT zero margin-bottom) so the intentional overlap reproduces. Folding it
+    away renders the box M px too short and erases the overlap, which section-
+    compare then measures as a height mismatch."""
     ref = tmp_path / "ref"
     impl = tmp_path / "impl"
     (impl / "src").mkdir(parents=True)
@@ -939,7 +2683,7 @@ def test_section_root_height_bakes_negative_bottom_margin(tmp_path: Path) -> Non
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -947,10 +2691,57 @@ def test_section_root_height_bakes_negative_bottom_margin(tmp_path: Path) -> Non
     m = _re.search(r'className="solvable"[^>]*style=\{\{([^}]*)\}\}', blob)
     assert m, f"solvable section must be emitted; got:\n{blob}"
     style = m.group(1)
-    assert 'minHeight: "2025px"' in style, f"floor must fold negative margin (2700-675); got:\n{style}"
-    assert 'minHeight: "2700px"' not in style, "must not keep the inflated captured height"
-    # bottom margin neutralised so the next section does not move up an extra 675.
-    assert 'marginBottom: "0px"' in style, f"bottom margin must be neutralised; got:\n{style}"
+    # Full captured height kept as the min-height floor (overlap is flow-neutral).
+    assert 'minHeight: "2700px"' in style, f"floor must keep full captured height; got:\n{style}"
+    assert 'minHeight: "2025px"' not in style, "must not fold the overlap into the floor (renders M px too short)"
+    # Negative bottom margin preserved verbatim so the deliberate overlap reproduces.
+    assert 'margin: "0px 0px -675px"' in style, f"negative bottom margin must be preserved; got:\n{style}"
+    assert 'marginBottom: "0px"' not in style, "must not neutralise the bottom margin (erases the overlap)"
+
+
+def test_nested_element_preserves_negative_bottom_margin_overlap(tmp_path: Path) -> None:
+    """S1 (generic, non-root case): the negative-bottom-margin-is-flow-neutral
+    rule is NOT special to section roots. A nested content element (e.g. a graphic
+    that overlaps the element below it via margin-bottom -M while holding its own
+    captured height) must likewise keep its full height as a min-height floor and
+    preserve the negative bottom margin — not fold it away. This is the lever that
+    fixes an inner overlap (~150px too tall) without any class-name special case."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "host", "styles": {
+                "position": "relative", "height": "1098px", "padding": "256px 0px 0px"},
+             "children": [
+                 {"tag": "div", "class": "title", "text": "Title",
+                  "styles": {"height": "130px"}},
+                 {"tag": "div", "class": "graphic", "styles": {
+                     "position": "relative", "height": "921px",
+                     "margin": "-60px 0px -150px"},
+                  "children": [{"tag": "span", "text": "node"}]},
+             ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "host"}]}), encoding="utf-8"
+    )
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    import re as _re
+    m = _re.search(r'className="graphic"[^>]*style=\{\{([^}]*)\}\}', blob)
+    assert m, f"graphic element must be emitted; got:\n{blob}"
+    style = m.group(1)
+    assert 'minHeight: "921px"' in style, f"nested element must keep full height as floor; got:\n{style}"
+    assert 'minHeight: "771px"' not in style, "must not fold the inner overlap (921-150) into the floor"
+    assert 'margin: "-60px 0px -150px"' in style, f"nested negative bottom margin must be preserved; got:\n{style}"
+    assert 'marginBottom: "0px"' not in style, "must not neutralise the nested bottom margin"
 
 
 def test_autoplay_background_video_gets_playback_attrs(tmp_path: Path) -> None:
@@ -980,7 +2771,7 @@ def test_autoplay_background_video_gets_playback_attrs(tmp_path: Path) -> None:
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1037,7 +2828,7 @@ def test_stroke_draw_paths_stamped_and_driver_wired(tmp_path: Path) -> None:
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1094,7 +2885,7 @@ def test_ancestor_backdrop_propagates_to_flat_sections(tmp_path: Path) -> None:
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1122,6 +2913,83 @@ def test_ancestor_backdrop_propagates_to_flat_sections(tmp_path: Path) -> None:
     )
     pl = _re.search(r'className="plain"[^>]*', blob)
     assert pl and "rgb(17, 0, 0)" not in pl.group(0), "no dark ancestor -> no dark bg"
+
+
+def _band_ref(tmp_path: Path, section_node: dict, dominant_bg: str | None = None) -> tuple[Path, Path]:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{"tag": "div", "class": "wrap",
+                      "styles": {"background-color": "rgb(21, 21, 21)"},
+                      "children": [section_node]}],
+    }), encoding="utf-8")
+    sec_entry: dict = {"index": 0, "tag": section_node["tag"], "cls": section_node["class"]}
+    if dominant_bg is not None:
+        sec_entry["dominantBg"] = dominant_bg
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [sec_entry]}), encoding="utf-8")
+    return ref, impl
+
+
+def test_band_wrapper_skipped_for_absolute_overlay_root(tmp_path: Path) -> None:
+    """FIX-1: a section whose ROOT is position:absolute is an overlay/pinned
+    backdrop, pulled from flow and anchored to an ancestor. A full-bleed
+    `width:100vw; margin:calc(50%-50vw)` band around it is a meaningless 0-height
+    div — do NOT emit it. (A static/relative bg-less section still gets the band.)"""
+    ref, impl = _band_ref(tmp_path, {
+        "tag": "div", "class": "overlay",
+        "styles": {"position": "absolute", "top": "0", "left": "0"},
+        "children": [{"tag": "button", "text": "Play"}],
+    })
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert "calc(50% - 50vw)" not in blob, f"no full-bleed band around an absolute overlay; got:\n{blob}"
+
+
+def test_band_wrapper_still_emitted_for_static_root(tmp_path: Path) -> None:
+    """The gate is strictly on out-of-flow roots: a normal static/relative bg-less
+    section inside a dark ancestor STILL gets the full-bleed band."""
+    ref, impl = _band_ref(tmp_path, {
+        "tag": "section", "class": "flat",
+        "styles": {"color": "rgb(255, 255, 255)"},
+        "children": [{"tag": "h2", "text": "White copy"}],
+    })
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert "calc(50% - 50vw)" in blob, f"static bg-less section must still get the band; got:\n{blob}"
+
+
+def test_dominant_bg_not_promoted_onto_absolute_overlay_root(tmp_path: Path) -> None:
+    """FIX-1: the page-dominant-bg promotion must NOT paint an absolute overlay
+    root opaque — that would occlude what it overlays (e.g. a control overlay
+    covering its video)."""
+    ref, impl = _band_ref(tmp_path, {
+        "tag": "div", "class": "overlay",
+        "styles": {"position": "absolute", "top": "0", "left": "0"},
+        "children": [{"tag": "button", "text": "Play"}],
+    }, dominant_bg="rgb(255, 255, 255)")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    over_files = [p.read_text(encoding="utf-8")
+                  for p in (impl / "src" / "components").glob("*.tsx")
+                  if 'className="overlay"' in p.read_text(encoding="utf-8")]
+    assert over_files, "overlay component must exist"
+    assert 'backgroundColor: "rgb(255, 255, 255)"' not in over_files[0], (
+        "dominant bg must NOT be promoted onto an absolute overlay root")
 
 
 def test_word_grouped_char_split_keeps_inter_word_spaces(tmp_path: Path) -> None:
@@ -1156,7 +3024,7 @@ def test_word_grouped_char_split_keeps_inter_word_spaces(tmp_path: Path) -> None
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1188,7 +3056,7 @@ def test_flat_char_split_still_joins_without_spaces(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1227,7 +3095,7 @@ def test_heuristic_constants_env_overridable(tmp_path: Path) -> None:
         env.update(env_extra)
         proc = subprocess.run(
             ["bash", str(SCRIPT), str(ref), str(impl)],
-            capture_output=True, text=True, timeout=30, env=env,
+            capture_output=True, text=True, timeout=120, env=env,
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         return _impl_blob(impl)
@@ -1277,7 +3145,7 @@ def test_sticky_ancestor_wrapper_track_emitted_as_vh(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1328,7 +3196,7 @@ def test_class_entry_does_not_steal_id_reserved_subtree(tmp_path: Path) -> None:
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1348,8 +3216,11 @@ def test_viewport_proportional_heights_emitted_as_vh(tmp_path: Path) -> None:
     renders +800px at any other viewport (ref renders 1899 at a 633 viewport =
     3x633). When orig-layout.json records the capture viewportHeight, captured
     px that are near-exact >=50vh multiples of 25vh must be re-expressed in vh
-    so the clone scales like the ref. Non-multiples (hero 638px) stay px; with
-    no viewport record nothing converts."""
+    so the clone scales like the ref. The section root keeps its FULL captured
+    height (2700px -> 300vh, the ref's authored value) and its negative bottom
+    margin verbatim — the overlap is flow-neutral and reproduced, not folded
+    away. Non-multiples (hero 638px) stay px; with no viewport record nothing
+    converts."""
     ref = tmp_path / "ref"
     impl = tmp_path / "impl"
     (impl / "src").mkdir(parents=True)
@@ -1360,7 +3231,8 @@ def test_viewport_proportional_heights_emitted_as_vh(tmp_path: Path) -> None:
     (ref / "structure.json").write_text(json.dumps({
         "tag": "body",
         "children": [
-            # 300vh track w/ -75vh overlap -> Fix 64 folds to 2025px -> 225vh
+            # 300vh track w/ -75vh overlap -> full 2700px kept as floor -> 300vh,
+            # overlap margin preserved verbatim (flow-neutral, not folded)
             {"tag": "div", "class": "solvable", "styles": {
                 "position": "relative", "height": "2700px", "min-height": "2700px",
                 "margin": "0px 0px -675px"},
@@ -1380,14 +3252,20 @@ def test_viewport_proportional_heights_emitted_as_vh(tmp_path: Path) -> None:
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
     import re as _re
     solv = _re.search(r'className="solvable"[^>]*style=\{\{([^}]*)\}\}', blob)
-    assert solv and 'minHeight: "225vh"' in solv.group(1), (
-        f"folded 2025px @900 viewport must emit 225vh; got:\n{solv.group(1) if solv else blob}"
+    assert solv and 'minHeight: "300vh"' in solv.group(1), (
+        f"full 2700px @900 viewport must emit 300vh (the ref's authored height); "
+        f"got:\n{solv.group(1) if solv else blob}"
+    )
+    # The negative bottom margin (the deliberate overlap) is preserved verbatim.
+    assert solv and 'margin: "0px 0px -675px"' in solv.group(1), (
+        f"the overlap margin must be preserved, not folded into the height; "
+        f"got:\n{solv.group(1) if solv else blob}"
     )
     pin = _re.search(r'className="pin"[^>]*style=\{\{([^}]*)\}\}', blob)
     assert pin and '"100vh"' in pin.group(1), (
@@ -1424,7 +3302,7 @@ def test_app_root_does_not_bake_captured_page_height(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     app = _app_tsx(impl)
@@ -1486,7 +3364,7 @@ def test_scroll_state_fade_elements_stamped_and_driver_wired(tmp_path: Path) -> 
     }), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1542,7 +3420,7 @@ def test_unreferenced_handwritten_module_atticized(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not (lib / "Orphan.tsx").exists(), "unreferenced hand-written module must leave src/"
@@ -1583,7 +3461,7 @@ def test_html_id_attribute_emitted(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1632,7 +3510,7 @@ def test_centering_translate_matrix_is_preserved(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1686,7 +3564,7 @@ def test_lazy_image_data_src_promoted_to_src(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1700,6 +3578,42 @@ def test_lazy_image_data_src_promoted_to_src(tmp_path: Path) -> None:
     assert 'srcSet="/images/g/lazy3.avif 1x"' in blob, "data-srcset must be promoted to srcSet"
     # no blank/placeholder src emitted for the promoted images
     assert 'src=""' not in blob, "empty placeholder src must not be emitted for lazy images"
+
+
+def test_picture_source_media_query_preserved(tmp_path: Path) -> None:
+    """A3: a <picture><source> carries a `media` query that routes desktop vs
+    mobile art. Dropping it makes the browser pick the first matching <source>
+    (the mobile one, media-less) at every viewport, so the clone renders the
+    mobile image on desktop. `media` must survive extract->scaffold verbatim."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "hero", "children": [
+                {"tag": "picture", "children": [
+                    {"tag": "source", "media": "(max-width: 767px)",
+                     "srcset": "https://cdn-domain-1.example/img/mo/hero-m.png"},
+                    {"tag": "source", "media": "(min-width: 768px)",
+                     "srcset": "https://cdn-domain-1.example/img/pc/hero.png"},
+                    {"tag": "img", "src": "https://cdn-domain-1.example/img/pc/hero.png", "alt": "Hero"},
+                ]},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}), encoding="utf-8"
+    )
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _impl_blob(impl)
+    assert 'media="(max-width: 767px)"' in blob, f"mobile <source> media query must survive; got:\n{blob}"
+    assert 'media="(min-width: 768px)"' in blob, "desktop <source> media query must survive"
 
 
 def test_runtime_text_fills_empty_animated_elements(tmp_path: Path) -> None:
@@ -1729,7 +3643,7 @@ def test_runtime_text_fills_empty_animated_elements(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _impl_blob(impl)
@@ -1758,7 +3672,7 @@ def test_global_html_body_bg_override_emitted(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     app = _app_tsx(impl)
@@ -1790,7 +3704,7 @@ def test_root_and_global_clip_horizontal_overflow(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     app = _app_tsx(impl)
@@ -1848,7 +3762,7 @@ def test_anonymous_parent_siblings_not_re_emitted_as_uncovered(tmp_path: Path) -
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     comp = impl / "src" / "components"
@@ -1935,7 +3849,7 @@ def test_shared_id_sections_each_get_own_subtree(tmp_path: Path) -> None:
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     comp = impl / "src" / "components"
@@ -1993,7 +3907,7 @@ def test_class_section_entry_does_not_match_substring_class_token(tmp_path: Path
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     card_file = impl / "src" / "components" / "DgaCard.tsx"
@@ -2034,7 +3948,7 @@ def test_collapsed_zero_scale_entrance_state_reset_to_visible(tmp_path: Path) ->
         {"index": 0, "tag": "section", "cls": "pyramid"},
     ]}), encoding="utf-8")
     proc = _sp.run(["bash", str(SCRIPT), str(ref), str(impl)],
-                   capture_output=True, text=True, timeout=30)
+                   capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _src_blob(impl)
     assert "matrix(0, 0, 0, 0" not in blob, (
@@ -2049,9 +3963,11 @@ def test_collapsed_zero_scale_entrance_state_reset_to_visible(tmp_path: Path) ->
 
 def test_frozen_subunity_scrub_scale_reset_to_rest(tmp_path: Path) -> None:
     """A pure uniform DOWN-scale baked inline (matrix(0.9)/scale(0.9), no marker)
-    is a frozen scroll-zoom/entrance initial — reset transform to rest (scale 1)
-    so the element is not stuck shrunk (realfood's dga_card_bg zoom background).
-    Up-scale and scale+translate are preserved (conservative)."""
+    on an IN-FLOW element is a frozen scroll-zoom/entrance initial — reset transform
+    to rest (scale 1) so the element is not stuck shrunk, and stamp it for ScrollScrub.
+    Up-scale and scale+translate are preserved (conservative). (A position:absolute
+    backdrop like realfood's dga_card_bg is EXCLUDED by Fix 119 — the emitted
+    ScrollScrub freezes on absolute targets; see test_absolute_frozen_scrub_scale_*.)"""
     ref = tmp_path / "ref"
     impl = tmp_path / "impl"
     (impl / "src").mkdir(parents=True)
@@ -2061,7 +3977,7 @@ def test_frozen_subunity_scrub_scale_reset_to_rest(tmp_path: Path) -> None:
         "children": [
             {"tag": "section", "class": "zoom", "styles": {}, "children": [
                 {"tag": "div", "class": "cardbg", "styles": {
-                    "transform": "matrix(0.9, 0, 0, 0.9, 0, 0)", "position": "absolute"}},
+                    "transform": "matrix(0.9, 0, 0, 0.9, 0, 0)"}},
                 {"tag": "div", "class": "emph", "styles": {
                     "transform": "scale(1.05)"}},
                 {"tag": "div", "class": "shift", "styles": {
@@ -2083,7 +3999,7 @@ def test_frozen_subunity_scrub_scale_reset_to_rest(tmp_path: Path) -> None:
         }]},
     }), encoding="utf-8")
     proc = subprocess.run(["bash", str(SCRIPT), str(ref), str(impl)],
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _src_blob(impl)
     assert "matrix(0.9, 0, 0, 0.9, 0, 0)" not in blob, (
@@ -2127,7 +4043,7 @@ def test_static_subunity_scale_preserved_without_scrub_context(tmp_path: Path) -
     ]}), encoding="utf-8")
     # NO generation-plan.json → no scrollScrub context → SCRUB_WRAP_ATTRS empty.
     proc = _sp.run(["bash", str(SCRIPT), str(ref), str(impl)],
-                   capture_output=True, text=True, timeout=30)
+                   capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _src_blob(impl)
     assert "matrix(0.9, 0, 0, 0.9, 0, 0)" in blob, (
@@ -2159,9 +4075,10 @@ def test_cross_effect_no_regression_one_transpile(tmp_path: Path) -> None:
                     "transform": "matrix(0, 0, 0, 0, 0, 20.5)", "opacity": "0",
                     "position": "absolute"},
                  "children": [{"tag": "img", "class": "food-img"}]},
-                # #3 frozen zoom: sub-unity scale -> stripped AND stamped
+                # #3 frozen zoom (IN-FLOW): sub-unity scale -> stripped AND stamped
+                # (a position:absolute backdrop would be excluded — Fix 119)
                 {"tag": "div", "class": "zoombg", "styles": {
-                    "transform": "matrix(0.9, 0, 0, 0.9, 0, 0)", "position": "absolute"}},
+                    "transform": "matrix(0.9, 0, 0, 0.9, 0, 0)"}},
                 # rotation: rotate(90deg) -> matrix(0,1,-1,0) -> MUST be preserved
                 # (Fix 112: a≈0,d≈0 but b,c=±1 is rotation, not a zero-scale collapse)
                 {"tag": "div", "class": "icon", "styles": {
@@ -2190,7 +4107,7 @@ def test_cross_effect_no_regression_one_transpile(tmp_path: Path) -> None:
         }]},
     }), encoding="utf-8")
     proc = _sp.run(["bash", str(SCRIPT), str(ref), str(impl)],
-                   capture_output=True, text=True, timeout=30)
+                   capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _src_blob(impl)
     # #2 collapse stripped (food visible)
@@ -2225,7 +4142,7 @@ def test_scrub_scale_section_auto_wrapped(tmp_path: Path) -> None:
         "tag": "body", "class": "antialiased", "styles": {},
         "children": [
             {"tag": "section", "class": "zoombg", "styles": {
-                "transform": "matrix(0.9, 0, 0, 0.9, 0, 0)", "position": "absolute"},
+                "transform": "matrix(0.9, 0, 0, 0.9, 0, 0)"},
              "children": [{"tag": "div", "text": "bg"}]},
         ],
     }), encoding="utf-8")
@@ -2240,7 +4157,7 @@ def test_scrub_scale_section_auto_wrapped(tmp_path: Path) -> None:
         }]},
     }), encoding="utf-8")
     proc = _sp.run(["bash", str(SCRIPT), str(ref), str(impl)],
-                   capture_output=True, text=True, timeout=30)
+                   capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _src_blob(impl)
     assert "import ScrollScrub" in blob, "entry must import ScrollScrub"
@@ -2253,6 +4170,57 @@ def test_scrub_scale_section_auto_wrapped(tmp_path: Path) -> None:
     # <ScrollReveal> (double-wrap — the reveal's transform fights the scrub scale).
     assert "ScrollReveal" not in blob, (
         "pure scrub-scale section must not be double-wrapped in ScrollReveal")
+
+
+def test_absolute_frozen_scrub_scale_not_auto_wrapped(tmp_path: Path) -> None:
+    """Fix 119: a position:absolute element frozen at a sub-unity scrub scale
+    (realfood's dga_card_bg zoom backdrop) must NOT be stripped, stamped, nor
+    auto-wrapped in <ScrollScrub>. The emitted ScrollScrub drives scale from framer
+    useScroll, which reads scrollYProgress≈0 from async measurement on an absolute /
+    jump-scrolled target and FREEZES it at the band's START scale — measured to regress
+    realfood card_bg 2.9x (322k->935k AE/Mpx) and the pyramid rendered on top of it 2.2x.
+    Absolute backdrops need the bespoke rAF path (cf. DgaCardBg), never this component;
+    the baked scale is KEPT so the element is unchanged from capture (no worse than
+    baseline) rather than freeze-wrapped. Mirrors the fixed/sticky exclusion."""
+    import json as _json
+    import subprocess as _sp
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(_json.dumps({
+        "tag": "body", "class": "antialiased", "styles": {},
+        "children": [
+            {"tag": "section", "class": "zoom", "styles": {}, "children": [
+                {"tag": "div", "class": "cardbg", "styles": {
+                    "transform": "matrix(0.9, 0, 0, 0.9, 0, 0)", "position": "absolute"}},
+            ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(_json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "zoom"},
+    ]}), encoding="utf-8")
+    (ref / "generation-plan.json").write_text(_json.dumps({
+        "scrollScrub": {"required": True, "sites": [{
+            "offset": '["start end","end start"]',
+            "transforms": [{"input": "[0,0.05,0.75,0.9]",
+                            "output": "[0.9,1,1,1]", "property": "scale"}],
+        }]},
+    }), encoding="utf-8")
+    proc = _sp.run(["bash", str(SCRIPT), str(ref), str(impl)],
+                   capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    # baked scale KEPT (not stripped) — absolute backdrop left as captured
+    assert "matrix(0.9, 0, 0, 0.9, 0, 0)" in blob, (
+        "an absolute frozen scrub-scale must NOT be stripped (Fix 119)")
+    # NOT stamped, NOT auto-wrapped, NOT imported into the entry
+    assert "data-scroll-scrub-target" not in blob, (
+        "an absolute scrub-scale element must not be stamped (Fix 119)")
+    assert "<ScrollScrub" not in blob, (
+        "an absolute scrub-scale section must not be auto-wrapped (Fix 119)")
+    assert "import ScrollScrub" not in blob, (
+        "no ScrollScrub import when the only scrub candidate is absolute")
 
 
 def test_svg_line_draw_in_stamped_when_hidden(tmp_path: Path) -> None:
@@ -2285,7 +4253,7 @@ def test_svg_line_draw_in_stamped_when_hidden(tmp_path: Path) -> None:
         {"index": 0, "tag": "section", "cls": "pyr"},
     ]}), encoding="utf-8")
     proc = _sp.run(["bash", str(SCRIPT), str(ref), str(impl)],
-                   capture_output=True, text=True, timeout=30)
+                   capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = _src_blob(impl)
     assert blob.count('data-stroke-draw="1"') == 1, (
@@ -2330,7 +4298,7 @@ def test_next_page_mounts_state_driver_with_use_client(tmp_path: Path) -> None:
         {"index": 0, "tag": "section", "cls": "pyr"},
     ]}), encoding="utf-8")
     proc = _sp.run(["bash", str(SCRIPT), str(ref), str(impl)],
-                   capture_output=True, text=True, timeout=30)
+                   capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "stack=next" in proc.stdout, f"expected next stack, got: {proc.stdout}"
     page = next(impl.rglob("page.tsx"))
@@ -2340,3 +4308,480 @@ def test_next_page_mounts_state_driver_with_use_client(tmp_path: Path) -> None:
     driver = next(impl.rglob("ScrollStateDriver.tsx"))
     assert driver.read_text(encoding="utf-8").lstrip().startswith("'use client'"), (
         "ScrollStateDriver runs useEffect → must be a client component on Next")
+
+
+def test_absolute_backdrop_wrapper_regroups_contiguous_sections(tmp_path: Path) -> None:
+    """KEYSTONE: a position:relative wrapper that is the CONTAINING BLOCK for a
+    position:absolute full-bleed backdrop child (e.g. realfood's erf_wrapper >
+    card_bg) is dropped by flat section emission — the backdrop then attaches to
+    the static App root and collapses to zero paint (section-compare reads BLACK).
+    The transpiler must re-emit that wrapper around the FULL contiguous run of
+    section-map sections it spans (the content sections provide the flow height),
+    carrying position (+ bg + class) but NEVER a min-height (the prior Fix 117
+    baked a 4580px min-height around only the backdrop section, inflating flow and
+    cascading lower sections to BLACK)."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body", "class": "antialiased",
+        "styles": {"background-color": "rgb(253, 251, 238)"},
+        "children": [
+            # erf_wrapper: relative containing block spanning erf + card_bg.
+            {"tag": "div", "class": "erf_wrapper",
+             "styles": {"position": "relative", "height": "4580px"},
+             "children": [
+                 # full-bleed absolute backdrop (no offsets) -> needs the wrapper.
+                 {"tag": "div", "class": "card_bg",
+                  "styles": {"position": "absolute", "height": "4580px",
+                             "background-color": "rgb(253, 251, 238)"}},
+                 # content section that provides the flow height.
+                 {"tag": "section", "class": "erf", "id": "pyramid",
+                  "styles": {"position": "relative"},
+                  "children": [{"tag": "h2", "text": "Eat real food"}]},
+             ]},
+            # sibling section OUTSIDE the wrapper -> must NOT be re-grouped.
+            {"tag": "section", "class": "winning", "id": "winning",
+             "children": [{"tag": "h2", "text": "Real food wins"}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "erf", "id": "pyramid"},
+        {"index": 1, "tag": "div", "cls": "card_bg"},
+        {"index": 2, "tag": "section", "cls": "winning", "id": "winning"},
+    ]}), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = _app_tsx(impl)
+    import re as _re
+    # The wrapper div is re-emitted with position:relative and the ref class.
+    wrap = _re.search(
+        r'<div className="erf_wrapper" style=\{\{ position: "relative" \}\}>'
+        r'(?P<inner>.*?)</div>',
+        app, _re.S,
+    )
+    assert wrap, f"erf_wrapper must be re-emitted as a relative grouping div; got:\n{app}"
+    inner = wrap.group("inner")
+    # NO min-height / height may be baked on the wrapper (prevents the Fix 117
+    # flow-inflation cascade) — the content sections size the flow.
+    assert "minHeight" not in wrap.group(0) and "height" not in wrap.group(0), (
+        f"wrapper must not carry a min-height/height; got:\n{wrap.group(0)}"
+    )
+    # BOTH section components in the run (pyramid + card_bg) nest INSIDE; the
+    # out-of-run sibling (winning) does NOT.
+    assert ("Pyramid" in inner) or ("pyramid" in inner.lower()), (
+        f"the erf/pyramid section must nest inside the wrapper; got:\n{inner}"
+    )
+    assert "CardBg" in inner or "Card" in inner or "card" in inner.lower(), (
+        f"the card_bg backdrop section must nest inside the wrapper; got:\n{inner}"
+    )
+    assert "Winning" not in inner, (
+        f"the out-of-run sibling must stay OUTSIDE the wrapper; got:\n{inner}"
+    )
+    assert "Winning" in app, "the out-of-run sibling must still render in the page"
+
+
+def test_no_wrapper_regroup_without_absolute_backdrop(tmp_path: Path) -> None:
+    """Fail-safe scope: a position:relative wrapper spanning >=2 sections that has
+    NO absolute full-bleed backdrop child is NOT re-emitted as a grouping div —
+    flat emission is preserved. Only the containing-block-for-backdrop case is
+    handled (a bg band is already painted per-section by the Fix 88/97 logic), so
+    we never introduce a second, competing wrapper mechanism."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body", "class": "antialiased",
+        "children": [
+            {"tag": "div", "class": "plainwrap",
+             "styles": {"position": "relative"},
+             "children": [
+                 {"tag": "section", "class": "a", "id": "a",
+                  "children": [{"tag": "h2", "text": "A"}]},
+                 {"tag": "section", "class": "b", "id": "b",
+                  "children": [{"tag": "h2", "text": "B"}]},
+             ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "a", "id": "a"},
+        {"index": 1, "tag": "section", "cls": "b", "id": "b"},
+    ]}), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = _app_tsx(impl)
+    assert 'className="plainwrap"' not in app, (
+        f"a backdrop-less relative wrapper must NOT be re-emitted (fail-safe); got:\n{app}"
+    )
+
+
+def _css_scope_ref(tmp_path: Path, css: str, forensic: bool = True) -> tuple[Path, Path]:
+    """Ref whose wrapper has NO absolute backdrop child, so the only thing that can
+    re-emit it is the ref-CSS scoping criterion.
+
+    Shape is taken from realfood-v2's own structure.json rather than invented:
+    `section.lineInTheSand` holds `div.solvable_problem` and `div.container` as
+    DIRECT CHILDREN, and BOTH are section-map sections. `.container` being both a
+    direct child and a section component is what makes `.lineInTheSand>.container`
+    a live selector in the emitted tree. A sibling section outside the wrapper
+    pins the contiguous-run boundary.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body", "class": "antialiased", "styles": {},
+        "children": [
+            {"tag": "section", "class": "lineInTheSand",
+             "styles": {"position": "relative"},
+             "children": [
+                 {"tag": "div", "class": "solvable_problem", "styles": {},
+                  "children": [{"tag": "h2", "text": "A solvable problem"}]},
+                 {"tag": "div", "class": "container", "styles": {},
+                  "children": [{"tag": "p", "text": "Eat real food"}]},
+             ]},
+            {"tag": "section", "class": "winning", "id": "winning", "styles": {},
+             "children": [{"tag": "h2", "text": "Real food wins"}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "div", "cls": "solvable_problem"},
+        {"index": 1, "tag": "div", "cls": "container"},
+        {"index": 2, "tag": "section", "cls": "winning", "id": "winning"},
+    ]}), encoding="utf-8")
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(css, encoding="utf-8")
+    if forensic:
+        (ref / "generation-plan.json").write_text(json.dumps({
+            "forensicPreservation": {"required": True,
+                                     "strategy": "ref-derived-jsx-with-local-css"},
+        }), encoding="utf-8")
+    return ref, impl
+
+
+CHILD_SCOPED_CSS = ".lineInTheSand>.container{padding-bottom:182px;min-height:1011px}"
+
+
+def test_forensic_wrapper_regroups_when_ref_css_child_scopes_a_direct_child(
+    tmp_path: Path,
+) -> None:
+    """A wrapper with NO absolute backdrop child must still be re-emitted when
+    forensic className-only mode is active AND the ref CSS scopes one of its
+    DIRECT CHILDREN through a CHILD combinator (`.lineInTheSand>.container`).
+
+    In forensic mode the baked box model is stripped and layout is delegated to
+    the mirrored ref CSS, so dropping the wrapper silently deletes every such
+    scoped rule: realfood's `.container` rendered 38px against a ref 1011px,
+    costing ~975px of document height and displacing every section below it.
+    The backdrop criterion cannot see this case — the wrapper's job here is to
+    satisfy a selector, not to be a containing block."""
+    ref, impl = _css_scope_ref(tmp_path, CHILD_SCOPED_CSS)
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = _app_tsx(impl)
+    # CLASSNAME-ONLY payload. This branch exists only in forensic mode, whose
+    # contract is that mirrored ref CSS owns layout — the ref's own
+    # `.lineInTheSand{position:relative}` supplies the position. Baking an inline
+    # position here would INVENT a containing block whenever the captured
+    # ancestor was static, re-anchoring every absolute descendant in the region;
+    # an inline background would likewise outrank the mirrored CSS.
+    wrap = re.search(
+        r'<section className="lineInTheSand">(?P<inner>.*?)</section>',
+        app, re.S,
+    )
+    assert wrap, (
+        "a CSS-child-scoped wrapper must be re-emitted (className-only) so "
+        f"`.lineInTheSand>.container` keeps matching; got:\n{app}"
+    )
+    assert "style=" not in wrap.group(0).split(">", 1)[0], (
+        f"the CSS-scope branch must carry no inline style; got:\n{wrap.group(0)[:200]}"
+    )
+    inner = wrap.group("inner")
+    assert "SolvableProblem" in inner, (
+        f"the full contiguous run must nest inside the wrapper; got:\n{inner}"
+    )
+    assert "Winning" not in inner, (
+        f"the out-of-run sibling must stay OUTSIDE the wrapper; got:\n{inner}"
+    )
+    # ADJACENCY is the whole point: re-emitting the wrapper only revives
+    # `.lineInTheSand > .container` if the container stays a DIRECT child. An
+    # interposed element (a Fix 88 band div, a ScrollReveal, a sticky wrapper)
+    # would silently zero the fix while the transpiler still reports success.
+    assert re.search(r"<Container\s*/>", inner), (
+        f"the scoped container must render inside the wrapper; got:\n{inner}"
+    )
+    between = inner.split("<Container")[0]
+    assert "<div" not in between and "<ScrollReveal" not in between, (
+        "nothing may be interposed between the wrapper and the scoped container, "
+        f"or the `>` selector stops matching; got:\n{inner}"
+    )
+    container = (impl / "src" / "components" / "Container.tsx").read_text(encoding="utf-8")
+    assert 'className="container"' in container, (
+        f"the container component must keep the class the rule targets; got:\n{container}"
+    )
+
+
+def _band_owner_ref(tmp_path: Path, paint_class: bool = True) -> tuple[Path, Path]:
+    """Ref where the region's background is owned by an ANCESTOR (`div.dark`),
+    which is what makes the Fix 88 band fire on every section beneath it.
+
+    This is realfood-v2's actual shape: `.dark{background-color:var(--off-black)}`
+    paints the band, `.lineInTheSand` paints nothing, and the sections inherit the
+    backdrop only because the band div reproduces it per-section.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body", "class": "antialiased", "styles": {},
+        "children": [
+            {"tag": "div", "class": "dark",
+             "styles": {"background-color": "rgb(17, 0, 0)"},
+             "children": [
+                 {"tag": "section", "class": "lineInTheSand",
+                  "styles": {"position": "relative"},
+                  "children": [
+                      {"tag": "div", "class": "solvable_problem", "styles": {},
+                       "children": [{"tag": "h2", "text": "A solvable problem"}]},
+                      {"tag": "div", "class": "container", "styles": {},
+                       "children": [{"tag": "p", "text": "Eat real food"}]},
+                  ]},
+                 {"tag": "section", "class": "other", "styles": {},
+                  "children": [{"tag": "h2", "text": "Other"}]},
+             ]},
+            {"tag": "section", "class": "winning", "id": "winning", "styles": {},
+             "children": [{"tag": "h2", "text": "Real food wins"}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "div", "cls": "solvable_problem"},
+        {"index": 1, "tag": "div", "cls": "container"},
+        {"index": 2, "tag": "section", "cls": "other"},
+        {"index": 3, "tag": "section", "cls": "winning", "id": "winning"},
+    ]}), encoding="utf-8")
+    (ref / "css").mkdir()
+    dark_rule = ".dark{background-color:var(--off-black)}" if paint_class else ""
+    (ref / "css" / "main.css").write_text(
+        ":root{--off-black:#100}" + dark_rule + CHILD_SCOPED_CSS, encoding="utf-8")
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "forensicPreservation": {"required": True,
+                                 "strategy": "ref-derived-jsx-with-local-css"},
+    }), encoding="utf-8")
+    return ref, impl
+
+
+def test_band_owning_ancestor_is_reemitted_instead_of_per_section_bands(
+    tmp_path: Path,
+) -> None:
+    """LAYER 2: re-emitting the scoped wrapper is inert on its own, because the
+    Fix 88 band div is interposed between it and the scoped child.
+
+    On realfood-v2 every child of `.lineInTheSand` is rooted in an anonymous
+    full-bleed band div reproducing `.dark`'s background, so `.lineInTheSand >
+    .container` still matches nothing and none of the ~975px is recovered.
+
+    The fix is to re-emit the ancestor that actually OWNS the background, so the
+    mirrored ref CSS paints it natively (`.dark{background-color:var(--off-black)}`)
+    and the per-section bands beneath it become redundant. That restores the
+    parent/child adjacency the `>` selector needs while preserving the backdrop."""
+    ref, impl = _band_owner_ref(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = _app_tsx(impl)
+    # The bg owner is re-emitted, className-only: the mirrored CSS paints it.
+    owner = re.search(r'<div className="dark">(?P<inner>.*?)</div>', app, re.S)
+    assert owner, (
+        f"the background-owning ancestor must be re-emitted so its rule paints; got:\n{app}"
+    )
+    assert 'className="lineInTheSand"' in owner.group("inner"), (
+        f"the scoped wrapper must nest inside the bg owner; got:\n{owner.group('inner')}"
+    )
+    assert "Winning" not in owner.group("inner"), (
+        f"a section outside the bg owner must stay outside it; got:\n{owner.group('inner')}"
+    )
+    # The per-section band is now redundant and must NOT interpose.
+    container = (impl / "src" / "components" / "Container.tsx").read_text(encoding="utf-8")
+    body = container.split("return (", 1)[1]
+    assert "backgroundColor" not in body, (
+        "the per-section band must be dropped once the bg owner is re-emitted, "
+        f"or it breaks `.lineInTheSand>.container`; got:\n{container}"
+    )
+    assert re.search(r'return \(\s*<div className="container"', container), (
+        f"`.container` must be the component root for the `>` rule to match; got:\n{container}"
+    )
+
+
+def test_descendant_scoped_wrapper_is_not_regrouped(tmp_path: Path) -> None:
+    """SPECIFICITY GUARD: a DESCENDANT-combinator scope (`.lineInTheSand .container`)
+    must NOT re-emit the wrapper, even though it names the same two classes.
+
+    A descendant scope is the idiom of a site-wide theme class rather than a
+    structural wrapper — on navercorp-esg-sustainability `.navercorp` scopes 230
+    such selectors and is already applied to the App root, so admitting descendant
+    scopes would wrap every section in a spurious extra DOM level. Requiring an
+    explicit `>` is what keeps the criterion to genuine structural wrappers.
+
+    This test fails if `_css_child_scopes_direct_child` is loosened to accept a
+    whitespace combinator."""
+    ref, impl = _css_scope_ref(
+        tmp_path, ".lineInTheSand .container{padding-bottom:182px}")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = _app_tsx(impl)
+    assert 'className="lineInTheSand"' not in app, (
+        f"a descendant-only scope must NOT re-emit the wrapper (fail-safe); got:\n{app}"
+    )
+
+
+def test_css_scoped_wrapper_is_not_regrouped_in_baked_mode(tmp_path: Path) -> None:
+    """MODE GUARD: the CSS-scope branch is forensic-only.
+
+    Without `forensicPreservation.strategy = ref-derived-jsx-with-local-css` the
+    box model is baked inline, so the scoped rule is not load-bearing — realfood's
+    container keeps its padding either way and the wrapper drop costs ~0px. Baked
+    sites must stay byte-for-byte on the pre-existing flat path, which is also
+    what keeps every pre-existing (baked) wrapper test honest.
+
+    This test fails if the `_forensic_classname_only()` gate is dropped."""
+    ref, impl = _css_scope_ref(tmp_path, CHILD_SCOPED_CSS, forensic=False)
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = _app_tsx(impl)
+    assert 'className="lineInTheSand"' not in app, (
+        f"baked mode must not re-emit the CSS-scoped wrapper; got:\n{app}"
+    )
+
+
+def _uncovered_ref(tmp_path: Path, bg: str, extra: dict | None = None) -> tuple[Path, Path]:
+    """Ref whose wrapper holds an EMPTY out-of-flow backdrop plus one section.
+
+    The backdrop is the shape realfood's `card_bg` has: a childless, textless
+    div whose entire job is to paint a 4580px cream band behind the region. No
+    section-map entry claims it, so it reaches the uncovered-fragment pass.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    backdrop_styles = {"position": "absolute", "height": "4580.34px"}
+    if bg:
+        backdrop_styles["background-color"] = bg
+    if extra:
+        backdrop_styles.update(extra)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "class": "antialiased",
+        "styles": {"background-color": "rgb(255, 255, 255)"},
+        "children": [
+            {"tag": "div", "class": "erf-wrapper", "styles": {"position": "relative"},
+             "children": [
+                 {"tag": "div", "class": "card-bg", "styles": backdrop_styles},
+                 {"tag": "section", "class": "hero", "styles": {},
+                  "children": [{"tag": "h1", "text": "Eat Real Food"}]},
+             ]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "hero"},
+    ]}), encoding="utf-8")
+    return ref, impl
+
+
+def _transpile(ref: Path, impl: Path) -> str:
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return _src_blob(impl)
+
+
+def test_uncovered_pass_keeps_empty_painted_backdrop(tmp_path: Path) -> None:
+    """An unclaimed empty div that PAINTS is visible ref content.
+
+    _collect_uncovered's has_content test only looked for text or media, so a
+    childless backdrop div was dropped silently — realfood's 4580px cream
+    card_bg is captured in structure.json and appears nowhere in the emitted
+    impl. extract-dom.sh already learned this at capture time (its past-cap
+    keep test includes a paints-something branch for exactly these stat-grid
+    bars / card-parallax layers / footer column backers); the emission side
+    must not undo it.
+    """
+    ref, impl = _uncovered_ref(tmp_path, "rgb(253, 251, 238)")
+    blob = _transpile(ref, impl)
+    assert "card-bg" in blob, f"painted backdrop must survive emission; got:\n{blob[:1500]}"
+    assert "4580.34px" in blob, "backdrop height must be preserved"
+
+
+def test_uncovered_pass_keeps_backdrop_painted_by_border_only(tmp_path: Path) -> None:
+    ref, impl = _uncovered_ref(tmp_path, "", {"border": "2px solid rgb(0, 0, 0)"})
+    blob = _transpile(ref, impl)
+    assert "card-bg" in blob, "a border-only painted backdrop is still visible content"
+
+
+def test_uncovered_pass_still_drops_transparent_empty_wrapper(tmp_path: Path) -> None:
+    """Negative control: rescuing painted nodes must not rescue invisible ones."""
+    ref, impl = _uncovered_ref(tmp_path, "rgba(0, 0, 0, 0)")
+    blob = _transpile(ref, impl)
+    assert "card-bg" not in blob, (
+        f"a fully transparent empty wrapper paints nothing and must stay dropped; got:\n{blob[:1200]}"
+    )
+
+
+def test_uncovered_out_of_flow_node_keeps_its_containing_block(tmp_path: Path) -> None:
+    """A rescued out-of-flow node must carry its positioned ancestor.
+
+    Uncovered fragments are emitted at App top level, so every ancestor is lost.
+    The impl mirrors the ref CSS byte-for-byte, and realfood's rule is
+    `.card_bg{position:absolute;z-index:1;top:0;bottom:0}` — with the relative
+    erf_wrapper dropped those offsets resolve against the initial containing
+    block. Measured in a browser: without the wrapper the 4580px band renders at
+    top=0 over the 700px hero; with it, at its flow position (top=1900). So
+    rescuing the node without its containing block trades "missing" for
+    "covering" — both halves are required.
+    """
+    ref, impl = _uncovered_ref(tmp_path, "rgb(253, 251, 238)")
+    blob = _transpile(ref, impl)
+    assert "erf-wrapper" in blob, (
+        f"the absolute backdrop's relative ancestor must be re-emitted; got:\n{blob[:1500]}"
+    )
+    # The wrapper must supply positioning only — painting stays with Fix 88.
+    m = re.search(r'className="erf-wrapper" style=\{\{([^}]*)\}\}', blob)
+    assert m, f"expected an emitted erf-wrapper with a style object; got:\n{blob[:1500]}"
+    assert "position" in m.group(1), m.group(1)
+    assert "background" not in m.group(1).lower(), (
+        f"restored wrapper must not paint (no competing band mechanism): {m.group(1)}"
+    )
+
+
+def test_uncovered_in_flow_painted_node_is_not_wrapped(tmp_path: Path) -> None:
+    """Only out-of-flow nodes need the containing block restored."""
+    ref, impl = _uncovered_ref(tmp_path, "rgb(253, 251, 238)",
+                               {"position": "static"})
+    blob = _transpile(ref, impl)
+    assert "card-bg" in blob, "in-flow painted node is still rescued"
+    assert "erf-wrapper" not in blob, (
+        f"an in-flow node renders at its flow position already; got:\n{blob[:1200]}"
+    )

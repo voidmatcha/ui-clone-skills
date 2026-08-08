@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ui_clone.hooks._common import sanitize_command_for_deny, strip_heredoc_bodies
+
 _STATIC_MIRROR_DOWNLOAD_PATTERNS = re.compile(
     r"\bwget\b"
     r"(?=[^\n\r]*https?://)"
@@ -57,11 +59,17 @@ _HTML_WRITE_PATTERNS = [
 
 
 def _static_mirror_download_violation(cmd: str) -> bool:
-    return bool(cmd and _STATIC_MIRROR_DOWNLOAD_PATTERNS.search(cmd))
+    # Heredoc bodies (e.g. a commit message describing wget/curl mirrors) are
+    # data, not commands; quotes are kept so a real mirror's impl/public target
+    # still matches.
+    return bool(cmd and _STATIC_MIRROR_DOWNLOAD_PATTERNS.search(strip_heredoc_bodies(cmd)))
 
 
 def _static_server_violation(cmd: str) -> bool:
-    return bool(cmd and _STATIC_SERVER_PATTERNS.search(cmd))
+    # Server patterns are pure commands (no path arg to preserve) — strip both
+    # heredoc bodies and quotes so a commit message / quoted mention of
+    # "npm run dev" / "npx serve" cannot false-trigger the gate.
+    return bool(cmd and _STATIC_SERVER_PATTERNS.search(sanitize_command_for_deny(cmd)))
 
 
 def _is_impl_index_html_path(path: str) -> bool:
@@ -83,6 +91,9 @@ def _bash_html_write_targets(cmd: str) -> list[str]:
 
 
 def _whole_document_html_snapshot_violation(cmd: str) -> bool:
+    # NOT heredoc-stripped: a whole-document mirror often writes the HTML payload
+    # THROUGH a heredoc (`cat > impl/index.html <<HTML ... </html> HTML`), so the
+    # heredoc body is exactly what must be inspected here.
     if not cmd or not _WHOLE_DOCUMENT_HTML_PATTERNS.search(cmd):
         return False
     # Site-detection probes may read outerHTML.length. Full document HTML
@@ -101,6 +112,8 @@ def _static_html_mirror_write_target(cmd: str) -> str | None:
     path is specifically whole-document/live snapshot HTML becoming the
     implementation.
     """
+    # NOT heredoc-stripped: live HTML is frequently piped into impl/index.html
+    # via a heredoc, so the document body is the payload this gate must catch.
     if not cmd or not _STATIC_HTML_MIRROR_SOURCE_PATTERNS.search(cmd):
         return None
     for target in _bash_html_write_targets(cmd):

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -26,6 +27,29 @@ def test_auto_verify_does_not_block_on_original_curl_403(tmp_path: Path) -> None
         "**Result: 1 PASS, 0 FAIL, 0 SKIP, 1 STRUCTURAL_ONLY**\n",
         encoding="utf-8",
     )
+    impl = tmp_path / "impl"
+    impl.mkdir()
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+
+    server_code = """
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), SimpleHTTPRequestHandler)
+print(server.server_address[1], flush=True)
+try:
+    server.serve_forever()
+finally:
+    server.server_close()
+"""
+    server_proc = subprocess.Popen(
+        [sys.executable, "-c", server_code],
+        cwd=impl,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert server_proc.stdout is not None
+    port = int(server_proc.stdout.readline().strip())
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -46,21 +70,28 @@ esac
     env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
     env["PLUGIN_ROOT"] = str(root)
 
-    proc = subprocess.run(
-        [
-            "bash",
-            str(root / "scripts" / "verify" / "auto-verify.sh"),
-            "readymag-auto",
-            "https://readymag.com/",
-            "http://127.0.0.1:5173/",
-            str(ref),
-        ],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                "bash",
+                str(root / "scripts" / "verify" / "auto-verify.sh"),
+                "readymag-auto",
+                "https://readymag.com/",
+                f"http://127.0.0.1:{port}/",
+                str(ref),
+            ],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    finally:
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "WARN" in proc.stdout

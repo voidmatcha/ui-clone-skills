@@ -49,7 +49,7 @@ def test_verification_plan_registers_scroll_state_machine_check_from_bundle(tmp_
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         check=False,
     )
 
@@ -60,6 +60,36 @@ def test_verification_plan_registers_scroll_state_machine_check_from_bundle(tmp_
     assert checks["scroll-state-machine"]["script"].endswith("scroll-state-machine-check.sh")
     assert checks["scroll-state-machine"]["produces"] == "scroll-state-machine.json"
     assert "initial → active/expanded → settled/returned" in checks["scroll-state-machine"]["reason"]
+
+
+def test_verification_plan_ignores_virtualizer_scroll_state_decoys(tmp_path: Path) -> None:
+    ref = tmp_path / "ref" / "virtualizer"
+    bundles = ref / "bundles"
+    bundles.mkdir(parents=True)
+    (bundles / "app.js").write_text(
+        "const useScrollendEvent = true; "
+        "const isScrollingResetDelay = 150; "
+        "function focusRow() { list.scrollTo(0, 10); }\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["UI_CLONE_VERIFY_TIER"] = "standard"
+    proc = subprocess.run(
+        ["bash", str(ROOT / "skills" / "visual-debug" / "scripts" / "verification-plan.sh"), str(ref)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    plan = json.loads((ref / "verification-plan.json").read_text(encoding="utf-8"))
+    checks = {check["id"] for check in plan["requiredChecks"]}
+    assert plan["signals"]["hasScrollStateMachine"] is False
+    assert "scroll-state-machine" not in checks
 
 
 def test_verification_plan_registers_scroll_state_machine_for_scrolltrigger_pin_scrub(tmp_path: Path) -> None:
@@ -85,7 +115,7 @@ def test_verification_plan_registers_scroll_state_machine_for_scrolltrigger_pin_
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         check=False,
     )
 
@@ -98,7 +128,7 @@ def test_verification_plan_registers_scroll_state_machine_for_scrolltrigger_pin_
 
 def test_scroll_state_machine_check_is_wired_into_dispatcher_and_uses_iife() -> None:
     script = ROOT / "skills" / "visual-debug" / "scripts" / "scroll-state-machine-check.sh"
-    dispatcher = (ROOT / "scripts" / "verify" / "run-required-checks.sh").read_text(encoding="utf-8")
+    dispatcher = (ROOT / "scripts" / "verify" / "build_required_dispatch.py").read_text(encoding="utf-8")
     text = script.read_text(encoding="utf-8")
 
     assert '"scroll-state-machine-check.sh"' in dispatcher

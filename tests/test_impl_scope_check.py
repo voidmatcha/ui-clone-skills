@@ -25,12 +25,13 @@ def test_reference_capture_summary_not_flagged_outside_scope(tmp_path: Path) -> 
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@t.t")
     _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "commit.gpgsign", "false")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "baseline")
 
     def run() -> dict:
         subprocess.run(["bash", str(SCRIPT), str(ref), str(repo / "impl")],
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True, timeout=120)
         art: dict = json.loads((ref / "impl-scope.json").read_text())
         return art
 

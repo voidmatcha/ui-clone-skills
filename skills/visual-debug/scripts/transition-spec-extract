@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+"""Extract a transition-spec.json from a live implementation page.
+
+Opens the URL with the same agent-browser surface used by the existing
+visual-debug scripts and writes the transition shape consumed by
+animation-spec-compare. Passing a JSON file path as the URL copies (and
+dedups) that spec and is only for local validation/pre-extracted flows.
+
+A rest-state document.getAnimations() snapshot sees almost nothing on real
+sites (measured on the ebay benchmark: 0 of 16 ref transitions visible, 12
+duplicate flip-card entries emitted), so extraction STIMULATES the page:
+
+  1. dedup       — identical (target, property, type, duration, easing)
+                   animation objects collapse to one entry with a count.
+  2. scroll sweep — scrolls 0 -> 25 -> 50 -> 75 -> 100% -> 0, collecting
+                   getAnimations() at each point (catches scroll-triggered
+                   CSS transitions/animations and ScrollTimeline WAAPI).
+  3. scroll-observed sampling — when --ref-spec lists scroll-triggered
+                   targets, computed transform/size/opacity is sampled per
+                   scroll point; changing values synthesize an entry (rAF /
+                   framer MotionValue scrubs never create WAAPI objects).
+  4. hover probe — when --ref-spec lists hover targets, each is really
+                   hovered via `agent-browser hover` (fires CSS :hover) with
+                   a collection pass after, and the element's DECLARED
+                   transition (property/duration/easing) synthesizes an
+                   entry deterministically.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+COLLECT_JS = r"""
+(() => {
+  const cssPath = (el) => {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return "document";
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const classes = Array.from(el.classList || []).slice(0, 3).map((c) => `.${CSS.escape(c)}`).join("");
+    return `${el.tagName.toLowerCase()}${classes}`;
+  };
+  const serializeKeyframes = (effect) => {
+    try {
+      return (effect && typeof effect.getKeyframes === "function") ? effect.getKeyframes() : [];
+    } catch (_) {
+      return [];
+    }
+  };
+  const propertyFromKeyframes = (frames) => {
+    for (const frame of frames) {
+      for (const key of Object.keys(frame || {})) {
+        if (!["offset", "easing", "composite", "computedOffset"].includes(key)) return key;
+      }
+    }
+    return "";
+  };
+  const endpoint = (frames, property, index) => {
+    const frame = frames[index];
+    if (!frame || !property || frame[property] == null) return "";
+    return String(frame[property]);
+  };
+  const timingOf = (effect) => {
+    try {
+      return effect && typeof effect.getTiming === "function" ? effect.getTiming() : {};
+    } catch (_) {
+      return {};
+    }
+  };
+  const animations = typeof document.getAnimations === "function"
+    ? document.getAnimations({ subtree: true })
+    : [];
+  return {
+    transitions: animations.map((animation, index) => {
+      const effect = animation.effect;
+      const target = cssPath(effect && effect.target);
+      const frames = serializeKeyframes(effect);
+      const first = frames[0] || {};
+      const last = frames[frames.length - 1] || {};
+      const property = propertyFromKeyframes(frames);
+      const timing = timingOf(effect);
+      const easing = String(last.easing || first.easing || timing.easing || "");
+      const duration = Number.isFinite(Number(timing.duration))
+        ? `${Number(timing.duration)}ms`
+        : String(timing.duration || "");
+      // EXTRACT-M1 — the start delay is the stagger offset (per-sibling ladder);
+      // capture it so the compare oracle can score a dropped stagger. 0/absent
+      // stays empty (the common, cost-free case).
+      const delay = Number.isFinite(Number(timing.delay)) && Number(timing.delay) > 0
+        ? `${Number(timing.delay)}ms`
+        : "";
+      return {
+        id: `${target}|${property || animation.animationName || index}`,
+        target,
+        animation: {
+          type: animation.constructor && animation.constructor.name ? animation.constructor.name : "Animation",
+          property,
+          easing,
+          duration,
+          delay,
+          from: endpoint(frames, property, 0),
+          to: endpoint(frames, property, frames.length - 1),
+          engine: "document.getAnimations",
+          playState: animation.playState,
+        },
+      };
+    }),
+  };
+})()
+"""
+
+SAMPLE_FIELDS = ("transform", "width", "height", "opacity", "borderRadius")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("url", help="Page URL to inspect, or a JSON file to copy")
+    parser.add_argument("--out", required=True, help="Output transition-spec.json path")
+    parser.add_argument("--session", default=f"transition-spec-{int(time.time())}")
+    parser.add_argument("--wait-ms", type=int, default=1500)
+    parser.add_argument(
+        "--ref-spec",
+        help="Reference transition-spec.json supplying hover/scroll stimulation targets",
+    )
+    parser.add_argument(
+        "--max-hover-targets", type=int, default=12,
+        help="Cap on distinct hover selectors to really hover (each costs ~0.5s)",
+    )
+    return parser.parse_args(argv)
+
+
+def _unwrap_agent_browser_json(raw: str) -> Any:
+    text = raw.strip()
+    if not text:
+        raise ValueError("agent-browser eval returned empty output")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        # Some agent-browser versions wrap eval payloads in a top-level result/data
+        # envelope or print log lines before the final JSON object.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end < start:
+            raise
+        value = json.loads(text[start : end + 1])
+    if isinstance(value, dict) and isinstance(value.get("data"), str):
+        return json.loads(value["data"])
+    if isinstance(value, dict) and isinstance(value.get("result"), str):
+        return json.loads(value["result"])
+    return value
+
+
+def _dedup_key(transition: dict[str, Any]) -> tuple[Any, ...]:
+    animation = transition.get("animation") or {}
+    return (
+        transition.get("target"),
+        animation.get("property"),
+        animation.get("type"),
+        animation.get("duration"),
+        animation.get("easing"),
+    )
+
+
+def dedup_transitions(transitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse identical animation objects (12 flip cards -> 1 entry, count=12)."""
+
+    out: list[dict[str, Any]] = []
+    counts: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for transition in transitions:
+        if not isinstance(transition, dict):
+            continue
+        key = _dedup_key(transition)
+        seen = counts.get(key)
+        if seen is None:
+            entry = dict(transition)
+            entry["count"] = 1
+            counts[key] = entry
+            out.append(entry)
+        else:
+            seen["count"] = int(seen.get("count", 1)) + 1
+    return out
+
+
+def _base_selector(target: str) -> str:
+    """Strip pseudo-classes/elements so the selector is queryable/hoverable."""
+
+    return re.sub(r"::?[a-zA-Z-]+(\([^)]*\))?", "", str(target or "")).strip()
+
+
+def _ref_targets(ref_spec_path: str | None) -> tuple[list[str], list[str]]:
+    """(hover_selectors, scroll_selectors) from a reference transition spec."""
+
+    if not ref_spec_path:
+        return [], []
+    try:
+        spec = json.loads(Path(ref_spec_path).read_text(encoding="utf-8"))
+    except Exception:
+        return [], []
+    hover: list[str] = []
+    scroll: list[str] = []
+    for transition in spec.get("transitions") or []:
+        if not isinstance(transition, dict):
+            continue
+        raw_target = transition.get("target") or transition.get("selector") or ""
+        selector = _base_selector(str(raw_target))
+        if not selector:
+            continue
+        animation = transition.get("animation") or {}
+        kind = " ".join(
+            str(transition.get(k, "")) for k in ("trigger", "type")
+        ) + " " + str(animation.get("type", ""))
+        kind = kind.lower()
+        if "hover" in kind and selector not in hover:
+            hover.append(selector)
+        elif any(k in kind for k in _SCROLL_TRIGGER_KINDS) and selector not in scroll:
+            # EXTRACT-M2 — intersection / page-load / enter-reveal / in-view
+            # triggers are all viewport-entry reveals sampled by the SAME scroll
+            # sweep; only "scroll" was bucketed, so a CSS class-toggle reveal
+            # (no WAAPI object) went unsampled -> false missing-motion. A
+            # false-positive here is just an extra (harmless) sampling pass,
+            # while a miss loses real motion — so bias toward inclusion.
+            scroll.append(selector)
+    return hover, scroll
+
+
+# Trigger/type tokens that mean "animates on viewport entry / page load" and are
+# observable via the scroll sweep. Matched against trigger+type+animation.type
+# (never the selector), so class-name collisions like "center" don't apply.
+_SCROLL_TRIGGER_KINDS = (
+    "scroll", "intersection", "reveal", "enter", "appear", "view", "load",
+)
+
+
+class _Browser:
+    def __init__(self, session: str) -> None:
+        if shutil.which("agent-browser") is None:
+            raise FileNotFoundError("agent-browser not found; cannot extract live transition spec")
+        self.session = session
+
+    def _run(self, *args: str, check: bool = True) -> str:
+        result = subprocess.run(
+            ["agent-browser", "--session", self.session, *args],
+            check=check, capture_output=True, text=True,
+        )
+        return result.stdout
+
+    def open(self, url: str) -> None:
+        self._run("open", url)
+
+    def eval(self, js: str) -> Any:
+        # Wraps the agent-browser CLI `eval` subcommand (runs JS in the browser
+        # page) — this is NOT Python eval(); no host-side code is executed.
+        return _unwrap_agent_browser_json(self._run("eval", js))
+
+    def hover(self, selector: str) -> bool:
+        try:
+            # Off-viewport elements fail to hover; bring them in first.
+            self._run("scrollintoview", selector, check=False)
+            self._run("hover", selector)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+
+def _collect(browser: _Browser) -> list[dict[str, Any]]:
+    try:
+        data = browser.eval(COLLECT_JS)
+    except Exception:
+        return []
+    if isinstance(data, dict) and isinstance(data.get("transitions"), list):
+        return [t for t in data["transitions"] if isinstance(t, dict)]
+    return []
+
+
+def _scroll_to_fraction(browser: _Browser, fraction: float) -> None:
+    js = (
+        "(() => { const max = Math.max(0, Math.max(document.documentElement.scrollHeight,"
+        " document.body ? document.body.scrollHeight : 0) - innerHeight);"
+        f" const y = Math.round(max * {fraction});"
+        " window.scrollTo(0, y); window.dispatchEvent(new Event('scroll')); return y; })()"
+    )
+    try:
+        browser.eval(js)
+    except Exception:
+        pass
+
+
+def _sample_selectors(browser: _Browser, selectors: list[str]) -> dict[str, dict[str, str]]:
+    if not selectors:
+        return {}
+    js = (
+        "(() => { const sels = " + json.dumps(selectors) + "; const out = {};"
+        " for (const sel of sels) { let el = null;"
+        " try { el = document.querySelector(sel); } catch (_) {}"
+        " if (!el) continue; const cs = getComputedStyle(el);"
+        " out[sel] = {transform: cs.transform, width: cs.width, height: cs.height,"
+        " opacity: cs.opacity, borderRadius: cs.borderRadius}; } return out; })()"
+    )
+    try:
+        data = browser.eval(js)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _declared_transitions(browser: _Browser, selectors: list[str]) -> dict[str, dict[str, str]]:
+    if not selectors:
+        return {}
+    js = (
+        "(() => { const sels = " + json.dumps(selectors) + "; const out = {};"
+        " for (const sel of sels) { let el = null;"
+        " try { el = document.querySelector(sel); } catch (_) {}"
+        " if (!el) continue; const cs = getComputedStyle(el);"
+        " out[sel] = {property: cs.transitionProperty, duration: cs.transitionDuration,"
+        " easing: cs.transitionTimingFunction}; } return out; })()"
+    )
+    try:
+        data = browser.eval(js)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _max_duration_ms(raw: str) -> float:
+    best = 0.0
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        try:
+            if part.endswith("ms"):
+                best = max(best, float(part[:-2]))
+            elif part.endswith("s"):
+                best = max(best, float(part[:-1]) * 1000.0)
+        except ValueError:
+            continue
+    return best
+
+
+def _scroll_observed_entries(
+    samples: list[dict[str, dict[str, str]]],
+) -> list[dict[str, Any]]:
+    """Synthesize entries for selectors whose computed style changed across the sweep."""
+
+    out: list[dict[str, Any]] = []
+    selectors: list[str] = []
+    for sample in samples:
+        for selector in sample:
+            if selector not in selectors:
+                selectors.append(selector)
+    for selector in selectors:
+        points = [s[selector] for s in samples if selector in s]
+        if len(points) < 2:
+            continue
+        changed = [
+            field for field in SAMPLE_FIELDS
+            if len({str(p.get(field, "")) for p in points}) > 1
+        ]
+        if not changed:
+            continue
+        representative = changed[0]
+        out.append(
+            {
+                "id": f"{selector}|scroll-observed",
+                "target": selector,
+                "animation": {
+                    "type": "scroll-observed",
+                    "property": ",".join(changed),
+                    "easing": "",
+                    "duration": "",
+                    "from": str(points[0].get(representative, "")),
+                    "to": str(points[-1].get(representative, "")),
+                    "engine": "computed-style-sweep",
+                },
+            }
+        )
+    return out
+
+
+def _declared_entries(declared: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for selector, style in declared.items():
+        duration_ms = _max_duration_ms(style.get("duration", ""))
+        if duration_ms <= 0:
+            continue
+        out.append(
+            {
+                "id": f"{selector}|declared-transition",
+                "target": selector,
+                "animation": {
+                    "type": "css-hover",
+                    "property": str(style.get("property", "")),
+                    "easing": str(style.get("easing", "")).split(",")[0].strip(),
+                    "duration": f"{duration_ms:g}ms",
+                    "from": "",
+                    "to": "",
+                    "engine": "declared-transition",
+                },
+            }
+        )
+    return out
+
+
+def _copy_json(input_path: Path, output_path: Path) -> None:
+    data = json.loads(input_path.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and isinstance(data.get("transitions"), list):
+        data["transitions"] = dedup_transitions(data["transitions"])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _extract_live(args: argparse.Namespace, output_path: Path) -> None:
+    hover_targets, scroll_targets = _ref_targets(args.ref_spec)
+    browser = _Browser(args.session)
+    browser.open(args.url)
+    if args.wait_ms > 0:
+        time.sleep(args.wait_ms / 1000.0)
+
+    collected: list[dict[str, Any]] = _collect(browser)
+    samples: list[dict[str, dict[str, str]]] = []
+
+    # Scroll sweep: collect WAAPI at each point; sample ref scroll targets.
+    samples.append(_sample_selectors(browser, scroll_targets))
+    for fraction in (0.25, 0.5, 0.75, 1.0):
+        _scroll_to_fraction(browser, fraction)
+        time.sleep(0.4)
+        collected.extend(_collect(browser))
+        samples.append(_sample_selectors(browser, scroll_targets))
+    _scroll_to_fraction(browser, 0.0)
+    time.sleep(0.3)
+
+    # Hover probe: real hovers (fires CSS :hover) + declared transition params.
+    hovered = 0
+    for selector in hover_targets[: max(0, args.max_hover_targets)]:
+        if browser.hover(selector):
+            hovered += 1
+            time.sleep(0.15)
+            collected.extend(_collect(browser))
+    declared = _declared_transitions(browser, hover_targets)
+
+    transitions = dedup_transitions(collected)
+    transitions.extend(_scroll_observed_entries(samples))
+    transitions.extend(_declared_entries(declared))
+
+    payload = {
+        "source": "transition-spec-extract",
+        "url": args.url,
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "stimulated": {
+            "scrollSweep": True,
+            "hoverTargets": len(hover_targets),
+            "hoveredOk": hovered,
+            "scrollTargets": len(scroll_targets),
+            "refSpec": args.ref_spec or "",
+        },
+        "transitions": transitions,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    out_path = Path(args.out)
+    try:
+        input_path = Path(args.url)
+        if input_path.is_file() and input_path.suffix.lower() == ".json":
+            _copy_json(input_path, out_path)
+        else:
+            _extract_live(args, out_path)
+        return 0
+    except Exception as exc:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(
+                {
+                    "source": "transition-spec-extract",
+                    "ok": False,
+                    "error": str(exc),
+                    "transitions": [],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"transition-spec-extract: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

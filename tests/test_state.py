@@ -302,6 +302,8 @@ def test_mark_failed_at_hard_cap_auto_records_unclonable(tmp_path: Path) -> None
     # understands why the run was terminated.
     assert "hard" in entry["reason"].lower() and "cap" in entry["reason"].lower()
     assert str(HARD_CAP_GATE_FAILS) in entry["reason"]
+    assert state.terminal_state["status"] == "unclonable"
+    assert state.terminal_state["category"] == "hard-cap-fail"
 
 
 def test_mark_failed_past_cap_does_not_duplicate_unclonable(tmp_path: Path) -> None:
@@ -337,6 +339,8 @@ def test_mark_failed_auto_unclonable_persists_to_disk(tmp_path: Path) -> None:
     entry = reloaded.unclonable_reasons[0]
     assert entry["gate"] == "extraction"
     assert entry["category"] == "hard-cap-fail"
+    assert reloaded.terminal_state["status"] == "unclonable"
+    assert reloaded.terminal_state["gate"] == "extraction"
 
 
 def test_mark_passed_does_not_regress_gate(tmp_path: Path) -> None:
@@ -515,6 +519,8 @@ def test_record_unclonable_appends_entry(tmp_path: Path) -> None:
     assert "Helvetica" in entry["reason"]
     assert entry["detail"] == {"family": "Helvetica Now Display"}
     assert "detected_at" in entry
+    assert reloaded.terminal_state["status"] == "unclonable"
+    assert reloaded.terminal_state["gate"] == "paid-features"
 
 
 def test_record_unclonable_is_idempotent(tmp_path: Path) -> None:
@@ -525,6 +531,68 @@ def test_record_unclonable_is_idempotent(tmp_path: Path) -> None:
     state.record_unclonable("paid-features", "same reason", ref_dir)
     reloaded = PipelineState.load(ref_dir)
     assert len(reloaded.unclonable_reasons) == 1
+    assert reloaded.terminal_state["status"] == "unclonable"
+
+
+def test_mark_terminal_roundtrips_and_clear_removes_state(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    state = PipelineState(component="Comp", current_gate="post-implement")
+    state.mark_terminal(
+        ref_dir,
+        status="failed",
+        category="canonical-verify-failed",
+        gate="post-implement",
+        reason="canonical verify failed 1 gate: post-implement",
+        detail={"failed_gates": ["post-implement"]},
+        next_action="read verify-report.json and patch failures",
+    )
+
+    reloaded = PipelineState.load(ref_dir)
+    assert reloaded.terminal_state["status"] == "failed"
+    assert reloaded.terminal_state["category"] == "canonical-verify-failed"
+    assert reloaded.terminal_state["detail"] == {"failed_gates": ["post-implement"]}
+    assert reloaded.terminal_state["next_action"].startswith("read verify")
+
+    reloaded.clear_terminal(ref_dir)
+    cleared = PipelineState.load(ref_dir)
+    assert cleared.terminal_state == {}
+    raw = json.loads((ref_dir / "pipeline-state.json").read_text(encoding="utf-8"))
+    assert "terminalState" not in raw
+
+
+def test_mark_terminal_self_attested_pins_result_sha(tmp_path: Path) -> None:
+    """Item 5: a self-attested terminal write (default written_by='cli') records
+    writtenBy + a sectionsResultSha256 pin when sections/result.txt exists — for
+    ALL statuses, so unclonable/failed via the CLI are bound too (hole-1)."""
+    import hashlib
+
+    for status in ("incomplete", "abandoned", "unclonable", "failed"):
+        ref_dir = tmp_path / status
+        (ref_dir / "sections").mkdir(parents=True)
+        (ref_dir / "sections" / "result.txt").write_text("**Result: 1 PASS**\n")
+        PipelineState(component="C", current_gate="post-implement").mark_terminal(
+            ref_dir, status=status, category="x", reason="y"
+        )
+        t = PipelineState.load(ref_dir).terminal_state
+        assert t["writtenBy"] == "cli"
+        expected = hashlib.sha256(
+            (ref_dir / "sections" / "result.txt").read_bytes()
+        ).hexdigest()
+        assert t["sectionsResultSha256"] == expected
+
+
+def test_mark_terminal_pipeline_provenance_is_unpinned(tmp_path: Path) -> None:
+    """A gate-bound write (written_by='pipeline') is exempt from the pin."""
+    ref_dir = tmp_path / "comp"
+    (ref_dir / "sections").mkdir(parents=True)
+    (ref_dir / "sections" / "result.txt").write_text("x\n")
+    PipelineState(component="C", current_gate="post-implement").mark_terminal(
+        ref_dir, status="failed", category="x", reason="y", written_by="pipeline"
+    )
+    t = PipelineState.load(ref_dir).terminal_state
+    assert t["writtenBy"] == "pipeline"
+    assert "sectionsResultSha256" not in t
 
 
 # ── Step G: fallback_suggestions on unclonable_reasons ──
@@ -719,3 +787,161 @@ def test_concurrent_record_unclonable_dedupes_across_processes(tmp_path: Path) -
     assert reasons.count(("reference", "duplicate-test")) == 1, (
         f"dedup failed under concurrency: got {reasons!r}"
     )
+
+
+def test_recover_hard_cap_clears_only_hard_cap_reasons(tmp_path: Path) -> None:
+    """recover_hard_cap lifts a hard-cap termination (constraint resolved
+    outside the impl loop) but refuses to clear genuine content blockers."""
+    from ui_clone.state import HARD_CAP_GATE_FAILS, HARD_CAP_REASON_TEMPLATE
+
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    state = PipelineState(component="c")
+    state.gate_fail_counts["post-implement"] = HARD_CAP_GATE_FAILS
+    state.unclonable_reasons.append({
+        "gate": "post-implement",
+        "reason": HARD_CAP_REASON_TEMPLATE.format(
+            gate="post-implement", cap=HARD_CAP_GATE_FAILS
+        ),
+        "category": "hard-cap-fail",
+    })
+    state.save(ref_dir)
+
+    changed = state.recover_hard_cap(
+        "post-implement", "ref crops re-captured idle; fonts wired", ref_dir
+    )
+    assert changed
+
+    final = PipelineState.load(ref_dir)
+    assert final.unclonable_reasons == []
+    assert "post-implement" not in final.gate_fail_counts
+    assert len(final.recoveries) == 1
+    audit = final.recoveries[0]
+    assert audit["gate"] == "post-implement"
+    assert audit["operator_reason"].startswith("ref crops re-captured")
+    assert audit["cleared"][0]["category"] == "hard-cap-fail"
+
+
+def test_recover_hard_cap_refuses_content_blockers_without_force(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    state = PipelineState(component="c")
+    state.unclonable_reasons.append({
+        "gate": "paid-features",
+        "reason": "paid font with no substitution",
+        "category": "paid-font",
+    })
+    state.save(ref_dir)
+
+    import pytest
+
+    with pytest.raises(ValueError, match="non-hard-cap"):
+        state.recover_hard_cap("paid-features", "trying anyway", ref_dir)
+
+    final = PipelineState.load(ref_dir)
+    assert len(final.unclonable_reasons) == 1
+    assert final.recoveries == []
+
+
+def test_recover_hard_cap_requires_reason(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    state = PipelineState(component="c")
+    state.save(ref_dir)
+
+    import pytest
+
+    with pytest.raises(ValueError, match="operator reason"):
+        state.recover_hard_cap("post-implement", "   ", ref_dir)
+
+
+def test_mark_failed_signature_change_resets_consecutive_counter(
+    tmp_path: Path,
+) -> None:
+    """A failure with a DIFFERENT failure_signature resets the consecutive
+    counter to 1 — the failing-check set changed, so the run is converging
+    (or facing a new blocker), not retrying the same action. Validated on a
+    live E2E run: per-turn Stop-hook gate evaluations of an actively
+    iterating agent (failing set shrinking 53→27→16 checks) accumulated 10
+    'consecutive' fails and falsely terminated a clonable run."""
+    from ui_clone.state import HARD_CAP_GATE_FAILS
+
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    state = PipelineState(component="comp", current_gate="post-implement")
+
+    # Far more than the cap in total — but the signature changes every time,
+    # so the consecutive counter never exceeds 1 and no hard cap fires.
+    for i in range(HARD_CAP_GATE_FAILS + 3):
+        state.mark_failed("post-implement", ref_dir, failure_signature=f"sig-{i}")
+    assert state.gate_fail_counts["post-implement"] == 1
+    assert state.unclonable_reasons == []
+
+    # Identical signature N consecutive times → cap fires as before.
+    for _ in range(HARD_CAP_GATE_FAILS):
+        state.mark_failed("post-implement", ref_dir, failure_signature="stuck")
+    assert state.gate_fail_counts["post-implement"] == HARD_CAP_GATE_FAILS
+    assert any(
+        r.get("category") == "hard-cap-fail" for r in state.unclonable_reasons
+    )
+
+
+def test_mark_failed_no_signature_keeps_legacy_counting(tmp_path: Path) -> None:
+    """Legacy callers that pass no failure_signature keep the old semantics:
+    every blocked run increments the consecutive counter."""
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    state = PipelineState(component="comp", current_gate="extraction")
+    for _ in range(3):
+        state.mark_failed("extraction", ref_dir)
+    assert state.gate_fail_counts["extraction"] == 3
+
+
+def test_mark_failed_absolute_cap_stops_signature_cycling(tmp_path: Path) -> None:
+    """An agent cycling between alternating failure sets (A/B/A/B…) resets
+    the consecutive counter forever, so a secondary absolute total cap
+    terminates the run with a distinct reason."""
+    from ui_clone.state import ABSOLUTE_CAP_GATE_FAILS
+
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    state = PipelineState(component="comp", current_gate="post-implement")
+    for i in range(ABSOLUTE_CAP_GATE_FAILS):
+        state.mark_failed(
+            "post-implement", ref_dir, failure_signature=("A" if i % 2 else "B")
+        )
+    assert state.gate_total_fail_counts["post-implement"] == ABSOLUTE_CAP_GATE_FAILS
+    reasons = [r["reason"] for r in state.unclonable_reasons]
+    assert any("absolute cap" in r for r in reasons)
+
+
+def test_recover_hard_cap_clears_signature_state(tmp_path: Path) -> None:
+    """recover_hard_cap must reset the signature + total counters along with
+    the consecutive counter, so a recovered run starts counting fresh."""
+    from ui_clone.state import HARD_CAP_GATE_FAILS
+
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    state = PipelineState(component="comp", current_gate="post-implement")
+    for _ in range(HARD_CAP_GATE_FAILS):
+        state.mark_failed("post-implement", ref_dir, failure_signature="stuck")
+    assert state.unclonable_reasons
+
+    assert state.recover_hard_cap(
+        "post-implement", "false cap: tooling bug validated in E2E run", ref_dir
+    )
+    assert "post-implement" not in state.gate_fail_counts
+    assert "post-implement" not in state.gate_fail_signatures
+    assert "post-implement" not in state.gate_total_fail_counts
+    assert state.recoveries
+
+
+def test_signature_counters_roundtrip_disk(tmp_path: Path) -> None:
+    """gate_fail_signatures / gate_total_fail_counts survive a save+load."""
+    ref_dir = tmp_path / "comp"
+    ref_dir.mkdir()
+    state = PipelineState(component="comp", current_gate="extraction")
+    state.mark_failed("extraction", ref_dir, failure_signature="s1")
+    loaded = PipelineState.load(ref_dir)
+    assert loaded.gate_fail_signatures["extraction"] == "s1"
+    assert loaded.gate_total_fail_counts["extraction"] == 1

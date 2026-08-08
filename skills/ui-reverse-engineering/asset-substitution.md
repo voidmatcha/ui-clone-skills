@@ -47,6 +47,12 @@ Optional. When absent, section-compare runs full AE pixel comparison on every se
     }
   ],
   "videos": [],
+  "originLockedSkips": [
+    {
+      "id": "hero-webgl-intro",
+      "reason": "Origin-locked WebGL — the shader bundle is served only to the reference origin, so the transition cannot be reproduced"
+    }
+  ],
   "structuralOnlySections": ["main-hero", "*"]
 }
 ```
@@ -54,6 +60,7 @@ Optional. When absent, section-compare runs full AE pixel comparison on every se
 **Field rules:**
 
 - `fonts` / `images` / `videos`: arrays of `{ original, replacement, reason }`. Free-form `reason` field — describe *why*, not *what*. Future-you reading this in 6 months needs to know whether the substitution is still required or was a temporary workaround that's now removable.
+- `originLockedSkips` / `skips` / `substitutions` (transition exemptions): arrays of `{ id | target | selector | transitionId, reason }`. Read by the `transition-fires` gate, which exempts the matching `transition-spec.json` entry from having to fire. **A `reason` is mandatory** — reasonless entries and bare strings are rejected, measured normally (so a dead transition still fails the gate), and listed in `transition-fires.json` `unreasonedSkipIds` so the rejection is visible. Only two shapes justify an exemption: an asset the clone legitimately substituted, or motion that is physically unreproducible (origin-locked WebGL/shader, paid runtime). "It did not fire" is not a reason — that is the defect the gate exists to catch.
 - `structuralOnlySections`: array of section name patterns. Each is checked against the section name produced by `section-compare.sh` using **substring match** (so `"hero"` matches `"main-hero"`, `"hero-section"`, etc.). The literal `"*"` is a wildcard meaning "every section uses substituted assets" — common when the substitution is the project's primary font.
 
 ## What changes
@@ -62,7 +69,7 @@ When the file exists, `section-compare.sh`:
 
 1. Echoes the active patterns at the top of its run (`▸ Asset substitution mode active: pixel diff skipped for [...]`).
 2. In the AE loop, sections matching any pattern get marked `🔁 STRUCTURAL_ONLY` instead of `✅`/`❌` and increment a separate `SUBSTITUTED_COUNT`.
-3. The result line in `sections/result.txt` reports `N PASS, N FAIL, N SKIP, N STRUCTURAL_ONLY` so the breakdown is visible in the Stop gate output.
+3. The result line in `sections/result.txt` reports `N PASS, N FAIL, N SKIP, N STRUCTURAL_ONLY, N UNMEASURED` so the breakdown is visible in the Stop gate output. `UNMEASURED` counts sections whose reference crop carried no signal (blank / mostly-masked / colour-flattened) — they were never compared, so they are neither a pass nor an impl failure, and any non-zero value blocks convergence. Readers accept the older 4-field line for artifacts written before the field existed.
 4. Step 5 (structure diff — heights, child counts, SVG-text presence, layout system) **still runs** on substituted sections. Layout regressions are caught even when pixel diff is bypassed.
 
 The Stop gate only counts `❌ FAIL` lines — `🔁 STRUCTURAL_ONLY` is not a failure, so substituted sections pass without further intervention.

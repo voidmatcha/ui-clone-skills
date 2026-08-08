@@ -35,21 +35,46 @@ mkdir -p "$DIR/html"
 
 echo "═══ Section HTML + CSS Extraction ═══"
 
-# Detect sections and extract each one
-RESULT=$(agent-browser --session "$SESSION" eval "(() => {
+# Detect sections and extract each one. agent-browser versions differ:
+# some print the eval return value directly, others wrap it under
+# {data:{result:...}}. Store the raw response and let Python normalize it.
+RAW_RESULT="$(mktemp "${TMPDIR:-/tmp}/ui-clone-section-html.XXXXXX")"
+trap 'rm -f "$RAW_RESULT"; agent-browser --session "$SESSION" close 2>/dev/null || true' EXIT
+
+agent-browser --session "$SESSION" eval "(() => {
   const sections = [];
 
-  // Find all top-level sections
-  let candidates = [...document.querySelectorAll('header, section, footer')];
-  if (candidates.length === 0) {
-    const main = document.querySelector('main') || document.body;
-    candidates = [...main.children].filter(el =>
-      el.getBoundingClientRect().height > 50 &&
-      !['SCRIPT','STYLE','LINK','META'].includes(el.tagName)
-    );
-  }
+  // Find all top-level sections. Many production sites do not use
+  // semantic <section> tags; include large direct children of main/body
+  // so div-based layouts still get per-section extraction.
+  const seen = new Set();
+  const candidates = [];
+  const addCandidate = (el) => {
+    if (!el || seen.has(el)) return;
+    if (['SCRIPT','STYLE','LINK','META','NOSCRIPT'].includes(el.tagName)) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.height <= 50 && !['HEADER','FOOTER','SECTION'].includes(el.tagName)) return;
+    seen.add(el);
+    candidates.push(el);
+  };
+  document.querySelectorAll('header, section, footer').forEach(addCandidate);
+  const roots = [document.querySelector('main'), document.querySelector('[role=\"main\"]'), document.body]
+    .filter(Boolean);
+  roots.forEach((root) => {
+    [...root.children].forEach((child) => {
+      if (child.tagName === 'MAIN') {
+        [...child.children].forEach(addCandidate);
+      } else {
+        addCandidate(child);
+      }
+    });
+  });
 
-  candidates.forEach((section, idx) => {
+  const finalCandidates = candidates.filter((el) =>
+    candidates.filter((other) => other !== el && el.contains(other)).length < 2
+  );
+
+  finalCandidates.forEach((section, idx) => {
     const tag = section.tagName.toLowerCase();
     const id = section.id || '';
     const cls = typeof section.className === 'string' ? section.className : '';
@@ -159,15 +184,43 @@ RESULT=$(agent-browser --session "$SESSION" eval "(() => {
   });
 
   return JSON.stringify(sections);
-})()" 2>/dev/null || echo "[]")
+})()" > "$RAW_RESULT" || printf '[]\n' > "$RAW_RESULT"
 
-RESULT=$(echo "$RESULT" | sed 's/^"//;s/"$//' | sed 's/\\"/"/g' | sed 's/\\\\"/"/g')
-
-echo "$RESULT" | python3 -c "
+python3 - "$DIR/html" "$RAW_RESULT" <<'PY'
 import json, sys, os
+from pathlib import Path
 
-data = json.load(sys.stdin)
-outdir = '$DIR/html'
+outdir = sys.argv[1]
+raw_path = Path(sys.argv[2])
+
+def unwrap(raw):
+    value = raw.strip()
+    if not value:
+        return []
+    for _ in range(8):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if isinstance(parsed, dict):
+            data = parsed.get('data')
+            if isinstance(data, dict) and 'result' in data:
+                parsed = data['result']
+            elif 'result' in parsed:
+                parsed = parsed['result']
+            else:
+                return parsed
+        if isinstance(parsed, str):
+            value = parsed.strip()
+            continue
+        return parsed
+    return parsed
+
+data = unwrap(raw_path.read_text(encoding='utf-8', errors='replace'))
+if isinstance(data, str):
+    data = unwrap(data)
+if not isinstance(data, list):
+    raise SystemExit(f'extract-section-html: expected section list, got {type(data).__name__}')
 
 print(f'  Found {len(data)} sections')
 print()
@@ -184,7 +237,7 @@ for sec in data:
         json.dump(sec, f, indent=2)
 
     print(f'  ✅ {name}.json')
-    print(f'     tag={sec[\"tag\"]} top={rect.get(\"top\",\"?\")} height={rect.get(\"height\",\"?\")}')
+    print(f'     tag={sec["tag"]} top={rect.get("top","?")} height={rect.get("height","?")}')
     print(f'     children={len(children)} media={len(media)}')
 
     # Show media elements
@@ -192,9 +245,9 @@ for sec in data:
         tag = m.get('tag','?')
         src = m.get('src','')[:60]
         if tag == 'video':
-            print(f'     📹 video: {src} autoplay={m.get(\"autoplay\")} muted={m.get(\"muted\")} loop={m.get(\"loop\")}')
+            print(f'     📹 video: {src} autoplay={m.get("autoplay")} muted={m.get("muted")} loop={m.get("loop")}')
         elif tag == 'source':
-            print(f'     📹 source: {src} type={m.get(\"type\")}')
+            print(f'     📹 source: {src} type={m.get("type")}')
         elif tag == 'img':
             print(f'     🖼  img: {src[:40]}...')
     print()
@@ -205,7 +258,7 @@ with open(os.path.join(outdir, '_summary.json'), 'w') as f:
     json.dump(summary, f, indent=2)
 
 print(f'  Summary: {outdir}/_summary.json')
-" 2>/dev/null
+PY
 
 echo "" >&2
 echo "═══ Done ═══" >&2

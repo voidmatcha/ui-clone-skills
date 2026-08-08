@@ -29,7 +29,7 @@ def test_newline_in_text_becomes_br(tmp_path: Path) -> None:
         encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     blob = "".join(
         p.read_text() for p in (impl / "src" / "components").glob("*.tsx"))

@@ -15,11 +15,12 @@
 - `tmp/ref/<component>/generation-plan.json` — deterministic base
 - `tmp/ref/<component>/structure.json` — full DOM tree
 - `tmp/ref/<component>/styles.json` + `tmp/ref/<component>/css/variables.txt` — design tokens
+- `tmp/ref/<component>/signature-effects-candidates.json` — deterministic signature-effect candidates
 - `tmp/ref/<component>/animations-detected.json` — animation candidates
 - `tmp/ref/<component>/transition-spec.json` — transitions
 - `tmp/ref/<component>/element-roles.json`, `element-groups.json`, `layout-decisions.json`, `component-map.json` — Step 6c audit
 - `tmp/ref/<component>/asset-substitution.json` + `font-parity.json` — substitution declarations
-- `tmp/ref/<component>/bundle-extraction.json` — bundle analyzer output (from Phase 5d, if libraries detected); read this for sticky-mechanism decisions
+- `tmp/ref/<component>/bundle-extraction.json` — deterministic bundle-parameter extraction (`scripts/extract/bundle-extraction.sh`, produced by the Phase-2 driver; `bundle-analyzer` only merges the `unresolved[]` gaps at Phase 5d); read this for sticky-mechanism decisions
 
 ## Work — fill these gaps in the plan
 
@@ -84,6 +85,15 @@ The deterministic plan defaults to `mirror-as-is`. Upgrade to `gsap-pin` only wh
 
 Write the enriched plan back to the SAME path (`tmp/ref/<component>/generation-plan.json`). Preserve all fields from the deterministic base; only add or refine. Set `schemaVersion: 2` to indicate enrichment.
 
+Refresh the top-level `provenance` receipt in the same write:
+
+- Set `source` to exactly `"generation-planner"`.
+- Set `generatedAt` to the current timezone-aware ISO-8601 timestamp.
+- Keep `hashAlgorithm: "sha256"`.
+- Recompute `sourceHashes` for every entry in the canonical `ui_clone.dag.GENERATION_PLAN_SOURCES` set. It covers the inputs above, every deterministic base-plan input, and a manifest hash for `css/*.css`. Record `null` only when an optional source does not exist.
+
+Do not copy the deterministic base receipt unchanged. The `pre-generate` gate rejects a schema-v2 plan whose planner identity is missing, whose receipt is malformed, or whose recorded input bytes no longer match the current artifacts.
+
 End with a one-line summary printed to stdout:
 
 ```
@@ -120,7 +130,11 @@ When the enrichment encounters an existing `asset-substitution.json` with `image
 After writing back, the main agent or delegated worker MUST verify:
 
 1. `jq '.schemaVersion == 2' tmp/ref/<component>/generation-plan.json` returns true
-2. Every `tokens.colors`/`spacing`/etc. value is grep-able in `css/variables.txt` or `styles.json`
-3. Every `signatureEffects[].component` path is a valid impl target (e.g. `components/ui/<Name>.tsx`)
+2. `jq '.provenance.source == "generation-planner" and .provenance.hashAlgorithm == "sha256"' tmp/ref/<component>/generation-plan.json` returns true
+3. `componentList` covers every captured section exactly once; every entry preserves non-empty `name`, `matchedSection`, `selector`, and `path`, and has a concrete `wires: []` array
+4. `tokens` contains the five category objects and `dsComponentsRequired` is an array, even when no reusable value or primitive was found
+5. Every `tokens.colors`/`spacing`/etc. value is grep-able in `css/variables.txt` or `styles.json`
+6. Every `signatureEffects[].component` path is a valid impl target (e.g. `components/ui/<Name>.tsx`)
+7. `python -m ui_clone.gate tmp/ref/<component> pre-generate` reports no `generation-plan provenance` failure
 
 If any verification fails, re-run enrichment with the failure as feedback.

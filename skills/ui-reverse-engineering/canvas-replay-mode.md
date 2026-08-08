@@ -67,6 +67,42 @@ motion, a declared substituted asset — NOT a static screenshot used as a CSS
 background. (`ref-screenshot-asset` anti-cheat targets static section
 screenshots; a moving, declared hero video is a different, legitimate asset.)
 
+### 1b. Interactive-physics canvas → behavioral-repro, NOT video replay
+
+Video replay is correct for a **decorative** canvas (WebGL shader, Spline
+scene, generative plate): its identity is its pixels, and the ref's own
+recorded motion reproduces it faithfully. It is **wrong** for an
+**interactive-physics** canvas — matter.js / verlet / planck / p2 drop-in
+letters, falling bodies, cloth — whose identity is the *running simulation*
+that spawns, drops and appends bodies (often on interaction). A recorded loop
+cannot respond or append, so it ships dead motion.
+
+`canvas-webgl-detect.sh` positively detects a physics engine (runtime global
+`window.Matter`/`planck`/`p2`/`Box2D`, else a bundle-script signature) and
+stamps the detection artifact:
+
+```json
+{ "renderKind": "interactive-physics", "hasPhysics": true,
+  "physicsEngine": { "name": "matter-js", "version": "0.20.0",
+                     "source": "runtime-global", "liveEngine": null } }
+```
+
+When `hasPhysics` is set, `build_replay_plan` short-circuits to
+`decision: "behavioral-repro"` (reason `interactive-physics`) instead of
+`canvas-replay`, and `generation-plan.json` → `canvas.physics.required` carries
+the engine + constants. Generation MUST then **rebuild the simulation with the
+same engine** (bundle the library; use `physicsEngine.liveEngine.gravity` when
+captured, else the library defaults plus any bundle-grep constants), producing
+a **live canvas that actually runs** — not a `<video>`. Because physics is
+non-deterministic (spawn randomness, frame timing), the runtime verdict is an
+honest **`unmeasurable`** on exact frames; the enforced bar is that the impl
+renders a running, responding canvas. A behavioral-repro plan deliberately does
+**not** get the blank-hero video relief (`replay_satisfies_blank_hero`), so a
+blank impl still fails `runtime-frame-proof` — the physics has to run.
+
+A decorative shader/Spline canvas has **no** physics engine, so `hasPhysics`
+stays false and it keeps the video-replay route below unchanged.
+
 ### 2. Capture — `scripts/extract/canvas-replay-capture.sh`
 
 Records the reference's hero canvas region against the **live ref URL** via

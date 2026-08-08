@@ -37,6 +37,9 @@
 
 set -uo pipefail
 
+# shellcheck source=../../../scripts/lib/viewport.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/lib/viewport.sh"
+
 SESSION="${1:?Usage: header-state-runtime-check.sh <session> <ref-url> <impl-url> <ref-dir> [w] [h]}"
 REF_URL="${2:?ref-url required}"
 IMPL_URL="${3:?impl-url required}"
@@ -165,10 +168,102 @@ PROBE_JS='
 })()
 '
 
+agent_browser_href() {
+  local session="$1"
+  agent-browser --session "$session" eval '(() => location.href)()' 2>/dev/null | python3 -c '
+import json
+import sys
+
+value = sys.stdin.read().strip()
+for _ in range(5):
+    if isinstance(value, dict):
+        value = value.get("data") if value.get("data") is not None else value.get("result", "")
+        continue
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+            continue
+        except Exception:
+            break
+    break
+print(value if isinstance(value, str) else "")
+' 2>/dev/null
+}
+
+canonical_http_href() {
+  python3 -c '
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+value = sys.stdin.read().strip()
+try:
+    parsed = urlsplit(value)
+    port = parsed.port
+except ValueError:
+    raise SystemExit(1)
+scheme = parsed.scheme.lower()
+if scheme not in {"http", "https"} or not parsed.hostname:
+    raise SystemExit(1)
+host = parsed.hostname.lower()
+if ":" in host:
+    host = f"[{host}]"
+default_port = 80 if scheme == "http" else 443
+netloc = host if port in {None, default_port} else f"{host}:{port}"
+path = parsed.path or "/"
+print(urlunsplit((scheme, netloc, path, parsed.query, parsed.fragment)))
+'
+}
+
+is_blank_browser_href() {
+  local href="$1"
+  case "$href" in
+    about:blank|about:srcdoc|chrome-error://*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 probe_url() {
   local session="$1" url="$2" out_file="$3"
-  agent-browser --session "$session" open "$url" --viewport "${WIDTH}x${HEIGHT}" --wait 1500 >/dev/null 2>&1 || true
-  agent-browser --session "$session" eval "$PROBE_JS" > "$out_file" 2>/dev/null || true
+  if ! ab_open_at_viewport "$session" "$url" "$WIDTH" "$HEIGHT" 2; then
+    echo "header-state-runtime-check: cannot probe at declared viewport ${WIDTH}x${HEIGHT}; failing closed" >&2
+    exit 1
+  fi
+  local href
+  if ! href="$(agent_browser_href "$session")"; then
+    echo "header-state-runtime-check: location.href evaluation failed after viewport setup for $url" >&2
+    exit 1
+  fi
+  if is_blank_browser_href "$href"; then
+    # agent-browser 0.31.x can reset a just-opened page to about:blank while
+    # applying viewport. Reopen after the viewport is established; otherwise
+    # the JS probe sees body/html on a blank page and false-skips the ref.
+    if ! agent-browser --session "$session" open "$url" >/dev/null 2>&1; then
+      echo "header-state-runtime-check: viewport setup reset session to ${href:-empty href}, and reopen failed for $url" >&2
+      exit 1
+    fi
+    sleep 2
+    if ! href="$(agent_browser_href "$session")"; then
+      echo "header-state-runtime-check: location.href evaluation failed after reopening $url" >&2
+      exit 1
+    fi
+    if is_blank_browser_href "$href"; then
+      echo "header-state-runtime-check: refusing to probe blank browser page after opening $url (href=${href:-empty})" >&2
+      exit 1
+    fi
+  fi
+  local canonical_href
+  if ! canonical_href="$(printf '%s' "$href" | canonical_http_href)"; then
+    echo "header-state-runtime-check: refusing to probe non-http(s) browser page after opening $url (href=${href:-empty})" >&2
+    exit 1
+  fi
+  if ! agent-browser --session "$session" eval "$PROBE_JS" > "$out_file" 2>/dev/null; then
+    echo "header-state-runtime-check: header probe evaluation failed at $canonical_href" >&2
+    exit 1
+  fi
 }
 
 probe_url "$REF_SESSION" "$REF_URL" "$PROBE_REF"
@@ -189,7 +284,11 @@ def read_probe(path: str) -> dict:
     try:
         text = Path(path).read_text(encoding="utf-8")
     except Exception:
-        return {"found": False, "error": "probe-missing"}
+        return {
+            "found": False,
+            "measurementComplete": False,
+            "error": "probe-missing",
+        }
     # agent-browser eval emits the value as the last JSON-shaped line.
     # Scan from the end for the first line that parses as JSON.
     for line in reversed(text.strip().splitlines()):
@@ -207,9 +306,14 @@ def read_probe(path: str) -> dict:
                 value = json.loads(value)
             except Exception:
                 continue
-        if isinstance(value, dict):
+        if isinstance(value, dict) and isinstance(value.get("found"), bool):
+            value["measurementComplete"] = True
             return value
-    return {"found": False, "error": "probe-parse-failed"}
+    return {
+        "found": False,
+        "measurementComplete": False,
+        "error": "probe-parse-failed",
+    }
 
 def signature(snap: dict | None) -> tuple[str, str, frozenset]:
     """Reduce a snap to (className, data-attrs-tuple, child-class-set)
@@ -246,6 +350,7 @@ ref_probe = read_probe(ref_path)
 impl_probe = read_probe(impl_path)
 
 reasons: list[str] = []
+status = ""
 ref_mutates = False
 impl_mutates = False
 ref_classes_toggled: set[str] = set()
@@ -370,7 +475,19 @@ def geo_changes(probe: dict) -> tuple[bool, list]:
         return False, []
     return bool(changed), changed
 
-if not ref_probe.get("found"):
+if not ref_probe.get("measurementComplete"):
+    status = "fail"
+    reasons.append(
+        "ref header measurement failed "
+        f"({ref_probe.get('error', 'unmeasured-reference')})"
+    )
+elif not impl_probe.get("measurementComplete"):
+    status = "fail"
+    reasons.append(
+        "impl header measurement failed "
+        f"({impl_probe.get('error', 'unmeasured-implementation')})"
+    )
+elif not ref_probe.get("found"):
     status = "skip"
     reasons.append(f"ref probe: no header/nav root found ({ref_probe.get('error','no-root')})")
 else:
@@ -394,8 +511,10 @@ else:
 # its geometry on scroll. Either makes impl parity mandatory.
 ref_state = ref_mutates or ref_geo_changes
 
-if not ref_state:
-    status = "skip" if ref_probe.get("found") else "skip"
+if status == "fail":
+    pass
+elif not ref_state:
+    status = "skip"
     if ref_probe.get("found") and not reasons:
         reasons.append("ref header does not mutate or move on scroll — no state machine to verify")
 else:
@@ -454,6 +573,7 @@ payload = {
     "status": status,
     "ref": {
         "url": ref_url,
+        "measurementComplete": ref_probe.get("measurementComplete", False),
         "found": ref_probe.get("found", False),
         "mutates": ref_mutates,
         "classesToggled": sorted(ref_classes_toggled),
@@ -462,6 +582,7 @@ payload = {
     },
     "impl": {
         "url": impl_url,
+        "measurementComplete": impl_probe.get("measurementComplete", False),
         "found": impl_probe.get("found", False),
         "mutates": impl_mutates,
         "classesToggled": sorted(impl_classes_toggled),

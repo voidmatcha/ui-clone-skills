@@ -16,15 +16,16 @@
 #   This script collapses that into ONE invocation: read the plan,
 #   dispatch each requiredCheck with the correct args based on a
 #   known-signatures table, skip scripts whose artifact already
-#   passes. The agent runs this once at Step 8 and gets every static
-#   + runtime gate artifact materialized in a single Bash call.
+#   passes, except live runtime-text evidence which is always recaptured.
+#   The agent runs this once at Step 8 and gets every static + runtime gate
+#   artifact materialized in a single Bash call.
 #
 # Usage:
 #   run-required-checks.sh <session> <ref-url> <impl-url> <ref-dir>
 #
 # Exit:
 #   0 — every dispatched check exited 0 (pass) OR was skipped
-#   1 — at least one check exited non-zero (fail) — gate.py will
+#   1 — at least one block-severity check exited non-zero (fail) — gate.py will
 #       enforce the actual pass/fail verdict via the artifacts
 #   2 — setup error (missing plan, unreachable URL, etc.)
 #
@@ -50,7 +51,17 @@ set -uo pipefail
 # Default 3 min; override via RUN_REQUIRED_CHECK_TIMEOUT_SEC.
 : "${RUN_REQUIRED_CHECK_TIMEOUT_SEC:=180}"
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-_RUN_WITH_TIMEOUT="python3 ${_SCRIPT_DIR}/../lib/run_with_timeout.py"
+
+# Bash 5.1 switched here-documents from temporary files to pipes. On macOS,
+# sufficiently large interpreter heredocs can block in heredoc_write before
+# the child ever starts reading. Scope the official Bash 5.0 compatibility
+# mode to dispatched check children only; Bash 3/4 retain their exact command
+# path. The project-specific override is intentionally explicit and narrow.
+_DISPATCH_CHILD_BASH_COMPAT=""
+if [ "${BASH_VERSINFO[0]:-0}" -gt 5 ] \
+  || { [ "${BASH_VERSINFO[0]:-0}" -eq 5 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ]; }; then
+  _DISPATCH_CHILD_BASH_COMPAT="${UI_CLONE_DISPATCH_BASH_COMPAT:-5.0}"
+fi
 
 SESSION="${1:-}"
 REF_URL="${2:-}"
@@ -70,19 +81,15 @@ fi
 # agent-browser sessions, and trap-close all derived sessions on exit.
 RUN_UUID=$(date +%s%N | tail -c 8)
 SESSION="${SESSION}-${RUN_UUID}"
-DERIVED_SESSIONS=()
 
 # shellcheck disable=SC2329 # Invoked via trap.
 cleanup_browser_sessions() {
-  [ "${#DERIVED_SESSIONS[@]}" -eq 0 ] && return 0
-  for s in "${DERIVED_SESSIONS[@]}"; do
-    agent-browser --session "$s" close >/dev/null 2>&1 || true
-    # Also close the -ref / -impl child variants spawned by scripts
-    # that open ref+impl pairs (svg-dom-parity, runtime-dom-parity,
-    # font-parity).
-    agent-browser --session "${s}-ref" close >/dev/null 2>&1 || true
-    agent-browser --session "${s}-impl" close >/dev/null 2>&1 || true
-  done
+  command -v agent-browser >/dev/null 2>&1 || return 0
+  # Discover first, then close only live sessions owned by this unique run
+  # prefix. Guessing derived names and closing absent sessions can create ghost
+  # registrations on some agent-browser versions; prefix discovery also catches
+  # nested names created internally (for example hover fallback sessions).
+  bash "$_SCRIPT_DIR/cleanup-sessions.sh" "$SESSION" >/dev/null 2>&1 || true
 }
 trap cleanup_browser_sessions EXIT INT TERM
 
@@ -98,6 +105,94 @@ if [ ! -f "$PLAN" ]; then
 fi
 
 REPO_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}}}"
+
+_resolve_python_bin() {
+  if [ -n "${PYTHON_BIN:-}" ]; then
+    if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+      command -v "$PYTHON_BIN"
+      return 0
+    fi
+    echo "$PYTHON_BIN"
+    return 0
+  fi
+  if [ -n "${VIRTUAL_ENV:-}" ]; then
+    if [ -x "$VIRTUAL_ENV/bin/python3" ]; then
+      echo "$VIRTUAL_ENV/bin/python3"
+      return 0
+    fi
+    if [ -x "$VIRTUAL_ENV/bin/python" ]; then
+      echo "$VIRTUAL_ENV/bin/python"
+      return 0
+    fi
+  fi
+  if [ -x "$REPO_ROOT/.venv/bin/python3" ]; then
+    echo "$REPO_ROOT/.venv/bin/python3"
+    return 0
+  fi
+  if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    echo "$REPO_ROOT/.venv/bin/python"
+    return 0
+  fi
+  command -v python3 2>/dev/null || true
+}
+
+PYTHON_BIN="$(_resolve_python_bin)"
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+  echo "run-required-checks: ERROR — python3 not found; requires Python >=3.11." >&2
+  exit 2
+fi
+PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(".".join(str(p) for p in sys.version_info[:3]))' 2>/dev/null || echo "unknown")"
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+  echo "run-required-checks: ERROR — requires Python >=3.11; selected interpreter '$PYTHON_BIN' reports $PYTHON_VERSION." >&2
+  exit 2
+fi
+export PYTHON_BIN
+PATH="$(dirname "$PYTHON_BIN"):$PATH"
+export PATH
+_RUN_WITH_TIMEOUT=("$PYTHON_BIN" "${_SCRIPT_DIR}/../lib/run_with_timeout.py")
+RUNTIME_TEXT_PROVENANCE="$REF_DIR/runtime-text-sequence.provenance.json"
+
+# (No agent-browser watchdog here: this dispatcher runs every check in a fresh
+# `bash "$script_path"` child that does NOT inherit a sourced shell function, and
+# each row is already bounded by run_with_timeout.py. The ab-timeout.sh shadow is
+# sourced where it actually fires — inside the capture scripts that call
+# `agent-browser open` directly, e.g. section-compare.sh / hover-state-compare.sh.)
+
+# Portable file mtime (epoch seconds): BSD/macOS `stat -f %m`, GNU/Linux
+# `stat -c %Y`. Used by the B1 per-check staleness fallback + fresh-write seed.
+_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+_RUN_REQUIRED_HELPERS="$REPO_ROOT/scripts/verify/run_required_helpers.py"
+_mtime_ns() { "$PYTHON_BIN" "$_RUN_REQUIRED_HELPERS" mtime-ns "$1"; }
+
+# A runtime-text capture is bound to the URLs it actually opened, not merely to
+# impl/ref file hashes. Compare the current invocation against every requested,
+# opened, and observed receipt written by runtime-text-sequence-check.sh.
+_runtime_text_urls_match() {
+  "$PYTHON_BIN" "$_RUN_REQUIRED_HELPERS" runtime-text-urls-match "$1" "$REF_URL" "$IMPL_URL"
+}
+
+_runtime_text_clear_cache() {
+  rm -f "$RUNTIME_TEXT_PROVENANCE"
+  local input_sidecar
+  input_sidecar=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_inputs sidecar "$REF_DIR" "runtime-text-sequence" 2>/dev/null || echo "")
+  [ -n "$input_sidecar" ] && rm -f "$input_sidecar"
+}
+
+_runtime_text_write_provenance() {
+  PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" "$_RUN_REQUIRED_HELPERS" runtime-text-write-provenance "$1" "$RUNTIME_TEXT_PROVENANCE" "$REF_URL" "$IMPL_URL" "$2"
+}
+
+_hover_state_partial_valid() {
+  PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" "$_RUN_REQUIRED_HELPERS" hover-state-partial-valid "$REF_DIR" "$1"
+}
+
+_required_check_reusable() {
+  PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" "$_RUN_REQUIRED_HELPERS" required-check-reusable "$REF_DIR" "$1" "$2"
+}
+
+_section_compare_reusable() {
+  PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" "$_RUN_REQUIRED_HELPERS" section-compare-reusable "$REF_DIR" "$1"
+}
 
 # Determine impl_root by walking up from REF_DIR's parent (typical:
 # tmp/ref/<c> → repo/impl) and falling back to the canonical resolver.
@@ -148,206 +243,21 @@ if [ ! -d "$IMPL_ROOT/src" ] && [ ! -d "$IMPL_ROOT/app" ] && [ ! -d "$IMPL_ROOT/
   echo "  Not a usable impl tree; refusing to dispatch checks against it." >&2
   exit 2
 fi
+_IMPL_BINDING_ERR=""
+if ! _IMPL_BINDING_ERR=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" "$_RUN_REQUIRED_HELPERS" persist-impl-binding "$REF_DIR" "$IMPL_ROOT" 2>&1); then
+  echo "run-required-checks: ERROR — failed to persist impl binding for ref '$REF_DIR' and impl '$IMPL_ROOT'." >&2
+  [ -n "$_IMPL_BINDING_ERR" ] && printf '%s\n' "$_IMPL_BINDING_ERR" | sed 's/^/  /' >&2
+  exit 2
+fi
+unset _IMPL_BINDING_ERR
 
 GREEN="\033[0;32m"; RED="\033[0;31m"; YELLOW="\033[1;33m"; NC="\033[0m"
-TOTAL=0; PASS=0; FAIL=0; SKIP=0; STALE=0
+TOTAL=0; PASS=0; FAIL=0; WARN=0; SKIP=0; STALE=0
 
 # Build the list of (id, script, produces, args-mode) tuples from the plan.
 # args-mode is determined by the script basename — kept small and
 # explicit so adding a new gate means updating this table.
-python3 - "$PLAN" "$REF_DIR" "$REPO_ROOT" "$IMPL_ROOT" "$IMPL_SRC" "$IMPL_PUBLIC" "$REF_URL" "$IMPL_URL" "$SESSION" <<'PY' > "$REF_DIR/.run-required-checks-dispatch.txt"
-import json
-import sys
-from pathlib import Path
-
-(plan_path, ref_dir, repo_root, impl_root, impl_src, impl_public,
- ref_url, impl_url, session) = sys.argv[1:10]
-plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
-
-# Known dispatch signatures. Add new scripts here as they are wired in.
-# Each entry maps the SCRIPT FILENAME to an ARGS RECIPE string with
-# placeholders {ref_dir}, {impl_root}, {impl_src}, {ref_url}, {impl_url},
-# {session}.
-SIGNATURES = {
-    # ── static / quick tier (no browser) ──
-    "ref-screenshot-asset-check.sh": "{ref_dir} {impl_root}",
-    "entry-coherence-check.sh": "{ref_dir} {impl_root}",
-    "scaffold-residue-check.sh": "{ref_dir} {impl_root}",
-    "html-paste-check.sh": "{ref_dir} {impl_root}",
-    "monolithic-impl-check.sh": "{ref_dir} {impl_root}",
-    "motion-coverage-check.sh": "{ref_dir} {impl_root}",
-    "scroll-engine-parity-check.sh": "{ref_dir} {impl_root}",
-    "forced-state-class-check.sh": "{ref_dir} {impl_root}",
-    "lottie-scroll-scrub-check.sh": "{ref_dir} {impl_root} {ref_url} {impl_url} {session}-lottie",
-    "swiper-runtime-check.sh": "{ref_dir} {impl_root}",
-    "css-mirror-check.sh": "{ref_dir} {impl_root}",
-    "scaffold-warn-check.sh": "{ref_dir} {impl_root}",
-    "invalidation-check.sh": "{ref_dir}",
-    "required-media-coverage-check.sh": "{ref_dir} {impl_root}",
-    "remote-asset-ref-check.sh": "{ref_dir}",
-    "capture-artifact-inventory-check.sh": "{ref_dir}",
-    "asset-transfer-check.sh": "{ref_dir} {impl_public}",
-    "asset-utilization-check.sh": "{ref_dir} {impl_src}",
-    "asset-placement-check.sh": "{ref_dir} {impl_root}",
-    "image-fidelity-check.sh": "{ref_dir} {impl_src}",
-    "proxy-mirror-check.sh": "{ref_dir}",
-    "bundle-paste-check.sh": "{ref_dir} {impl_root}",
-    "transition-spec-coverage.sh": "{ref_dir} {impl_src}",
-    "signature-effects-coverage-check.sh": "{ref_dir} {impl_src}",
-    "spec-implementation-coverage.sh": "{ref_dir} {impl_src}",
-    "runtime-spec-coverage.sh": "{ref_dir} {impl_src}",
-    "bundle-impl-coverage-check.sh": "{ref_dir} {impl_pkg}",
-    # 2026-05-22: add {impl_url} third arg so the runtime-proof block in
-    # lottie-runtime-check.sh fires (it opens impl_url, waits 1.5s, and
-    # asserts at least one Lottie container painted svg/canvas). Without
-    # impl_url the script falls back to the legacy static-only check
-    # which can pass when imports exist but loadAnimation never runs.
-    "lottie-runtime-check.sh": "{ref_dir} {impl_root} {impl_url}",
-    # ── browser-needed / standard tier ──
-    "tailwind-transform-conflict-check.sh":
-        "ENV:REF_DIR={ref_dir} -- {session}-twc {impl_url}",
-    "hydration-check.sh": "{session}-hyd {impl_url} {ref_dir}",
-    "runtime-image-validity-check.sh":
-        "ENV:REF_DIR={ref_dir} -- {session}-rim {impl_url}",
-    "hidden-children-check.sh": "{session}-hidden {impl_url} {ref_dir}",
-    # NOTE: reveal-trigger-check.sh script writes via REF_DIR env;
-    # but it also doesn't currently emit reveal-trigger.json — script
-    # bug deferred to a follow-up commit. SIGNATURE here is what the
-    # script EXPECTS once the writer is added.
-    "reveal-trigger-check.sh":
-        "ENV:REF_DIR={ref_dir} -- {session}-reveal {impl_url}",
-    # transition-fires drives each transition-spec entry's trigger in a real
-    # browser and asserts a MEASURED runtime delta. Positional args:
-    # <session> <impl-url> <ref-dir>; writes <ref-dir>/transition-fires.json.
-    "transition-fires-check.sh":
-        "{session}-fires {impl_url} {ref_dir}",
-    # 2026-05-22: header-state-runtime gate fires unconditionally — proves
-    # the impl header is a runtime state machine (mutates className on
-    # scroll) when the ref's header is stateful. Args: session ref-url
-    # impl-url ref-dir [w] [h]. self-skips when ref header is static.
-    "header-state-runtime-check.sh":
-        "{session}-hsr {ref_url} {impl_url} {ref_dir}",
-    # svg-provenance closes the IconMark.tsx hand-roll loophole.
-    # svg-dom-parity only checks count
-    # + section presence; this gate asserts impl SVG geometry traces
-    # back to ref geometry. Args: session ref-url impl-url ref-dir.
-    "svg-provenance-check.sh":
-        "{session}-svgp {ref_url} {impl_url} {ref_dir}",
-    # 2026-05-22: runtime-proof rollup is a file-IO aggregator —
-    # only ref-dir needed. Must run AFTER all source artifacts are
-    # produced; dispatcher already orders rows by add_check insertion
-    # order (this row is inserted near the end of standard tier so
-    # source artifacts exist by the time it dispatches).
-    "runtime-proof-rollup.sh":
-        "{ref_dir}",
-    # 2026-05-22: transition-proof rollup — same file-IO contract as
-    # runtime-proof; ref-dir only.
-    "transition-proof-rollup.sh":
-        "{ref_dir}",
-    # 2026-05-22: ref-js-loader gate — static scan of impl source for
-    # ref-host references, plus optional runtime probe when impl_url
-    # is passed.
-    "ref-js-loader-check.sh":
-        "{ref_dir} {impl_root} {impl_url}",
-    # runtime-env gate — catches Vite preamble traps, hydration
-    # mismatches, port-routing collisions from orphan dev servers.
-    # Observed failure modes: NODE_ENV=production trap and orphan-port
-    # interception. Needs ref-dir + impl-root + impl-url.
-    "runtime-env-check.sh":
-        "{ref_dir} {impl_root} {impl_url}",
-    # 2026-05-22: video-play-proof — currentTime advancement check.
-    "video-play-proof-check.sh":
-        "{session}-vpp {impl_url} {ref_dir}",
-    # 2026-05-22: impl-scope guard — diff git HEAD against baseline,
-    # fail if iteration touched plugin tooling.
-    "impl-scope-check.sh":
-        "{ref_dir} {impl_root}",
-    # 2026-05-22 grounding: color-token gate is pure file-scan;
-    # ref-dir + impl-root only.
-    "color-token-grounding-check.sh":
-        "{ref_dir} {impl_root}",
-    # 2026-05-22: duration/easing grounding — scan impl for guessed
-    # transition timings; static, no browser.
-    "duration-easing-grounding-check.sh":
-        "{ref_dir} {impl_root}",
-    # 2026-05-22: mobile viewport parity at 375x812.
-    "mobile-viewport-parity-check.sh":
-        "{session}-mvp {ref_url} {impl_url} {ref_dir}",
-    # 2026-05-22: stronger frame-delta proof (Lottie currentFrame +
-    # canvas paint + WebGL drawbuffer).
-    "runtime-frame-proof-check.sh":
-        "{session}-rfp {impl_url} {ref_dir}",
-    "scroll-end-completion-check.sh": "{session}-sec {impl_url} {ref_dir}",
-    "scroll-state-machine-check.sh": "{session}-ssm {ref_url} {impl_url} {ref_dir}",
-    "font-parity-check.sh": "{session}-fp {ref_url} {impl_url} {ref_dir}",
-    "breakpoint-collision-check.sh":
-        "ENV:REF_DIR={ref_dir} -- {session}-bound {impl_url}",
-    # ── ref+impl browser pairs ──
-    "runtime-dom-parity-check.sh":
-        "{session}-rdp {ref_url} {impl_url} {ref_dir}",
-    "svg-dom-parity-check.sh":
-        "{session}-svg {ref_url} {impl_url} {ref_dir}",
-    "transition-compare.sh":
-        "{ref_url} {impl_url} {session}-tc {ref_dir}",
-    "hover-state-compare.sh":
-        "{ref_url} {impl_url} {session}-hsc {ref_dir}",
-    "video-motion-compare.sh":
-        "{ref_url} {impl_url} {session}-vmc {ref_dir}",
-    "click-state-compare.sh":
-        "{ref_url} {impl_url} {session}-clk {ref_dir}",
-    "scroll-coverage-check.sh":
-        "{ref_dir} {ref_url} {impl_url} {session}-scov",
-    "tree-diff.sh": "{session}-td {ref_url} {impl_url} {ref_dir}",
-    "keyframes-diff.sh": "{session}-kf {ref_url} {impl_url} {ref_dir}",
-    # ── static text/dom fidelity ──
-    "text-fidelity-check.sh":
-        "{ref_dir} {impl_root} --out {ref_dir}/text-fidelity-check.json",
-    "dom-mirror-check.sh":
-        "{ref_dir} {impl_root} --out {ref_dir}/dom-mirror-check.json",
-    # 2026-05-22: hero-composite-check pairs with the dom-mirror advisory
-    # downgrade — same {ref_dir} {impl_root} contract; default artifact path
-    # is $REF_DIR/hero-composite.json (matches verification-plan row).
-    "hero-composite-check.sh": "{ref_dir} {impl_root}",
-    "scroll-anim-temporal-diff.sh": "MANUAL",
-}
-
-ctx = {
-    "ref_dir": ref_dir,
-    "impl_root": impl_root,
-    "impl_src": impl_src,
-    "impl_public": impl_public,
-    "impl_pkg": str(Path(impl_root) / "package.json"),
-    "ref_url": ref_url,
-    "impl_url": impl_url,
-    "session": session,
-}
-
-for check in plan.get("requiredChecks", []):
-    cid = check.get("id", "?")
-    script_rel = check.get("script") or ""
-    produces = check.get("produces") or ""
-    if not script_rel or not produces:
-        print(f"SKIP\t{cid}\t\t\tno-script-or-produces", flush=True)
-        continue
-    # Resolve script path against repo root.
-    script_path = Path(repo_root) / script_rel
-    if not script_path.is_file():
-        # Try relative basename match (for scripts referenced by short
-        # name only).
-        alt = list(Path(repo_root).rglob(Path(script_rel).name))
-        if alt:
-            script_path = alt[0]
-        else:
-            print(f"NOSCRIPT\t{cid}\t{script_rel}\t\tscript not found", flush=True)
-            continue
-    sig = SIGNATURES.get(script_path.name)
-    if not sig:
-        print(f"NOSIG\t{cid}\t{script_path}\t\tunknown signature", flush=True)
-        continue
-    args = sig.format(**ctx)
-    deps = " ".join(check.get("dependsOn", []) or [])
-    print(f"DISPATCH\t{cid}\t{script_path}\t{args}\t{produces}\t{deps}", flush=True)
-PY
+"$PYTHON_BIN" "$REPO_ROOT/scripts/verify/build_required_dispatch.py" "$PLAN" "$REF_DIR" "$REPO_ROOT" "$IMPL_ROOT" "$IMPL_SRC" "$IMPL_PUBLIC" "$REF_URL" "$IMPL_URL" "$SESSION" > "$REF_DIR/.run-required-checks-dispatch.txt"
 
 
 SETUP_FAILURE=0
@@ -369,8 +279,16 @@ dep_failed() {
   done
   return 1
 }
-while IFS=$'\t' read -r kind cid script_path args produces deps; do
+while IFS=$'\t' read -r kind cid script_path args produces severity deps; do
   TOTAL=$((TOTAL + 1))
+  severity="${severity:-block}"
+  # Dry mode: print the resolved dispatch rows without executing anything.
+  # Used by tests to assert row composition (e.g. the VIEWPORTS env on the
+  # synthesized section-compare row) without launching browsers.
+  if [ "${UI_CLONE_DISPATCH_DRY:-0}" = "1" ]; then
+    echo "DRY|$kind|$cid|$args|$produces|$severity"
+    continue
+  fi
   case "$kind" in
     SKIP)
       echo -e "${YELLOW}~${NC} $cid: $kind"
@@ -403,7 +321,7 @@ while IFS=$'\t' read -r kind cid script_path args produces deps; do
   # Skip when artifact already exists with status=pass (idempotency).
   art="$REF_DIR/$produces"
   if [ -f "$art" ]; then
-    cur_status=$(python3 -c "
+    cur_status=$("$PYTHON_BIN" -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -411,29 +329,128 @@ try:
 except Exception:
     print('parse-error')
 " "$art" 2>/dev/null)
-    if [ "$cur_status" = "pass" ]; then
-      # Stale-check: artifact older than newest source/asset file.
+    _semantic_cache_note=""
+    if [ "$cur_status" = "parse-error" ]; then
+      if [ "$cid" = "section-compare" ]; then
+        _semantic_cache_note=$(_section_compare_reusable "$art" 2>/dev/null) \
+          || _semantic_cache_note=""
+      else
+        _semantic_cache_note=$(_required_check_reusable "$cid" "$art" 2>/dev/null) \
+          || _semantic_cache_note=""
+      fi
+      case "$_semantic_cache_note" in
+        pass$'\t'*) cur_status="pass" ;;
+        warn$'\t'*) cur_status="partial" ;;
+      esac
+    fi
+    # Infrastructure/capture errors are never reusable evidence, even for an
+    # advisory row. Re-dispatch them on every run until the producer emits a
+    # real pass/fail/warn verdict. Ordinary advisory failures remain cacheable.
+    if [ "$cur_status" != "error" ] \
+      && { [ "$cur_status" = "pass" ] || [ "$cur_status" = "partial" ] \
+        || [ "$severity" != "block" ]; }; then
+      # Stale-check (B1): prefer the per-check input fingerprint
+      # (ui_clone.check_inputs) so a check is stale iff its OWN declared inputs
+      # changed — one impl edit no longer re-dispatches every satisfied check.
+      # The hash + the sidecar path BOTH come from the shared module (shell-out),
+      # so this and the Python gate cannot diverge on file-set, algorithm, or
+      # sidecar identity. Before a sidecar exists, fall back to a per-check
+      # declared-input mtime sweep (conservative — never treat an
+      # un-fingerprinted artifact as fresh); the sidecar is seeded ONLY in the
+      # post-dispatch path once a fresh write is proven (not in the skip path).
       stale_seen=0
-      if [ -n "$IMPL_ROOT" ]; then
-        for sub in src app pages components public lib hooks contexts; do
-          d="$IMPL_ROOT/$sub"
-          [ -d "$d" ] || continue
-          if find "$d" -type f -newer "$art" 2>/dev/null | head -1 | grep -q .; then
-            stale_seen=1
-            break
+      if [ "$cid" = "runtime-text-sequence" ]; then
+        # This artifact is live browser evidence, not a deterministic
+        # file-input result. Always recapture it on a canonical run so a
+        # previously passing render cannot certify a later runtime state.
+        # Fresh artifacts are still URL- and provenance-validated below.
+        _runtime_text_clear_cache
+        stale_seen=1
+      fi
+      if [ "$stale_seen" = "0" ]; then
+        cur_ih=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_inputs hash "$IMPL_ROOT" "$REF_DIR" "$cid" 2>/dev/null || echo "UNREGISTERED")
+        ihfile=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_inputs sidecar "$REF_DIR" "$cid" 2>/dev/null || echo "")
+        if [ "$cur_ih" = "EMPTY" ]; then
+          : # registered input-independent check — never stale
+        elif [ "$cur_ih" = "UNAVAILABLE" ]; then
+          # Every declared side must be present, matched, and readable. Do not
+          # let a ref-only partial hash certify a deleted/empty impl input.
+          stale_seen=1
+        elif [ "$cur_ih" = "UNREGISTERED" ]; then
+          # Unregistered (registry-completeness test prevents this for known
+          # checks): conservative legacy newest-file sweep over the 8 impl roots.
+          if [ -n "$IMPL_ROOT" ]; then
+            for sub in src app pages components public lib hooks contexts; do
+              d="$IMPL_ROOT/$sub"
+              [ -d "$d" ] || continue
+              if find "$d" -type f -newer "$art" 2>/dev/null | head -1 | grep -q .; then
+                stale_seen=1
+                break
+              fi
+            done
           fi
-        done
+        elif [ -n "$ihfile" ] && [ -f "$ihfile" ]; then
+          if [ "$(cat "$ihfile" 2>/dev/null)" != "$cur_ih" ]; then
+            stale_seen=1
+          fi
+        elif [ "$cid" = "runtime-text-sequence" ]; then
+          # Runtime capture migration is intentionally fail-closed. A valid
+          # dispatcher provenance receipt without its canonical input hash is
+          # incomplete certification, so never fall back to coarse mtimes.
+          stale_seen=1
+        else
+          # Registered, no sidecar yet (migration): newest mtime over the check's
+          # DECLARED inputs — the SAME glob set the hash uses, so staleness is
+          # already scoped per-check (no src+public-only under-scan, matches the
+          # Python gate). Do NOT seed the sidecar here: the +1s mtime tolerance is
+          # an inherent same-second ambiguity, transient in the mtime path but it
+          # would be FROZEN as a false-fresh verdict if written to a sidecar. The
+          # sidecar is seeded ONLY after a real dispatch proves a fresh write.
+          nin=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_inputs mtime "$IMPL_ROOT" "$REF_DIR" "$cid" 2>/dev/null || echo "UNREGISTERED")
+          art_m=$(_mtime "$art")
+          if [[ "$nin" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            if awk "BEGIN{exit !($nin > $art_m + 1)}"; then
+              stale_seen=1
+            fi
+          else
+            # No sidecar plus an unreadable/unavailable declared-input mtime is
+            # not fresh migration evidence. Re-dispatch and let the producer
+            # create a canonical fingerprint sidecar.
+            stale_seen=1
+          fi
+        fi
       fi
       if [ "$stale_seen" = "1" ]; then
         STALE=$((STALE + 1))
         # Fall through to re-dispatch.
       else
-        PASS=$((PASS + 1))
+        if [ "$cur_status" = "pass" ]; then
+          PASS=$((PASS + 1))
+        else
+          WARN=$((WARN + 1))
+        fi
         continue
       fi
     fi
   fi
-  # Dispatch the check.
+  # Dispatch the check. Record the artifact mtime first so the B1 sidecar seed
+  # can prove the artifact was FRESHLY written this run (not an old one left in
+  # place by a check that exited non-zero).
+  art_mtime_ns_before=0
+  [ -f "$art" ] && art_mtime_ns_before=$(_mtime_ns "$art")
+  if [ "$cid" = "runtime-text-sequence" ]; then
+    # Remove prior certification before dispatch so failures, error artifacts,
+    # and mismatched receipts cannot retain reusable provenance.
+    _runtime_text_clear_cache
+  fi
+  _dispatch_ih=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_inputs hash "$IMPL_ROOT" "$REF_DIR" "$cid" 2>/dev/null || echo "")
+  if [ -n "$_dispatch_ih" ] && [ "$_dispatch_ih" != "UNREGISTERED" ] \
+    && [ "$_dispatch_ih" != "EMPTY" ]; then
+    _dispatch_ihf=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_inputs sidecar "$REF_DIR" "$cid" 2>/dev/null || echo "")
+    if [ -n "$_dispatch_ihf" ] && { [ -e "$_dispatch_ihf" ] || [ -L "$_dispatch_ihf" ]; }; then
+      printf '%s' "DISPATCH_INFLIGHT_INVALID" > "$_dispatch_ihf" 2>/dev/null || true
+    fi
+  fi
   env_vars=""
   positional="$args"
   if [[ "$args" == ENV:* ]]; then
@@ -442,37 +459,158 @@ except Exception:
     positional="${env_spec##* -- }"
   fi
   echo -e "▶ $cid"
-  # Track every agent-browser session name that appears in the args
-  # so cleanup_browser_sessions can close them on exit.
-  for tok in $positional; do
-    case "$tok" in
-      "${SESSION}"-*) DERIVED_SESSIONS+=("$tok") ;;
-    esac
+  # Per-row timeout override (Task B / review F3): a multi-pass row (e.g. the
+  # frozen section-compare wrapper) carries ROW_TIMEOUT_SEC in its ENV: prefix so
+  # it gets its own budget instead of the shared single-check 180s.
+  row_timeout="$RUN_REQUIRED_CHECK_TIMEOUT_SEC"
+  # D20 (loop-nvti-0): 60fps frame-compare rows drive full scroll/interaction
+  # sweeps whose duration scales with page height. Hover comparison can measure
+  # up to five targets and each target may require one fresh confirmation, so
+  # it needs a larger dedicated budget than the other heavy rows. An explicit
+  # ROW_TIMEOUT_SEC in the row ENV still wins below.
+  case "$cid" in
+    hover-state-compare)
+      row_timeout="${RUN_REQUIRED_HOVER_TIMEOUT_SEC:-1800}"
+      ;;
+    transition-compare|click-state-compare|video-motion-compare)
+      row_timeout="${RUN_REQUIRED_HEAVY_TIMEOUT_SEC:-540}"
+      ;;
+  esac
+  for _kv in $env_vars; do
+    case "$_kv" in ROW_TIMEOUT_SEC=*) row_timeout="${_kv#ROW_TIMEOUT_SEC=}" ;; esac
   done
   # shellcheck disable=SC2086 # intentional word-split on positional
   if [ -n "$env_vars" ]; then
     # shellcheck disable=SC2086 # intentional word-split on env_vars
-    if $_RUN_WITH_TIMEOUT "$RUN_REQUIRED_CHECK_TIMEOUT_SEC" env $env_vars bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+    if [ -n "$_DISPATCH_CHILD_BASH_COMPAT" ]; then
+      # Put the dispatcher-owned assignment last so a plan row cannot silently
+      # defeat the containment; use UI_CLONE_DISPATCH_BASH_COMPAT to override.
+      # shellcheck disable=SC2086 # intentional word-split on env_vars/positional
+      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+        rc=0
+      else
+        rc=$?
+      fi
+    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
     fi
   else
-    if $_RUN_WITH_TIMEOUT "$RUN_REQUIRED_CHECK_TIMEOUT_SEC" bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+    if [ -n "$_DISPATCH_CHILD_BASH_COMPAT" ]; then
+      # shellcheck disable=SC2086 # intentional word-split on positional
+      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+        rc=0
+      else
+        rc=$?
+      fi
+    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
     fi
   fi
   if [ "$rc" -eq 124 ]; then
-    echo "  → check timed out after ${RUN_REQUIRED_CHECK_TIMEOUT_SEC}s (RUN_REQUIRED_CHECK_TIMEOUT_SEC)" >&2
+    echo "  → check timed out after ${row_timeout}s (row budget; see RUN_REQUIRED_CHECK_TIMEOUT_SEC / RUN_REQUIRED_HEAVY_TIMEOUT_SEC / RUN_REQUIRED_HOVER_TIMEOUT_SEC / ROW_TIMEOUT_SEC)" >&2
   fi
-  if [ "$rc" -eq 0 ]; then
+  _artifact_fresh=0
+  if [ -f "$art" ] && [ "$(_mtime_ns "$art")" != "$art_mtime_ns_before" ]; then
+    _artifact_fresh=1
+  fi
+  _hover_partial_note=""
+  if [ "$cid" = "hover-state-compare" ] && [ "$_artifact_fresh" = "1" ]; then
+    _hover_partial_note=$(_hover_state_partial_valid "$art" 2>/dev/null) || _hover_partial_note=""
+  fi
+  _seed_ok=0
+  if [ "$rc" -eq 0 ] && [ ! -f "$art" ]; then
+    # Emit-or-fail invariant: a dispatched check that exits 0 without
+    # writing its declared artifact is invisible to every rollup and
+    # silently reads as green — the script-side analogue of an agent
+    # skip-faking a step. Treat it as a hard check failure.
+    echo "  → $cid exited 0 but did not write $produces — emit-or-fail invariant violated" >&2
+    FAIL=$((FAIL + 1))
+    mark_failed "$cid"
+  elif [ "$rc" -eq 0 ]; then
     PASS=$((PASS + 1))
+    _seed_ok=1
+  elif [ -n "$_hover_partial_note" ]; then
+    WARN=$((WARN + 1))
+    echo "  → hover-state-compare returned $rc with valid partial evidence; $_hover_partial_note"
+    _seed_ok=1
+  elif [ "$severity" != "block" ] && [ -f "$art" ]; then
+    WARN=$((WARN + 1))
+    echo "  → advisory check returned $rc but produced $produces (severity=$severity); canonical gate will report it as a warning."
+    _artifact_status=$("$PYTHON_BIN" -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('status') if isinstance(d, dict) else 'unknown')
+except Exception:
+    print('parse-error')
+" "$art" 2>/dev/null)
+    if [ "$_artifact_status" != "error" ]; then
+      _seed_ok=1
+    fi
   else
     FAIL=$((FAIL + 1))
     mark_failed "$cid"
+    if [ -f "$art" ] && [ "$_artifact_fresh" = "1" ]; then
+      _artifact_status=$("$PYTHON_BIN" -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('status') if isinstance(d, dict) else 'unknown')
+except Exception:
+    print('parse-error')
+" "$art" 2>/dev/null)
+      [ "$_artifact_status" = "fail" ] && _seed_ok=1
+    fi
   fi
+  # Seed/update the per-check input-hash sidecar (B1) only when the artifact was
+  # freshly written this run and is reusable evidence: pass, cacheable advisory,
+  # or a hard status:fail verdict. Keep the invalid pre-dispatch sentinel for
+  # status:error and for nonzero producers that leave an old artifact in place.
+  if [ "$_seed_ok" = "1" ] && [ -f "$art" ]; then
+    _seed_status=$("$PYTHON_BIN" -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('status') if isinstance(d, dict) else 'unknown')
+except Exception:
+    print('parse-error')
+" "$art" 2>/dev/null)
+    [ "$_seed_status" = "error" ] && _seed_ok=0
+  fi
+  _runtime_provenance_written=0
+  if [ "$cid" = "runtime-text-sequence" ]; then
+    if [ "$_seed_ok" != "1" ] || [ ! -f "$art" ] \
+      || ! _runtime_text_urls_match "$art" \
+      || ! _runtime_text_write_provenance "$art" "$art_mtime_ns_before"; then
+      _runtime_text_clear_cache
+      _seed_ok=0
+    else
+      # The provenance writer proves nanosecond-level freshness and binds the
+      # exact bytes. Preserve that proof when the portable second-resolution
+      # mtime happens not to advance.
+      _runtime_provenance_written=1
+    fi
+  fi
+  if [ "$_seed_ok" = "1" ] && [ -f "$art" ] \
+    && { [ "$_runtime_provenance_written" = "1" ] \
+      || [ "$(_mtime_ns "$art")" != "$art_mtime_ns_before" ]; }; then
+    _ih=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_inputs hash "$IMPL_ROOT" "$REF_DIR" "$cid" 2>/dev/null || echo "")
+    if [ -n "$_ih" ] && [ "$_ih" != "UNREGISTERED" ] \
+      && [ "$_ih" != "UNAVAILABLE" ] && [ "$_ih" != "EMPTY" ]; then
+      _ihf=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_inputs sidecar "$REF_DIR" "$cid" 2>/dev/null || echo "")
+      [ -n "$_ihf" ] && printf '%s' "$_ih" > "$_ihf" 2>/dev/null || true
+    fi
+  fi
+  # Every row owns a unique child session and must set its own viewport. Reap
+  # the completed row's live session family before the next one starts. The old
+  # approach set a viewport on the bare run prefix after every row, which
+  # created a persistent browser that accumulated across the whole dispatcher
+  # and eventually poisoned late runtime-text/section captures.
+  cleanup_browser_sessions
 done < "$REF_DIR/.run-required-checks-dispatch.txt"
 
 rm -f "$REF_DIR/.run-required-checks-dispatch.txt"
@@ -481,6 +619,7 @@ echo
 echo "═══ run-required-checks summary ═══"
 echo "  dispatched: $TOTAL"
 echo "  pass:       $PASS"
+echo "  warn:       $WARN (advisory non-zero or non-pass artifact; not a hard dispatcher failure)"
 echo "  fail:       $FAIL"
 echo "  skipped:    $SKIP (unknown signature or missing script — wire into SIGNATURES table)"
 echo "  stale:      $STALE (re-dispatched because impl source moved)"

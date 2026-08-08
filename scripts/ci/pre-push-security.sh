@@ -39,26 +39,58 @@ DRIFT_TEST="test-parity.sh"
 
 section "Secrets"
 secret_patterns=(
-  'AKIA[0-9A-Z]{16}'
-  'sk-[a-zA-Z0-9]{20,}'
-  'ghp_[a-zA-Z0-9]{36}'
-  'xox[baprs]-[0-9A-Za-z-]{10,}'
-  'AIza[0-9A-Za-z_-]{35}'
-  '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  'AKIA[0-9A-Z]{16}'                    # AWS access key id
+  'sk-[a-zA-Z0-9]{20,}'                 # OpenAI-style key
+  'sk-ant-[a-zA-Z0-9_-]{20,}'           # Anthropic key (its hyphens break the sk- pattern above)
+  'gh[oprsu]_[A-Za-z0-9]{36}'           # GitHub token: classic ghp_/OAuth gho_/server ghs_/user ghu_/refresh ghr_
+  'github_pat_[0-9A-Za-z_]{82}'         # GitHub fine-grained PAT
+  'glpat-[0-9A-Za-z_-]{20}'             # GitLab personal access token
+  '(sk|rk)_live_[0-9a-zA-Z]{24,}'       # Stripe live secret / restricted key (underscore form sk- misses)
+  'xox[baprs]-[0-9A-Za-z-]{10,}'        # Slack token (bot/app/user/refresh/legacy)
+  'xapp-[0-9]-[A-Za-z0-9-]{10,}'        # Slack app-level token
+  'AIza[0-9A-Za-z_-]{35}'               # Google API key
+  'npm_[A-Za-z0-9]{36}'                 # npm classic automation/publish token
+  '_authToken=[A-Za-z0-9+/=_.-]{16,}'   # npm registry auth token (.npmrc); value charset excludes ${...} env refs
+  '-----BEGIN [A-Z ]*PRIVATE KEY-----'  # PEM private key block
 )
 secret_hits=0
+# N2: token-scoped placeholder suppression. The OLD whole-line filter dropped any
+# matched line that ALSO contained example/placeholder/YOUR_/TODO in prose, so a real
+# key annotated `# TODO rotate` leaked silently. This drops a hit only when the
+# MATCHED TOKEN is itself placeholder-shaped. Markers are case-sensitive (lowercase
+# example/placeholder so the AWS docs shape AKIA...EXAMPLE stays caught) plus YOUR_;
+# TODO/<YOUR are prose-only and dropped from token scope; A-/x-filler is NOT
+# suppressed (drift tests inject A-filler tokens that must stay caught). A function,
+# not an inline $() while/case, for bash-3.2 (macOS) parser compatibility.
+_drop_placeholder_token_lines() {
+  local _p="$1" _line _tok
+  while IFS= read -r _line; do
+    _tok=$(printf '%s' "$_line" | grep -oE "$_p" | head -1)
+    case "$_tok" in
+      *example*|*placeholder*|*YOUR_*) continue ;;
+    esac
+    printf '%s\n' "$_line"
+  done
+}
 for p in "${secret_patterns[@]}"; do
   # tmp/, scratch/, benchmark/, and .omx/ hold generated runtime/captured
   # contents. Those can contain third-party public keys, absolute paths, and
   # local agent logs; they are gitignored and never published, so exclude them
   # from shipped-surface scans.
+  # Include the rest of the shipped/trackable surface, not just config files:
+  # *.py is the bulk of the published package (ui_clone/), and .npmrc/.env* are
+  # the canonical homes of the npm/env tokens above (git-trackable — not in
+  # .gitignore). bin/ui-clone (extensionless) ships via npm `files`.
   hits=$(grep -rEn "$p" \
     --include='*.sh' --include='*.md' --include='*.json' --include='*.yaml' --include='*.yml' \
+    --include='*.py' --include='*.toml' --include='*.lock' \
+    --include='.npmrc' --include='.env*' --include='ui-clone' \
     --exclude="$SELF" --exclude="$DRIFT_TEST" \
     --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules \
     --exclude-dir=.venv --exclude-dir=.mypy_cache --exclude-dir=.sisyphus \
     . 2>/dev/null | \
-    grep -vE 'evals\.json|example|placeholder|YOUR_|TODO|<YOUR' || true)
+    grep -vE 'evals\.json' | \
+    _drop_placeholder_token_lines "$p" || true)
   if [ -n "$hits" ]; then
     err "Potential secret matching /$p/"
     echo "$hits" | head -3 | sed 's/^/      /' >&2
@@ -107,63 +139,7 @@ if command -v python3 >/dev/null 2>&1; then
     python3 -c "import json; json.load(open('hooks/codex-hooks.json'))" 2>/dev/null && \
       ok "hooks/codex-hooks.json valid JSON" || err "hooks/codex-hooks.json invalid JSON"
   fi
-  if python3 - <<'PY'
-import pathlib
-import re
-import sys
-
-expected = {
-    pathlib.Path("skills/ui-reverse-engineering/agents/openai.yaml"),
-    pathlib.Path("skills/ui-capture/agents/openai.yaml"),
-    pathlib.Path("skills/visual-debug/agents/openai.yaml"),
-}
-paths = set(pathlib.Path("skills").glob("*/agents/openai.yaml"))
-errors = []
-
-for missing in sorted(expected - paths):
-    errors.append(f"{missing}: missing OpenAI agent manifest")
-
-required = {
-    "interface": ("display_name", "short_description", "default_prompt"),
-    "policy": ("allow_implicit_invocation",),
-}
-
-for path in sorted(paths):
-    text = path.read_text(encoding="utf-8")
-    if "\t" in text:
-        errors.append(f"{path}: tabs are not allowed")
-
-    sections = {}
-    current = None
-    for line in text.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line.startswith(" "):
-            key = line.split(":", 1)[0].strip()
-            current = key
-            sections.setdefault(current, {})
-            continue
-        if current is None:
-            continue
-        match = re.match(r"^  ([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$", line)
-        if match:
-            sections.setdefault(current, {})[match.group(1)] = match.group(2).strip()
-
-    for section, keys in required.items():
-        if section not in sections:
-            errors.append(f"{path}: missing {section}: section")
-            continue
-        for key in keys:
-            if key not in sections[section]:
-                errors.append(f"{path}: missing {section}.{key}")
-            elif sections[section][key] == "":
-                errors.append(f"{path}: empty {section}.{key}")
-
-if errors:
-    for error in errors:
-        print(error, file=sys.stderr)
-    sys.exit(1)
-PY
+  if python3 "$REPO_ROOT/scripts/ci/validate_openai_agent_manifests.py"
   then
     ok "skills/*/agents/openai.yaml shape valid"
   else
@@ -174,9 +150,20 @@ else
 fi
 
 section "Shell syntax"
+# Use bash 4+ explicitly. macOS ships bash 3.2 as /bin/bash, which cannot parse
+# a heredoc nested inside `$(...)` command substitution (a 3.2 limitation) and
+# would false-flag valid scripts as syntax errors. All target hosts (GitHub
+# Actions Ubuntu, Linux installs, macOS users with `brew install bash`) run
+# bash 4+, so resolve one here — mirrors scripts/ci/ci-local.sh.
+SYNTAX_BASH=$(command -v bash)
+if [ "$("$SYNTAX_BASH" -c 'echo ${BASH_VERSION%%.*}' 2>/dev/null)" -lt 4 ] 2>/dev/null; then
+  for cand in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [ -x "$cand" ] && { SYNTAX_BASH="$cand"; break; }
+  done
+fi
 syntax_fail=0
 while IFS= read -r f; do
-  bash -n "$f" 2>/dev/null || { err "syntax error: $f"; syntax_fail=$((syntax_fail + 1)); }
+  "$SYNTAX_BASH" -n "$f" 2>/dev/null || { err "syntax error: $f"; syntax_fail=$((syntax_fail + 1)); }
 done < <(find scripts hooks -name '*.sh' -type f 2>/dev/null)
 [ "$syntax_fail" -eq 0 ] && ok "all shell scripts parse"
 
@@ -221,9 +208,12 @@ if command -v python3 >/dev/null 2>&1; then
   plugin_v=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])" 2>/dev/null || echo "")
   market_v=$(python3 -c "import json; print(json.load(open('.claude-plugin/marketplace.json'))['plugins'][0]['version'])" 2>/dev/null || echo "")
   codex_v=$(python3 -c "import json; print(json.load(open('.codex-plugin/plugin.json'))['version'])" 2>/dev/null || echo "")
-  if [ -n "$plugin_v" ] && [ -n "$market_v" ] && [ -n "$codex_v" ]; then
-    [ "$plugin_v" = "$market_v" ] && [ "$plugin_v" = "$codex_v" ] && ok "versions match: $plugin_v" || \
-      err "version mismatch: claude-plugin=$plugin_v marketplace=$market_v codex-plugin=$codex_v"
+  package_v=$(python3 -c "import json; print(json.load(open('package.json'))['version'])" 2>/dev/null || echo "")
+  pyproj_v=$(python3 -c "import re; m=re.search(r'^version\s*=\s*\"([^\"]+)\"', open('pyproject.toml').read(), re.M); print(m.group(1) if m else '')" 2>/dev/null || echo "")
+  init_v=$(python3 -c "import re; m=re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('ui_clone/__init__.py').read()); print(m.group(1) if m else '')" 2>/dev/null || echo "")
+  if [ -n "$plugin_v" ] && [ -n "$market_v" ] && [ -n "$codex_v" ] && [ -n "$package_v" ] && [ -n "$pyproj_v" ] && [ -n "$init_v" ]; then
+    [ "$plugin_v" = "$market_v" ] && [ "$plugin_v" = "$codex_v" ] && [ "$plugin_v" = "$package_v" ] && [ "$plugin_v" = "$pyproj_v" ] && [ "$plugin_v" = "$init_v" ] && ok "versions match: $plugin_v" || \
+      err "version mismatch: claude-plugin=$plugin_v marketplace=$market_v codex-plugin=$codex_v package.json=$package_v pyproject.toml=$pyproj_v ui_clone/__init__.py=$init_v"
   else
     warn "could not extract versions"
   fi

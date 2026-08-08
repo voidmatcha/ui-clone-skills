@@ -107,10 +107,32 @@ required_by_trigger = {
 
 checked: list[dict[str, Any]] = []
 missing: list[dict[str, Any]] = []
+dispatch_only: list[dict[str, Any]] = []
+
+# FILE-LEVEL provenance gate (id30): a per-region dispatchOnly flag is forgeable —
+# an agent can hand-add it to a real capture-needing region to skip its manifest.
+# Honor dispatch-only ONLY when the regions.json FILE was deterministically
+# projected from transition-spec. Require both the producer source and its
+# transition-spec derivation record; either field alone is forgeable. Without
+# both, every region owes its capture manifest regardless of a per-region flag.
+derived_from = data.get("derivedFrom") if isinstance(data, dict) else None
+file_dispatch_provenance = (
+    isinstance(data, dict) and data.get("source") == "derive-from-transition-spec"
+    and isinstance(derived_from, list)
+    and "transition-spec.json" in derived_from
+)
 
 for index, region in enumerate(regions):
     name = str(region.get("name") or region.get("selector") or f"region-{index}")
     trigger = str(region.get("triggerType") or "")
+    # Dispatch-only regions are deterministic projections of transition-spec
+    # (regions.json source: derive-from-transition-spec), NOT independent
+    # capture proof. They carry no per-state capture manifest by design, so
+    # they are NOT "missing" one — record them distinctly instead of failing.
+    # Gated on FILE provenance so a hand-set per-region flag cannot bypass capture.
+    if region.get("dispatchOnly") and file_dispatch_provenance:
+        dispatch_only.append({"region": name, "triggerType": trigger, "reason": "dispatch-only (spec-derived; not capture-backed)"})
+        continue
     artifacts = region.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
         missing.append({"region": name, "triggerType": trigger, "reason": "missing artifacts manifest"})
@@ -155,6 +177,7 @@ payload = {
     "status": status,
     "regionsChecked": len(regions),
     "checkedArtifacts": checked,
+    "dispatchOnlyRegions": dispatch_only,
     "missingArtifacts": missing,
     "rule": "Every regions.json triggerType entry must enumerate explicit ref capture artifacts; downstream generation must not infer transition evidence from trigger names alone.",
 }

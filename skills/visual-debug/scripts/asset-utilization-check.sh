@@ -160,6 +160,7 @@ fi
 HIDDEN_MANIFEST_FILE="$REF_DIR/.asset-utilization.hidden-manifest.tmp"
 python3 - "$IMPL_SRC" "$BASENAMES_FILE" > "$HIDDEN_MANIFEST_FILE" <<'PY'
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -167,9 +168,20 @@ impl_src = Path(sys.argv[1])
 basenames_path = Path(sys.argv[2])
 basenames = [line.strip() for line in basenames_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 text_exts = {".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".json", ".mdx"}
+generated_dirs = {
+    part.strip()
+    for part in re.split(r"[:,]", os.environ.get("UI_CLONE_GENERATED_EVIDENCE_DIRS", "ref-css"))
+    if part.strip()
+}
+
+def in_generated_evidence_dir(path: Path) -> bool:
+    return bool(generated_dirs.intersection(path.parts))
+
 matched = set()
 for path in impl_src.rglob("*"):
     if not path.is_file() or path.suffix.lower() not in text_exts:
+        continue
+    if in_generated_evidence_dir(path):
         continue
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -206,6 +218,14 @@ impl_src = Path(sys.argv[1])
 basenames_path = Path(sys.argv[2])
 basenames = [line.strip() for line in basenames_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 text_exts = {".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".mdx"}
+generated_dirs = {
+    part.strip()
+    for part in re.split(r"[:,]", os.environ.get("UI_CLONE_GENERATED_EVIDENCE_DIRS", "ref-css"))
+    if part.strip()
+}
+
+def in_generated_evidence_dir(path: Path) -> bool:
+    return bool(generated_dirs.intersection(path.parts))
 
 rail_name_re = re.compile(r"(?:asset|reference|manifest|image)[-_ ]?(?:rail|strip|manifest)", re.I)
 low_opacity_re = re.compile(r"(?:opacity-(?:0|5|10|15|20)\b|opacity\s*[:=]\s*['\"]?0(?:\.\d+)?)", re.I)
@@ -218,6 +238,8 @@ non_content_re = re.compile(
 suspicious = set()
 for path in impl_src.rglob("*"):
     if not path.is_file() or path.suffix.lower() not in text_exts:
+        continue
+    if in_generated_evidence_dir(path):
         continue
     try:
         text = path.read_text(encoding="utf-8", errors="replace")

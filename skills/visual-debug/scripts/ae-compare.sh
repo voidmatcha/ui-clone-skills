@@ -31,7 +31,10 @@ if [ "$REF_SIZE" != "$IMPL_SIZE" ]; then
   echo "WARN: Size mismatch ref=$REF_SIZE impl=$IMPL_SIZE — resizing impl to match"
   W=$(echo "$REF_SIZE" | cut -dx -f1)
   H=$(echo "$REF_SIZE" | cut -dx -f2)
-  RESIZED=$(mktemp /tmp/ae-compare-XXXXXX.png)
+  # L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+  RESIZED="$(mktemp /tmp/ae-compare-XXXXXX)"
+  mv "$RESIZED" "${RESIZED}.png"
+  RESIZED="${RESIZED}.png"
   trap "rm -f '$RESIZED'" EXIT
   convert "$IMPL" -resize "${W}x${H}!" "$RESIZED"
   IMPL="$RESIZED"

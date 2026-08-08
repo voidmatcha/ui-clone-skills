@@ -9,6 +9,7 @@ ui_clone/gates/<area>.py modules). The import-time validator in
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -167,7 +168,20 @@ def run(self: Gate, gate: str, json_output: bool = False) -> int:
             if passed:
                 ps.mark_passed(gate, self.ref_dir)
             else:
-                ps.mark_failed(gate, self.ref_dir)
+                # Signature-aware fail counting: digest the sorted failing
+                # check labels so state.mark_failed can distinguish "same
+                # failure set re-evaluated" (stagnation — counts toward the
+                # hard cap) from "failing set changed" (progress — resets
+                # the consecutive counter). Labels only: per-check
+                # measurements (AE etc.) vary run-to-run from capture noise
+                # and would make the signature unstable.
+                failing = sorted(
+                    r.label for r in results if r.status == "fail"
+                )
+                sig = hashlib.sha256(
+                    "\n".join(failing).encode("utf-8")
+                ).hexdigest()[:16]
+                ps.mark_failed(gate, self.ref_dir, failure_signature=sig)
         except OSError:
             pass  # Non-fatal — state tracking is best-effort
 

@@ -1,11 +1,43 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Any
+
+import pytest
+from PIL import Image
 
 from ui_clone.gate import Gate
 
 from ._helpers import (
     _write_min_spec_artifacts,
 )
+
+
+def _write_png(path: Path) -> None:
+    Image.new("RGB", (2, 2), color="black").save(path, format="PNG")
+
+
+def _write_webm(path: Path) -> None:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libvpx-vp9",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
 
 
 def test_gate_spec_fails_when_transition_spec_missing(tmp_path: Path) -> None:
@@ -33,14 +65,18 @@ def test_gate_spec_points_to_runtime_dump_when_motion_exists_but_spec_missing(
     ref.mkdir()
     (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
     (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
-    (ref / "verification-plan.json").write_text(json.dumps({
-        "schemaVersion": 1, "requiredChecks": []
-    }))
-    (ref / "animation-runtime-dump.json").write_text(json.dumps({
-        "gsap": {"version": "3.12.5"},
-        "scrollTrigger": [{"trigger": "section.hero", "start": 0, "end": 600}],
-        "ix2": {"timelineCount": 0, "eventCount": 0},
-    }))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "gsap": {"version": "3.12.5"},
+                "scrollTrigger": [{"trigger": "section.hero", "start": 0, "end": 600}],
+                "ix2": {"timelineCount": 0, "eventCount": 0},
+            }
+        )
+    )
 
     results = Gate(ref).gate_spec()
     failures = [r for r in results if r.status == "fail"]
@@ -60,15 +96,19 @@ def test_gate_spec_points_to_runtime_dump_when_motion_exists_but_spec_empty(
     ref = tmp_path / "ref"
     ref.mkdir()
     _write_min_spec_artifacts(ref)
-    (ref / "verification-plan.json").write_text(json.dumps({
-        "schemaVersion": 1, "requiredChecks": []
-    }))
-    (ref / "animation-runtime-dump.json").write_text(json.dumps({
-        "gsap": None,
-        "scrollTrigger": [],
-        "framer": {"motionValues": [{"selector": ".card"}]},
-        "ix2": {"timelineCount": 2, "eventCount": 3},
-    }))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "gsap": None,
+                "scrollTrigger": [],
+                "framer": {"motionValues": [{"selector": ".card"}]},
+                "ix2": {"timelineCount": 2, "eventCount": 3},
+            }
+        )
+    )
 
     results = Gate(ref).gate_spec()
     failures = [r for r in results if r.status == "fail"]
@@ -81,22 +121,27 @@ def test_gate_spec_points_to_runtime_dump_when_motion_exists_but_spec_empty(
     ), failures
 
 
-
 def test_gate_spec_fails_when_bundle_map_missing(tmp_path: Path) -> None:
     """gate_spec must fail when bundle-map.json is absent."""
     ref = tmp_path / "ref"
     ref.mkdir()
-    (ref / "transition-spec.json").write_text(json.dumps({
-        "transitions": [{
-            "id": "fixture-reveal-on-scroll",
-            "trigger": "intersection",
-            "source_chunk": "fixture.js",
-            "bundle_branch": "main",
-            "target": ".fixture",
-            "animation": "opacity-translateY",
-            "reference_frames": ["frame_00.png"],
-        }]
-    }))
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "fixture-reveal-on-scroll",
+                        "trigger": "intersection",
+                        "source_chunk": "fixture.js",
+                        "bundle_branch": "main",
+                        "target": ".fixture",
+                        "animation": "opacity-translateY",
+                        "reference_frames": ["frame_00.png"],
+                    }
+                ]
+            }
+        )
+    )
     # bundle-map.json intentionally absent
 
     gate = Gate(ref)
@@ -107,7 +152,6 @@ def test_gate_spec_fails_when_bundle_map_missing(tmp_path: Path) -> None:
     )
 
 
-
 def test_gate_spec_passes_with_required_files(tmp_path: Path) -> None:
     """gate_spec must pass when all required artifacts exist."""
     ref = tmp_path / "ref"
@@ -116,30 +160,103 @@ def test_gate_spec_passes_with_required_files(tmp_path: Path) -> None:
     bundles = ref / "bundles"
     bundles.mkdir()
     (bundles / "fixture.js").write_text("// fixture bundle")
-    (ref / "transition-spec.json").write_text(json.dumps({
-        "transitions": [{
-            "id": "fixture-reveal-on-scroll",
-            "trigger": "intersection",
-            "source_chunk": "fixture.js",
-            "bundle_branch": "main",
-            "target": ".fixture",
-            "animation": "opacity-translateY",
-            "reference_frames": ["frame_00.png"],
-        }]
-    }))
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "fixture-reveal-on-scroll",
+                        "trigger": "intersection",
+                        "source_chunk": "fixture.js",
+                        "bundle_branch": "main",
+                        "target": ".fixture",
+                        "animation": "opacity-translateY",
+                        "reference_frames": ["frame_00.png"],
+                    }
+                ]
+            }
+        )
+    )
     (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
-    (ref / "verification-plan.json").write_text(json.dumps({
-        "schemaVersion": 1, "requiredChecks": []
-    }))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
     verify = ref / "verify"
     verify.mkdir()
     for i in range(5):
-        (verify / f"frame_{i:02d}.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
+        _write_png(verify / f"frame_{i:02d}.png")
 
     gate = Gate(ref)
     results = gate.gate_spec()
     failures = [r for r in results if r.status == "fail"]
     assert not failures, f"gate_spec must pass with required files present: {failures}"
+
+
+@pytest.mark.parametrize(
+    ("dynamic", "bundle_branch", "animation", "should_fail"),
+    [
+        (
+            None,
+            "scale timeline",
+            {"type": "scroll-scrub", "randomScaleRange": [0.8, 2]},
+            True,
+        ),
+        (
+            False,
+            "scale timeline",
+            {"type": "scroll-scrub", "randomScaleRange": [0.8, 2]},
+            True,
+        ),
+        (
+            True,
+            "scale timeline",
+            {"type": "scroll-scrub", "randomScaleRange": [0.8, 2]},
+            False,
+        ),
+        (None, "gsap.utils.random(0.8, 2)", {"type": "scroll-scrub"}, True),
+        (None, "deterministic scale timeline", {"type": "scroll-scrub"}, False),
+    ],
+)
+def test_gate_spec_requires_dynamic_for_stochastic_animation(
+    tmp_path: Path,
+    dynamic: bool | None,
+    bundle_branch: str,
+    animation: dict[str, Any],
+    should_fail: bool,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["hero.js"]}))
+    (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    bundles = ref / "bundles"
+    bundles.mkdir()
+    (bundles / "hero.js").write_text("// random scale fixture")
+    verify = ref / "verify"
+    verify.mkdir()
+    _write_png(verify / "hero.png")
+    transition: dict[str, Any] = {
+        "id": "hero-random-parallax",
+        "trigger": "scroll",
+        "source_chunk": "hero.js",
+        "bundle_branch": bundle_branch,
+        "target": ".hero .item-outer",
+        "animation": animation,
+        "reference_frames": ["verify/hero.png"],
+    }
+    if dynamic is not None:
+        transition["dynamic"] = dynamic
+    (ref / "transition-spec.json").write_text(json.dumps({"transitions": [transition]}))
+
+    stochastic_failures = [
+        result
+        for result in Gate(ref).gate_spec()
+        if result.status == "fail" and result.label == "stochastic transition dynamic mask"
+    ]
+
+    assert bool(stochastic_failures) is should_fail
 
 
 def test_gate_spec_fails_when_source_chunk_is_not_grounded(tmp_path: Path) -> None:
@@ -148,29 +265,39 @@ def test_gate_spec_fails_when_source_chunk_is_not_grounded(tmp_path: Path) -> No
     ref.mkdir()
     (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
     (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
-    (ref / "verification-plan.json").write_text(json.dumps({
-        "schemaVersion": 1, "requiredChecks": []
-    }))
-    (ref / "canvas-webgl-detection.json").write_text(json.dumps({
-        "primaryRenderType": "canvas",
-        "canvasCount": 1,
-        "hasWebGL": False,
-    }))
-    (ref / "transition-spec.json").write_text(json.dumps({
-        "transitions": [{
-            "id": "hero-canvas-runtime",
-            "trigger": "page load",
-            "source_chunk": "canvas-webgl-detection.json",
-            "bundle_branch": "canvas-webgl-detection.json: canvasCount=1",
-            "target": "canvas",
-            "animation": {"engine": "canvas-2d", "dynamic": True},
-            "reference_frames": "verify/page-scroll/f000.png",
-        }]
-    }))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    (ref / "canvas-webgl-detection.json").write_text(
+        json.dumps(
+            {
+                "primaryRenderType": "canvas",
+                "canvasCount": 1,
+                "hasWebGL": False,
+            }
+        )
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "hero-canvas-runtime",
+                        "trigger": "page load",
+                        "source_chunk": "canvas-webgl-detection.json",
+                        "bundle_branch": "canvas-webgl-detection.json: canvasCount=1",
+                        "target": "canvas",
+                        "animation": {"engine": "canvas-2d", "dynamic": True},
+                        "reference_frames": "verify/page-scroll/f000.png",
+                    }
+                ]
+            }
+        )
+    )
     verify = ref / "verify"
     verify.mkdir()
     for i in range(5):
-        (verify / f"frame_{i:02d}.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
+        _write_png(verify / f"frame_{i:02d}.png")
 
     failures = [
         r
@@ -182,38 +309,41 @@ def test_gate_spec_fails_when_source_chunk_is_not_grounded(tmp_path: Path) -> No
     assert "canvas-webgl-detection.json" in failures[0].message
 
 
-
 def test_gate_spec_fails_when_any_transition_missing_documented_fields(tmp_path: Path) -> None:
     """Every transition entry must carry the documented bundle-to-code handoff fields."""
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
     (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
-    (ref / "verification-plan.json").write_text(json.dumps({
-        "schemaVersion": 1, "requiredChecks": []
-    }))
-    (ref / "transition-spec.json").write_text(json.dumps({
-        "transitions": [
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
             {
-                "id": "hero-reveal",
-                "trigger": "page load",
-                "source_chunk": "a.js",
-                "bundle_branch": "first visit",
-                "target": ".hero",
-                "animation": {"property": "opacity", "from": 0, "to": 1},
-                "reference_frames": "verify/hero/f001.png",
-            },
-            {
-                "id": "cards-scroll",
-                "trigger": "scroll",
-                "bundle_branch": "desktop",
-            },
-        ]
-    }))
+                "transitions": [
+                    {
+                        "id": "hero-reveal",
+                        "trigger": "page load",
+                        "source_chunk": "a.js",
+                        "bundle_branch": "first visit",
+                        "target": ".hero",
+                        "animation": {"property": "opacity", "from": 0, "to": 1},
+                        "reference_frames": "verify/hero/f001.png",
+                    },
+                    {
+                        "id": "cards-scroll",
+                        "trigger": "scroll",
+                        "bundle_branch": "desktop",
+                    },
+                ]
+            }
+        )
+    )
     verify = ref / "verify"
     verify.mkdir()
     for i in range(5):
-        (verify / f"frame_{i:02d}.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
+        _write_png(verify / f"frame_{i:02d}.png")
 
     gate = Gate(ref)
     results = gate.gate_spec()
@@ -228,6 +358,169 @@ def test_gate_spec_fails_when_any_transition_missing_documented_fields(tmp_path:
         for r in failures
     ), f"Missing documented transition fields must fail gate_spec: {failures}"
 
+
+@pytest.mark.parametrize(
+    "reference_frames",
+    [
+        "none",
+        "",
+        [],
+        "verify/hero/missing.png",
+    ],
+)
+def test_gate_spec_fails_without_existing_reference_frame_evidence(
+    tmp_path: Path,
+    reference_frames: object,
+) -> None:
+    """Declared transitions need real local image/video evidence."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["fixture.js"]}))
+    bundles = ref / "bundles"
+    bundles.mkdir()
+    (bundles / "fixture.js").write_text("// fixture bundle")
+    (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "hero-reveal",
+                        "trigger": "page load",
+                        "source_chunk": "fixture.js",
+                        "bundle_branch": "first visit",
+                        "target": ".hero",
+                        "animation": {"property": "opacity", "from": 0, "to": 1},
+                        "reference_frames": reference_frames,
+                    }
+                ]
+            }
+        )
+    )
+
+    failures = [result for result in Gate(ref).gate_spec() if result.status == "fail"]
+
+    assert any(
+        result.label == "transitions[0] reference frame evidence"
+        and "existing local image/video" in result.message
+        for result in failures
+    ), failures
+
+
+@pytest.mark.parametrize(
+    "reference_frames",
+    [
+        "verify/intro/f010.png",
+        ["verify/intro/f010.png", "verify/intro/intro.webm"],
+        "verify/intro/f010.png to f030.png",
+    ],
+)
+def test_gate_spec_accepts_existing_reference_frame_evidence(
+    tmp_path: Path,
+    reference_frames: object,
+) -> None:
+    """String, list, and range text forms can point to captured media."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["fixture.js"]}))
+    bundles = ref / "bundles"
+    bundles.mkdir()
+    (bundles / "fixture.js").write_text("// fixture bundle")
+    (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    evidence = ref / "verify" / "intro"
+    evidence.mkdir(parents=True)
+    _write_png(evidence / "f010.png")
+    _write_png(evidence / "f030.png")
+    if "webm" in str(reference_frames):
+        if shutil.which("ffmpeg") is None:
+            pytest.skip("ffmpeg is required to generate valid WebM evidence")
+        _write_webm(evidence / "intro.webm")
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "hero-reveal",
+                        "trigger": "page load",
+                        "source_chunk": "fixture.js",
+                        "bundle_branch": "first visit",
+                        "target": ".hero",
+                        "animation": {"property": "opacity", "from": 0, "to": 1},
+                        "reference_frames": reference_frames,
+                    }
+                ]
+            }
+        )
+    )
+
+    evidence_results = [
+        result
+        for result in Gate(ref).gate_spec()
+        if result.label == "transitions[0] reference frame evidence"
+    ]
+
+    assert evidence_results == []
+
+
+@pytest.mark.parametrize(
+    ("filename", "payload"),
+    [
+        ("corrupt.png", b"\x89PNG\r\n\x1a\nnot-a-decodable-image"),
+        ("corrupt.webm", b"\x1aE\xdf\xa3not-a-decodable-video"),
+    ],
+)
+def test_gate_spec_rejects_corrupt_reference_media(
+    tmp_path: Path,
+    filename: str,
+    payload: bytes,
+) -> None:
+    """A non-empty file with a media extension is not transition evidence."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["fixture.js"]}))
+    bundles = ref / "bundles"
+    bundles.mkdir()
+    (bundles / "fixture.js").write_text("// fixture bundle")
+    (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    evidence = ref / "verify"
+    evidence.mkdir()
+    (evidence / filename).write_bytes(payload)
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "hero-reveal",
+                        "trigger": "page load",
+                        "source_chunk": "fixture.js",
+                        "bundle_branch": "first visit",
+                        "target": ".hero",
+                        "animation": {"property": "opacity", "from": 0, "to": 1},
+                        "reference_frames": f"verify/{filename}",
+                    }
+                ]
+            }
+        )
+    )
+
+    failures = [
+        result
+        for result in Gate(ref).gate_spec()
+        if result.label == "transitions[0] reference frame evidence"
+    ]
+
+    assert len(failures) == 1
+    assert failures[0].status == "fail"
+    assert "decodable" in failures[0].message
 
 
 def test_gate_spec_passes_when_no_substitute_decisions(tmp_path: Path) -> None:
@@ -253,14 +546,9 @@ def test_gate_spec_passes_when_no_substitute_decisions(tmp_path: Path) -> None:
     gate = Gate(ref)
     results = gate.gate_spec()
     sub_failures = [
-        r
-        for r in results
-        if r.status == "fail" and "paid-font substitution" in r.label
+        r for r in results if r.status == "fail" and "paid-font substitution" in r.label
     ]
-    assert not sub_failures, (
-        f"decision=use must not trigger substitution failure: {sub_failures}"
-    )
-
+    assert not sub_failures, f"decision=use must not trigger substitution failure: {sub_failures}"
 
 
 def test_gate_spec_fails_when_substitute_but_no_asset_substitution_json(tmp_path: Path) -> None:
@@ -286,14 +574,9 @@ def test_gate_spec_fails_when_substitute_but_no_asset_substitution_json(tmp_path
 
     gate = Gate(ref)
     results = gate.gate_spec()
-    failures = [
-        r
-        for r in results
-        if r.status == "fail" and "paid-font substitution" in r.label
-    ]
+    failures = [r for r in results if r.status == "fail" and "paid-font substitution" in r.label]
     assert failures, "substitute without asset-substitution.json must fail"
     assert any("use.typekit.net" in r.message for r in failures)
-
 
 
 def test_gate_spec_fails_when_asset_substitution_has_no_fonts(tmp_path: Path) -> None:
@@ -316,19 +599,12 @@ def test_gate_spec_fails_when_asset_substitution_has_no_fonts(tmp_path: Path) ->
         )
     )
     # Has images but no fonts — schema allows other categories
-    (ref / "asset-substitution.json").write_text(
-        json.dumps({"images": [{"from": "a", "to": "b"}]})
-    )
+    (ref / "asset-substitution.json").write_text(json.dumps({"images": [{"from": "a", "to": "b"}]}))
 
     gate = Gate(ref)
     results = gate.gate_spec()
-    failures = [
-        r
-        for r in results
-        if r.status == "fail" and "paid-font substitution" in r.label
-    ]
+    failures = [r for r in results if r.status == "fail" and "paid-font substitution" in r.label]
     assert failures, "asset-substitution.json without fonts[] must fail"
-
 
 
 def test_gate_spec_passes_when_substitute_and_fonts_declared(tmp_path: Path) -> None:
@@ -352,11 +628,7 @@ def test_gate_spec_passes_when_substitute_and_fonts_declared(tmp_path: Path) -> 
     )
     (ref / "asset-substitution.json").write_text(
         json.dumps(
-            {
-                "fonts": [
-                    {"from": "Adobe Garamond Pro", "to": "EB Garamond", "reason": "paid"}
-                ]
-            }
+            {"fonts": [{"from": "Adobe Garamond Pro", "to": "EB Garamond", "reason": "paid"}]}
         )
     )
     # Loop-38 fix: substitute decision is only valid AFTER a download attempt.
@@ -381,15 +653,10 @@ def test_gate_spec_passes_when_substitute_and_fonts_declared(tmp_path: Path) -> 
 
     gate = Gate(ref)
     results = gate.gate_spec()
-    failures = [
-        r
-        for r in results
-        if r.status == "fail" and "paid-font substitution" in r.label
-    ]
+    failures = [r for r in results if r.status == "fail" and "paid-font substitution" in r.label]
     assert not failures, f"declared substitute must pass: {failures}"
     sub_pass = [r for r in results if r.label == "paid-font substitution"]
     assert sub_pass and sub_pass[0].status == "pass"
-
 
 
 def test_gate_spec_fails_when_substitute_without_download_attempt(tmp_path: Path) -> None:
@@ -416,9 +683,7 @@ def test_gate_spec_fails_when_substitute_without_download_attempt(tmp_path: Path
         )
     )
     (ref / "asset-substitution.json").write_text(
-        json.dumps(
-            {"fonts": [{"from": "Die Grotesk", "to": "Inter Variable"}]}
-        )
+        json.dumps({"fonts": [{"from": "Die Grotesk", "to": "Inter Variable"}]})
     )
     (ref / "download-log.json").write_text(
         json.dumps(
@@ -438,6 +703,170 @@ def test_gate_spec_fails_when_substitute_without_download_attempt(tmp_path: Path
     gate = Gate(ref)
     results = gate.gate_spec()
     fail_labels = [r.label for r in results if r.status == "fail"]
-    assert any(
-        "download attempt missing" in label for label in fail_labels
-    ), f"loop-38 regression — must fail without download attempt: {fail_labels}"
+    assert any("download attempt missing" in label for label in fail_labels), (
+        f"loop-38 regression — must fail without download attempt: {fail_labels}"
+    )
+
+
+def test_spec_selectors_present_in_dom_flags_subpage_selectors(tmp_path: Path) -> None:
+    """A transition-spec target whose class/id is absent from the captured
+    structure.json BLOCKS at draft time — the subpage/late-mount selector that
+    otherwise only fails downstream at transition-fires after a full generate.
+    Present selectors, runtime-injected (swiper/canvas), and CSS-module hashed
+    names must NOT be flagged."""
+    from ui_clone.gates.spec import _check_spec_selectors_present_in_dom
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "structure.json").write_text(
+        json.dumps(
+            {
+                "tag": "body",
+                "children": [
+                    {
+                        "tag": "div",
+                        "class": "main-header",
+                        "children": [
+                            {
+                                "tag": "div",
+                                "class": "item-outer",
+                                "children": [
+                                    {"tag": "div", "class": "item-inner"},
+                                ],
+                            },
+                        ],
+                    },
+                    # CSS-module hashed class present on the page
+                    {"tag": "section", "class": "dga_text_line__MVXuV"},
+                    # Tailwind class with a colon (DOM stores it unescaped)
+                    {"tag": "div", "class": "md:flex"},
+                ],
+            }
+        )
+    )
+    spec = {
+        "transitions": [
+            # present (exact)
+            {"id": "parallax", "target": ".item-inner"},
+            # present (CSS-module hash — base name should match)
+            {"id": "word", "target": ".dga_text_line"},
+            # runtime-injected — exempt even though absent from capture
+            {"id": "swiper", "target": ".swiper-wrapper"},
+            {"id": "lottie", "target": "canvas"},
+            # ABSENT class — bundle-derived subpage selector (the bug)
+            {"id": "page-hero", "target": ".page-hero .parallax-items"},
+            {"id": "para", "target": ".page-hero-front .paragraph-1"},
+            # COMPOUND with present ANCESTOR but absent TARGET LEAF — must be
+            # flagged (the `any`-semantics bug Codex caught: .main-header exists
+            # but .subpage-leaf does not, so the selector resolves to nothing).
+            {"id": "compound", "target": ".main-header .subpage-leaf"},
+            # comma selector LIST with one fully-present group — must NOT be
+            # flagged (a list matches if any group matches).
+            {"id": "list", "target": ".absent-x, .item-inner"},
+            # attribute value containing a dot must NOT be mis-parsed as a `.5`
+            # class token; .main-header is present so this is NOT flagged.
+            {"id": "attrnoise", "target": '.main-header[data-ratio=".5"]'},
+            # pseudo-class noise stripped; .item-inner present → NOT flagged.
+            {"id": "pseudo", "target": ".item-inner:hover"},
+            # Tailwind escaped selector — DOM stores `md:flex` unescaped; the
+            # escaped `.md\:flex` token must unescape and match → NOT flagged.
+            {"id": "tw", "target": r".md\:flex"},
+            # `.swiperless` only matches the runtime allowlist as a substring —
+            # the trailing boundary means it is NOT exempted, and it is absent → FLAGGED.
+            {"id": "swiperless", "target": ".swiperless"},
+            # attr-only / tag-only — not reliably checkable, must be skipped
+            {"id": "counter", "target": "[data-value]"},
+            {"id": "anchor", "target": "a"},
+        ]
+    }
+    gate = Gate(ref)
+    results = _check_spec_selectors_present_in_dom(gate, spec)
+    assert len(results) == 1
+    r = results[0]
+    assert r.status == "fail", "absent same-page/subpage targets must BLOCK, not warn"
+    assert r.label == "spec-selectors-present-in-dom"
+    # remediation must offer both resolution paths (re-capture OR move to skipped[])
+    assert "skipped[]" in r.message
+    assert "re-capture" in r.message.lower()
+    # the absent targets are named; present/runtime/attr/tag/list are not
+    assert "page-hero" in r.message and "paragraph-1" in r.message
+    assert "compound" in r.message, "present-ancestor + absent-leaf must be flagged"
+    assert "swiperless" in r.message, "substring of an allowlist term must NOT be exempted"
+    assert "item-inner" not in r.message
+    assert "list" not in r.message, "comma-list with a present group must not flag"
+    assert "attrnoise" not in r.message, "attr value dot must not be parsed as a class"
+    assert "pseudo" not in r.message, "pseudo-class must be stripped before token check"
+    assert "tw" not in r.message, "Tailwind escaped selector must unescape and match"
+    assert ".swiper-wrapper" not in r.message and "[data-value]" not in r.message
+
+
+def test_spec_selectors_present_in_dom_blocks_full_gate_spec(tmp_path: Path) -> None:
+    """Integration: an absent spec target propagates a fail-severity result out
+    of gate_spec() (the block promotion), while a spec whose targets are all
+    present in the captured DOM produces no spec-selectors result at all."""
+
+    def _seed(ref: Path, target: str) -> None:
+        (ref / "bundle-map.json").write_text(json.dumps({"chunks": ["a.js"]}))
+        bundles = ref / "bundles"
+        bundles.mkdir()
+        (bundles / "fixture.js").write_text("// fixture bundle")
+        (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
+        (ref / "verification-plan.json").write_text(
+            json.dumps({"schemaVersion": 1, "requiredChecks": []})
+        )
+        (ref / "structure.json").write_text(
+            json.dumps(
+                {
+                    "tag": "body",
+                    "children": [
+                        {"tag": "div", "class": "hero-present"},
+                    ],
+                }
+            )
+        )
+        (ref / "transition-spec.json").write_text(
+            json.dumps(
+                {
+                    "transitions": [
+                        {
+                            "id": "reveal",
+                            "trigger": "intersection",
+                            "source_chunk": "fixture.js",
+                            "bundle_branch": "main",
+                            "target": target,
+                            "animation": "opacity",
+                            "reference_frames": ["frame_00.png"],
+                        }
+                    ]
+                }
+            )
+        )
+        verify = ref / "verify"
+        verify.mkdir()
+        for i in range(5):
+            _write_png(verify / f"frame_{i:02d}.png")
+
+    absent_ref = tmp_path / "absent"
+    absent_ref.mkdir()
+    _seed(absent_ref, ".subpage-only-leaf")
+    absent = [r for r in Gate(absent_ref).gate_spec() if r.label == "spec-selectors-present-in-dom"]
+    assert len(absent) == 1 and absent[0].status == "fail"
+
+    present_ref = tmp_path / "present"
+    present_ref.mkdir()
+    _seed(present_ref, ".hero-present")
+    present = [
+        r for r in Gate(present_ref).gate_spec() if r.label == "spec-selectors-present-in-dom"
+    ]
+    assert present == [], "target present in captured DOM must not block"
+
+
+def test_spec_selectors_present_in_dom_silent_without_structure(tmp_path: Path) -> None:
+    """No structure.json (or empty capture) must never block — return no results."""
+    from ui_clone.gates.spec import _check_spec_selectors_present_in_dom
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    spec = {"transitions": [{"id": "x", "target": ".whatever-absent"}]}
+    gate = Gate(ref)
+    assert _check_spec_selectors_present_in_dom(gate, spec) == []

@@ -33,6 +33,20 @@ def test_gate_section_compare_passes_when_all_sections_pass(tmp_path: Path) -> N
 
 
 
+def test_gate_section_compare_fails_on_empty_result(tmp_path: Path) -> None:
+    """An empty / whitespace-only result.txt has no ❌ rows but measured nothing
+    — it must NOT certify 'All sections PASS' (no negative evidence ≠ verified)."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    sections = ref / "sections"
+    sections.mkdir()
+    (sections / "result.txt").write_text("   \n\n")
+    gate = Gate(ref)
+    results = gate.gate_section_compare()
+    failures = [r for r in results if r.status == "fail"]
+    assert failures, "empty result.txt must not certify PASS"
+
+
 def test_gate_section_compare_fails_when_section_failed(tmp_path: Path) -> None:
     """gate_section_compare must fail when result.txt contains ❌."""
     ref = tmp_path / "ref"
@@ -667,6 +681,12 @@ def test_dynamic_mask_augments_webgl_embed_selectors() -> None:
         "WebGL-embed selectors must be appended to DYNAMIC_SELECTORS so they are "
         "masked symmetrically on ref + impl"
     )
+
+
+def test_dynamic_mask_covers_embedded_and_native_video_surfaces() -> None:
+    """Equivalent Vimeo iframe and local video implementations share a mask."""
+    body = _section_compare_body()
+    assert 'DYNAMIC_SELECTORS="${DYNAMIC_SELECTORS:-canvas, video, iframe}"' in body
 
 
 def test_dynamic_mask_waits_for_canvas_mount() -> None:

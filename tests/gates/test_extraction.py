@@ -40,6 +40,84 @@ def test_gate_extraction_does_not_require_transition_coverage(tmp_path: Path) ->
     )
 
 
+def test_gate_extraction_finalizes_explicit_empty_phase2_artifacts(tmp_path: Path) -> None:
+    """Loop-03 regression: explicit absence must not look like skipped extraction.
+
+    A Phase 2 fast path can have enough source evidence to prove there are no
+    inline SVGs or CSS custom properties, while still leaving `inline-svgs.json`
+    as a double-encoded empty array and `css/variables.txt` at zero bytes. The
+    extraction gate should normalize those into canonical sentinel artifacts and
+    derive body/design summaries from structure/CSS before checking file size.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "tag": "body",
+        "class": "home scrolled",
+        "styles": {
+            "transition": "background-color 0.3s ease",
+            "background-color": "rgb(255, 255, 255)",
+            "color": "rgb(0, 0, 0)",
+        },
+        "children": [
+            {
+                "tag": "button",
+                "class": "cta",
+                "styles": {
+                    "background-color": "rgb(0, 199, 60)",
+                    "border-radius": "999px",
+                    "padding": "12px 24px",
+                    "font-size": "16px",
+                    "font-weight": "700",
+                    "font-family": "Arial",
+                },
+            },
+            {
+                "tag": "button",
+                "class": "cta",
+                "styles": {
+                    "background-color": "rgb(0, 199, 60)",
+                    "border-radius": "999px",
+                    "padding": "12px 24px",
+                    "font-size": "16px",
+                    "font-weight": "700",
+                    "font-family": "Arial",
+                },
+            },
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure))
+    (ref / "head.json").write_text(json.dumps({"title": "Test"}))
+    (ref / "styles.json").write_text(json.dumps({"body": {"color": "rgb(0, 0, 0)"}}))
+    (ref / "fonts.json").write_text(json.dumps({"faces": []}))
+    (ref / "visible-images.json").write_text(json.dumps({"images": []}))
+    # Matches the loop-03 artifact shape: JSON string whose value is an empty array.
+    (ref / "inline-svgs.json").write_text(json.dumps("[]"))
+    css_dir = ref / "css"
+    css_dir.mkdir()
+    (css_dir / "app.css").write_text(
+        "body.scrolled { background: #000; color: #fff; } .cta { color: #111; }"
+    )
+    (css_dir / "variables.txt").write_text("")
+
+    results = Gate(ref).gate_extraction()
+    failures = [r for r in results if r.status == "fail"]
+
+    assert failures == []
+    inline_svgs = json.loads((ref / "inline-svgs.json").read_text())
+    assert inline_svgs["observation"] == "no-inline-svgs"
+    assert inline_svgs["svgs"] == []
+    variables_txt = (css_dir / "variables.txt").read_text()
+    assert "no CSS custom properties observed" in variables_txt
+    variables_json = json.loads((css_dir / "variables.json").read_text())
+    assert variables_json["observation"] == "no-css-custom-properties"
+    body_state = json.loads((ref / "body-state.json").read_text())
+    assert body_state["currentBodyClasses"] == "home scrolled"
+    assert any("body.scrolled" in row["selector"] for row in body_state["bodyClassRules"])
+    design_bundles = json.loads((ref / "design-bundles.json").read_text())
+    assert design_bundles["summary"]["bundleCount"] >= 1
+
+
 def _write_minimal_extraction_artifacts(ref: Path) -> None:
     """Plant minimum extraction artifacts so unclonable-preflight tests
     aren't tripped by missing-file failures from earlier checks."""
@@ -168,4 +246,3 @@ def test_unclonable_preflight_quiet_on_normal_page(tmp_path: Path) -> None:
         f"normal product page must NOT trigger unclonable-preflight; "
         f"got: {[(r.label, r.status, r.message[:60]) for r in preflight]}"
     )
-

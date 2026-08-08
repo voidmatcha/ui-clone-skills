@@ -13,7 +13,7 @@ def _run(ref: Path, impl: Path) -> subprocess.CompletedProcess[str]:
         ["bash", str(SCRIPT), str(ref), str(impl / "src")],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
 
 

@@ -13,13 +13,16 @@ from ._helpers import (
 
 
 class TestPreBashFreshFolderStaticMirror:
-    """Fresh natural prompts must enter the ui_clone pipeline, not mirror the
-    live site into impl/public and self-verify with HTTP checks."""
+    """Mirroring the live site into impl/public is still denied — but by the
+    retained static-mirror family, not the (removed, hook-slimming B)
+    fresh-folder ordering-nanny. Starting a static server before post-implement
+    is now an advisory warning, not a hard block (Stop verify-stamp gate is the
+    real backstop)."""
 
     MODULE = "ui_clone.hooks.pre_bash"
 
     def test_wget_static_mirror_blocked_before_pipeline(self, tmp_path: Path) -> None:
-        """No Phase 1 evidence + wget mirror into impl/public → deny."""
+        """wget mirror into impl/public → still denied (static-mirror guard)."""
         make_search_root(tmp_path)
         target = tmp_path / "scratch" / "loop-60" / "impl" / "public"
         target.mkdir(parents=True)
@@ -38,11 +41,10 @@ class TestPreBashFreshFolderStaticMirror:
         data = json.loads(out)
         reason = data["hookSpecificOutput"]["permissionDecisionReason"]
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "fresh-folder enforcement" in reason
-        assert "pipeline driver FIRST" in reason
+        assert "static mirror blocked" in reason
 
     def test_curl_static_html_save_blocked_before_pipeline(self, tmp_path: Path) -> None:
-        """No Phase 1 evidence + curl writes live HTML to impl/public → deny."""
+        """curl writes live HTML to impl/public → still denied (static-mirror guard)."""
         make_search_root(tmp_path)
         target = tmp_path / "scratch" / "loop-60" / "impl" / "public" / "index.html"
         target.parent.mkdir(parents=True)
@@ -59,11 +61,12 @@ class TestPreBashFreshFolderStaticMirror:
         data = json.loads(out)
         reason = data["hookSpecificOutput"]["permissionDecisionReason"]
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "fresh-folder enforcement" in reason
-        assert "pipeline driver FIRST" in reason
+        assert "static mirror blocked" in reason
 
-    def test_static_server_blocked_before_pipeline(self, tmp_path: Path) -> None:
-        """No Phase 1 evidence + serving impl/public → deny shallow mirror completion."""
+    def test_static_server_before_pipeline_warns_not_blocks(self, tmp_path: Path) -> None:
+        """Serving impl/public before Phase 1 → advisory WARNING, not a block
+        (hook slimming B demoted the static-server guard). The command is
+        allowed; the Stop verify-stamp gate is the real ship-short backstop."""
         make_search_root(tmp_path)
         server = tmp_path / "scratch" / "loop-60" / "impl" / "server.js"
         server.parent.mkdir(parents=True)
@@ -76,13 +79,8 @@ class TestPreBashFreshFolderStaticMirror:
         )
 
         assert result.returncode == 0
-        out = result.stdout.strip()
-        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
-        data = json.loads(out)
-        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
-        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "fresh-folder enforcement" in reason
-        assert "pipeline driver FIRST" in reason
+        # No deny payload on stdout — the command is not blocked.
+        assert result.stdout.strip() == "", f"expected no block, got: {result.stdout}"
 
     def test_static_mirror_tools_allowed_after_pipeline_evidence(self, tmp_path: Path) -> None:
         """Once pipeline-state exists, fresh-folder enforcement no longer owns the command."""

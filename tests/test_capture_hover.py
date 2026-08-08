@@ -51,8 +51,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "extract" / "capture-hover.sh"
 
 
+def test_browser_eval_records_css_stylesheet_href() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'typeof sheet.href === "string"' in source
+    assert "sourceHrefs: sourceHref ? [sourceHref] : []" in source
+
+
 def _make_fake_agent_browser(
-    tmp_path: Path, eval_payload: str, open_returncode: int = 0,
+    tmp_path: Path,
+    eval_payload: str,
+    open_returncode: int = 0,
     eval_returncode: int = 0,
 ) -> Path:
     """Build a fake `agent-browser` shell wrapper. Same shape as Phase A/B."""
@@ -61,7 +69,7 @@ def _make_fake_agent_browser(
     fake = bin_dir / "agent-browser"
     fake.write_text(
         "#!/usr/bin/env bash\n"
-        f"echo \"$@\" >> '{tmp_path / 'calls.log'}'\n"
+        f'printf \'%s %s %s\\n\' "$1" "$2" "$3" >> \'{tmp_path / "calls.log"}\'\n'
         "shift 2  # consume --session NAME\n"
         'if [ "$1" = "open" ]; then\n'
         f"  exit {open_returncode}\n"
@@ -84,19 +92,24 @@ def _run_capture_hover(
     # warnings into stdout/stderr that the capture script parses as JSON.
     env["LC_ALL"] = "C"
     env["LANG"] = "C"
+    env["STATE_STRUCTURE_SPEC"] = "0"
     args = [str(SCRIPT), "https://example.test", "sess1", str(ref_dir)]
     if reuse_session:
         args.append("--reuse-session")
-    return subprocess.run(
-        args, capture_output=True, text=True, env=env, timeout=20
-    )
+    return subprocess.run(args, capture_output=True, text=True, env=env, timeout=20)
 
 
-def _result(activation: str, *, affected: str | None = None,
-            kind: str = "css+js",
-            css_props: dict | None = None,
-            js_changes: list[dict] | None = None,
-            dom_changes: list[dict] | None = None) -> dict:
+def _result(
+    activation: str,
+    *,
+    affected: str | None = None,
+    activation_validated: bool = True,
+    source_hrefs: list[str] | None = None,
+    kind: str = "css+js",
+    css_props: dict | None = None,
+    js_changes: list[dict] | None = None,
+    dom_changes: list[dict] | None = None,
+) -> dict:
     """Build one per-candidate hover result entry.
 
     kind: "css" | "js" | "css+js" — which signal class produced this entry.
@@ -108,15 +121,19 @@ def _result(activation: str, *, affected: str | None = None,
         css_props = {"transform": "scale(1.05)", "opacity": "0.9"}
     if js_changes is None and kind in ("js", "css+js"):
         js_changes = [
-            {"selector": affected or activation,
-             "computedStyleBefore": {"transform": "none"},
-             "computedStyleAfter": {"transform": "scale(1.05)"}},
+            {
+                "selector": affected or activation,
+                "computedStyleBefore": {"transform": "none"},
+                "computedStyleAfter": {"transform": "scale(1.05)"},
+            },
         ]
     return {
         "activation": activation,
         "affected": affected if affected else activation,
+        "activationValidated": activation_validated,
         "kind": kind,
         "cssProperties": css_props or {},
+        "sourceHrefs": source_hrefs or [],
         "jsChanges": js_changes or [],
         "domChanges": dom_changes or [],
         "eventDriver": "agent-browser.eval.synthetic-hover",
@@ -124,25 +141,29 @@ def _result(activation: str, *, affected: str | None = None,
 
 
 def _eval_payload(
-    results: list[dict], duration_ms: int = 5000,
+    results: list[dict],
+    duration_ms: int = 5000,
     candidates_found: int | None = None,
     candidates_processed: int | None = None,
     candidates_capped_at: int = 50,
+    selectors_absent_from_page: int = 0,
+    selectors_invalid: int = 0,
 ) -> str:
     css_count = len([r for r in results if r.get("kind") in ("css", "css+js")])
     js_count = len([r for r in results if r.get("kind") in ("js", "css+js")])
-    any_signal = len([
-        r for r in results
-        if r.get("cssProperties") or r.get("jsChanges") or r.get("domChanges")
-    ])
+    any_signal = len(
+        [r for r in results if r.get("cssProperties") or r.get("jsChanges") or r.get("domChanges")]
+    )
     payload = {
         "results": results,
         "durationMs": duration_ms,
-        "candidatesFound": candidates_found if candidates_found is not None
-                           else len(results),
-        "candidatesProcessed": candidates_processed if candidates_processed is not None
-                              else len(results),
+        "candidatesFound": candidates_found if candidates_found is not None else len(results),
+        "candidatesProcessed": candidates_processed
+        if candidates_processed is not None
+        else len(results),
         "candidatesCappedAt": candidates_capped_at,
+        "selectorsAbsentFromPage": selectors_absent_from_page,
+        "selectorsInvalid": selectors_invalid,
         "candidatesWithCssRule": css_count,
         "candidatesWithJsDiff": js_count,
         "candidatesWithAnySignal": any_signal,
@@ -157,9 +178,7 @@ def test_no_hover_candidates_emits_empty_manifest(tmp_path: Path) -> None:
     """Site with no :hover rules + no JS hover handlers → results empty,
     manifest.entries empty, summary records 0 found / 0 with signal."""
     ref_dir = tmp_path / "ref"
-    bin_dir = _make_fake_agent_browser(
-        tmp_path, _eval_payload([], duration_ms=500)
-    )
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload([], duration_ms=500))
     proc = _run_capture_hover(ref_dir, bin_dir)
     assert proc.returncode == 0, f"stderr: {proc.stderr}"
 
@@ -183,9 +202,12 @@ def test_css_only_candidate_emits_entry_with_declared_properties(
     (codex [1] [6]: synthetic events cannot activate CSS :hover)."""
     ref_dir = tmp_path / "ref"
     results = [
-        _result(".btn", kind="css",
-                css_props={"transform": "scale(1.05)", "opacity": "0.9"},
-                js_changes=[]),
+        _result(
+            ".btn",
+            kind="css",
+            css_props={"transform": "scale(1.05)", "opacity": "0.9"},
+            js_changes=[],
+        ),
     ]
     bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
     proc = _run_capture_hover(ref_dir, bin_dir)
@@ -206,6 +228,186 @@ def test_css_only_candidate_emits_entry_with_declared_properties(
     assert snap["kind"] == "css"
     assert snap["cssProperties"]["transform"] == "scale(1.05)"
     assert snap["cssProperties"]["opacity"] == "0.9"
+    hover_css = json.loads((ref_dir / "hover-css-rules.json").read_text())
+    assert hover_css["status"] == "pass"
+    assert hover_css["count"] == 1
+    assert hover_css["rules"][0]["selector"] == ".btn:hover"
+    assert hover_css["rules"][0]["cssProperties"]["transform"] == "scale(1.05)"
+
+
+def test_absent_css_only_candidate_is_not_emitted(tmp_path: Path) -> None:
+    """A stylesheet rule whose activation selector is absent from the current
+    document must not pollute either hover artifact."""
+    ref_dir = tmp_path / "ref"
+    results = [
+        _result(
+            ".download-button",
+            activation_validated=False,
+            kind="css",
+            css_props={"transform": "translateY(-2px)"},
+            js_changes=[],
+        ),
+    ]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path,
+        _eval_payload(
+            results,
+            candidates_found=0,
+            candidates_processed=0,
+            selectors_absent_from_page=1,
+        ),
+    )
+    proc = _run_capture_hover(ref_dir, bin_dir)
+    assert proc.returncode == 0, proc.stderr
+
+    hover_dir = ref_dir / "states" / "hover"
+    manifest = json.loads((hover_dir / "manifest.json").read_text())
+    summary = json.loads((hover_dir / "summary.json").read_text())
+    hover_css = json.loads((ref_dir / "hover-css-rules.json").read_text())
+    assert manifest == {"entries": []}
+    assert hover_css["count"] == 0
+    assert summary["candidatesFound"] == 0
+    assert summary["candidatesProcessed"] == 0
+    assert summary["selectorsAbsentFromPage"] == 1
+    assert summary["selectorsInvalid"] == 0
+
+
+def test_present_css_candidate_preserves_validation_provenance(
+    tmp_path: Path,
+) -> None:
+    """A selector confirmed on the current page remains eligible and absent /
+    invalid discovery counts survive into summary provenance."""
+    ref_dir = tmp_path / "ref"
+    results = [
+        _result(
+            ".product-card",
+            affected=".product-card>.title",
+            kind="css",
+            css_props={"color": "red"},
+            js_changes=[],
+        ),
+    ]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path,
+        _eval_payload(
+            results,
+            candidates_found=1,
+            candidates_processed=1,
+            selectors_absent_from_page=3,
+            selectors_invalid=2,
+        ),
+    )
+    proc = _run_capture_hover(ref_dir, bin_dir)
+    assert proc.returncode == 0, proc.stderr
+
+    hover_dir = ref_dir / "states" / "hover"
+    manifest = json.loads((hover_dir / "manifest.json").read_text())
+    summary = json.loads((hover_dir / "summary.json").read_text())
+    hover_css = json.loads((ref_dir / "hover-css-rules.json").read_text())
+    assert len(manifest["entries"]) == 1
+    assert hover_css["count"] == 1
+    assert hover_css["rules"][0]["selector"] == ".product-card:hover>.title"
+    assert summary["candidatesFound"] == 1
+    assert summary["candidatesProcessed"] == 1
+    assert summary["selectorsAbsentFromPage"] == 3
+    assert summary["selectorsInvalid"] == 2
+
+
+def test_cssom_stylesheet_href_maps_to_downloaded_css_source(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    (ref_dir / "css").mkdir(parents=True)
+    (ref_dir / "css" / "site.css").write_text(".card:hover{color:red}", encoding="utf-8")
+    results = [
+        _result(
+            ".card",
+            kind="css",
+            css_props={"color": "red"},
+            js_changes=[],
+            source_hrefs=["https://cdn.example.test/assets/site.css?v=42"],
+        ),
+    ]
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
+
+    proc = _run_capture_hover(ref_dir, bin_dir)
+
+    assert proc.returncode == 0, proc.stderr
+    hover_css = json.loads((ref_dir / "hover-css-rules.json").read_text())
+    assert hover_css["rules"][0]["sourceHrefs"] == [
+        "https://cdn.example.test/assets/site.css?v=42"
+    ]
+    assert hover_css["rules"][0]["sourceFile"] == "css/site.css"
+
+
+def test_deduped_hover_rule_preserves_all_stylesheet_hrefs(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    results = [
+        _result(
+            ".card",
+            kind="css",
+            css_props={"color": "red"},
+            js_changes=[],
+            source_hrefs=["https://cdn.example.test/a.css"],
+        ),
+        _result(
+            ".card",
+            kind="css",
+            css_props={"opacity": ".8"},
+            js_changes=[],
+            source_hrefs=["https://cdn.example.test/b.css"],
+        ),
+    ]
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
+
+    proc = _run_capture_hover(ref_dir, bin_dir)
+
+    assert proc.returncode == 0, proc.stderr
+    hover_css = json.loads((ref_dir / "hover-css-rules.json").read_text())
+    assert hover_css["rules"][0]["sourceHrefs"] == [
+        "https://cdn.example.test/a.css",
+        "https://cdn.example.test/b.css",
+    ]
+    assert "sourceFile" not in hover_css["rules"][0]
+
+
+def test_equivalent_selector_pairs_are_deduplicated_before_emission(
+    tmp_path: Path,
+) -> None:
+    ref_dir = tmp_path / "ref"
+    results = [
+        _result(
+            ".card",
+            affected=".card > .title",
+            kind="css",
+            css_props={"color": "red"},
+            js_changes=[],
+        ),
+        _result(
+            ".card",
+            affected=".card>.title",
+            kind="css",
+            css_props={"opacity": "0.8"},
+            js_changes=[],
+        ),
+    ]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path,
+        _eval_payload(results, candidates_found=1, candidates_processed=1),
+    )
+    proc = _run_capture_hover(ref_dir, bin_dir)
+    assert proc.returncode == 0, proc.stderr
+
+    hover_dir = ref_dir / "states" / "hover"
+    manifest = json.loads((hover_dir / "manifest.json").read_text())
+    summary = json.loads((hover_dir / "summary.json").read_text())
+    hover_css = json.loads((ref_dir / "hover-css-rules.json").read_text())
+    assert len(manifest["entries"]) == 1
+    assert summary["candidatesProcessed"] == 1
+    assert hover_css["count"] == 1
+    assert hover_css["rules"][0]["selector"] == ".card:hover>.title"
+    assert hover_css["rules"][0]["cssProperties"] == {
+        "color": "red",
+        "opacity": "0.8",
+    }
 
 
 def test_js_only_candidate_emits_entry_with_runtime_changes(
@@ -216,12 +418,18 @@ def test_js_only_candidate_emits_entry_with_runtime_changes(
     with computed-style before/after."""
     ref_dir = tmp_path / "ref"
     results = [
-        _result("button.cta", kind="js",
-                css_props={}, js_changes=[
-                    {"selector": "button.cta",
-                     "computedStyleBefore": {"backgroundColor": "rgb(255, 0, 0)"},
-                     "computedStyleAfter": {"backgroundColor": "rgb(200, 0, 0)"}},
-                ]),
+        _result(
+            "button.cta",
+            kind="js",
+            css_props={},
+            js_changes=[
+                {
+                    "selector": "button.cta",
+                    "computedStyleBefore": {"backgroundColor": "rgb(255, 0, 0)"},
+                    "computedStyleAfter": {"backgroundColor": "rgb(200, 0, 0)"},
+                },
+            ],
+        ),
     ]
     bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
     proc = _run_capture_hover(ref_dir, bin_dir)
@@ -244,8 +452,9 @@ def test_descendant_hover_records_affected_scope_distinct_from_activation(
     must record both so downstream gate can resolve correctly."""
     ref_dir = tmp_path / "ref"
     results = [
-        _result(".card", affected=".card .title", kind="css",
-                css_props={"color": "rgb(255, 100, 0)"}),
+        _result(
+            ".card", affected=".card .title", kind="css", css_props={"color": "rgb(255, 100, 0)"}
+        ),
     ]
     bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
     proc = _run_capture_hover(ref_dir, bin_dir)
@@ -294,9 +503,7 @@ def test_dom_hover_mutation_counts_as_runtime_signal(tmp_path: Path) -> None:
             dom_changes=[
                 {
                     "selector": "div.card",
-                    "changes": {
-                        "className": {"before": "card", "after": "card is-hover"}
-                    },
+                    "changes": {"className": {"before": "card", "after": "card is-hover"}},
                 }
             ],
         )
@@ -319,7 +526,9 @@ def test_dom_hover_mutation_counts_as_runtime_signal(tmp_path: Path) -> None:
 def test_agent_browser_open_failure_exit_2(tmp_path: Path) -> None:
     ref_dir = tmp_path / "ref"
     bin_dir = _make_fake_agent_browser(
-        tmp_path, _eval_payload([]), open_returncode=1,
+        tmp_path,
+        _eval_payload([]),
+        open_returncode=1,
     )
     proc = _run_capture_hover(ref_dir, bin_dir)
     assert proc.returncode == 2
@@ -349,7 +558,8 @@ def test_derived_session_used_by_default(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text()
     assert "sess1-hover" in calls
     bare_lines = [
-        line for line in calls.splitlines()
+        line
+        for line in calls.splitlines()
         if "--session sess1 " in (line + " ") and "sess1-hover" not in line
     ]
     assert not bare_lines, f"derived session must be used: {calls}"
@@ -373,15 +583,14 @@ def test_summary_carries_cap_metadata(tmp_path: Path) -> None:
     ref_dir = tmp_path / "ref"
     results = [_result(f"a.item-{i}", kind="css") for i in range(50)]
     bin_dir = _make_fake_agent_browser(
-        tmp_path, _eval_payload(results, candidates_found=150,
-                                candidates_processed=50,
-                                candidates_capped_at=50),
+        tmp_path,
+        _eval_payload(
+            results, candidates_found=150, candidates_processed=50, candidates_capped_at=50
+        ),
     )
     proc = _run_capture_hover(ref_dir, bin_dir)
     assert proc.returncode == 0
-    summary = json.loads(
-        (ref_dir / "states" / "hover" / "summary.json").read_text()
-    )
+    summary = json.loads((ref_dir / "states" / "hover" / "summary.json").read_text())
     assert summary["candidatesFound"] == 150
     assert summary["candidatesProcessed"] == 50
     assert summary["candidatesCappedAt"] == 50

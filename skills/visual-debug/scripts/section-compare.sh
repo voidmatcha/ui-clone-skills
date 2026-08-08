@@ -17,12 +17,26 @@
 
 set -euo pipefail
 
+# W-4 (loop-ebpb-0): the reference follows prefers-color-scheme — a host
+# OS theme flip (macOS auto-dark in the evening) silently captured the ref
+# in dark mode and poisoned an entire compare cycle (footer dSSIM
+# 0.0000065 -> 0.687 reading as catastrophic regression). Pin light unless
+# the caller explicitly overrides.
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_COLOR_SCHEME
+
 VIEW_W="${VIEW_W:-1440}"
 VIEW_H="${VIEW_H:-900}"
 NO_IMAGES="${NO_IMAGES:-0}"
 WAIT_REF="${WAIT_REF:-8000}"
 WAIT_IMPL="${WAIT_IMPL:-6000}"
 WAIT_LAZY_LOAD="${WAIT_LAZY_LOAD:-2}"
+# H9 (loop-nvti-3/4): a fixed 0.5s settle captured choreography-alive refs
+# MID-TRANSITION (1.06s CSS transitions + rest re-eval) — transient ref crops
+# overturned two eyeball observations. When the caller does not pin
+# WAIT_SCROLL_SETTLE, it is DERIVED from the spec's longest transition
+# duration (+0.4s rest margin, floor 0.5s, cap 4s) after DIR is known below.
+WAIT_SCROLL_SETTLE_USER="${WAIT_SCROLL_SETTLE:-}"
 WAIT_SCROLL_SETTLE="${WAIT_SCROLL_SETTLE:-0.5}"
 
 # ── Frozen-ref mode (opt-in) ─────────────────────────────────────────
@@ -75,6 +89,24 @@ SECTION_PERCEPTUAL_DENSE="${SECTION_PERCEPTUAL_DENSE:-1}"
 SECTION_DSSIM_DENSE_MAX="${SECTION_DSSIM_DENSE_MAX:-0.12}"
 SECTION_DSSIM_LOCAL_FAIL="${SECTION_DSSIM_LOCAL_FAIL:-0.30}"
 SECTION_LOCAL_BAND_PX="${SECTION_LOCAL_BAND_PX:-200}"
+# Strict-dssim rescue ceiling (pass-by-dssim-strict): a responsive (un-baked)
+# impl rasterizes glyphs at a different subpixel phase than a pixel-frozen ref
+# crop, so AE saturates past dssim_cap and AE_SATURATION while dSSIM stays
+# ~1e-6..0.02 (loop-ebpb-3: 8 rows <= 0.0212, byte-continuous across the
+# un-bake; real defects measured 0.118/0.199 — ~5x separation). 0.03 sits in
+# that gap, 4x tighter than SECTION_DSSIM_DENSE_MAX.
+SECTION_DSSIM_STRICT_MAX="${SECTION_DSSIM_STRICT_MAX:-0.03}"
+
+# ── Motion shift-search (Commit 2) ──
+# A faithful scroll-reveal section can be caught at a different scroll sub-frame
+# than the ref (identical content, uniformly translated tens-to-low-hundreds px).
+# A wide NON-circular vertical shift-search realigns it; a broken impl does not
+# (vetoed by motion_phase_verdict's collapse + structure + localized guards).
+SECTION_MOTION_PHASE_MAX_PX="${SECTION_MOTION_PHASE_MAX_PX:-240}"   # widest shift searched (each direction)
+SECTION_MOTION_PHASE_STEP="${SECTION_MOTION_PHASE_STEP:-8}"          # coarse sweep granularity in px
+SECTION_MOTION_COLLAPSE_MIN="${SECTION_MOTION_COLLAPSE_MIN:-0.15}"   # min AE drop ratio to count as a phase
+SECTION_MOTION_MIN_STRUCT="${SECTION_MOTION_MIN_STRUCT:-0.85}"       # shifted structure floor (1 - dssim)
+SECTION_MOTION_PHASE="${SECTION_MOTION_PHASE:-1}"                    # master enable (1 default; 0 disables tier)
 
 # ── Dynamic-content exclusion ──
 # RAF-driven canvases (Three.js shaders, particles), <video>, and other
@@ -99,12 +131,24 @@ SECTION_LOCAL_BAND_PX="${SECTION_LOCAL_BAND_PX:-200}"
 # video-motion-compare, NOT by section-compare. Opt back into per-pixel
 # motion-in-section by setting `EXCLUDE_DYNAMIC=0`.
 EXCLUDE_DYNAMIC="${EXCLUDE_DYNAMIC:-1}"
-DYNAMIC_SELECTORS="${DYNAMIC_SELECTORS:-canvas, video}"
+DYNAMIC_SELECTORS="${DYNAMIC_SELECTORS:-canvas, video, iframe}"
 
 ORIG_URL="${1:?Usage: section-compare.sh <orig-url> <impl-url> <session> [output-dir]}"
 IMPL_URL="${2:?Usage: section-compare.sh <orig-url> <impl-url> <session> [output-dir]}"
 SESSION="${3:?Usage: section-compare.sh <orig-url> <impl-url> <session> [output-dir]}"
 DIR="${4:-tmp/ref/visual-debug}"
+# H9 settle derivation (see header note): only when the caller did not pin it.
+_SETTLE_SPEC="$DIR/transition-spec.json"
+if [ ! -f "$_SETTLE_SPEC" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/transition-spec.json" ]; then
+  _SETTLE_SPEC="${REF_ROOT_DIR}/transition-spec.json"
+fi
+if [ -z "$WAIT_SCROLL_SETTLE_USER" ] && [ -f "$_SETTLE_SPEC" ]; then
+  _derived_settle=$(PYTHONPATH="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"     python3 -m ui_clone.section_capture --print-settle "$_SETTLE_SPEC" 2>/dev/null || echo "")
+  case "$_derived_settle" in
+    ''|*[!0-9.]*) : ;; # non-numeric — keep the 0.5 default
+    *) WAIT_SCROLL_SETTLE="$_derived_settle" ;;
+  esac
+fi
 # ⚠️  IMPORTANT: Always pass $4 = absolute path to tmp/ref/<component-name>.
 # The default (tmp/ref/visual-debug) is for standalone runs only.
 # The Stop gate looks for sections/result.txt in the ACTIVE REF_DIR (which is absolute).
@@ -123,6 +167,21 @@ if [[ "$DIR" != /* ]]; then
 fi
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+# AE ceiling for the dssim/perceptual leniency branches (+ visual-judge
+# override path). See lib/dssim-cap.sh header.
+# shellcheck source=lib/dssim-cap.sh
+. "$SCRIPTS_DIR/lib/dssim-cap.sh"
+# Navigation watchdog: shadows `agent-browser` so a dead/unreachable URL on the
+# open/goto/navigate path fails fast (UI_CLONE_AB_OPEN_TIMEOUT, default 30s)
+# instead of deadlocking this compare. See lib/ab-timeout.sh header.
+# shellcheck source=lib/ab-timeout.sh
+. "$SCRIPTS_DIR/lib/ab-timeout.sh"
+# AE unit normalization: ImageMagick 7.1.2-27 Q16 returns `compare -metric AE`
+# as pixel_count * 65535 (QuantumRange), not the raw count. Every AE flows
+# through _ae_at, which normalizes via _ae_normalize. See lib/ae-quantum.sh.
+# shellcheck source=lib/ae-quantum.sh
+. "$SCRIPTS_DIR/lib/ae-quantum.sh"
+SECTION_DSSIM_AE_CAP_MULT="${SECTION_DSSIM_AE_CAP_MULT:-10}"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../../.." && pwd)"
 
 # ── Optional multi-viewport fan-out ─────────────────────────────────
@@ -133,17 +192,15 @@ REPO_ROOT="$(cd "$SCRIPTS_DIR/../../.." && pwd)"
 # a canonical aggregate sections/result.txt for gates and completion reports.
 if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
   SECTION_COMPARE_INNER_CMD="${SECTION_COMPARE_INNER_CMD:-$0}"
-  mkdir -p "$DIR/sections/viewports"
-  RESULT_FILE="$DIR/sections/result.txt"
-  {
-    echo "# section-compare multi-viewport result"
-    echo "viewports: $VIEWPORTS"
-    echo ""
-  } > "$RESULT_FILE"
 
-  OVERALL=0
-  IFS=',' read -r -a VIEWPORT_LIST <<< "$VIEWPORTS"
-  for RAW_VIEWPORT in "${VIEWPORT_LIST[@]}"; do
+  # Validate the full fan-out before touching canonical evidence. Previously the
+  # wrapper truncated result.txt before discovering a malformed later entry,
+  # leaving a header-only file that could not honestly represent either the last
+  # complete sweep or the interrupted one.
+  IFS=',' read -r -a RAW_VIEWPORT_LIST <<< "$VIEWPORTS"
+  VIEWPORT_LIST=()
+  VIEWPORT_COUNT=0
+  for RAW_VIEWPORT in "${RAW_VIEWPORT_LIST[@]}"; do
     VP="$(printf '%s' "$RAW_VIEWPORT" | tr -d '[:space:]')"
     if [ -z "$VP" ]; then
       continue
@@ -152,6 +209,38 @@ if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
       echo "ERROR: malformed VIEWPORTS entry '$RAW_VIEWPORT' (expected WIDTHxHEIGHT)" >&2
       exit 2
     fi
+    VIEWPORT_LIST[$VIEWPORT_COUNT]="$VP"
+    VIEWPORT_COUNT=$((VIEWPORT_COUNT + 1))
+  done
+  if [ "$VIEWPORT_COUNT" -eq 0 ]; then
+    echo "ERROR: VIEWPORTS did not contain any WIDTHxHEIGHT entries" >&2
+    exit 2
+  fi
+
+  mkdir -p "$DIR/sections/viewports"
+  RESULT_FILE="$DIR/sections/result.txt"
+  RESULT_JSON_FILE="$DIR/sections/result.json"
+  RESULT_TMP="$(mktemp "$DIR/sections/.result.txt.tmp.XXXXXX")"
+  RESULT_JSON_TMP=""
+  # Invoked indirectly by the EXIT trap below.
+  # shellcheck disable=SC2329
+  _cleanup_result_stage() {
+    [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP"
+    [ -z "${RESULT_JSON_TMP:-}" ] || rm -f "$RESULT_JSON_TMP"
+  }
+  trap '_result_status=$?; _cleanup_result_stage; exit "$_result_status"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  RESULT_JSON_TMP="$(mktemp "$DIR/sections/.result.json.tmp.XXXXXX")"
+  {
+    echo "# section-compare multi-viewport result"
+    echo "viewports: $VIEWPORTS"
+    echo ""
+  } > "$RESULT_TMP"
+
+  OVERALL=0
+  for VP in "${VIEWPORT_LIST[@]}"; do
     VP_W="${VP%x*}"
     VP_H="${VP#*x}"
     VP_DIR="$DIR/sections/viewports/$VP"
@@ -160,19 +249,41 @@ if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
     {
       echo "viewport: $VP"
       echo ""
-    } >> "$RESULT_FILE"
+    } >> "$RESULT_TMP"
 
     echo "▸ section-compare viewport $VP"
     set +e
+    # REF_ROOT_DIR: per-viewport runs write artifacts under
+    # sections/viewports/<WxH>/, but ref-root-level inputs
+    # (transition-spec.json, asset-substitution.json) only exist at $DIR —
+    # without this the inner run silently resolved an empty spec and every
+    # dynamic:true mask dropped out (loop-e2e-9 viewport-fanout-mask-gap).
     VIEW_W="$VP_W" VIEW_H="$VP_H" VIEWPORTS="" SECTION_COMPARE_INNER=1 \
+      REF_ROOT_DIR="$DIR" \
+      WAIT_SCROLL_SETTLE="$WAIT_SCROLL_SETTLE" \
       bash "$SECTION_COMPARE_INNER_CMD" "$ORIG_URL" "$IMPL_URL" "${SESSION}-${VP}" "$VP_DIR" \
       > "$VP_DIR/section-compare.log" 2>&1
-    CODE=$?
+    COMPARE_CODE=$?
+    CODE=$COMPARE_CODE
+    if command -v agent-browser >/dev/null 2>&1 \
+      && [ -f "$REPO_ROOT/scripts/verify/cleanup-sessions.sh" ]; then
+      CLEANUP_OUTPUT="$(
+        bash "$REPO_ROOT/scripts/verify/cleanup-sessions.sh" "${SESSION}-${VP}" 2>&1
+      )"
+      CLEANUP_CODE=$?
+      if [ "$CLEANUP_CODE" -ne 0 ]; then
+        echo "ERROR: section-compare cleanup failed for viewport $VP session prefix '${SESSION}-${VP}' (exit $CLEANUP_CODE)" >&2
+        [ -z "$CLEANUP_OUTPUT" ] || printf '%s\n' "$CLEANUP_OUTPUT" >&2
+        if [ "$COMPARE_CODE" -eq 0 ]; then
+          CODE=2
+        fi
+      fi
+    fi
     set -e
 
-    echo "[$VP] exit: $CODE" >> "$RESULT_FILE"
+    echo "[$VP] exit: $CODE" >> "$RESULT_TMP"
     if [ -f "$VP_DIR/sections/result.txt" ]; then
-      python3 - "$VP" "$VP_DIR/sections/result.txt" >> "$RESULT_FILE" <<'PY'
+      python3 - "$VP" "$VP_DIR/sections/result.txt" >> "$RESULT_TMP" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -196,14 +307,104 @@ for raw in Path(result_path).read_text(encoding="utf-8", errors="replace").split
     print(f"[{vp}] {line}" if line else "")
 PY
     else
-      echo "[$VP] sections/result.txt missing; see $VP_DIR/section-compare.log" >> "$RESULT_FILE"
+      echo "[$VP] sections/result.txt missing; see $VP_DIR/section-compare.log" >> "$RESULT_TMP"
     fi
-    echo "" >> "$RESULT_FILE"
+    echo "" >> "$RESULT_TMP"
 
-    if [ "$CODE" -ne 0 ]; then
+    if [ "$COMPARE_CODE" -ne 0 ]; then
       OVERALL=1
+    elif [ "$CODE" -eq 2 ] && [ "$OVERALL" -eq 0 ]; then
+      OVERALL=2
     fi
   done
+
+  # Each inner run writes its own result.json. Write the derived top-level
+  # helper from the aggregate result.txt after every viewport has completed so
+  # post-command report consumers see totals across the full responsive sweep.
+  python3 - "$RESULT_TMP" "$RESULT_JSON_TMP" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+text = src.read_text(encoding="utf-8", errors="replace")
+row_re = re.compile(
+    r"^\|\s*(?P<name>[^|]+?)\s*\|\s*(?P<ae>[^|]*?)\s*\|"
+    r"\s*(?P<aempx>[^|]*?)\s*\|\s*(?P<sev>[^|]*?)\s*\|"
+    r"\s*(?P<status>[^|]*?)\s*\|\s*$"
+)
+summary_re = re.compile(
+    r"\*\*Result: (\d+) PASS, (\d+) FAIL, (\d+) SKIP, "
+    r"(\d+) STRUCTURAL_ONLY(?:, (\d+) UNMEASURED)?\*\*"
+)
+
+def num(value):
+    try:
+        return int(float(value.replace(",", "").strip()))
+    except ValueError:
+        return None
+
+rows = []
+for line in text.splitlines():
+    match = row_re.match(line)
+    if not match:
+        continue
+    name = match.group("name")
+    if name == "Section" or (name and set(name) <= {"-"}):
+        continue
+    status_raw = match.group("status")
+    if "✅" in status_raw or "PASS" in status_raw:
+        status = "pass"
+    elif "MISSING" in status_raw or "missing" in status_raw:
+        status = "missing"
+    elif "STRUCTURAL" in status_raw:
+        status = "structural-only"
+    elif "🌑" in status_raw:
+        status = "saturated"
+    elif "❌" in status_raw or "FAIL" in status_raw:
+        status = "fail"
+    elif "UNMEASURED" in status_raw:
+        # Distinct from "unknown": the row was deliberately not compared because
+        # the reference crop carried no signal. The self-healing loop classifier
+        # reads this file, and "unknown" reads as a parse artifact it can ignore.
+        status = "unmeasured"
+    else:
+        status = "unknown"
+    rows.append({
+        "name": name,
+        "ae": num(match.group("ae")),
+        "aePerMpx": num(match.group("aempx")),
+        "severity": match.group("sev") or None,
+        "status": status,
+        "statusRaw": status_raw,
+        "diffCrop": None,
+    })
+
+summary = {"pass": 0, "fail": 0, "skip": 0, "structuralOnly": 0}
+for match in summary_re.finditer(text):
+    summary["pass"] += int(match.group(1))
+    summary["fail"] += int(match.group(2))
+    summary["skip"] += int(match.group(3))
+    summary["structuralOnly"] += int(match.group(4))
+
+dst.write_text(json.dumps({
+    "schemaVersion": 1,
+    "source": "section-compare.sh",
+    "summary": summary,
+    "sections": rows,
+}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+PY
+  # POSIX cannot atomically rename this two-file pair. result.txt is therefore
+  # the sole canonical commit marker read by gates and Stop hooks; result.json is
+  # a derived helper that consumers may read only after publication completes.
+  # Publish the helper first, then atomically replace the commit marker after the
+  # complete responsive sweep has been assembled.
+  mv -f "$RESULT_JSON_TMP" "$RESULT_JSON_FILE"
+  RESULT_JSON_TMP=""
+  mv -f "$RESULT_TMP" "$RESULT_FILE"
+  RESULT_TMP=""
+  trap - EXIT HUP INT TERM
   exit "$OVERALL"
 fi
 
@@ -253,12 +454,31 @@ if [ "$ONLY_IF_CHANGED" = "1" ]; then
   elif [ -f "$HASH_FILE" ] && [ -f "$DIR/sections/result.txt" ]; then
     PRIOR_HASH=$(cat "$HASH_FILE" 2>/dev/null || echo "")
     if [ "$CURRENT_HASH" = "$PRIOR_HASH" ]; then
-      echo "▸ ONLY_IF_CHANGED: impl source hash matches prior run ($CURRENT_HASH)"
-      echo "  → no source changes since last section-compare; reusing $DIR/sections/result.txt"
-      echo "  (delete $HASH_FILE to force a full re-run)"
-      exit 0
+      # The hash tracks impl source only, and is written regardless of the prior
+      # run's verdict. Reusing a run that did not converge would report exit 0 for
+      # a result.txt that says otherwise — and that is the *expected* path here,
+      # because the remedy for an UNMEASURED row is capture-side and re-capturing
+      # the reference does not change the impl hash.
+      _prior_line=$(grep -E '^\*\*Result: ' "$DIR/sections/result.txt" 2>/dev/null | tail -1)
+      _prior_fail=$(printf '%s\n' "$_prior_line" | sed -nE 's/^.*, ([0-9]+) FAIL,.*$/\1/p')
+      _prior_unmeasured=$(printf '%s\n' "$_prior_line" | sed -nE 's/^.*, ([0-9]+) UNMEASURED\*\*$/\1/p')
+      if [ -z "$_prior_unmeasured" ]; then
+        # Artifact predates the UNMEASURED field — fall back to the table rows.
+        _prior_unmeasured=$(grep -cE '^\|.*\| *unmeasured *\|' "$DIR/sections/result.txt" 2>/dev/null || true)
+      fi
+      if [ "${_prior_fail:-0}" -gt 0 ] || [ "${_prior_unmeasured:-0}" -gt 0 ]; then
+        echo "▸ ONLY_IF_CHANGED: impl unchanged, but the prior run did not converge"
+        echo "  (${_prior_fail:-0} FAIL, ${_prior_unmeasured:-0} UNMEASURED) — running full"
+        echo "  compare rather than reusing it."
+      else
+        echo "▸ ONLY_IF_CHANGED: impl source hash matches prior run ($CURRENT_HASH)"
+        echo "  → no source changes since last section-compare; reusing $DIR/sections/result.txt"
+        echo "  (delete $HASH_FILE to force a full re-run)"
+        exit 0
+      fi
+    else
+      echo "▸ ONLY_IF_CHANGED: impl source changed (was ${PRIOR_HASH:0:12}..., now ${CURRENT_HASH:0:12}...) — running full compare"
     fi
-    echo "▸ ONLY_IF_CHANGED: impl source changed (was ${PRIOR_HASH:0:12}..., now ${CURRENT_HASH:0:12}...) — running full compare"
   else
     echo "▸ ONLY_IF_CHANGED: no prior result.txt or hash file — running full compare"
   fi
@@ -266,9 +486,21 @@ fi
 
 # Augment DYNAMIC_SELECTORS from transition-spec.json — entries with `dynamic: true`
 # contribute their `target` selector. Ignored when EXCLUDE_DYNAMIC is off.
+# Load optional project-local dynamic selector masks before validating and
+# injecting DYNAMIC_SELECTORS. This keeps per-site dynamic/live chrome config
+# data-only and avoids shell-sourcing repository files.
+source "$SCRIPTS_DIR/lib/dynamic-selectors.sh"
+load_section_dynamic_selectors_config
+
 DYNAMIC_PAUSE_EXTRA=""
 if [ "$EXCLUDE_DYNAMIC" = "1" ]; then
   TSPEC_FILE="$DIR/transition-spec.json"
+  # Viewport fan-out: inner runs get DIR=sections/viewports/<WxH>/ which never
+  # holds the spec — resolve from the ref root the wrapper passed instead of
+  # silently masking nothing (loop-e2e-9 viewport-fanout-mask-gap).
+  if [ ! -f "$TSPEC_FILE" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/transition-spec.json" ]; then
+    TSPEC_FILE="${REF_ROOT_DIR}/transition-spec.json"
+  fi
   if [ -f "$TSPEC_FILE" ]; then
     EXTRA_TARGETS=$(python3 -c "
 import json
@@ -303,7 +535,13 @@ except Exception:
     echo "ERROR: DYNAMIC_SELECTORS must not contain quote characters (\" or '). Use bare attribute matchers like [data-canvas=hero] or class/id selectors." >&2
     exit 1
   fi
-  DYNAMIC_PAUSE_EXTRA=" ${DYNAMIC_SELECTORS} { visibility: hidden !important; }"
+DYNAMIC_PAUSE_EXTRA=" ${DYNAMIC_SELECTORS} { visibility: hidden !important; }"
+if [ -n "${SECTION_FIXED_OVERLAY_SELECTORS:-}" ]; then
+  DYNAMIC_PAUSE_EXTRA="${DYNAMIC_PAUSE_EXTRA} html[data-section-compare-scrolled=1] ${SECTION_FIXED_OVERLAY_SELECTORS} { visibility: hidden !important; }"
+fi
+if [ -n "${SECTION_IGNORE_SELECTORS:-}" ]; then
+  DYNAMIC_PAUSE_EXTRA="${DYNAMIC_PAUSE_EXTRA} ${SECTION_IGNORE_SELECTORS} { display: none !important; }"
+fi
   echo "▸ EXCLUDE_DYNAMIC=1 — masking: $DYNAMIC_SELECTORS"
 fi
 
@@ -316,10 +554,18 @@ fi
 
 SESSION_REF="${SESSION}-sc-ref"
 SESSION_IMPL="${SESSION}-sc-impl"
+SESSION_REF_USED=0
+SESSION_IMPL_USED=0
 
 cleanup_browsers() {
-  agent-browser --session "$SESSION_REF" close 2>/dev/null || true
-  agent-browser --session "$SESSION_IMPL" close 2>/dev/null || true
+  if [ "$SESSION_REF_USED" = "1" ]; then
+    agent-browser --session "$SESSION_REF" close 2>/dev/null || true
+    SESSION_REF_USED=0
+  fi
+  if [ "$SESSION_IMPL_USED" = "1" ]; then
+    agent-browser --session "$SESSION_IMPL" close 2>/dev/null || true
+    SESSION_IMPL_USED=0
+  fi
 }
 trap cleanup_browsers EXIT
 
@@ -334,7 +580,56 @@ if [ "$RECATCH_REF" != "1" ]; then
   shopt -s nullglob
   _frozen_ref_pngs=("$DIR/sections/ref/"*.png)
   shopt -u nullglob
-  if [ -s "$DIR/sections/ref-sections.json" ] && [ "${#_frozen_ref_pngs[@]}" -gt 0 ]; then
+  # Provenance guard (B2 interim): a prior run stamps frozen-ref-provenance.json
+  # with the (url, viewport) the frozen crops belong to. That stamp used to be
+  # write-only, so reusing another site's / another viewport's frozen crops was
+  # silently possible. Read it back and REFUSE reuse (fall through to live
+  # capture) when it disagrees with this run — a stale baseline directly
+  # miscolors the verdict. Also warn (non-blocking) when the crops are older than
+  # UI_CLONE_REF_FROZEN_TTL_SEC. No stamp (fresh PASS1 crops) → existence floor
+  # decides as before. Entirely inside the non-default RECATCH_REF!=1 branch, so
+  # the default live-capture path is byte-identical.
+  _reuse_ok=1
+  if [ -s "$DIR/sections/ref-sections.json" ] && [ "${#_frozen_ref_pngs[@]}" -gt 0 ] \
+     && [ -f "$DIR/sections/frozen-ref-provenance.json" ]; then
+    # `|| _prov_rc=$?` keeps the helper's deliberate `sys.exit(2)` (refuse) from
+    # tripping `set -e` and aborting the whole script — exit 2 must FALL THROUGH
+    # to live ref capture, not terminate the run.
+    _prov_rc=0
+    python3 - "$DIR/sections/frozen-ref-provenance.json" "$ORIG_URL" "$VIEW_W" "$VIEW_H" \
+      "${UI_CLONE_REF_FROZEN_TTL_SEC:-86400}" <<'PY' || _prov_rc=$?
+import calendar, json, sys, time
+prov_path, url, vw, vh, ttl = sys.argv[1:6]
+want_vp = f"{vw}x{vh}"
+try:
+    with open(prov_path) as fh:
+        p = json.load(fh)
+except Exception:
+    sys.exit(0)  # unreadable/corrupt stamp -> don't block; existence floor applies
+got_url, got_vp = p.get("refUrl"), p.get("viewport")
+if (got_url and got_url != url) or (got_vp and got_vp != want_vp):
+    sys.stderr.write(
+        f"⚠ frozen-ref provenance mismatch: crops captured for {got_url!r} @ "
+        f"{got_vp!r} but this run is {url!r} @ {want_vp!r} — refusing reuse, "
+        f"re-capturing the ref live.\n"
+    )
+    sys.exit(2)  # refuse reuse
+stamped = p.get("reusedAt") or p.get("capturedAt") or ""
+try:
+    age = time.time() - calendar.timegm(time.strptime(stamped[:19], "%Y-%m-%dT%H:%M:%S"))
+    if int(ttl) > 0 and age > int(ttl):
+        sys.stderr.write(
+            f"⚠ frozen ref is ~{int(age // 3600)}h old (> TTL {ttl}s) — set "
+            f"RECATCH_REF=1 to re-capture if the ref may have changed.\n"
+        )
+except Exception:
+    pass
+sys.exit(0)
+PY
+    [ "$_prov_rc" = "2" ] && _reuse_ok=0
+  fi
+  if [ "$_reuse_ok" = "1" ] \
+     && [ -s "$DIR/sections/ref-sections.json" ] && [ "${#_frozen_ref_pngs[@]}" -gt 0 ]; then
     REUSE_FROZEN_REF=1
     echo "▸ RECATCH_REF=$RECATCH_REF — reusing ${#_frozen_ref_pngs[@]} frozen ref crop(s); skipping ref re-capture."
     python3 - "$DIR" "$ORIG_URL" "$VIEW_W" "$VIEW_H" "${#_frozen_ref_pngs[@]}" <<'PY' 2>/dev/null || true
@@ -352,7 +647,7 @@ stamp = {
 with open(os.path.join(d, "sections", "frozen-ref-provenance.json"), "w") as fh:
     json.dump(stamp, fh, indent=2)
 PY
-  else
+  elif [ "$_reuse_ok" = "1" ]; then
     echo "▸ RECATCH_REF=$RECATCH_REF set but no frozen ref artifacts (sections/ref/*.png + ref-sections.json) — falling back to live ref capture." >&2
   fi
 fi
@@ -384,6 +679,13 @@ ref_eval() {
 rm -f "$DIR/sections/impl/"*.png "$DIR/sections/diff/"*.png 2>/dev/null || true
 if [ "$REUSE_FROZEN_REF" != "1" ]; then
   rm -f "$DIR/sections/ref/"*.png 2>/dev/null || true
+  # batch-13 ITEM 1: the ref-calib frames are part of the frozen ref baseline —
+  # clean them only on a fresh ref capture, preserve them under RECATCH_REF=0 so
+  # the dynamic classification survives into the verdict pass.
+  rm -f "$DIR/sections/ref-calib/"*.png 2>/dev/null || true
+  # The ref scroll-position manifest is rewritten on every fresh ref capture;
+  # drop the stale one so a frozen impl never reuses a position from an older run.
+  rm -f "$DIR/sections/ref-scroll-positions.json" 2>/dev/null || true
 fi
 
 # ── Asset substitution mode ──
@@ -400,6 +702,11 @@ fi
 #     "structuralOnlySections": ["main-hero", "*"]   // "*" matches every section
 #   }
 SUBSTITUTION_FILE="$DIR/asset-substitution.json"
+# Same ref-root fallback as transition-spec.json above: per-viewport inner
+# runs must not lose STRUCTURAL_ONLY switching (loop-e2e-9).
+if [ ! -f "$SUBSTITUTION_FILE" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/asset-substitution.json" ]; then
+  SUBSTITUTION_FILE="${REF_ROOT_DIR}/asset-substitution.json"
+fi
 SUBSTITUTION_PATTERNS=""
 SUBSTITUTION_ALL=0
 SUBSTITUTION_AUTO=0    # 1 if structuralOnlySections was auto-defaulted
@@ -570,8 +877,26 @@ echo ""
 # resize — opening at the default viewport then resizing leaves the page in a
 # broken half-mobile state that bears no resemblance to a real mobile load.
 echo "▸ Opening both sites..."
-ref_browser set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
-agent-browser --session "$SESSION_IMPL" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
+if [ "$REUSE_FROZEN_REF" != "1" ]; then
+  SESSION_REF_USED=1
+fi
+set +e
+ref_browser set viewport "$VIEW_W" "$VIEW_H" > /dev/null
+REF_VIEWPORT_RC=$?
+set -e
+if [ "$REF_VIEWPORT_RC" -ne 0 ]; then
+  echo "ERROR: failed to set reference viewport ${VIEW_W}x${VIEW_H} for session '$SESSION_REF'" >&2
+  exit 2
+fi
+SESSION_IMPL_USED=1
+set +e
+agent-browser --session "$SESSION_IMPL" set viewport "$VIEW_W" "$VIEW_H" > /dev/null
+IMPL_VIEWPORT_RC=$?
+set -e
+if [ "$IMPL_VIEWPORT_RC" -ne 0 ]; then
+  echo "ERROR: failed to set implementation viewport ${VIEW_W}x${VIEW_H} for session '$SESSION_IMPL'" >&2
+  exit 2
+fi
 
 ref_browser open "$ORIG_URL" 2>&1 | head -1 || true
 agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 | head -1 || true
@@ -616,18 +941,37 @@ PAUSE_ANIMATIONS='(() => {
   `;
   document.head.appendChild(style);
 
-  // Stop Swiper autoplay
+  // Stop Swiper autoplay AND pin to slide 0 — stopping alone freezes the
+  // carousel at whichever slide it happened to reach, so ref and impl (and
+  // ref across runs) freeze at DIFFERENT indices and AE diffs a moving
+  // target (navercorp postmortem: middle-banner carousel state diverged
+  // every compare). Pinning makes the frozen state deterministic.
   if (window.Swiper) {
     document.querySelectorAll(".swiper").forEach(el => {
-      if (el.swiper) el.swiper.autoplay.stop();
+      if (el.swiper) {
+        try { el.swiper.autoplay && el.swiper.autoplay.stop(); } catch (e) {}
+        try { el.swiper.slideTo(0, 0, false); } catch (e) {}
+      }
     });
   }
-  // Stop Splide autoplay
+  // Stop Splide autoplay and pin to slide 0
   if (window.Splide) {
     document.querySelectorAll(".splide").forEach(el => {
-      if (el.splide) el.splide.Components.Autoplay.pause();
+      if (el.splide) {
+        try { el.splide.Components.Autoplay.pause(); } catch (e) {}
+        try { el.splide.go(0); } catch (e) {}
+      }
     });
   }
+  // Generic carousel pinning: common track-class patterns get their scroll
+  // reset so hand-rolled interval sliders land on a deterministic first
+  // frame. (Class-name heuristic only — ARIA-based carousels are not
+  // covered here.)
+  document.querySelectorAll("[class*=carousel] ul, [class*=slider] ul, [class*=rolling]").forEach(el => {
+    try {
+      if (el.scrollLeft) el.scrollLeft = 0;
+    } catch (e) {}
+  });
   // Pause all <video> elements at frame 0 — autoplay videos otherwise produce
   // a different frame on every screenshot, dominating AE without representing
   // structural diffs. Reset currentTime so ref/impl land on the same frame
@@ -889,9 +1233,9 @@ fi
 _scroll_js() {
   local sel="$1"; local y="$2"
   if [ "$sel" = "__document__" ]; then
-    echo "(() => { window.scrollTo(0, $y); return $y; })()"
+    echo "(() => { window.scrollTo(0, $y); document.documentElement.setAttribute('data-section-compare-scrolled', ($y > 0 ? '1' : '0')); return $y; })()"
   else
-    echo "(() => { const w = document.querySelector('$sel'); if (!w) { window.scrollTo(0, $y); return $y; } w.scrollTop = $y; w.dispatchEvent(new Event('scroll')); return w.scrollTop; })()"
+    echo "(() => { const w = document.querySelector('$sel'); if (!w) { window.scrollTo(0, $y); document.documentElement.setAttribute('data-section-compare-scrolled', ($y > 0 ? '1' : '0')); return $y; } w.scrollTop = $y; document.documentElement.setAttribute('data-section-compare-scrolled', ($y > 0 ? '1' : '0')); w.dispatchEvent(new Event('scroll')); return w.scrollTop; })()"
   fi
 }
 
@@ -1008,167 +1352,34 @@ sleep "$WAIT_SCROLL_SETTLE"
 # ── Step 1: Enumerate sections on both sites ──
 echo "▸ Enumerating sections..."
 
-ENUMERATE_SECTIONS='(() => {
-  const semanticTags = new Set(["section", "footer", "header", "nav", "main"]);
-  const containers = [];
-
-  function collect(parent, depth) {
-    if (depth > 6) return;
-    const children = Array.from(parent.children);
-
-    children.forEach(el => {
-      const tag = el.tagName.toLowerCase();
-      if (tag === "script" || tag === "style" || tag === "link" || tag === "noscript") return;
-      const rect = el.getBoundingClientRect();
-      const h = rect.height;
-      if (h < 50 || rect.width < 100) {
-        // h === 0 indicates a layout-only wrapper that does not size to its
-        // descendants (typical of abs-positioned-widget DOMs like Readymag
-        // exports — body children such as #root, #mags are 0-height because
-        // content lives in nested abs-positioned widgets). Descend so we
-        // can find the real visible sections inside.
-        if (h === 0 && el.children.length > 0) {
-          collect(el, depth + 1);
-        }
-        return;
-      }
-
-      const isSemantic = semanticTags.has(tag);
-      const isLargeDiv = tag === "div" && h > window.innerHeight * 0.2;
-      const isPageWrapper = h > document.documentElement.scrollHeight * 0.8;
-
-      if (isSemantic) {
-        // Descend only when this element directly wraps other layout-level sections
-        // (e.g., <main> with <section> children, or <section> wrapping nested <section>s).
-        // <header>/<footer>/<nav>/<aside> are internal *content* roles when they appear
-        // inside a section (page header, section heading row, table-of-contents nav,
-        // sidebar aside) — descending on them loses the wrapping section. Only true
-        // layout-level wrappers (section/main) trigger descent here.
-        const hasStructuralChild = Array.from(el.children).some(c => {
-          const t = c.tagName.toLowerCase();
-          return t === "section" || t === "main";
-        });
-        const structuralDescendantCount = Array.from(el.querySelectorAll("section, main"))
-          .filter(c => c !== el).length;
-        const hasWrappedStructuralDescendants = tag === "main"
-          && structuralDescendantCount >= 2
-          && h > window.innerHeight * 1.5;
-        // Webflow / single-main pages collapse 17+ visible sub-sections into one giant
-        const isJumboMain = tag === "main"
-          && el.children.length > 3
-          && h > window.innerHeight * 1.5;
-        // Webflow CMS patterns can wrap multiple semantic sub-sections in a
-        // generic outer <section>. The outer <section> looks like a single
-        // container, so a shallow detector can add it and never descend,
-        // missing named sub-sections. Detect
-        // this shape: a tall <section> whose direct children include ≥2
-        // distinctly-named-class divs each large enough to be a section.
-        const hasMultipleNamedSubsections = (() => {
-          if (tag !== "section" || h <= window.innerHeight * 1.5) return false;
-          const namedDivKids = Array.from(el.children).filter(c => {
-            if (c.tagName.toLowerCase() !== "div") return false;
-            if (!c.className || typeof c.className !== "string") return false;
-            const r = c.getBoundingClientRect();
-            return r.height > window.innerHeight * 0.25;
-          });
-          if (namedDivKids.length < 2) return false;
-          const distinctClasses = new Set(
-            namedDivKids.map(d => d.className.trim().split(/\s+/)[0]).filter(Boolean)
-          );
-          return distinctClasses.size >= 2;
-        })();
-        if (hasStructuralChild || isJumboMain || hasWrappedStructuralDescendants
-            || hasMultipleNamedSubsections) {
-          collect(el, depth + 1);
-        } else {
-          containers.push({ el, tag, rect });
-        }
-      } else if (isLargeDiv) {
-        // If this div wraps most of the page, descend into it instead
-        if (isPageWrapper) {
-          collect(el, depth + 1);
-        } else {
-          // Check if this div has semantic children — if so, descend
-          const hasSemanticChildren = Array.from(el.children).some(c =>
-            semanticTags.has(c.tagName.toLowerCase())
-          );
-          if (hasSemanticChildren) {
-            collect(el, depth + 1);
-          } else {
-            containers.push({ el, tag, rect });
-          }
-        }
-      } else if (tag === "div" && h > 100) {
-        collect(el, depth + 1);
-      }
-    });
-  }
-
-  collect(document.body, 0);
-
-  // Deduplicate: remove parents that contain other found sections
-  const filtered = containers.filter((c, i) =>
-    !containers.some((other, j) => j !== i && c.el.contains(other.el) && c.el !== other.el)
-  );
-
-  filtered.sort((a, b) => a.rect.top - b.rect.top);
-
-  return filtered.map((c, i) => {
-    const el = c.el;
-    const rect = el.getBoundingClientRect();
-    const scrollY = window.scrollY;
-
-    // Extract text fingerprint (first 100 chars of visible text, normalized)
-    const text = el.innerText || "";
-    const words = text.replace(/\\s+/g, " ").trim().substring(0, 200);
-    const fingerprint = words.substring(0, 100).toLowerCase().replace(/[^a-z0-9 ]/g, "");
-    // Full visible-text word string (not truncated to 100 chars) — drives the
-    // text-content pairing signal so sections match by what they SAY, not by
-    // class name. Capped at 800 chars to bound JSON size.
-    const textWords = text.replace(/\\s+/g, " ").trim().toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\\s+/g, " ").trim().substring(0, 800);
-
-    // Check for SVGs
-    const svgs = el.querySelectorAll("svg");
-    const hasSvgText = [...svgs].some(svg => {
-      const paths = svg.querySelectorAll("path");
-      if (paths.length < 3) return false;
-      const totalD = [...paths].reduce((sum, p) => sum + (p.getAttribute("d")?.length || 0), 0);
-      return totalD > 500;
-    });
-
-    // Get rendering info
-    const cs = getComputedStyle(el);
-
-    return {
-      index: i,
-      tag: c.tag,
-      id: el.id || null,
-      className: (el.className?.toString?.() || "").substring(0, 80),
-      fingerprint,
-      textWords,
-      hasSvgText,
-      rect: {
-        top: Math.round(rect.top + scrollY),
-        left: Math.round(rect.left),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      },
-      display: cs.display,
-      gridCols: cs.gridTemplateColumns !== "none" ? cs.gridTemplateColumns : null,
-      childCount: el.children.length,
-    };
-  });
-})()'
+# Single-sourced enumerator (also consumed by alignment-sweep-check.sh):
+# emits per-section rect, text fingerprints, clientWidth, contentBox,
+# contentGroups, and leftGap/rightGap. See lib/enumerate-sections.js.
+# The dynamic mask (PAUSE_ANIMATIONS, above) sets `visibility: hidden` on the
+# DYNAMIC_SELECTORS to absorb timer-phase MOTION from the screenshot. That mask
+# is applied BEFORE this enumeration, and visibility:hidden also makes the
+# enumerator's contentBox/contentGroups filters drop the masked elements — so a
+# STATIC geometry defect under a mask (loop-11 footer cards baked left:426px /
+# ±192 transform, off-center at non-extraction viewports) became invisible to
+# alignment-parity (exemption-without-compensation). visibility:hidden PRESERVES
+# layout, so we hand the enumerator the masked selector list; it measures
+# mask-hidden geometry (rect/contentGroups) while still skipping display:none and
+# zero-size elements. Applied identically to ref + impl, so the comparison stays
+# ref-relative. The list is quote-free by construction (validated above).
+ENUMERATE_SECTIONS="window.__UI_RE_DYNAMIC_SELECTORS__ = \"${DYNAMIC_SELECTORS}\";
+$(cat "$SCRIPTS_DIR/lib/enumerate-sections.js")"
 
 # Ref enumeration is skipped in frozen-ref mode — the cached ref-sections.json
 # is reused as-is (a stdout redirect through ref_browser would truncate it).
 if [ "$REUSE_FROZEN_REF" != "1" ]; then
   agent-browser --session "$SESSION_REF" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/ref-sections.json" 2>&1
+  cp "$DIR/sections/ref-sections.json" "$DIR/sections/ref-runtime-sections.json"
 fi
 agent-browser --session "$SESSION_IMPL" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/impl-sections.json" 2>&1
 
 IMPL_SEMANTIC_CANDIDATES='(() => {
-  const selectors = "main, section, header, footer, nav, article, [id]";
+  const selectors = "main, section, header, footer, nav, article, [id], [class]";
+  const landmarkTags = new Set(["main", "header", "footer", "nav", "article"]);
   const seen = new Set();
 
   return Array.from(document.querySelectorAll(selectors)).flatMap((el, i) => {
@@ -1176,7 +1387,8 @@ IMPL_SEMANTIC_CANDIDATES='(() => {
     seen.add(el);
 
     const rect = el.getBoundingClientRect();
-    if (rect.height < 50 || rect.width < 100) return [];
+    const isLandmark = landmarkTags.has(el.tagName.toLowerCase());
+    if (rect.height < (isLandmark ? 24 : 50) || rect.width < 100) return [];
 
     const text = el.innerText || "";
     const words = text.replace(/\s+/g, " ").trim().substring(0, 200);
@@ -1190,6 +1402,45 @@ IMPL_SEMANTIC_CANDIDATES='(() => {
       return totalD > 500;
     });
     const cs = getComputedStyle(el);
+    const visibleRect = node => {
+      const r = node.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return null;
+      const style = getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden"
+          || Number.parseFloat(style.opacity || "1") === 0) return null;
+      return r;
+    };
+    const directBoxes = Array.from(el.children).map(visibleRect).filter(Boolean);
+    const contentBox = directBoxes.length ? (() => {
+      const left = Math.min(...directBoxes.map(box => box.left));
+      const right = Math.max(...directBoxes.map(box => box.right));
+      return {
+        left: Math.round(left),
+        width: Math.round(right - left),
+        boxCount: directBoxes.length,
+      };
+    })() : null;
+    const contentGroups = Array.from(el.children).flatMap(child => {
+      const childRect = visibleRect(child);
+      const boxes = Array.from(child.children).map(visibleRect).filter(Boolean);
+      if (!childRect || boxes.length < 2) return [];
+      const left = Math.min(...boxes.map(box => box.left));
+      const right = Math.max(...boxes.map(box => box.right));
+      const rawName = (child.className?.toString?.() || "").trim().split(" ")[0]
+        || child.tagName.toLowerCase();
+      const name = rawName.includes("__")
+        ? rawName.substring(0, rawName.lastIndexOf("__"))
+        : rawName;
+      return [{
+        name: name.substring(0, 40),
+        containerLeft: Math.round(childRect.left),
+        containerWidth: Math.round(childRect.width),
+        unionLeft: Math.round(left),
+        unionWidth: Math.round(right - left),
+        childCount: boxes.length,
+        childCenters: boxes.slice(0, 24).map(box => Math.round(box.left + box.width / 2)),
+      }];
+    });
 
     return [{
       index: i,
@@ -1208,6 +1459,13 @@ IMPL_SEMANTIC_CANDIDATES='(() => {
       display: cs.display,
       gridCols: cs.gridTemplateColumns !== "none" ? cs.gridTemplateColumns : null,
       childCount: el.children.length,
+      clientWidth: document.documentElement.clientWidth,
+      contentBox,
+      contentGroups,
+      leftGap: contentBox ? Math.round(contentBox.left - rect.left) : null,
+      rightGap: contentBox
+        ? Math.round((rect.left + rect.width) - (contentBox.left + contentBox.width))
+        : null,
     }];
   });
 })()'
@@ -1225,15 +1483,29 @@ IMPL_SEMANTIC_CANDIDATES='(() => {
 # ref-sections.json with its entries so the matcher sees the full set.
 # Falls back to the runtime enumeration when section-map.json is absent
 # or doesn't validate.
-if [ -f "$DIR/section-map.json" ]; then
+# D23 (loop-nvti-1): section-map.json lives ONLY at the ref root — in the
+# VIEWPORTS fan-out $DIR is sections/viewports/<WxH>/ and the override was
+# silently skipped, so the raw (pin-released, over-segmented) enumeration
+# became the frozen baseline and every impl crop mis-mapped. Same
+# REF_ROOT_DIR sibling fallback as transition-spec/asset-substitution
+# above — the third ref-root input to hit this class.
+SECTION_MAP_FILE="$DIR/section-map.json"
+if [ ! -f "$SECTION_MAP_FILE" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/section-map.json" ]; then
+  SECTION_MAP_FILE="${REF_ROOT_DIR}/section-map.json"
+fi
+if [ -f "$SECTION_MAP_FILE" ]; then
+  if [ "$REUSE_FROZEN_REF" != "1" ]; then
+    ref_eval "$IMPL_SEMANTIC_CANDIDATES" > "$DIR/sections/ref-semantic-candidates.json" 2>&1 || true
+  fi
   agent-browser --session "$SESSION_IMPL" eval "$IMPL_SEMANTIC_CANDIDATES" > "$DIR/sections/impl-semantic-candidates.json" 2>&1 || true
   PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     python3 -m ui_clone.section_compare_sections augment-impl \
-    "$DIR/section-map.json" \
+    "$SECTION_MAP_FILE" \
     "$DIR/sections/impl-sections.json" \
     "$DIR/sections/impl-semantic-candidates.json" 2>/dev/null || true
 
-  python3 - "$DIR/section-map.json" "$DIR/sections/ref-sections.json" 2>/dev/null <<'PY' || true
+  if [ "$REUSE_FROZEN_REF" != "1" ]; then
+    python3 - "$SECTION_MAP_FILE" "$DIR/sections/ref-sections.json" 2>/dev/null <<'PY' || true
 import json
 import sys
 import os
@@ -1257,6 +1529,13 @@ def _norm_text(raw):
 # row inherits the live text of the matching runtime row.
 _runtime_by_id = {}
 _runtime_by_cls = {}
+# Full runtime ROW lookups so the synthesis can also inherit the live-measured
+# ALIGNMENT fields (contentGroups, clientWidth, leftGap/rightGap, contentBox)
+# the section-map ground truth lacks — without these the ref side of
+# alignment-parity has contentGroups=None and a content-bearing ref row reads as
+# unmeasurable, failing the gate against its own reference. Matched by id, then
+# by class token. (batch-13 ITEM 3)
+_rt_all = []
 try:
     _prev = json.load(open(out_path))
 except Exception:
@@ -1265,15 +1544,46 @@ if isinstance(_prev, list):
     for pr in _prev:
         if not isinstance(pr, dict):
             continue
+        _rt_all.append(pr)
+        pid = str(pr.get("id") or "").strip()
         tw = str(pr.get("textWords") or "").strip()
         if not tw:
             continue
-        pid = str(pr.get("id") or "").strip()
         if pid:
             _runtime_by_id.setdefault(pid, tw)
         for tok in str(pr.get("className") or "").split():
             if len(tok) >= 4:
                 _runtime_by_cls.setdefault(tok, tw)
+
+def _runtime_row(sid, cls, y):
+    # POSITION-aware: a class token shared by adjacent sections (e.g. an FAQ
+    # section and a following CTA share a wrapper class) makes a first-token-wins
+    # lookup hand the CTA the FAQ section's contentGroups. Rank candidates by
+    # id-exact, then class-overlap, then closest
+    # document top — the same disambiguation the matcher uses. (batch-13 ITEM 3)
+    sid = str(sid or "").strip()
+    cls_toks = {t for t in str(cls or "").split() if len(t) >= 4}
+    try:
+        yf = float(y)
+    except (TypeError, ValueError):
+        yf = 0.0
+    best = None
+    best_key = None
+    for pr in _rt_all:
+        pid = str(pr.get("id") or "").strip()
+        ptoks = {t for t in str(pr.get("className") or "").split() if len(t) >= 4}
+        id_match = bool(sid and pid == sid)
+        cls_match = bool(cls_toks & ptoks)
+        if not id_match and not cls_match:
+            continue
+        prt = pr.get("rect") if isinstance(pr.get("rect"), dict) else {}
+        ptop = prt.get("top")
+        dtop = abs(float(ptop) - yf) if isinstance(ptop, (int, float)) else 1e9
+        key = (0 if id_match else 1, 0 if cls_match else 1, dtop)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = pr
+    return best
 # Synthesize ref-sections rows in the shape ENUMERATE_SECTIONS returns,
 # preserving the index-by-Y order section-map.json already uses.
 #
@@ -1284,6 +1594,7 @@ if isinstance(_prev, list):
 # read `y`, producing a "phantom ref" with collapsed coords that triggered
 # uniform AE/Mpx ~950k across every section and 632 wasted retry iterations.
 out = []
+active_view_width = int(os.environ.get("VIEW_W") or 1440)
 # Fix 12 — drop layout-only zero-height wrappers from synthesis.
 # V8 (d4b369d) section-map had 15 sections but all carried `height: 0` for
 # the same reason scroll-reveal animations leave them collapsed at capture
@@ -1306,10 +1617,15 @@ for i, s in enumerate(sections_sorted):
     # Same fallback for id: extraction-time section-map uses `name`.
     sid = s.get("id") or s.get("name")
     tag = s.get("tag") or "section"
+    if tag not in {"main", "section", "header", "footer", "nav", "article"} and not sid and not cls:
+        # Anonymous non-semantic children have no stable cross-DOM identity.
+        # Runtime enumeration may add them affirmatively; map geometry alone
+        # must not create a reference-only row.
+        continue
     y = int(s.get("top") or s.get("y") or 0)
     h = h_raw
     x = int(s.get("left") or s.get("x") or 0)
-    w = int(s.get("width") or s.get("w") or 1440)
+    w = int(s.get("width") or s.get("w") or active_view_width)
     fp_seed = sid or cls or f"sec-{i}"
     # fingerprint: lowercase alphanumeric, take first 100 chars of the
     # human-readable seed. Runtime ENUMERATE_SECTIONS uses innerText; we
@@ -1331,7 +1647,7 @@ for i, s in enumerate(sections_sorted):
         tw = _norm_text(s.get("textPreview"))
     if not tw:
         tw = _norm_text(fp_seed)
-    out.append({
+    row = {
         "index": i,
         "tag": tag,
         "id": sid,
@@ -1343,7 +1659,22 @@ for i, s in enumerate(sections_sorted):
         "display": s.get("display") or "block",
         "gridCols": s.get("gridCols") or None,
         "childCount": int(s.get("childCount") or 0),
-    })
+    }
+    # Inherit the live-measured alignment fields the section-map lacks, so the
+    # synthesized ref row carries the SAME contentGroups/gaps the impl row
+    # enumerates (batch-13 ITEM 3 — keeps alignment-parity's ref side measurable).
+    _rt = _runtime_row(sid, cls, y)
+    if isinstance(_rt, dict):
+        for _k in ("contentGroups", "clientWidth", "leftGap", "rightGap", "contentBox"):
+            _v = _rt.get(_k)
+            if _v is not None:
+                row[_k] = _v
+        if not row.get("childCount"):
+            try:
+                row["childCount"] = int(_rt.get("childCount") or 0)
+            except (TypeError, ValueError):
+                pass
+    out.append(row)
 # Fix 12 safety — if the h>=50 filter removed too many sections, the
 # resulting synthesis is degenerate. Fall back to the runtime enumeration
 # (don't write a thin override) so section-compare can still pair real
@@ -1353,6 +1684,16 @@ if len(out) < 3:
 with open(out_path, "w") as fh:
     json.dump(out, fh)
 PY
+  fi
+  if [ "$REUSE_FROZEN_REF" != "1" ] && [ -s "$DIR/sections/ref-semantic-candidates.json" ]; then
+    PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+      python3 -m ui_clone.section_compare_sections synthesize-ref \
+      "$SECTION_MAP_FILE" \
+      "$DIR/sections/ref-sections.json" \
+      "$DIR/sections/ref-semantic-candidates.json" \
+      "$VIEW_W" \
+      "$DIR/sections/ref-runtime-sections.json"
+  fi
   if [ -s "$DIR/sections/ref-sections.json" ] && head -1 "$DIR/sections/ref-sections.json" | grep -q "^\["; then
     echo "▸ ref-sections.json overridden from section-map.json (extraction-time ground truth)" >&2
   fi
@@ -1443,6 +1784,63 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
   exit 1
 fi
 
+# ── Step 3a: Record dynamic-mask coverage sidecar ─────────────────────
+# Evidence-only artifact for pass-under-mask audits. Do NOT change result.txt:
+# check-converged.sh parses that table shape. The active DYNAMIC_SELECTORS are
+# evaluated in the REF session at capture time; Python computes exact union
+# coverage per matched section and writes {section: coveragePct}.
+echo "▸ Recording dynamic-mask coverage..."
+MASK_ELEMENTS_FILE="$DIR/sections/mask-elements.json"
+if [ "$EXCLUDE_DYNAMIC" = "1" ] && [ "$REUSE_FROZEN_REF" != "1" ]; then
+  MASK_SELECTORS_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$DYNAMIC_SELECTORS")
+  MASK_RECTS_JS="(() => {
+    const selectors = ${MASK_SELECTORS_JSON};
+    try {
+      return Array.from(document.querySelectorAll(selectors)).flatMap((el, index) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return [];
+        return [{
+          index,
+          tag: el.tagName.toLowerCase(),
+          id: el.id || null,
+          className: (el.className?.toString?.() || '').substring(0, 120),
+          top: Math.round((rect.top + window.scrollY) * 100) / 100,
+          left: Math.round((rect.left + window.scrollX) * 100) / 100,
+          width: Math.round(rect.width * 100) / 100,
+          height: Math.round(rect.height * 100) / 100,
+        }];
+      });
+    } catch (_err) {
+      return [];
+    }
+  })()"
+  if ! ref_eval "$MASK_RECTS_JS" > "$MASK_ELEMENTS_FILE.tmp" 2>&1; then
+    echo "[]" > "$MASK_ELEMENTS_FILE.tmp"
+  fi
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 - "$MASK_ELEMENTS_FILE.tmp" "$MASK_ELEMENTS_FILE" <<'PY' 2>/dev/null || echo "[]" > "$MASK_ELEMENTS_FILE"
+import sys
+from pathlib import Path
+from ui_clone.section_compare_sections import parse_agent_browser_json_list
+
+src = Path(sys.argv[1])
+out = Path(sys.argv[2])
+raw = src.read_text(encoding="utf-8", errors="ignore")
+data = parse_agent_browser_json_list(raw)
+out.write_text(__import__("json").dumps(data, indent=2), encoding="utf-8")
+PY
+  rm -f "$MASK_ELEMENTS_FILE.tmp"
+elif [ "$REUSE_FROZEN_REF" = "1" ] && [ -s "$MASK_ELEMENTS_FILE" ]; then
+  echo "  Reusing frozen reference mask geometry from $MASK_ELEMENTS_FILE"
+else
+  echo "[]" > "$MASK_ELEMENTS_FILE"
+fi
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m ui_clone.section_compare_sections mask-coverage \
+  "$DIR/sections/matches.json" \
+  "$MASK_ELEMENTS_FILE" \
+  "$DIR/sections/mask-coverage.json" 2>/dev/null || echo "{}" > "$DIR/sections/mask-coverage.json"
+
 SECTION_CAPTURE_DIR="$DIR" \
 SECTION_CAPTURE_SESSION_REF="$SESSION_REF" \
 SECTION_CAPTURE_SESSION_IMPL="$SESSION_IMPL" \
@@ -1452,8 +1850,48 @@ SECTION_CAPTURE_REUSE_FROZEN_REF="${REUSE_FROZEN_REF:-0}" \
 SECTION_CAPTURE_SKIP_FINISH="${SKIP_FINISH_ANIMATIONS:-0}" \
 SECTION_CAPTURE_WAIT_SCROLL_SETTLE="${WAIT_SCROLL_SETTLE:-0.5}" \
 SECTION_CAPTURE_DYNAMIC_PAUSE_EXTRA="${DYNAMIC_PAUSE_EXTRA:-}" \
+SECTION_CAPTURE_FIXED_OVERLAY_SELECTORS="${SECTION_FIXED_OVERLAY_SELECTORS:-}" \
+SECTION_CAPTURE_REF_CALIB="${SECTION_REF_CALIB:-0}" \
+SECTION_CAPTURE_REF_URL="$ORIG_URL" \
+SECTION_CAPTURE_VIEW_W="${VIEW_W:-}" \
+SECTION_CAPTURE_VIEW_H="${VIEW_H:-}" \
 PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
   python3 -m ui_clone.section_capture "$DIR/sections/matches.json" 2>&1
+
+# ── batch-13 ITEM 1: ref-instability dynamic-section classification ──
+# Compute each section's REF-OWN frame-to-frame variance (ref vs ref-calib, two
+# independent reference loads) as AE/Mpx + dssim and write sections/ref-dynamic.json.
+# A section the reference cannot self-match is dynamic (framer scroll-scrub /
+# splash / carousel) and switches to structural/layout parity in the AE loop
+# below. Absent ref-calib (calibration off, or a frozen corpus without it) -> no
+# dynamic classification, every section keeps strict AE (backward compatible).
+if [ -d "$DIR/sections/ref-calib" ] && ls "$DIR/sections/ref-calib/"*.png >/dev/null 2>&1; then
+  echo "▸ Computing ref-instability calibration (ref vs ref-calib)..."
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  SECTION_DYNAMIC_THRESHOLD="${SECTION_DYNAMIC_REF_SELF_AE_PER_MPX:-2000}" \
+  SECTION_FUZZ="${SECTION_FUZZ:-8%}" \
+    python3 "$SCRIPTS_DIR/lib/ref-dynamic-classify.py" "$DIR/sections" 2>&1 || true
+fi
+
+# ── Crop-evidence guards (vacuous-pass closure) ─────────────────────
+# Computes per-crop truth (unique colors, dominant fraction, mean/std) plus
+# mask coverage and writes crop-guards.{json,tsv}. The AE loop below uses the
+# tsv to convert vacuous verdicts (blank ref, symmetric-blank, >60% masked,
+# color-flattened pair) on content-bearing sections into explicit UNMEASURED
+# rows — observed failure mode: a near-bottom section whose reveal never
+# mounted in the capture window produced byte-identical 2-color crops on both
+# sides and passed AE=0 over zero actual content.
+echo "▸ Evaluating crop-evidence guards..."
+# Mandatory (review-1 MAJOR 2): a guard crash/setup failure must not
+# silently disable the vacuous-pass closure — blank-crop AE=0 passes would
+# flow through again. On failure, a blocking row is injected into the
+# results table below instead of continuing as if guards had run.
+GUARDS_FAILED=0
+if ! PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m ui_clone.section_guards "$DIR/sections" 2>&1; then
+  GUARDS_FAILED=1
+  echo "  ⛔ crop-guard evaluation FAILED — vacuous-pass closure inactive; this run cannot pass."
+fi
 
 # ── Perceptual-dense pre-pass (opt-in) ──────────────────────────────
 # Computes, per matched section, the DOM structure severity (mirroring the
@@ -1577,6 +2015,20 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 SUBSTITUTED_COUNT=0
+# UNMEASURED is tracked apart from SKIP. SKIP means "the impl does not have this
+# section"; UNMEASURED means "the REFERENCE crop carried no signal, so neither
+# side was measured". Folding the second into the first produced a 0-FAIL
+# summary that read as a clean pass on a run that had measured nothing for
+# those sections — and blank ref crops cluster on mid-reveal/animated sections,
+# i.e. precisely what this tool exists to verify.
+UNMEASURED_COUNT=0
+# Review-1 MAJOR 2: guard evaluation is mandatory for matched crop runs.
+# A failed guard pass injects a blocking row so the table (and every
+# consumer keying on FAIL counts) sees the closure was inactive.
+if [ "${GUARDS_FAILED:-0}" = "1" ]; then
+  RESULTS="${RESULTS}| (crop-guards) | — | — | setup | ❌ FAIL (crop-guard evaluation failed — vacuous-pass closure inactive; fix ui_clone.section_guards setup and re-run) |\n"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
 # NON_STRUCTURAL_PASS_COUNT tracks ONLY real pixel-level passes (ok/minor AE).
 # STRUCTURAL_ONLY (substituted) rows DO NOT increment this — they pass the
 # layout sniff test but skip pixel diff, so they're not visual evidence on
@@ -1592,9 +2044,35 @@ print(' '.join(x['name'] for x in m if x.get('wrapper')))
 " 2>/dev/null || echo "")
 
 # Guard: nullglob — if no ref PNGs were captured, the glob expands to a literal string
-shopt -s nullglob
-REF_IMGS=("$DIR/sections/ref/"*.png)
-shopt -u nullglob
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m ui_clone.section_compare_sections crop-manifest \
+  "$DIR/sections/matches.json" \
+  "$DIR/sections/ref" \
+  "$DIR/sections/impl" \
+  "$DIR/sections/crop-manifest.json"
+
+# Evaluate only crops named by the CURRENT matches.json. Frozen references are
+# intentionally reused, so globbing ref/*.png can pick up an orphan from an
+# older enumeration (e.g. style_blurb-3 after the current match set has two
+# blurbs) and falsely report a missing implementation section.
+REF_IMGS=()
+while IFS= read -r _matched_crop_name; do
+  [ -z "$_matched_crop_name" ] && continue
+  _matched_ref_crop="$DIR/sections/ref/${_matched_crop_name}.png"
+  if [ -f "$_matched_ref_crop" ]; then
+    REF_IMGS+=("$_matched_ref_crop")
+  else
+    RESULTS="${RESULTS}| ${_matched_crop_name} | — | — | setup | ❌ FAIL (current matched reference crop missing — recapture required) |\n"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+done < <(
+  python3 -c '
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+for row in manifest.get("rows", []):
+    print(row.get("name", ""))
+' "$DIR/sections/crop-manifest.json"
+)
 if [ ${#REF_IMGS[@]} -eq 0 ]; then
   echo "ERROR: No ref section images captured in $DIR/sections/ref/ — check Step 3 output above"
   exit 1
@@ -1658,11 +2136,61 @@ for REF_IMG in "${REF_IMGS[@]}"; do
     continue
   fi
 
+  # A blank reference crop is capture failure, not implementation evidence.
+  # Apply policy=all guards before the near-black detector below; otherwise a
+  # black impl crop can be counted as a real FAIL and `continue` before the
+  # existing guard conversion ever runs.
+  GUARD_ROW=$(awk -F'\t' -v n="$NAME" '$1==n{print; exit}' "$DIR/sections/crop-guards.tsv" 2>/dev/null || true)
+  GUARD_REASON=""
+  GUARD_POLICY=""
+  if [ -n "$GUARD_ROW" ]; then
+    GUARD_REASON=$(printf '%s' "$GUARD_ROW" | cut -f2)
+    GUARD_POLICY=$(printf '%s' "$GUARD_ROW" | cut -f3)
+  fi
+  if [ "$GUARD_POLICY" = "all" ]; then
+    UNMEASURED_COUNT=$((UNMEASURED_COUNT + 1))
+    GUARD_SHORT=$(printf '%s' "$GUARD_REASON" | cut -c1-110)
+    RESULTS="${RESULTS}| ${NAME} | — | — | unmeasured | ⚠️ UNMEASURED (${GUARD_SHORT}) |\n"
+    echo "  ↳ ${NAME}: verdict converted to UNMEASURED before black detection — ${GUARD_REASON}"
+    continue
+  fi
+
   # Resize impl to match ref dimensions
   REF_SIZE=$(magick identify -format "%wx%h" "$REF_IMG" 2>/dev/null)
   IMPL_SIZE=$(magick identify -format "%wx%h" "$IMPL_IMG" 2>/dev/null)
 
-  if [ "$REF_SIZE" != "$IMPL_SIZE" ]; then
+  # batch-11 ITEM 4(c): crop-scale-mismatch tolerance. When the ref/impl crop
+  # dims differ, force-resizing with "!" STRETCHES the impl and distorts its
+  # aspect, inflating AE on identical content (an anti-aliasing shift across the
+  # whole crop) — the "dssim leniency blocked by AE cap" class. The exact-stretch
+  # stays the PRIMARY resized impl (keeps existing behaviour + the localized-
+  # defect band check valid); within SECTION_CROP_SCALE_TOL we ALSO build an
+  # aspect-preserving cover-fit CANDIDATE, and the AE step below takes the MIN of
+  # stretch-vs-cover-fit. Taking the min can only LOWER AE on identical content
+  # the stretch distorted, NEVER raise it, and the dssim_cap (THRESHOLD x
+  # SECTION_DSSIM_AE_CAP_MULT) still gates extreme AE — so detection is never
+  # weakened. Both candidates are EXACTLY ref dims.
+  IMPL_COVER=""
+  # SECTION_SKIP_IMPL_RESIZE=1 (calib-snapshot pass) leaves the impl crops at
+  # their NATIVE box dims so a later copy into ref-calib/ preserves the impl-path
+  # box (a scroll-scrub element captured at scale 0.67 stays w964, not stretched
+  # to the frozen ref's w1440). The AE verdict of that pass is discarded; only its
+  # crops are reused as the ref-instability calibration. (batch-13 ITEM 1)
+  if [ "${SECTION_SKIP_IMPL_RESIZE:-0}" != "1" ] && [ "$REF_SIZE" != "$IMPL_SIZE" ]; then
+    _R_W=$(echo "$REF_SIZE" | cut -dx -f1); _R_H=$(echo "$REF_SIZE" | cut -dx -f2)
+    _I_W=$(echo "$IMPL_SIZE" | cut -dx -f1); _I_H=$(echo "$IMPL_SIZE" | cut -dx -f2)
+    CROP_SCALE_TOL="${SECTION_CROP_SCALE_TOL:-1.04}"
+    if awk -v rw="$_R_W" -v rh="$_R_H" -v iw="$_I_W" -v ih="$_I_H" \
+           -v tol="$CROP_SCALE_TOL" 'BEGIN {
+             if (iw<=0 || ih<=0 || rw<=0 || rh<=0) exit 1
+             wr = (rw>iw) ? rw/iw : iw/rw
+             hr = (rh>ih) ? rh/ih : ih/rh
+             exit !(wr<=tol && hr<=tol)
+           }'; then
+      IMPL_COVER="$DIR/sections/diff/.${NAME}.cover.png"
+      magick "$IMPL_IMG" -resize "${_R_W}x${_R_H}^" -gravity center \
+        -extent "${_R_W}x${_R_H}" -quality 95 "$IMPL_COVER" 2>/dev/null || IMPL_COVER=""
+    fi
     magick "$IMPL_IMG" -resize "$REF_SIZE!" -quality 95 "$IMPL_IMG" 2>/dev/null
   fi
 
@@ -1689,9 +2217,112 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   # -fuzz tolerance: pixels with color diff <= fuzz% are considered identical.
   # Filters sub-pixel AA noise, font hinting, paper-texture/JPEG grain — keeping AE on structural divergence.
   FUZZ="${SECTION_FUZZ:-8%}"
-  AE=$(magick compare -metric AE -fuzz "$FUZZ" "$REF_IMG" "$IMPL_IMG" "$DIFF_IMG" 2>&1 || true)
-  # AE may be scientific notation (e.g. "1.0e+06") for large diffs.
-  AE=$(echo "$AE" | head -1 | awk '{ if ($1 ~ /^[0-9.eE+-]+$/) printf "%.0f\n", $1 }')
+  # Background fill for the vacated strip of a non-circular translate. A real
+  # vertical scroll-phase shift reveals the page BACKGROUND, so the strip is
+  # filled opaque (NOT transparent: a transparent strip is scored as zero-diff by
+  # `magick compare -metric AE`, which would let a LARGE shift earn free
+  # alignment credit for the revealed region). The fill MUST be the page
+  # background, NOT a sampled edge row: when ref content touches the top edge
+  # (headings/nav/hero bands — very common), an edge sample IS content, and
+  # filling the revealed strip with that content color forges the exact ref
+  # pixels — fake-collapsing AE/dssim and turning a real layout misplacement into
+  # a false pass-by-motion-phase (anti-cheat blocker). Use the MODAL (most-
+  # frequent) color of the WHOLE crop: for a content-on-background section the
+  # background dominates by pixel count, so the mode is the true page bg and is
+  # robust to content touching any single edge. Quantize first so anti-aliased
+  # shades collapse into the dominant bucket. SECTION_SHIFT_BG overrides for
+  # operators (humans-only knob).
+  SHIFT_BG="${SECTION_SHIFT_BG:-}"
+  if [ -z "$SHIFT_BG" ]; then
+    SHIFT_BG=$(magick "$REF_IMG" +dither -colors 16 -depth 8 -format "%c" \
+                 histogram:info:- 2>/dev/null \
+                 | sort -rn | head -1 | grep -oiE '#[0-9A-F]{6,8}' | head -1)
+    [ -z "$SHIFT_BG" ] && SHIFT_BG="white"
+  fi
+  _mk_shift() {  # write base img $1 translated vertically by $2 px (NON-circular) to $3
+    # dy>0 moves content DOWN: chop |dy| rows off the BOTTOM (they fall off, do
+    # NOT wrap) and splice |dy| opaque rows onto the TOP. dy<0 moves content UP:
+    # chop the TOP, splice the BOTTOM. Result stays exactly ref-dimensioned. No
+    # -roll, no -virtual-pixel wrap: content scrolled off one edge is DISCARDED,
+    # never re-introduced at the opposite edge, so misplaced content cannot wrap
+    # into alignment.
+    local base="$1" dy="$2" out="$3" k
+    case "$dy" in
+      -*) k="${dy#-}"
+          magick "$base" -background "$SHIFT_BG" -alpha remove \
+            -gravity North -chop "0x${k}" -gravity South -splice "0x${k}" \
+            "$out" 2>/dev/null || return 1 ;;
+      *)  k="${dy#+}"
+          magick "$base" -background "$SHIFT_BG" -alpha remove \
+            -gravity South -chop "0x${k}" -gravity North -splice "0x${k}" \
+            "$out" 2>/dev/null || return 1 ;;
+    esac
+  }
+  _ae_at() {  # AE: ref vs base img $1 translated vertically by $2 px (NON-circular) -> diff to $3
+    local base="$1" dy="$2" out="$3"
+    local shifted="$base"
+    if [ "$dy" != "0" ]; then
+      shifted="$DIR/sections/diff/.${NAME}.shift.png"
+      _mk_shift "$base" "$dy" "$shifted" || shifted="$base"
+    fi
+    local a
+    a=$(magick compare -metric AE -fuzz "$FUZZ" "$REF_IMG" "$shifted" "$out" 2>&1 || true)
+    if [ "$shifted" = "$DIR/sections/diff/.${NAME}.shift.png" ]; then
+      rm -f "$shifted" 2>/dev/null || true
+    fi
+    # Normalize the raw AE (pixel_count * QuantumRange on IM Q16) back to a raw
+    # mismatched-pixel COUNT. This is the single chokepoint every AE flows
+    # through, so all downstream comparisons, ratios (AE_ZERO_RAW), and severity
+    # tiers see consistent pixel-count units. No per-call assert here (dims not
+    # handy); the loud tripwire is at the top-level REF_W/REF_H site below.
+    local _raw_a
+    _raw_a=$(echo "$a" | head -1 | awk '{ if ($1 ~ /^[0-9.eE+-]+$/) printf "%.0f", $1 }')
+    [ -n "$_raw_a" ] && _ae_normalize "$_raw_a"
+  }
+  # AE = the MINIMUM over {stretch, cover-fit} x {0, +/- vertical phase offsets},
+  # keeping the diff image of the winning alignment. Each candidate can only
+  # LOWER AE; a real (localized/structural) defect cannot be aligned or rescaled
+  # away (shifting the whole crop to fix one element misaligns the rest), so its
+  # min stays high — and the dssim_cap still gates extreme AE downstream.
+  AE=$(_ae_at "$IMPL_IMG" 0 "$DIFF_IMG")
+  # Capture the TRUE unshifted AE before the ±6px _try_base sweep below overwrites
+  # $AE with the post-sweep min. The motion-phase collapse ratio (Commit 2) must
+  # be measured against the genuine dy=0 AE, not the already-slightly-collapsed min.
+  AE_ZERO_RAW="$AE"
+  _try_base() {  # update AE/DIFF if (base, dy) scores lower than the current AE
+    local base="$1" dy="$2"
+    if [ -z "$base" ]; then return 0; fi
+    local c
+    c=$(_ae_at "$base" "$dy" "$DIR/sections/diff/.${NAME}.cand.png")
+    if [ -n "$c" ]; then
+      if [ -z "$AE" ] || [ "$c" -lt "$AE" ] 2>/dev/null; then
+        AE="$c"
+        mv -f "$DIR/sections/diff/.${NAME}.cand.png" "$DIFF_IMG" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$DIR/sections/diff/.${NAME}.cand.png" 2>/dev/null || true
+    return 0
+  }
+  # batch-11 ITEM 4(c): the aspect-preserving cover-fit candidate at offset 0.
+  if [ -n "$IMPL_COVER" ]; then _try_base "$IMPL_COVER" 0; fi
+  # batch-11 ITEM 4(b): scroll-phase-offset tolerance. Two independent captures
+  # of identical content can settle a few px apart vertically, so a whole section
+  # is uniformly shifted — inflating AE on content that reads identical. Sweep a
+  # SMALL symmetric vertical-offset band (2px granularity, closest first) on both
+  # bases and keep the lowest AE. Bounded by SECTION_SCROLL_PHASE_TOL_PX
+  # (0 disables); a defect-scale shift is never aligned away.
+  SCROLL_PHASE_TOL_PX="${SECTION_SCROLL_PHASE_TOL_PX:-6}"
+  if [ -n "$AE" ] && [ "$AE" -gt 0 ] 2>/dev/null && [ "${SCROLL_PHASE_TOL_PX:-0}" -gt 0 ] 2>/dev/null; then
+    for _mag in $(seq 2 2 "$SCROLL_PHASE_TOL_PX"); do
+      _try_base "$IMPL_IMG" "+${_mag}"
+      _try_base "$IMPL_IMG" "-${_mag}"
+      if [ -n "$IMPL_COVER" ]; then
+        _try_base "$IMPL_COVER" "+${_mag}"
+        _try_base "$IMPL_COVER" "-${_mag}"
+      fi
+    done
+  fi
+  if [ -n "$IMPL_COVER" ]; then rm -f "$IMPL_COVER" 2>/dev/null || true; fi
 
   if [ -z "$AE" ]; then
     RESULTS="${RESULTS}| ${NAME} | ERROR | — | — | ⚠️ |\n"
@@ -1704,7 +2335,82 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   # Severity tiers below use this normalized value, not raw AE.
   REF_W=$(echo "$REF_SIZE" | cut -dx -f1)
   REF_H=$(echo "$REF_SIZE" | cut -dx -f2)
+  # Loud tripwire: AE is already normalized to a pixel count by _ae_at, so it
+  # must not exceed the crop's pixel budget. If it does, the AE unit divisor is
+  # wrong (ImageMagick metric behavior changed again) — warn so the run is not
+  # silently mis-tiered like the 2026-07 65535x inflation was.
+  if [ -n "$REF_W" ] && [ -n "$REF_H" ] && [ "$REF_W" -gt 0 ] 2>/dev/null; then
+    awk -v ae="$AE" -v w="$REF_W" -v h="$REF_H" 'BEGIN{ exit (ae > w*h*1.01) ? 1 : 0 }' || \
+      echo "section-compare: WARNING AE $AE > pixels ${REF_W}x${REF_H} for ${NAME} — AE unit divisor may be wrong (see lib/ae-quantum.sh)" >&2
+  fi
   AE_PER_MPX=$(awk -v ae="$AE" -v w="$REF_W" -v h="$REF_H" 'BEGIN { area = (w*h)/1000000; if (area > 0) printf "%.0f", ae/area; else print "0" }')
+
+  # ── batch-13 ITEM 1: REF-DYNAMIC sections use STRUCTURAL/LAYOUT PARITY ──
+  # A section the REFERENCE could not self-match (ref vs ref-calib, two
+  # independent loads) is dynamic — framer scroll-scrub / splash / carousel — and
+  # cannot be pixel-AE-compared against any impl. Switch to structural/layout
+  # parity against the reference's OWN scrub noise floor. Detection is preserved:
+  # a blanked section already FAILED the near-black check above; here a resized
+  # box or a structural change beyond the noise floor still FAILS (the verdict +
+  # noise floor are unit-tested in ui_clone.section_dynamic). Static sections
+  # never enter this branch, so their strict AE is untouched.
+  if [ -f "$DIR/sections/ref-dynamic.json" ]; then
+    DYN_VERDICT=$(PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - \
+        "$DIR/sections/ref-dynamic.json" "$NAME" "$REF_IMG" "$IMPL_IMG" \
+        "$REF_W" "$REF_H" "$IMPL_SIZE" "$AE_PER_MPX" <<'PY' 2>/dev/null || true
+import json, subprocess, sys
+from ui_clone.section_dynamic import dynamic_section_verdict
+dynjson, name, ref_img, impl_img, ref_w, ref_h, impl_size, ae_per_mpx = sys.argv[1:9]
+try:
+    rec = (json.load(open(dynjson)) or {}).get(name) or {}
+except Exception:
+    rec = {}
+if not rec.get("dynamic"):
+    print("static"); sys.exit(0)
+def _dssim(a, b):
+    try:
+        o = subprocess.run(["dssim", a, b], capture_output=True, text=True, timeout=60).stdout.split()
+        return float(o[0]) if o else None
+    except Exception:
+        return None
+try:
+    iw, ih = (int(x) for x in str(impl_size).lower().split("x"))
+except Exception:
+    iw = ih = 0
+def _f(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+status, reason = dynamic_section_verdict(
+    ref_self_dssim=rec.get("selfDssim"),
+    impl_dssim=_dssim(ref_img, impl_img),
+    ref_w=float(ref_w), ref_h=float(ref_h), impl_w=float(iw), impl_h=float(ih),
+    impl_near_black=False,
+    calib_w=_f(rec.get("calibW")), calib_h=_f(rec.get("calibH")),
+    # Task B / loop-16: same-frame strict-AE gate. impl AE/Mpx at the SAME scroll
+    # frame must stay within the ref's OWN same-frame AE noise (selfAePerMpx) — a
+    # content defect over the ceiling FAILS even if dssim<=floor (closes F1).
+    impl_ae_per_mpx=_f(ae_per_mpx),
+    ref_self_ae_per_mpx=_f(rec.get("selfAePerMpx")),
+)
+print(f"{status}\t{reason}")
+PY
+)
+    if [ -n "$DYN_VERDICT" ] && [ "$DYN_VERDICT" != "static" ]; then
+      DYN_STATUS=$(printf '%s' "$DYN_VERDICT" | head -1 | cut -f1)
+      DYN_REASON=$(printf '%s' "$DYN_VERDICT" | head -1 | cut -f2- | cut -c1-90)
+      if [ "$DYN_STATUS" = "pass" ]; then
+        RESULTS="${RESULTS}| ${NAME} | ${AE} | ${AE_PER_MPX} | dynamic-parity | 🌀 DYNAMIC (${DYN_REASON}) |\n"
+        PASS_COUNT=$((PASS_COUNT + 1))
+        NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+      else
+        RESULTS="${RESULTS}| ${NAME} | ${AE} | ${AE_PER_MPX} | dynamic-defect | ❌ FAIL (ref-dynamic section: ${DYN_REASON}) |\n"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+      fi
+      continue
+    fi
+  fi
 
   # Thresholds operate on AE/Mpx (defect density). Default 2000 still works for
   # static content; use SECTION_THRESHOLD=50000 for image/animation-rich pages.
@@ -1717,9 +2423,14 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   DSSIM_FALLBACK="${SECTION_DSSIM_FALLBACK:-1}"
   DSSIM_PASS_MAX="${SECTION_DSSIM_PASS_MAX:-0.015}"
   DSSIM_SCORE=""
+  # NOTE: no upper AE bound here — dSSIM is computed even in the saturated band
+  # (AE_PER_MPX >= AE_SATURATION). Saturation means AE lost its gradient, which
+  # is exactly when independent dSSIM evidence matters: the strict tier below
+  # rescues subpixel-phase artifacts that saturate AE while dSSIM stays ~0.
+  # The looser tiers (pass-by-dssim / pass-by-perceptual) still carry their own
+  # < SATURATION and dssim_cap_allows bounds unchanged.
   if [ "$DSSIM_FALLBACK" = "1" ] \
      && [ "$AE_PER_MPX" -gt "$THRESHOLD" ] \
-     && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
      && command -v dssim >/dev/null 2>&1; then
     DSSIM_SCORE=$(dssim "$REF_IMG" "$IMPL_IMG" 2>/dev/null | awk '{print $1}')
   fi
@@ -1749,6 +2460,8 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   elif [ -n "$DSSIM_SCORE" ] \
        && [ "$REF_HAS_VARIANCE" = "1" ] \
        && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
+       && dssim_cap_allows "$AE_PER_MPX" "$THRESHOLD" "$SECTION_DSSIM_AE_CAP_MULT" \
+            "$DIR/sections/${NAME}-judge.json" "$IMPL_IMG" \
        && awk -v d="$DSSIM_SCORE" -v max="$DSSIM_PASS_MAX" 'BEGIN{exit !(d+0 <= max+0)}'; then
     STATUS="✅"
     SEV="pass-by-dssim"
@@ -1756,9 +2469,37 @@ for REF_IMG in "${REF_IMGS[@]}"; do
     NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
   elif [ "$SECTION_PERCEPTUAL_DENSE" = "1" ] \
        && [ "$PERCEPTUAL_REFSHOT_CLEAN" = "1" ] \
+       && [ -n "$DSSIM_SCORE" ] \
+       && [ "$REF_HAS_VARIANCE" = "1" ] \
+       && awk -v d="$DSSIM_SCORE" -v max="$SECTION_DSSIM_STRICT_MAX" 'BEGIN{exit !(d+0 <= max+0)}' \
+       && [ "$(_perceptual_dom_sev "$NAME")" != "critical" ] \
+       && [ "$(_perceptual_dom_sev "$NAME")" != "major" ] \
+       && ! _perceptual_localized_defect "$REF_IMG" "$IMPL_IMG"; then
+    # Subpixel-phase artifact rescue (loop-ebpb-3 evidence class). Deliberately
+    # exempt from BOTH dssim_cap_allows and the AE_SATURATION bound: at
+    # dSSIM <= SECTION_DSSIM_STRICT_MAX with MEASURED ref variance, no
+    # major/critical DOM delta, and no localized 200px defect band, a saturated
+    # AE is evidence the metric lost its gradient — not evidence of a defect.
+    # The 42x-threshold incident that motivated dssim_cap involved the LOOSE
+    # dense ceiling (0.12); this tier is 4x tighter and keeps every anti-cheat
+    # guard the perceptual tier carries: PERCEPTUAL_REFSHOT_CLEAN (an impl that
+    # EMBEDS the ref screenshot scores dSSIM~0, so the screenshot-paste
+    # detector holds the same veto it holds on pass-by-perceptual) and the
+    # DENSE=1 mode gate (in DENSE=0 escape-hatch mode structure-severity.txt
+    # and the refshot check are never produced — the dom guard would be
+    # vacuous and the documented byte-identical strict-AE contract would
+    # break).
+    STATUS="✅"
+    SEV="pass-by-dssim-strict"
+    PASS_COUNT=$((PASS_COUNT + 1))
+    NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+  elif [ "$SECTION_PERCEPTUAL_DENSE" = "1" ] \
+       && [ "$PERCEPTUAL_REFSHOT_CLEAN" = "1" ] \
        && [ "$REF_HAS_VARIANCE" = "1" ] \
        && [ -n "$DSSIM_SCORE" ] \
        && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
+       && dssim_cap_allows "$AE_PER_MPX" "$THRESHOLD" "$SECTION_DSSIM_AE_CAP_MULT" \
+            "$DIR/sections/${NAME}-judge.json" "$IMPL_IMG" \
        && _perceptual_is_dense "$NAME" \
        && awk -v d="$DSSIM_SCORE" -v max="$SECTION_DSSIM_DENSE_MAX" 'BEGIN{exit !(d+0 <= max+0)}' \
        && [ "$(_perceptual_dom_sev "$NAME")" != "critical" ] \
@@ -1773,6 +2514,122 @@ for REF_IMG in "${REF_IMGS[@]}"; do
     SEV="pass-by-perceptual"
     PASS_COUNT=$((PASS_COUNT + 1))
     NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+  elif [ "$AE" -lt "${SECTION_AE_ABS_FLOOR:-8000}" ] \
+       && [ -n "$DSSIM_SCORE" ] \
+       && [ "$REF_HAS_VARIANCE" = "1" ] \
+       && awk -v d="$DSSIM_SCORE" -v max="$SECTION_DSSIM_DENSE_MAX" 'BEGIN{exit !(d+0 <= max+0)}' \
+       && awk -v w="$REF_W" -v h="$REF_H" -v max="${SECTION_AE_FLOOR_MAX_MPX:-0.5}" \
+            'BEGIN{ area=(w*h)/1000000; exit !(area > 0 && area <= max+0) }' \
+       && ! _perceptual_localized_defect "$REF_IMG" "$IMPL_IMG"; then
+    # Absolute-AE floor: a tiny crop (e.g. a ~0.06 Mpx header bar) inflates
+    # AE/Mpx into the critical band on a near-zero ABSOLUTE pixel difference —
+    # AE_PER_MPX = AE/area, so a sub-0.1 Mpx denominator turns a few-thousand-pixel
+    # diff into a "critical" score (the navercorp header: AE=3335 -> AE/Mpx 23160).
+    # Require DSSIM_SCORE to be non-empty: REF_HAS_VARIANCE is only MEASURED when
+    # dssim ran (else it defaults open to 1), so this makes the blank/near-uniform
+    # ref guard real evidence, not a default — without a measured ref-std the
+    # section conservatively falls through to the fail branches.
+    # N4: the floor previously checked only ABSOLUTE AE + variance + localized band,
+    # but NOT the global-dssim ceiling its sibling pass tiers (pass-by-dssim /
+    # pass-by-perceptual) carry — so a low-absolute-AE but high-global-dssim
+    # DISTRIBUTED defect (wrong font / global tint / uniform layout shift) rode the
+    # floor to green because a uniformly-spread divergence trips no 200px localized
+    # band (reproduced AE=4988 / dssim=0.199). Add (a) the same SECTION_DSSIM_DENSE_MAX
+    # (0.12) global-dssim ceiling, and (b) an upper REF-area Mpx bound
+    # (SECTION_AE_FLOOR_MAX_MPX, default 0.5) so the floor only rescues genuinely
+    # tiny-crop denominator artifacts — its stated navercorp-header purpose — not a
+    # full-size section that merely has few absolute diff pixels.
+    STATUS="✅"
+    SEV="pass-by-ae-floor"
+    PASS_COUNT=$((PASS_COUNT + 1))
+    NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+  elif [ "$SECTION_MOTION_PHASE" = "1" ] \
+       && [ -n "$DSSIM_SCORE" ] \
+       && [ "$REF_HAS_VARIANCE" = "1" ] \
+       && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
+       && [ -n "$AE_ZERO_RAW" ] \
+       && [ "$AE_ZERO_RAW" -gt 0 ] 2>/dev/null; then
+    # Motion shift-search tier (Commit 2). A faithful scroll-reveal section caught
+    # at a different sub-frame is IDENTICAL content uniformly translated vertically
+    # by tens-to-low-hundreds px. The ±6px _try_base sweep above is too narrow.
+    # Here we run a WIDE NON-circular vertical search (no -roll wrap) and let
+    # motion_phase_verdict decide: collapse + shifted-structure + no localized
+    # defect. A broken impl does NOT collapse (best stays ~dy=0) and/or has low
+    # shifted structure and/or a localized band — and FAILS, landing on its
+    # original major/critical severity (preserved below).
+    MP_BEST_AE="$AE_ZERO_RAW"   # baseline to beat = true unshifted AE@0
+    MP_BEST_DY=0
+    MP_TMP="$DIR/sections/diff/.${NAME}.mp.png"
+    for _md in $(seq "$SECTION_MOTION_PHASE_STEP" "$SECTION_MOTION_PHASE_STEP" "$SECTION_MOTION_PHASE_MAX_PX"); do
+      for _sgn in "-" "+"; do
+        _c=$(_ae_at "$IMPL_IMG" "${_sgn}${_md}" "$MP_TMP")
+        if [ -n "$_c" ] && { [ -z "$MP_BEST_AE" ] || [ "$_c" -lt "$MP_BEST_AE" ] 2>/dev/null; }; then
+          MP_BEST_AE="$_c"; MP_BEST_DY="${_sgn}${_md}"
+        fi
+      done
+    done
+    rm -f "$MP_TMP" 2>/dev/null || true
+    # Re-measure shifted-pair dssim at THE winning offset (same non-circular
+    # translate the AE used), so collapse and structure agree on one alignment.
+    # Default to the UNSHIFTED dssim; only adopt the re-measured shifted dssim when
+    # it is non-empty. A glitched/empty re-measure must NOT clobber it to empty
+    # (which would force a "missing dssim" fail). Falling back to the unshifted
+    # DSSIM_SCORE is conservative — it is >= the shifted value, so it can only make
+    # G2 harder to pass, never let a broken impl through.
+    MP_SHIFT_DSSIM="$DSSIM_SCORE"
+    # Localized-defect (G4) must be judged at the WINNING alignment, not on the
+    # unshifted pair. A faithfully scroll-shifted section differs in EVERY band
+    # when compared unshifted (the whole frame is offset by best_dy), so the
+    # per-band localized check on IMPL_IMG always tripped — vetoing the very
+    # uniform-shift case this tier exists to pass, leaving it inert. Recompute it
+    # on the impl shifted by MP_BEST_DY (the same non-circular translate the AE
+    # search used) so only a defect that SURVIVES alignment vetoes. best_dy=0 →
+    # the shifted image IS the unshifted impl, so the unshifted pair is correct.
+    MP_LOC_IMG="$IMPL_IMG"
+    MP_SH="$DIR/sections/diff/.${NAME}.mpsh.png"
+    if [ "$MP_BEST_DY" != "0" ] && _mk_shift "$IMPL_IMG" "$MP_BEST_DY" "$MP_SH"; then
+      _mp_sd=$(dssim "$REF_IMG" "$MP_SH" 2>/dev/null | awk '{print $1}')
+      [ -n "$_mp_sd" ] && MP_SHIFT_DSSIM="$_mp_sd"
+      MP_LOC_IMG="$MP_SH"
+    fi
+    MP_LOCALIZED=0
+    _perceptual_localized_defect "$REF_IMG" "$MP_LOC_IMG" && MP_LOCALIZED=1
+    rm -f "$MP_SH" 2>/dev/null || true
+    MP_VERDICT=$(PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - \
+        "$AE_ZERO_RAW" "$MP_BEST_AE" "$MP_SHIFT_DSSIM" "$REF_HAS_VARIANCE" "$MP_LOCALIZED" \
+        "$SECTION_MOTION_COLLAPSE_MIN" "$SECTION_MOTION_MIN_STRUCT" <<'PY' 2>/dev/null || true
+import sys
+from ui_clone.section_dynamic import motion_phase_verdict
+azr, asm, sd, refvar, loc, cmin, mstruct = sys.argv[1:8]
+def _f(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+status, reason = motion_phase_verdict(
+    ae_zero=_f(azr), ae_shift_min=_f(asm), shifted_dssim=_f(sd),
+    ref_has_variance=(refvar == "1"), localized_defect=(loc == "1"),
+    collapse_min=float(cmin), min_struct=float(mstruct),
+)
+print(f"{status}\t{reason}")
+PY
+)
+    MP_STATUS=$(printf '%s' "$MP_VERDICT" | head -1 | cut -f1)
+    MP_REASON=$(printf '%s' "$MP_VERDICT" | head -1 | cut -f2- | cut -c1-110)
+    if [ "$MP_STATUS" = "pass" ]; then
+      STATUS="✅"
+      SEV="pass-by-motion-phase"
+      PASS_COUNT=$((PASS_COUNT + 1))
+      NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+      echo "  ↳ ${NAME}: motion-phase pass (best_dy=${MP_BEST_DY}) — ${MP_REASON}"
+    else
+      # Not a motion phase — preserve the ORIGINAL major/critical severity this
+      # section would have received without the tier (it never reaches the
+      # branches below because this is an elif; saturated is excluded by the guard).
+      if [ "$AE_PER_MPX" -le $((THRESHOLD * 10)) ]; then SEV="major"; else SEV="critical"; fi
+      STATUS="❌"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
   elif [ "$AE_PER_MPX" -le $((THRESHOLD * 10)) ]; then
     STATUS="❌"
     SEV="major"
@@ -1785,6 +2642,43 @@ for REF_IMG in "${REF_IMGS[@]}"; do
     STATUS="🌑"
     SEV="saturated"
     FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+
+  # Crop-evidence guard conversion (vacuous-pass closure). A guard row in
+  # crop-guards.tsv means the crop pair is not pixel evidence for this
+  # content-bearing section: blank ref / symmetric-blank / >60% masked /
+  # color-flattened pair. policy "all" converts every verdict (a blank REF
+  # crop is a capture failure — failing the impl for it is as wrong as
+  # passing it); policy "pass-only" converts pass tiers but keeps fails
+  # (a fail on the unmasked remainder is still real evidence).
+  if [ -n "$GUARD_ROW" ]; then
+    if [ "$STATUS" = "✅" ] || [ "$GUARD_POLICY" = "all" ]; then
+      case "$SEV" in
+        ok|minor|pass-by-dssim|pass-by-perceptual|pass-by-ae-floor|pass-by-motion-phase)
+          PASS_COUNT=$((PASS_COUNT - 1))
+          NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT - 1))
+          ;;
+        major|critical|saturated)
+          FAIL_COUNT=$((FAIL_COUNT - 1))
+          ;;
+      esac
+      UNMEASURED_COUNT=$((UNMEASURED_COUNT + 1))
+      GUARD_SHORT=$(printf '%s' "$GUARD_REASON" | cut -c1-110)
+      RESULTS="${RESULTS}| ${NAME} | ${AE} | ${AE_PER_MPX} | unmeasured | ⚠️ UNMEASURED (${GUARD_SHORT}) |\n"
+      echo "  ↳ ${NAME}: verdict converted to UNMEASURED — ${GUARD_REASON}"
+      continue
+    fi
+  fi
+
+  # Diagnostic: name the cap when it (not the dssim score) closed the
+  # leniency path, so the agent knows the sanctioned next step is a
+  # visual-judge confirmation, not threshold tuning.
+  if [ "$STATUS" = "❌" ] && [ -n "$DSSIM_SCORE" ] \
+     && [ "$AE_PER_MPX" -gt $((THRESHOLD * SECTION_DSSIM_AE_CAP_MULT)) ] \
+     && awk -v d="$DSSIM_SCORE" -v max="$SECTION_DSSIM_DENSE_MAX" 'BEGIN{exit !(d+0 <= max+0)}'; then
+    echo "  ↳ ${NAME}: dssim leniency blocked by AE cap (AE/Mpx ${AE_PER_MPX} > ${SECTION_DSSIM_AE_CAP_MULT}x threshold)."
+    echo "    To confirm a perceptual pass, dispatch visual-debug-reviewer for this section and write"
+    echo "    $DIR/sections/${NAME}-judge.json with {\"verdict\": \"PASS\"} — stale (older than crop) judges are ignored."
   fi
 
   RESULTS="${RESULTS}| ${NAME} | ${AE} | ${AE_PER_MPX} | ${SEV} | ${STATUS} |\n"
@@ -1824,7 +2718,7 @@ echo "| Section | AE | AE/Mpx | Severity | Status |"
 echo "|---------|-----|--------|----------|--------|"
 echo -e "$RESULTS"
 echo ""
-echo "**Result: ${PASS_COUNT} PASS, ${FAIL_COUNT} FAIL, ${SKIP_COUNT} SKIP, ${SUBSTITUTED_COUNT} STRUCTURAL_ONLY**"
+echo "**Result: ${PASS_COUNT} PASS, ${FAIL_COUNT} FAIL, ${SKIP_COUNT} SKIP, ${SUBSTITUTED_COUNT} STRUCTURAL_ONLY, ${UNMEASURED_COUNT} UNMEASURED**"
 echo "(Severity is based on AE/Mpx — defect density per megapixel — not raw AE.)"
 
 # Count saturated rows for the agent's stop-decision routing.
@@ -1848,9 +2742,85 @@ mkdir -p "$DIR/sections"
   echo "|---------|-----|--------|----------|--------|"
   echo -e "$RESULTS"
   echo ""
-  echo "**Result: ${PASS_COUNT} PASS, ${FAIL_COUNT} FAIL, ${SKIP_COUNT} SKIP, ${SUBSTITUTED_COUNT} STRUCTURAL_ONLY**"
+  # UNMEASURED is a fifth canonical field, not a side-channel line: the evidence
+  # state has to live in the denominator every consumer already parses, or each
+  # one has to independently learn about it and they desync (which is the bug
+  # class this whole change exists to close).
+  echo "**Result: ${PASS_COUNT} PASS, ${FAIL_COUNT} FAIL, ${SKIP_COUNT} SKIP, ${SUBSTITUTED_COUNT} STRUCTURAL_ONLY, ${UNMEASURED_COUNT} UNMEASURED**"
   echo "(Severity is based on AE/Mpx — defect density per megapixel — not raw AE.)"
 } > "$DIR/sections/result.txt"
+
+# Machine-readable twin of result.txt for the self-healing loop (comparison-
+# fix.md H1) — that loop's classifier needs per-section JSON, which this
+# script never produced before (the documented loop dead-ended at parse).
+python3 - "$DIR/sections/result.txt" "$DIR/sections/result.json" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+rows = []
+row_re = re.compile(r"^\|\s*(?P<name>[^|]+?)\s*\|\s*(?P<ae>[^|]*?)\s*\|\s*(?P<aempx>[^|]*?)\s*\|\s*(?P<sev>[^|]*?)\s*\|\s*(?P<status>[^|]*?)\s*\|\s*$")
+for line in src.read_text(encoding="utf-8").splitlines():
+    m = row_re.match(line)
+    if not m or m.group("name") in ("Section", "---------"):
+        continue
+    name = m.group("name")
+    if set(name) <= {"-"}:
+        continue
+    status_raw = m.group("status")
+    if "✅" in status_raw or "PASS" in status_raw:
+        status = "pass"
+    elif "MISSING" in status_raw or "missing" in status_raw:
+        status = "missing"
+    elif "STRUCTURAL" in status_raw:
+        status = "structural-only"
+    elif "🌑" in status_raw:
+        status = "saturated"
+    elif "❌" in status_raw or "FAIL" in status_raw:
+        status = "fail"
+    elif "UNMEASURED" in status_raw:
+        # Distinct from "unknown": the row was deliberately not compared because
+        # the reference crop carried no signal. The self-healing loop classifier
+        # reads this file, and "unknown" reads as a parse artifact it can ignore.
+        status = "unmeasured"
+    else:
+        status = "unknown"
+
+    def num(s):
+        s = s.replace(",", "").strip()
+        try:
+            return int(float(s))
+        except ValueError:
+            return None
+
+    diff_crop = dst.parent / "diff" / f"{name}.png"
+    rows.append({
+        "name": name,
+        "ae": num(m.group("ae")),
+        "aePerMpx": num(m.group("aempx")),
+        "severity": m.group("sev") or None,
+        "status": status,
+        "statusRaw": status_raw,
+        "diffCrop": str(diff_crop) if diff_crop.is_file() else None,
+    })
+summary_re = re.compile(
+    r"\*\*Result: (\d+) PASS, (\d+) FAIL, (\d+) SKIP, (\d+) STRUCTURAL_ONLY"
+    r"(?:, (\d+) UNMEASURED)?\*\*"
+)
+summary = {}
+msum = summary_re.search(src.read_text(encoding="utf-8"))
+if msum:
+    summary = {"pass": int(msum.group(1)), "fail": int(msum.group(2)),
+               "skip": int(msum.group(3)), "structuralOnly": int(msum.group(4))}
+dst.write_text(json.dumps({
+    "schemaVersion": 1,
+    "source": "section-compare.sh",
+    "summary": summary,
+    "sections": rows,
+}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+PY
 
 # ── Step 5: Structure diff per section ──
 echo ""
@@ -1866,6 +2836,10 @@ for m in matches:
     ref = m.get('ref')
     impl = m.get('impl')
     if not ref or not impl:
+        continue
+    # Off-canvas synthetic pairs (unmounted overlays) carry only a rect —
+    # structure comparison is meaningless for content neither page renders.
+    if impl.get('offCanvas'):
         continue
 
     issues = []
@@ -2004,7 +2978,25 @@ fi
 # after calling mark_passed("section-compare") and recording "done" in pipeline-state.json.
 # section-compare.sh intentionally does NOT remove the marker here, so the Stop hook
 # can still fire once more to record the completed state.
-TOTAL_ROWS=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
+# An unmeasured section is absence of evidence, not evidence of absence. The
+# crop-evidence guard deliberately refuses to FAIL the impl for a blank REFERENCE
+# crop — but the run must not exit 0 either, or the pipeline records a pass over
+# sections nothing ever compared. Blank ref crops concentrate on mid-reveal and
+# mid-animation sections, so exiting 0 here certified exactly the sections a
+# motion clone is least able to verify.
+if [ "$UNMEASURED_COUNT" -gt 0 ]; then
+  echo ""
+  echo "  ⛔ Section-compare INCONCLUSIVE: ${UNMEASURED_COUNT} section(s) UNMEASURED — the"
+  echo "     reference crop carried no signal, so neither side was compared."
+  echo "     Fix the CAPTURE, not the impl. A blank ref crop means the screenshot was"
+  echo "     taken before the section revealed/animated. Raise the settle window with"
+  echo "     WAIT_SCROLL_SETTLE=<seconds> (normally derived from the longest transition"
+  echo "     in transition-spec.json; setting it pins the derivation), then re-run."
+  echo "     Iterating on impl/src for these rows tunes against nothing."
+  exit 1
+fi
+
+TOTAL_ROWS=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT + UNMEASURED_COUNT))
 # Template-mode escape valve (Common cheat pattern): when asset-substitution.json
 # declares wholesale wildcard substitution ("*"), the agent has explicitly
 # committed to a design-template clone where copy/imagery are intentionally
@@ -2018,7 +3010,12 @@ if [ "$SUBSTITUTION_ALL" = "1" ]; then
   # section-map coverage. Block the "agent gets a 2-section ref capture by
   # luck, declares wildcard substitution, gate passes" path. Threshold:
   # TOTAL_ROWS must be ≥ ceil(N/2) where N = section-map.json section count.
+  # D23: same ref-root fallback as the section-map override — this coverage
+  # gate is the second consumer of section-map.json in the viewport fan-out.
   SECTION_MAP="$DIR/section-map.json"
+  if [ ! -f "$SECTION_MAP" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/section-map.json" ]; then
+    SECTION_MAP="${REF_ROOT_DIR}/section-map.json"
+  fi
   EXPECTED_SECTIONS=$(python3 -c "
 import json
 try:

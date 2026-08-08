@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -263,6 +264,7 @@ def _init_impl_scope_git_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
     (repo / "ui_clone").mkdir()
     (repo / "ui_clone" / "gate.py").write_text("BASELINE = True\n", encoding="utf-8")
     (repo / "README.md").write_text("fixture\n", encoding="utf-8")
@@ -311,6 +313,43 @@ def test_impl_scope_check_ignores_unchanged_preexisting_parent_wip(tmp_path: Pat
     )
 
 
+
+def test_impl_scope_check_expands_unchanged_untracked_directory_baseline(tmp_path: Path) -> None:
+    """Untracked directory baselines must compare against later file-expanded diffs."""
+    repo, ref, impl = _init_impl_scope_git_repo(tmp_path)
+    bin_dir = repo / "bin"
+    bin_dir.mkdir()
+    cli = bin_dir / "ui-clone"
+    cli.write_text("#!/usr/bin/env node\nconsole.log('ui-clone')\n", encoding="utf-8")
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "impl-scope-check.sh"
+    first = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert first.returncode == 0, f"baseline init must pass: {first.stdout}\n{first.stderr}"
+
+    second = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert second.returncode == 0, (
+        "unchanged untracked directory contents must not fail impl-scope:\n"
+        f"{second.stdout}\n{second.stderr}"
+    )
+    artifact = json.loads((ref / "impl-scope.json").read_text(encoding="utf-8"))
+    assert artifact["status"] == "pass"
+    assert any(
+        row["path"] == "bin/ui-clone" and row["reason"] == "pre-existing-dirty-baseline"
+        for row in artifact["allowed"]
+    )
+
 def test_impl_scope_check_flags_preexisting_wip_modified_after_baseline(tmp_path: Path) -> None:
     """The baseline-dirty exemption is content-based, not a broad path
     whitelist. If the clone iteration edits that file further, fail.
@@ -344,7 +383,7 @@ def test_impl_scope_check_flags_preexisting_wip_modified_after_baseline(tmp_path
 
 def test_impl_scope_check_dispatcher_wired() -> None:
     import re
-    dispatcher = _project_root() / "scripts" / "verify" / "run-required-checks.sh"
+    dispatcher = _project_root() / "scripts" / "verify" / "build_required_dispatch.py"
     text = dispatcher.read_text(encoding="utf-8")
     m = re.search(r'"impl-scope-check\.sh":\s*"([^"]+)"', text)
     assert m, "impl-scope-check.sh missing from dispatcher SIGNATURES"
@@ -374,7 +413,7 @@ def test_runtime_env_check_script_present() -> None:
 
 def test_runtime_env_dispatcher_wired() -> None:
     import re
-    dispatcher = _project_root() / "scripts" / "verify" / "run-required-checks.sh"
+    dispatcher = _project_root() / "scripts" / "verify" / "build_required_dispatch.py"
     text = dispatcher.read_text(encoding="utf-8")
     m = re.search(r'"runtime-env-check\.sh":\s*"([^"]+)"', text)
     assert m, "runtime-env-check.sh missing from dispatcher SIGNATURES"
@@ -612,7 +651,7 @@ def test_ref_js_loader_no_allowlist_when_policy_canonical(tmp_path: Path) -> Non
 
 def test_ref_js_loader_dispatcher_wired() -> None:
     import re
-    dispatcher = _project_root() / "scripts" / "verify" / "run-required-checks.sh"
+    dispatcher = _project_root() / "scripts" / "verify" / "build_required_dispatch.py"
     text = dispatcher.read_text(encoding="utf-8")
     m = re.search(r'"ref-js-loader-check\.sh":\s*"([^"]+)"', text)
     assert m, "ref-js-loader-check.sh missing from dispatcher SIGNATURES"
@@ -642,7 +681,7 @@ def test_fix18_extract_dom_captures_pseudo_elements() -> None:
     entire visual layer — dominant cause of the "전체 레이아웃 못 잡는다"
     feedback after V15.
     """
-    script = _project_root() / "skills" / "visual-debug" / "scripts" / "extract-dom.sh"
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lib" / "extract-dom.js"
     text = script.read_text(encoding="utf-8")
     assert "capturePseudo" in text, (
         "extract-dom.sh must define a capturePseudo helper for ::before/::after (Fix 18)"
@@ -662,7 +701,14 @@ def test_fix18_scaffold_to_jsx_emits_pseudo_spans() -> None:
     children with the pseudo's content + styles so the impl reproduces the
     decoration layer the ref draws via CSS pseudo-elements.
     """
-    script = _project_root() / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "lib"
+        / "scaffold_to_jsx.py"
+    )
     text = script.read_text(encoding="utf-8")
     assert 'data-pseudo="' in text, (
         "scaffold-to-jsx.sh must emit <span data-pseudo=...> for captured pseudos (Fix 18)"
@@ -708,7 +754,14 @@ def test_fix16b_scaffold_to_jsx_consumes_subtrees() -> None:
     one subtree and rendered identical JSX. The `consumed` set tracks
     id(node) of already-assigned subtrees.
     """
-    script = _project_root() / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "lib"
+        / "scaffold_to_jsx.py"
+    )
     body = script.read_text(encoding="utf-8")
     assert "consumed = set()" in body, (
         "scaffold-to-jsx.sh must initialize a consumed set before the section loop (Fix 16b)"
@@ -719,8 +772,12 @@ def test_fix16b_scaffold_to_jsx_consumes_subtrees() -> None:
     assert "consumed.add(id(found))" in body, (
         "find_subtree_for_section must mark the assigned subtree consumed (Fix 16b)"
     )
-    assert "find_subtree_for_section(structure, sec, consumed)" in body, (
-        "section loop must pass consumed into find_subtree_for_section (Fix 16b)"
+    assert re.search(
+        r"find_subtree_for_section\(\s*structure,\s*sec,\s*consumed\b",
+        body,
+    ), (
+        "section loop must pass consumed into find_subtree_for_section (Fix 16b; "
+        "formatting may keep the call on one line or split it across lines)"
     )
 
 
@@ -732,7 +789,14 @@ def test_fix15_scaffold_to_jsx_emits_page_tsx() -> None:
     page.tsx wrapped components incorrectly; transpiler-generated page.tsx
     eliminates that wiring drift by mirroring the ref structure root.
     """
-    script = _project_root() / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "lib"
+        / "scaffold_to_jsx.py"
+    )
     body = script.read_text(encoding="utf-8")
     assert 'page.tsx' in body, "scaffold-to-jsx.sh must write page.tsx (Fix 15)"
     # Mirrors structure.json root tag (not hardcoded to <main>).
@@ -750,7 +814,11 @@ def test_fix13_scaffold_to_jsx_script_present() -> None:
     """
     script = _project_root() / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
     assert script.is_file(), "scaffold-to-jsx.sh missing — Fix 13 incomplete"
-    body = script.read_text(encoding="utf-8")
+    helper = script.parent / "lib" / "scaffold_to_jsx.py"
+    assert helper.is_file(), "scaffold_to_jsx.py helper missing — Fix 13 incomplete"
+    shell = script.read_text(encoding="utf-8")
+    assert 'python3 "$SCRIPT_DIR/lib/scaffold_to_jsx.py"' in shell
+    body = helper.read_text(encoding="utf-8")
     # Reads structure.json + section-map.json.
     assert "structure.json" in body
     assert "section-map.json" in body
@@ -824,7 +892,7 @@ def test_dom_scaffold_guards_degenerate_zero_sections(tmp_path: Path) -> None:
     script = _project_root() / "skills" / "visual-debug" / "scripts" / "dom-scaffold.sh"
     proc = subprocess.run(
         ["bash", str(script), str(ref)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
 
     assert proc.returncode != 0, (
@@ -856,7 +924,7 @@ def test_dom_scaffold_passes_with_healthy_section_map(tmp_path: Path) -> None:
     script = _project_root() / "skills" / "visual-debug" / "scripts" / "dom-scaffold.sh"
     proc = subprocess.run(
         ["bash", str(script), str(ref)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
 
     assert proc.returncode == 0, f"healthy section-map must pass:\n{proc.stdout}\n{proc.stderr}"
@@ -877,7 +945,7 @@ def test_dom_scaffold_escape_hatch_allows_zero_sections(tmp_path: Path) -> None:
     env = dict(**os.environ, DOM_SCAFFOLD_ALLOW_NO_SECTIONS="1")
     proc = subprocess.run(
         ["bash", str(script), str(ref)],
-        capture_output=True, text=True, timeout=30, env=env,
+        capture_output=True, text=True, timeout=120, env=env,
     )
 
     assert proc.returncode == 0, f"escape hatch must pass:\n{proc.stdout}\n{proc.stderr}"

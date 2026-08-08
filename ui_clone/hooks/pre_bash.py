@@ -53,7 +53,8 @@ from ui_clone.hooks.pre_bash_rules.impl_scaffold import (
 )
 from ui_clone.hooks.pre_bash_rules.ref_state import (
     _FRESH_FOLDER_ALLOW_PATTERNS,
-    _FRESH_FOLDER_DENY_PATTERNS,
+    _FRESH_FOLDER_DENY_PATHS,
+    _FRESH_FOLDER_DENY_TOOLS,
     _candidate_ref_roots,
     _command_path_tokens,
     _find_active_ref,
@@ -90,7 +91,8 @@ __all__ = [
     "_BASH_WRITE_PATTERNS",
     "_BLOCK_PATTERNS",
     "_FRESH_FOLDER_ALLOW_PATTERNS",
-    "_FRESH_FOLDER_DENY_PATTERNS",
+    "_FRESH_FOLDER_DENY_PATHS",
+    "_FRESH_FOLDER_DENY_TOOLS",
     "_HTML_WRITE_PATTERNS",
     "_IMPL_SCAFFOLD_PATTERNS",
     "_SECTION_COMPARE_COMMAND_PATTERNS",

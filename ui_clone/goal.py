@@ -417,8 +417,17 @@ def _section_compare_next_action_advisories(ref_dir: Path) -> list[str]:
     return advisories
 
 
-def build_goal_card_data(ref_dir: Path) -> GoalCard:
-    """Return deterministic, host-neutral goal card data for a ref directory."""
+def build_goal_card_data(
+    ref_dir: Path, *, external_prebuilt: bool = False
+) -> GoalCard:
+    """Return deterministic, host-neutral goal card data for a ref directory.
+
+    LAND item A: ``external_prebuilt`` (set by --reuse-frozen-ref) surfaces a
+    reference-acquisition "satisfied-by-supply" advisory at the reference gate
+    only. It never alters the done / --check-done / section-compare verdict
+    path, so the loop-exit signal stays a deterministic function of the
+    pinned-scorer evidence.
+    """
     state = PipelineState.load(ref_dir)
     gate = state.current_gate
     step = _GOAL_BY_GATE.get(gate)
@@ -433,6 +442,26 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     next_action = step.next_action.replace("<ref-dir>", command_ref)
     evidence = step.required_evidence.replace("<ref-dir>", command_ref)
     stop_evidence_status: str | None = None
+
+    # LAND item A: reference-acquisition satisfied-by-supply advisory. Reference
+    # gate only; advisory text on next_action/evidence — the verdict path below
+    # (done / section-compare / abort) is untouched.
+    if gate == "reference" and external_prebuilt:
+        from ui_clone.pipeline import reference_evidence_satisfied
+
+        satisfied, missing = reference_evidence_satisfied(
+            ref_dir, external_prebuilt=True
+        )
+        if satisfied:
+            note = " [reuse-frozen-ref: reference acquisition satisfied-by-supply"
+            if missing:
+                note += (
+                    "; missing acquisition artifacts (telemetry only): "
+                    + ", ".join(missing)
+                )
+            note += "]"
+            next_action += note
+            evidence += note
 
     if gate == "done":
         missing = state.missing_prerequisites("done")
@@ -557,9 +586,9 @@ def build_goal_card_data(ref_dir: Path) -> GoalCard:
     )
 
 
-def build_goal_card(ref_dir: Path) -> str:
+def build_goal_card(ref_dir: Path, *, external_prebuilt: bool = False) -> str:
     """Return a deterministic, host-neutral goal card for a ref directory."""
-    card = build_goal_card_data(ref_dir)
+    card = build_goal_card_data(ref_dir, external_prebuilt=external_prebuilt)
 
     # Abort-active rendering: ONLY emit terminal-state lines. The runnable
     # block (Mission / Current goal / Next action / Stop condition / Required
@@ -606,6 +635,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("ref_dir", type=Path, help="tmp/ref/<component> directory")
     parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Bind the run/reference dir explicitly (overrides the ref_dir positional)",
+    )
+    parser.add_argument(
+        "--reuse-frozen-ref",
+        action="store_true",
+        dest="reuse_frozen_ref",
+        help=(
+            "Treat the bound reference as an externally-supplied prebuilt "
+            "reference: surface reference-acquisition satisfied-by-supply "
+            "(advisory only; does not change the --check-done verdict)"
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -625,7 +670,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    card = build_goal_card_data(args.ref_dir)
+    # LAND item A: --run-dir overrides the ref_dir positional (explicit bind).
+    target_ref = args.run_dir if args.run_dir else args.ref_dir
+    external_prebuilt = bool(args.reuse_frozen_ref)
+    card = build_goal_card_data(target_ref, external_prebuilt=external_prebuilt)
     if args.check_done:
         # Order matters: an unclonable target should abort the loop even if
         # the pipeline somehow advanced to "done" (it shouldn't, but defend
@@ -639,6 +687,16 @@ def main(argv: list[str] | None = None) -> int:
         if card.current_gate == "done" and (card.stop_evidence_status or "").startswith(
             "satisfied:"
         ):
+            # Stamp parity (omx postmortem follow-up): the Stop hook requires
+            # a fresh canonical verify-stamp, but --check-done used to pass on
+            # gate state + result.txt counts alone — external loop drivers
+            # could declare success the Stop hook would have blocked.
+            from ui_clone.pipeline_phases.verify import canonical_stamp_problem
+
+            stamp_problem = canonical_stamp_problem(Path(target_ref))
+            if stamp_problem:
+                print(stamp_problem, file=sys.stderr)
+                return 1
             return 0
         diagnostic = card.stop_evidence_status or (
             f"not satisfied: current_gate is {card.current_gate!r}, not 'done'"
@@ -648,7 +706,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_output:
         print(json.dumps(card.to_json(), ensure_ascii=False, indent=2))
     else:
-        print(build_goal_card(args.ref_dir))
+        print(build_goal_card(target_ref, external_prebuilt=external_prebuilt))
     # Abort banner is terminal, not advisory. Text-mode drivers that call
     # `python -m ui_clone.goal <ref-dir>` (not --check-done) would otherwise
     # loop past the hard gate-fail cap (observed runs hit 180+ retries

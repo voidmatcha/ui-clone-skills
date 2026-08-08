@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>scroll-revealed JS hover fixture (batch-11 ITEM 3)</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; }
+    /* tall spacer pushes the hover targets BELOW the fold at scroll-top 0 */
+    .spacer { height: 180vh; background: #f5efe4; }
+    .row { display: flex; gap: 40px; padding: 80px; background: #101018; }
+    /* JS-hover target: NO :hover CSS rule. A pointerenter/mouseenter handler
+       (framer whileHover style) scales it. The probe must scroll it into view
+       and dispatch real pointer events to register the transform delta. */
+    .js-hover-card {
+      width: 160px; height: 120px; background: #2244cc; color: #fff;
+      display: grid; place-items: center; transform: scale(1);
+      transition: transform 120ms ease;
+    }
+    /* genuinely-missing hover: no handler, no :hover rule -> must FAIL. */
+    .no-hover-el {
+      width: 160px; height: 120px; background: #888; color: #000;
+      display: grid; place-items: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="spacer">scroll down</div>
+  <div class="row">
+    <div class="js-hover-card">JS hover</div>
+    <div class="no-hover-el">no hover</div>
+  </div>
+  <script>
+    // Framer-style JS whileHover: scale up on pointer/mouse enter, reset on
+    // leave. NO CSS :hover rule exists for this element, so only a real event
+    // dispatch (not CDP forcePseudoState) can fire it.
+    var card = document.querySelector(".js-hover-card");
+    function enter() { card.style.transform = "scale(1.25)"; }
+    function leave() { card.style.transform = "scale(1)"; }
+    card.addEventListener("pointerenter", enter);
+    card.addEventListener("mouseenter", enter);
+    card.addEventListener("pointerleave", leave);
+    card.addEventListener("mouseleave", leave);
+  </script>
+</body>
+</html>

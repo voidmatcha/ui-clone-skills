@@ -128,10 +128,18 @@ try:
 except Exception:
     site_label = target_url
 
-# Motion library detection
+# Motion library detection. external-sdks.json nests libs under `detected`
+# ({lib: {matches: n}}); iterate that map, not the top-level keys (which are
+# detected/usedMotion/source/derivedFrom/schemaVersion). Fall back to the whole
+# dict for legacy {lib: {matches}} payloads with no `detected` wrapper.
 sdk_libs: list[str] = []
 if isinstance(sdks, dict):
-    for k, v in sdks.items():
+    detected_map = sdks.get("detected")
+    if not isinstance(detected_map, dict):
+        detected_map = sdks
+    for k, v in detected_map.items():
+        if k in ("source", "derivedFrom", "schemaVersion", "usedMotion", "detected"):
+            continue
         if isinstance(v, dict) and v.get("matches", 0):
             sdk_libs.append(f"{k} ({v.get('matches')}×)")
         elif isinstance(v, list) and v:

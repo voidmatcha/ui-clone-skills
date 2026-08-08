@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "skills" / "visual-debug" / "scripts" / "extract-dom.sh"
+SCRIPT = REPO / "skills" / "visual-debug" / "scripts" / "lib" / "extract-dom.js"
 
 
 def _extract_iife(text: str) -> str:
-    """Pull the extraction IIFE out of the bash heredoc and inject a selector,
-    mirroring the sed substitution the script does at runtime."""
+    """Load the extraction IIFE and inject a selector,
+    mirroring the sed substitution the shell wrapper does at runtime."""
     start = text.index("(() => {")
     end = text.index("})()", start) + len("})()")
     return text[start:end].replace("SELECTOR_PLACEHOLDER", '"#root"')
@@ -58,7 +58,7 @@ function el(tag, children, attrs, text) {
   return node;
 }
 let node = el("picture", [
-  el("source", [], { srcset: "https://cdn.example/images/x.avif 1x", type: "image/avif" }),
+  el("source", [], { srcset: "https://cdn.example/images/x.avif 1x", media: "(min-width: 768px)", type: "image/avif" }),
   el("img", [], { src: "", "data-src": "https://cdn.example/images/x.webp", alt: "deep" }),
 ]);
 // 10 wrapping divs put <picture> at depth 10 (== HTML_DEPTH_CAP, captured) and
@@ -84,6 +84,28 @@ def _find(node: object, tag: str) -> dict | None:
         if hit:
             return hit
     return None
+
+
+def _find_class(node: object, class_name: str) -> dict | None:
+    if not isinstance(node, dict):
+        return None
+    classes = str(node.get("class") or "").split()
+    if class_name in classes:
+        return node
+    for c in node.get("children") or []:
+        hit = _find_class(c, class_name)
+        if hit:
+            return hit
+    return None
+
+
+def _find_all(node: object, tag: str) -> list[dict]:
+    if not isinstance(node, dict):
+        return []
+    hits = [node] if (node.get("tag") or "") == tag else []
+    for c in node.get("children") or []:
+        hits.extend(_find_all(c, tag))
+    return hits
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
@@ -113,6 +135,11 @@ def test_extract_dom_keeps_deep_media_leaves(tmp_path: Path) -> None:
     source = _find(picture, "source")
     assert source is not None and source.get("srcset", "").startswith("https://cdn.example"), (
         f"<source srcset> must be captured: {source}"
+    )
+    # A3: the <source> media query routes desktop vs mobile art; dropping it makes
+    # the browser serve the mobile <source> at every viewport.
+    assert source.get("media") == "(min-width: 768px)", (
+        f"<source media> query must be captured: {source}"
     )
 
 
@@ -269,3 +296,368 @@ def test_extract_dom_keeps_deep_text(tmp_path: Path) -> None:
     assert "EMPTY_DEEP_X" not in json.dumps(tree), (
         "empty wrapper nested past the cap should be dropped to bound capture bloat"
     )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_extract_dom_promotes_text_when_only_child_crosses_hard_cap(
+    tmp_path: Path,
+) -> None:
+    """A kept heading must not become empty when its text span is one level deeper."""
+    iife = _extract_iife(SCRIPT.read_text(encoding="utf-8"))
+    stub_tail = r"""
+let node = el("h3", [
+  el("span", [], { class: "translated-title" }, "깊은 카드 제목"),
+], { class: "card-title" });
+for (let i = 0; i < 18; i++) node = el("div", [node], { class: "w" + i });
+const root = node;
+global.document = {
+  querySelector: () => root,
+  querySelectorAll: () => [],
+  styleSheets: [],
+  body: { children: [root] },
+};
+"""
+    base_stub = DOM_STUB.split("let node = el(")[0]
+    harness = tmp_path / "harness.js"
+    harness.write_text(
+        base_stub + stub_tail + "\nconsole.log(" + iife + ");\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["node", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    tree = json.loads(proc.stdout.strip())
+
+    heading = _find(tree, "h3")
+    assert heading is not None
+    assert heading.get("children") == []
+    assert heading.get("text") == "깊은 카드 제목"
+
+
+DOM_STUB_DEEP_STRUCTURED_ITEM = r"""
+function cstyle() {
+  return {
+    getPropertyValue: (p) =>
+      p === "display" ? "block" : p === "position" ? "static" : "",
+    display: "block",
+    position: "static",
+    backgroundColor: "",
+    backgroundImage: "none",
+    borderTopWidth: "0px",
+    borderRightWidth: "0px",
+    borderBottomWidth: "0px",
+    borderLeftWidth: "0px",
+  };
+}
+global.window = { scrollY: 0 };
+global.getComputedStyle = (_el, _pseudo) => cstyle();
+global.SVGElement = function () {};
+function el(tag, children, attrs, text) {
+  children = children || [];
+  attrs = attrs || {};
+  text = text || "";
+  const node = {
+    tagName: tag.toUpperCase(),
+    className: attrs["class"] || "",
+    children: children,
+    childNodes: text ? [{ nodeType: 3, textContent: text }] : [],
+    nextSibling: null,
+    nodeType: 1,
+    getAttribute: (k) => (k in attrs ? attrs[k] : null),
+    getBoundingClientRect: () => ({ width: 100, height: 100, top: 0, left: 0 }),
+  };
+  Object.defineProperty(node, "textContent", {
+    get() {
+      let t = text;
+      for (const c of children) t += c.textContent || "";
+      return t;
+    },
+  });
+  node.querySelector = (selector) => {
+    const wanted = selector.split(",").map((s) => s.trim().toUpperCase());
+    const visit = (n) => {
+      for (const child of n.children || []) {
+        if (wanted.includes(child.tagName)) return child;
+        const hit = visit(child);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    return visit(node);
+  };
+  return node;
+}
+let detail = el("span", [], { class: "detail-text" }, "첫 번째 항목");
+for (let i = 0; i < 4; i++) detail = el("span", [detail], { class: "detail-wrap-" + i });
+const itemData = el("div", [
+  el("picture", [
+    el("source", [], { srcset: "https://cdn.example/naver/card.avif 1x", type: "image/avif" }),
+    el("img", [], { src: "https://cdn.example/naver/card.webp", alt: "card" }),
+  ], { class: "thumb-picture" }),
+  el("h3", [el("span", [], { class: "title-text" }, "카드 제목")], { class: "item-title" }),
+  el("ol", [el("li", [detail], { class: "feature-item" })], { class: "feature-list" }),
+  el("div", [el("div", [], { class: "EMPTY_DEEP_BRANCH" })], { class: "empty-branch" }),
+], { class: "item-data" });
+let root = itemData;
+for (let i = 0; i < 18; i++) root = el("div", [root], { class: "wrap-" + i });
+global.document = {
+  querySelector: () => root,
+  querySelectorAll: () => [],
+  styleSheets: [],
+  body: { children: [root] },
+};
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_extract_dom_keeps_deep_structured_item_data(tmp_path: Path) -> None:
+    """A deep item-data card must keep its media, heading, and list structure."""
+    iife = _extract_iife(SCRIPT.read_text(encoding="utf-8"))
+    harness = tmp_path / "harness.js"
+    harness.write_text(
+        DOM_STUB_DEEP_STRUCTURED_ITEM + "\nconsole.log(" + iife + ");\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["node", str(harness)], capture_output=True, text=True, timeout=20, check=False
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    tree = json.loads(proc.stdout.strip())
+
+    item = _find_class(tree, "item-data")
+    assert item is not None, "deep item-data container must survive"
+    picture = _find(item, "picture")
+    assert picture is not None and _find(picture, "img") is not None
+    heading = _find(item, "h3")
+    assert heading is not None and "카드 제목" in json.dumps(heading, ensure_ascii=False)
+    ordered = _find(item, "ol")
+    assert ordered is not None and _find(ordered, "li") is not None
+    assert "첫 번째 항목" in json.dumps(ordered, ensure_ascii=False)
+    assert "EMPTY_DEEP_BRANCH" not in json.dumps(tree), (
+        "empty deep branch must remain pruned inside structured allowance"
+    )
+
+
+# #10 — a PAINTED structural wrapper past HTML_DEPTH_CAP with no text and no
+# media descendant (stat-grid bars, card-parallax layers, footer column backers
+# are empty divs whose only content is a fill/border). Each node carries its own
+# computed style so the paint signal can be exercised per-node.
+DOM_STUB_PAINTED = r"""
+global.window = { scrollY: 0 };
+global.SVGElement = function () {};
+global.getComputedStyle = (el) => el.__cs;
+function cs(extra) {
+  const base = {
+    display: "block", position: "static",
+    backgroundColor: "", backgroundImage: "none",
+    borderTopWidth: "0px", borderRightWidth: "0px",
+    borderBottomWidth: "0px", borderLeftWidth: "0px",
+    getPropertyValue: (p) =>
+      p === "display" ? "block" : p === "position" ? "static" : "",
+  };
+  return Object.assign(base, extra || {});
+}
+function el(tag, children, attrs, text) {
+  children = children || [];
+  attrs = attrs || {};
+  text = text || "";
+  const node = {
+    tagName: tag.toUpperCase(),
+    className: attrs["class"] || "",
+    children: children,
+    childNodes: text ? [{ nodeType: 3, textContent: text }] : [],
+    nextSibling: null,
+    nodeType: 1,
+    __cs: cs(attrs.__style),
+    getAttribute: (k) => (k in attrs ? attrs[k] : null),
+    getBoundingClientRect: () => ({ width: 100, height: 100, top: 0, left: 0 }),
+  };
+  Object.defineProperty(node, "textContent", {
+    get() {
+      let t = text;
+      for (const c of children) t += c.textContent || "";
+      return t;
+    },
+  });
+  return node;
+}
+// depth-11 holder (has text -> survives) with two empty siblings at depth 12:
+const painted = el("div", [], {
+  class: "PAINTED_BAR", __style: { backgroundColor: "rgb(0, 128, 0)" },
+});
+const transparent = el("div", [], {
+  class: "TRANSPARENT_GAP", __style: { backgroundColor: "rgba(0, 0, 0, 0)" },
+});
+let node = el("div", [painted, transparent], {}, "x");
+for (let i = 0; i < 11; i++) node = el("div", [node], { class: "w" + i }, "x");
+const root = el("section", [node], { class: "root" });
+global.document = {
+  querySelector: () => root,
+  querySelectorAll: () => [],
+  styleSheets: [],
+  body: { children: [root] },
+};
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_extract_dom_keeps_deep_painted_wrapper(tmp_path: Path) -> None:
+    """#10: a painted structural wrapper past HTML_DEPTH_CAP (empty div with a
+    non-transparent fill/border — stat bars, parallax layers, footer columns)
+    must survive capture; an empty transparent wrapper at the same depth stays
+    dropped so capture bloat remains bounded. This change only ADDS reachable
+    painted nodes past the cap — it never removes a node the text/media test
+    already kept (see the deep-text and deep-media tests above, unchanged)."""
+    iife = _extract_iife(SCRIPT.read_text(encoding="utf-8"))
+    harness = tmp_path / "harness.js"
+    harness.write_text(DOM_STUB_PAINTED + "\nconsole.log(" + iife + ");\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["node", str(harness)], capture_output=True, text=True, timeout=20, check=False
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    tree = json.loads(proc.stdout.strip())
+
+    dumped = json.dumps(tree)
+    assert "PAINTED_BAR" in dumped, (
+        "painted structural wrapper nested past the cap must survive capture"
+    )
+    assert "TRANSPARENT_GAP" not in dumped, (
+        "empty transparent wrapper past the cap should stay dropped (bloat control)"
+    )
+
+
+DOM_STUB_DEEP_BREAKS = r"""
+global.window = { scrollY: 0 };
+global.SVGElement = function () {};
+function cs(extra) {
+  const base = {
+    display: "block", position: "static",
+    backgroundColor: "", backgroundImage: "none",
+    borderTopWidth: "0px", borderRightWidth: "0px",
+    borderBottomWidth: "0px", borderLeftWidth: "0px",
+    getPropertyValue: function (p) {
+      if (p === "display") return this.display;
+      if (p === "position") return this.position;
+      return "";
+    },
+  };
+  return Object.assign(base, extra || {});
+}
+global.getComputedStyle = (el) => el.__cs;
+function textNode(text) {
+  return { nodeType: 3, textContent: text };
+}
+function el(tag, children, attrs, childNodes) {
+  children = children || [];
+  attrs = attrs || {};
+  childNodes = childNodes || children;
+  const node = {
+    tagName: tag.toUpperCase(),
+    className: attrs["class"] || "",
+    children: children,
+    childNodes: childNodes,
+    nextSibling: null,
+    nodeType: 1,
+    __cs: cs(attrs.__style),
+    getAttribute: (k) => (k in attrs ? attrs[k] : null),
+    getBoundingClientRect: () => ({ width: 100, height: 20, top: 0, left: 0 }),
+  };
+  Object.defineProperty(node, "textContent", {
+    get() {
+      let t = "";
+      for (const n of childNodes) {
+        if (n.nodeType === 3) t += n.textContent || "";
+        else t += n.textContent || "";
+      }
+      return t;
+    },
+  });
+  return node;
+}
+const brPc = el("br", [], { class: "br_pc", __style: { display: "block" } });
+const brTab = el("br", [], { class: "br_tab", __style: { display: "none" } });
+const copy = el("p", [brPc, brTab], { class: "deep-copy" }, [
+  textNode("첫 줄"),
+  brPc,
+  textNode("두 번째 줄"),
+  brTab,
+  textNode("세 번째 줄"),
+]);
+let root = copy;
+for (let i = 0; i < 12; i++) root = el("div", [root], { class: "wrap-" + i });
+global.document = {
+  querySelector: () => root,
+  querySelectorAll: () => [],
+  styleSheets: [],
+  body: { children: [root] },
+};
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_extract_dom_keeps_deep_responsive_break_nodes(tmp_path: Path) -> None:
+    """Deep responsive BRs must remain classed structural children, not just
+    collapse into unclassed newlines on the parent text."""
+    iife = _extract_iife(SCRIPT.read_text(encoding="utf-8"))
+    harness = tmp_path / "harness.js"
+    harness.write_text(
+        DOM_STUB_DEEP_BREAKS + "\nconsole.log(" + iife + ");\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["node", str(harness)], capture_output=True, text=True, timeout=20, check=False
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    tree = json.loads(proc.stdout.strip())
+
+    copy = _find_class(tree, "deep-copy")
+    assert copy is not None, "deep text container must survive the depth cap"
+    assert copy.get("text") == "첫 줄\n두 번째 줄\n세 번째 줄"
+
+    breaks = _find_all(copy, "br")
+    assert [br.get("class") for br in breaks] == ["br_pc", "br_tab"]
+    assert [br.get("display") for br in breaks] == ["block", "none"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_extract_dom_preserves_trailing_space_inside_inline_child(
+    tmp_path: Path,
+) -> None:
+    """Keep the boundary space in ``<span>Version: </span><span>Free…</span>``."""
+    iife = _extract_iife(SCRIPT.read_text(encoding="utf-8"))
+    base_stub = DOM_STUB.split("let node = el(")[0]
+    stub_tail = r"""
+const first = el("span", [], {}, "Version: ");
+const second = el("span", [], {}, "Free, Pro, & Team");
+first.nextSibling = second;
+first.nextElementSibling = second;
+const root = el("div", [first, second], { id: "root" });
+global.document = {
+  querySelector: () => root,
+  querySelectorAll: () => [],
+  styleSheets: [],
+  body: { children: [root] },
+};
+"""
+    harness = tmp_path / "harness.js"
+    harness.write_text(
+        base_stub + stub_tail + "\nconsole.log(" + iife + ");\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["node", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    tree = json.loads(proc.stdout.strip())
+    first_capture = (tree.get("children") or [])[0]
+    assert first_capture.get("text") == "Version:"
+    assert first_capture.get("wsAfter") is True, first_capture

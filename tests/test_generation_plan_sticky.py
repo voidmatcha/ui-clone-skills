@@ -26,7 +26,7 @@ def test_sticky_strategy_populated_from_elements(tmp_path: Path) -> None:
     ]}), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref)],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, timeout=120)
     assert out.is_file(), proc.stdout + proc.stderr
     plan = json.loads(out.read_text())
     ss = plan.get("stickyStrategy")

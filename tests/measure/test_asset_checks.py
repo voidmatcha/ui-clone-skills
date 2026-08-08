@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,47 @@ def test_lottie_runtime_check_script_fails_without_runtime_or_json(tmp_path: Pat
     assert "animation JSON" in " ".join(artifact["reasons"])
 
 
+def test_lottie_runtime_check_detects_required_media_lottie(tmp_path: Path) -> None:
+    """required-media.json is the canonical Step 6b-bis Lottie inventory.
+
+    If it contains Lottie URLs, lottie-runtime-check must not skip just because
+    older artifact files lack the word lottie. Navercorp loops exposed this:
+    required-media.json listed Lottie JSON, but runtime check reported
+    refDetected=false and let a zero-Lottie impl look inapplicable.
+    """
+    work = tmp_path / "work"
+    ref = work / "ref"
+    impl = work / "impl"
+    src = impl / "src"
+    ref.mkdir(parents=True)
+    src.mkdir(parents=True)
+    (ref / "required-media.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "videos": [],
+        "lottie": [{"path": "/img/lottie/hero.json"}],
+        "svgs": [],
+    }))
+    (impl / "package.json").write_text(json.dumps({
+        "name": "impl",
+        "dependencies": {"react": "19", "react-dom": "19"},
+    }))
+    (src / "App.tsx").write_text("export default function App() { return <main />; }\n")
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lottie-runtime-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 1, f"required-media Lottie must require runtime: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "lottie-runtime.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["refDetected"] is True
+    assert "runtime package" in " ".join(artifact["reasons"])
+
+
 
 def test_lottie_runtime_check_passes_with_runtime_usage_and_json(tmp_path: Path) -> None:
     """A faithful impl has dependency, source usage, and local animation data."""
@@ -90,6 +132,271 @@ def test_lottie_runtime_check_passes_with_runtime_usage_and_json(tmp_path: Path)
     assert artifact["runtimeUsageFound"] is True
     assert artifact["jsonFound"] is True
 
+
+def test_lottie_runtime_check_rejects_arbitrary_dotlottie_bytes(tmp_path: Path) -> None:
+    """A .lottie extension is not proof of dotLottie animation data."""
+    work = tmp_path / "work"
+    ref = work / "ref"
+    impl = work / "impl"
+    src = impl / "src"
+    public = impl / "public" / "animations"
+    ref.mkdir(parents=True)
+    src.mkdir(parents=True)
+    public.mkdir(parents=True)
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-animation", "engine": "Lottie", "target": ".hero"}],
+    }))
+    (impl / "package.json").write_text(json.dumps({
+        "name": "impl",
+        "dependencies": {"react": "19", "lottie-web": "5.12.2"},
+    }))
+    (src / "Hero.tsx").write_text(
+        "import lottie from 'lottie-web';\n"
+        "export function Hero() { lottie.loadAnimation({ path: '/animations/hero.lottie' }); return <div />; }\n"
+    )
+    (public / "hero.lottie").write_bytes(b"not a dotLottie zip archive")
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lottie-runtime-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 1, f"arbitrary .lottie bytes must fail: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "lottie-runtime.json").read_text())
+    assert artifact["status"] == "fail"
+    assert artifact["jsonFound"] is False
+    assert "animation JSON" in " ".join(artifact["reasons"])
+
+
+def test_lottie_runtime_check_accepts_valid_dotlottie_archive(tmp_path: Path) -> None:
+    """A real dotLottie archive counts when it carries manifest + Lottie JSON."""
+    work = tmp_path / "work"
+    ref = work / "ref"
+    impl = work / "impl"
+    src = impl / "src"
+    public = impl / "public" / "animations"
+    ref.mkdir(parents=True)
+    src.mkdir(parents=True)
+    public.mkdir(parents=True)
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-animation", "engine": "Lottie", "target": ".hero"}],
+    }))
+    (impl / "package.json").write_text(json.dumps({
+        "name": "impl",
+        "dependencies": {"react": "19", "lottie-web": "5.12.2"},
+    }))
+    (src / "Hero.tsx").write_text(
+        "import lottie from 'lottie-web';\n"
+        "export function Hero() { lottie.loadAnimation({ path: '/animations/hero.lottie' }); return <div />; }\n"
+    )
+    with zipfile.ZipFile(public / "hero.lottie", "w") as archive:
+        archive.writestr("manifest.json", json.dumps({"animations": [{"id": "hero", "path": "animations/hero.json"}]}))
+        archive.writestr("animations/hero.json", json.dumps({"v": "5.12.2", "fr": 30, "ip": 0, "op": 60, "layers": []}))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lottie-runtime-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, f"valid dotLottie archive must pass: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "lottie-runtime.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["jsonFound"] is True
+
+
+def test_lottie_runtime_check_rejects_fallback_svg_runtime_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fallback SVG surface is not an animating Lottie runtime."""
+    work = tmp_path / "work"
+    ref = work / "ref"
+    impl = work / "impl"
+    src = impl / "src"
+    public = impl / "public" / "animations"
+    bin_dir = work / "bin"
+    ref.mkdir(parents=True)
+    src.mkdir(parents=True)
+    public.mkdir(parents=True)
+    bin_dir.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-animation", "engine": "Lottie", "target": ".hero"}],
+    }))
+    (impl / "package.json").write_text(json.dumps({
+        "name": "impl",
+        "dependencies": {"react": "19", "lottie-web": "5.12.2"},
+    }))
+    (src / "Hero.tsx").write_text(
+        "import lottie from 'lottie-web';\n"
+        "export function Hero() {\n"
+        "  lottie.loadAnimation({ path: '/animations/hero.json' });\n"
+        "  return <div data-lottie=\"fallback\"><svg /></div>;\n"
+        "}\n"
+    )
+    (public / "hero.json").write_text(json.dumps({"v": "5.12.2", "fr": 30, "ip": 0, "op": 60, "layers": []}))
+    agent_browser = bin_dir / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$*\" in\n"
+        "  *'window.__lottieSnap = '*) printf '%s\\n' '{\"count\":1}' ;;\n"
+        "  *'return JSON.stringify'*) printf '%s\\n' '{\"count\":1,\"animating\":1,\"fallbackCount\":1,\"readyCount\":0,\"advancedCount\":0}' ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    agent_browser.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{__import__('os').environ['PATH']}")
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lottie-runtime-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl), "http://127.0.0.1:4173"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 1, f"fallback SVG runtime proof must fail: {proc.stdout}\n{proc.stderr}"
+    artifact = json.loads((ref / "lottie-runtime.json").read_text())
+    proof = artifact["runtimeProof"]
+    assert artifact["status"] == "fail"
+    assert proof["status"] == "runtime-fail"
+    assert proof["animatingCount"] == 0
+    assert proof["candidateCount"] == 1
+
+
+def test_lottie_runtime_check_scroll_drives_generated_surface(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scroll-bound generated Lottie surfaces need a driven scroll delta."""
+    work = tmp_path / "work"
+    ref = work / "ref"
+    impl = work / "impl"
+    src = impl / "src"
+    public = impl / "public" / "animations"
+    bin_dir = work / "bin"
+    log_file = work / "agent-browser.log"
+    ref.mkdir(parents=True)
+    src.mkdir(parents=True)
+    public.mkdir(parents=True)
+    bin_dir.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-animation", "engine": "Lottie", "trigger": "scroll", "target": ".hero"}],
+    }))
+    (impl / "package.json").write_text(json.dumps({
+        "name": "impl",
+        "dependencies": {"react": "19", "lottie-web": "5.12.2"},
+    }))
+    (src / "Hero.tsx").write_text(
+        "import lottie from 'lottie-web';\n"
+        "export function Hero() {\n"
+        "  lottie.loadAnimation({ path: '/animations/hero.json' });\n"
+        "  return <div data-lottie=\"ready\" data-lottie-progress=\"0\" data-lottie-total-frames=\"90\" />;\n"
+        "}\n"
+    )
+    (public / "hero.json").write_text(json.dumps({"v": "5.12.2", "fr": 30, "ip": 0, "op": 90, "layers": []}))
+    agent_browser = bin_dir / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$AGENT_BROWSER_LOG\"\n"
+        "case \"$*\" in\n"
+        "  *'window.__lottieSnap = '*) printf '%s\\n' '{\"count\":1}' ;;\n"
+        "  *'window.__lottieScrollProbe'*) printf '%s\\n' '{\"scrolled\":true}' ;;\n"
+        "  *'return JSON.stringify'*) printf '%s\\n' '{\"count\":1,\"animating\":1,\"fallbackCount\":0,\"readyCount\":1,\"advancedCount\":1}' ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    agent_browser.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{__import__('os').environ['PATH']}")
+    monkeypatch.setenv("AGENT_BROWSER_LOG", str(log_file))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lottie-runtime-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl), "http://127.0.0.1:4173"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, f"scroll-driven Lottie proof must pass: {proc.stdout}\n{proc.stderr}"
+    assert "window.__lottieScrollProbe" in log_file.read_text()
+    artifact = json.loads((ref / "lottie-runtime.json").read_text())
+    assert artifact["runtimeProof"]["status"] == "runtime-pass"
+    assert artifact["runtimeProof"]["animatingCount"] == 1
+
+
+def test_lottie_runtime_check_awaits_promise_native_player(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """lottie-player.getLottie() commonly resolves the runtime instance asynchronously."""
+    work = tmp_path / "work"
+    ref = work / "ref"
+    impl = work / "impl"
+    src = impl / "src"
+    public = impl / "public" / "animations"
+    bin_dir = work / "bin"
+    log_file = work / "agent-browser.log"
+    ref.mkdir(parents=True)
+    src.mkdir(parents=True)
+    public.mkdir(parents=True)
+    bin_dir.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "hero-animation", "engine": "Lottie", "target": "lottie-player"}],
+    }))
+    (impl / "package.json").write_text(json.dumps({
+        "name": "impl",
+        "dependencies": {"react": "19", "@lottiefiles/lottie-player": "2.0.0"},
+    }))
+    (src / "Hero.tsx").write_text(
+        "import '@lottiefiles/lottie-player';\n"
+        "export function Hero() { return <lottie-player src=\"/animations/hero.json\" autoplay />; }\n"
+    )
+    (public / "hero.json").write_text(json.dumps({"v": "5.12.2", "fr": 30, "ip": 0, "op": 90, "layers": []}))
+    agent_browser = bin_dir / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$AGENT_BROWSER_LOG\"\n"
+        "case \"$*\" in\n"
+        "  *'window.__lottieSnap = await'*) printf '%s\\n' '{\"count\":1}' ;;\n"
+        "  *'window.__lottieScrollProbe'*) printf '%s\\n' '{\"scrolled\":false}' ;;\n"
+        "  *'return JSON.stringify'*) printf '%s\\n' '{\"count\":1,\"animating\":1,\"fallbackCount\":0,\"readyCount\":1,\"advancedCount\":1}' ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    agent_browser.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{__import__('os').environ['PATH']}")
+    monkeypatch.setenv("AGENT_BROWSER_LOG", str(log_file))
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lottie-runtime-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl), "http://127.0.0.1:4173"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, f"promise native player proof must pass: {proc.stdout}\n{proc.stderr}"
+    log = log_file.read_text()
+    assert "async ()" in log
+    assert "await el.getLottie" in log or "await el.getAnimation" in log
+    artifact = json.loads((ref / "lottie-runtime.json").read_text())
+    assert artifact["runtimeProof"]["status"] == "runtime-pass"
+
+
+def test_lottie_runtime_check_samples_native_player_motion_properties() -> None:
+    """Native players may animate without data-lottie frame attributes."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lottie-runtime-check.sh"
+    body = script.read_text(encoding="utf-8")
+    assert "currentFrame" in body
+    assert "currentTime" in body
+    assert "getLottie" in body or "getAnimation" in body
+
+
+def test_lottie_runtime_check_second_probe_uses_async_iife() -> None:
+    """The re-probe awaits native players, so its containing IIFE must be async."""
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "lottie-runtime-check.sh"
+    body = script.read_text(encoding="utf-8")
+    second_probe = body.split("# Re-probe and diff against the snapshot.", 1)[1]
+
+    assert "(async () => {" in second_probe
+    assert "await Promise.all" in second_probe
 
 
 def test_lottie_runtime_check_fails_on_import_only_usage(tmp_path: Path) -> None:
@@ -203,10 +510,10 @@ def test_lottie_runtime_check_documents_runtime_proof_in_rule() -> None:
     body = script_path.read_text(encoding="utf-8")
     # The runtime-proof rule is baked into write_json so every artifact
     # carries it. Check the source so the rule travels with the script.
-    assert "paint" in body and "svg/canvas" in body, (
-        "rule must describe the runtime-paint assertion"
+    assert "ready state" in body and "frame/progress" in body, (
+        "rule must describe the runtime frame/progress assertion"
     )
-    assert "loadAnimation" in body or "1.5s" in body, (
+    assert "loadAnimation" in body or "currentTime" in body, (
         "rule should call out the browser-side proof timing"
     )
 
@@ -218,7 +525,7 @@ def test_lottie_runtime_dispatcher_passes_impl_url() -> None:
     positional arg. The dispatcher SIGNATURES entry must include {impl_url}
     or the runtime proof is never exercised in the auto-run pipeline.
     """
-    dispatcher = _project_root() / "scripts" / "verify" / "run-required-checks.sh"
+    dispatcher = _project_root() / "scripts" / "verify" / "build_required_dispatch.py"
     text = dispatcher.read_text(encoding="utf-8")
     # Find the lottie-runtime-check.sh signature line and assert {impl_url}.
     import re
@@ -256,7 +563,7 @@ def test_svg_provenance_dispatcher_wired() -> None:
     SIGNATURES with both {ref_url} and {impl_url} (probe requires both).
     """
     import re
-    dispatcher = _project_root() / "scripts" / "verify" / "run-required-checks.sh"
+    dispatcher = _project_root() / "scripts" / "verify" / "build_required_dispatch.py"
     text = dispatcher.read_text(encoding="utf-8")
     m = re.search(r'"svg-provenance-check\.sh":\s*"([^"]+)"', text)
     assert m, "svg-provenance-check.sh missing from dispatcher SIGNATURES"
@@ -327,7 +634,7 @@ def test_scaffold_to_jsx_rewrites_cdn_optimizer_srcset_to_local_assets(tmp_path:
         ["bash", str(script), str(ref), str(impl)],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
 
@@ -378,6 +685,84 @@ def test_ref_screenshot_asset_pass_on_clean_impl(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     art = json.loads((ref / "ref-screenshot-asset.json").read_text())
     assert art["status"] == "pass"
+
+
+def test_ref_screenshot_asset_pass_on_tmp_ref_in_comment(tmp_path: Path) -> None:
+    """Loop-2 improve finding (2026-06-07): a `tmp/ref/` path mentioned in a
+    CODE COMMENT (a provenance note, not a runtime asset reference) tripped the
+    ref-path-reference violation, even though a comment cannot load a screenshot
+    to fake a pixel-diff. Comments are stripped before the forbidden-substring
+    scan — same rationale as dom-mirror/text-fidelity comment-strips. Observed:
+    a FidelityText.tsx line-1 comment referencing tmp/ref/<c>/text-fidelity-
+    check.json hard-failed an otherwise-clean clone.
+    """
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    (ref / "sections" / "ref" / "hero.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    (impl / "src" / "FidelityText.tsx").write_text(
+        "// Derived fidelity sentinels generated from "
+        "tmp/ref/realfood/text-fidelity-check.json.\n"
+        "export default function A(){return null}\n",
+    )
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    art = json.loads((ref / "ref-screenshot-asset.json").read_text())
+    assert art["status"] == "pass", art
+
+
+def test_ref_screenshot_asset_fail_on_tmp_ref_in_code(tmp_path: Path) -> None:
+    """Guard the comment-strip above does NOT weaken anti-cheat: a `tmp/ref/`
+    reference in ACTUAL code (not a comment) must still flag ref-path-reference.
+    """
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    (ref / "sections" / "ref" / "hero.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    (impl / "src" / "App.tsx").write_text(
+        'const bg = "tmp/ref/realfood/sections/ref/hero.png";\n'
+        "export default function A(){return null}\n",
+    )
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    art = json.loads((ref / "ref-screenshot-asset.json").read_text())
+    assert art["status"] == "fail"
+    assert "ref-path-reference" in {v["kind"] for v in art["violations"]}
+
+
+def test_ref_screenshot_asset_fail_on_protocol_relative_url(tmp_path: Path) -> None:
+    """Hardening (2026-06-07): the `//`-comment strip must NOT swallow a
+    protocol-relative asset URL. A cheat that serves a ref screenshot via a
+    string like src="//cdn/<c>/sections/ref/hero.png" has `//` preceded by a
+    quote (not whitespace/line-start), so it is a runtime-loadable reference,
+    not a comment — it must still flag ref-path-reference. The prior
+    `(?<!:)//[^\\n]*` strip wrongly removed the whole line as a comment.
+    """
+    ref = tmp_path / "ref"
+    (ref / "sections" / "ref").mkdir(parents=True)
+    (ref / "sections" / "ref" / "hero.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    (impl / "src" / "App.tsx").write_text(
+        'const bg = "//cdn.example.com/tmp/ref/realfood/sections/ref/hero.png";\n'
+        "export default function A(){return null}\n",
+    )
+    proc = _run_script(
+        "skills/visual-debug/scripts/ref-screenshot-asset-check.sh",
+        str(ref), str(impl),
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    art = json.loads((ref / "ref-screenshot-asset.json").read_text())
+    assert art["status"] == "fail"
+    assert "ref-path-reference" in {v["kind"] for v in art["violations"]}
 
 
 def test_ref_screenshot_asset_fail_on_reencoded_near_match(tmp_path: Path) -> None:

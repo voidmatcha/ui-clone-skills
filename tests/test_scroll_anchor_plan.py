@@ -85,6 +85,141 @@ def test_scroll_anchor_plan_adds_scroll_transition_phases_for_large_sections() -
     assert phases == ["enter", "mid", "exit"]
 
 
+def test_scroll_anchor_plan_rejects_header_to_document_root_false_pair() -> None:
+    """A missing impl header anchor must not turn the app root into motion evidence."""
+    ref = [
+        {
+            "index": 0,
+            "tag": "div",
+            "className": "border-bottom sticky",
+            "rect": {"top": 0, "height": 136, "width": 1440, "left": 0},
+            "textWords": "ai github version free pro team",
+        },
+        _section(1, 136, 336, "github docs help", "hero"),
+    ]
+    ref[1]["id"] = "landing"
+    impl = [
+        {
+            "index": 0,
+            "tag": "div",
+            "id": "root",
+            "className": "",
+            "rect": {"top": 0, "height": 2273, "width": 1440, "left": 0},
+            "textWords": (
+                "skip main ai github version free pro team github docs help "
+                "many sections"
+            ),
+        },
+        _section(1, 136, 336, "github docs help", "hero"),
+    ]
+    impl[1]["id"] = "landing"
+    spec = {
+        "transitions": [
+            {
+                "id": "docs-sticky-header",
+                "trigger": "scroll",
+                "selector": ".border-bottom",
+            }
+        ]
+    }
+
+    plan = build_scroll_anchor_plan(
+        ref,
+        impl,
+        viewport_height=900,
+        transition_spec=spec,
+    )
+
+    assert not any(row["name"].startswith("border-bottom") for row in plan)
+    assert any(row["name"].startswith("landing") for row in plan)
+
+
+def test_scroll_anchor_plan_prefilters_navercorp_root_and_fixed_overlay() -> None:
+    """Viewport overlays and offset app roots cannot steal real scroll anchors."""
+    ref = [
+        {
+            "index": 0,
+            "tag": "main",
+            "id": "content",
+            "position": "relative",
+            "rect": {"top": 100, "height": 5364, "width": 1440, "left": 0},
+            "textWords": "naver entire page wrapper",
+        },
+        _section(1, 931, 2250, "news latest stories", "main-news-list swiper"),
+        _section(2, 3429, 579, "technology services", "swiper-slide"),
+    ]
+    impl = [
+        {
+            "index": 0,
+            "tag": "div",
+            "id": "mobile-navigation",
+            "className": "mo-nav",
+            "position": "fixed",
+            "rect": {"top": 0, "height": 900, "width": 704, "left": 2176},
+            "textWords": "company story careers contact",
+        },
+        {
+            "index": 1,
+            "tag": "div",
+            "id": "root",
+            "position": "relative",
+            "rect": {"top": 100, "height": 6029, "width": 1440, "left": 0},
+            "textWords": "naver entire page wrapper",
+        },
+        {
+            "index": 2,
+            "tag": "main",
+            "id": "content",
+            "className": "navercorp main h_8",
+            "position": "relative",
+            "rect": {"top": 100, "height": 5364, "width": 1440, "left": 0},
+            "textWords": "naver entire page wrapper",
+        },
+        _section(3, 932, 2250, "news latest stories", "masonry-list swiper-wrapper"),
+        _section(4, 3429, 579, "technology services", "swiper-slide"),
+    ]
+
+    plan = build_scroll_anchor_plan(ref, impl, viewport_height=900)
+
+    assert plan
+    assert all(row["implTop"] != 0 for row in plan)
+    assert all(row["implHeight"] != 6029 for row in plan)
+    main_news = next(row for row in plan if row["refTop"] == 931)
+    assert main_news["refTop"] == 931
+    assert main_news["implTop"] == 932
+
+
+def test_batch_scroll_anchor_enumerator_emits_computed_position() -> None:
+    script = (REPO_ROOT / "skills/visual-debug/scripts/batch-scroll.sh").read_text()
+
+    assert "position: cs.position" in script
+
+
+def test_batch_scroll_removes_only_stale_generated_pngs() -> None:
+    script = (REPO_ROOT / "skills/visual-debug/scripts/batch-scroll.sh").read_text()
+    cleanup = script.split("cleanup_generated_pngs() {", 1)[1].split(
+        "\n}\n\ncleanup_generated_pngs",
+        1,
+    )[0]
+
+    assert 'for capture_dir in "$DIR/static/ref" "$DIR/static/impl" "$DIR/static/diff"' in cleanup
+    assert 'generated_pngs=("$capture_dir"/*.png)' in cleanup
+    assert 'rm -- "${generated_pngs[@]}"' in cleanup
+    assert "shopt -s nullglob" in cleanup
+    assert "find " not in cleanup
+    assert "*.json" not in cleanup
+
+
+def test_batch_scroll_pins_existing_swipers_before_static_capture() -> None:
+    script = (REPO_ROOT / "skills/visual-debug/scripts/batch-scroll.sh").read_text()
+    smart_freeze = script.split("SMART_FREEZE='", 1)[1].split("\n})()'", 1)[0]
+
+    assert 'document.querySelectorAll(".swiper, .swiper-container, .swiper-wrapper")' in smart_freeze
+    assert "swiper.autoplay.stop" in smart_freeze
+    assert "swiper.slideToLoop(0, 0, false)" in smart_freeze
+    assert "swiper.slideTo(0, 0, false)" in smart_freeze
+
+
 def test_load_eval_json_peels_agent_browser_result_envelope(tmp_path: Path) -> None:
     path = tmp_path / "eval.json"
     path.write_text(json.dumps({"success": True, "data": {"result": json.dumps([{"index": 0}])}}))

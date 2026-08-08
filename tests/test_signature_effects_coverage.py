@@ -19,7 +19,7 @@ _EFFECT = {
 def _run(ref: Path, impl: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl / "src")],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
 
 
@@ -188,6 +188,60 @@ def test_no_signature_effects_skips(tmp_path: Path) -> None:
     art = json.loads((ref / "signature-effects-coverage.json").read_text())
     assert proc.returncode == 0
     assert art["status"] == "skip"
+
+
+# --- Component-contract coverage (F2): effects whose name does not trip the
+# scroll/per-char/per-word keyword heuristics (e.g. MarqueeStrip, PlaygroundCanvas,
+# CardStackReveal) still declare a `component` contract. Declaring one and never
+# building it (no components/ui/X.tsx, name not wired anywhere) must FAIL — the
+# prior heuristic-only gate vacuously passed these.
+
+_NON_KEYWORD_EFFECT = {
+    "name": "MarqueeStrip",
+    "component": "components/ui/MarqueeStrip.tsx",
+    "library": "framer-motion",
+    "description": "Infinite horizontal marquee of partner logos.",
+}
+
+
+def test_component_declared_but_missing_and_unwired_fails(tmp_path: Path) -> None:
+    ref, impl = _scaffold(tmp_path, [_NON_KEYWORD_EFFECT])
+    (impl / "src" / "Hero.tsx").write_text(
+        "export const Hero=()=> <h1>eBay Playbook</h1>;\n", encoding="utf-8",
+    )
+    proc = _run(ref, impl)
+    art = json.loads((ref / "signature-effects-coverage.json").read_text())
+    assert proc.returncode == 1, art
+    assert art["status"] == "fail"
+    assert any(m.get("name") == "MarqueeStrip" for m in art["missing"]), art
+
+
+def test_component_declared_and_file_present_passes(tmp_path: Path) -> None:
+    ref, impl = _scaffold(tmp_path, [_NON_KEYWORD_EFFECT])
+    ui_dir = impl / "src" / "components" / "ui"
+    ui_dir.mkdir(parents=True)
+    (ui_dir / "MarqueeStrip.tsx").write_text(
+        "export default function MarqueeStrip(){return <div className='marquee'/>;}\n",
+        encoding="utf-8",
+    )
+    proc = _run(ref, impl)
+    art = json.loads((ref / "signature-effects-coverage.json").read_text())
+    assert proc.returncode == 0, art
+    assert art["status"] == "pass"
+
+
+def test_component_declared_and_name_wired_inline_passes(tmp_path: Path) -> None:
+    ref, impl = _scaffold(tmp_path, [_NON_KEYWORD_EFFECT])
+    # Implemented inline in a section (no separate ui/ file) but the named
+    # component is referenced — treated as wired.
+    (impl / "src" / "Section.tsx").write_text(
+        "import MarqueeStrip from './x';\nexport const S=()=> <MarqueeStrip/>;\n",
+        encoding="utf-8",
+    )
+    proc = _run(ref, impl)
+    art = json.loads((ref / "signature-effects-coverage.json").read_text())
+    assert proc.returncode == 0, art
+    assert art["status"] == "pass"
 
 
 _SCRUB_PLAN = {

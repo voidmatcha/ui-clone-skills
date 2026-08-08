@@ -32,8 +32,14 @@ mkdir -p "$OUT_DIR"
 REF_SESS="${SESSION}-kf-ref"
 IMPL_SESS="${SESSION}-kf-impl"
 
-TMP_IMPL=$(mktemp /tmp/kf-impl-XXXXXX.json)
-TMP_REF=$(mktemp /tmp/kf-ref-XXXXXX.json)
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+TMP_IMPL="$(mktemp /tmp/kf-impl-XXXXXX)"
+mv "$TMP_IMPL" "${TMP_IMPL}.json"
+TMP_IMPL="${TMP_IMPL}.json"
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+TMP_REF="$(mktemp /tmp/kf-ref-XXXXXX)"
+mv "$TMP_REF" "${TMP_REF}.json"
+TMP_REF="${TMP_REF}.json"
 
 cleanup() {
   agent-browser --session "$REF_SESS" close >/dev/null 2>&1 || true
@@ -159,13 +165,23 @@ with open(md, "w") as f:
             f.write("\n")
 
 # ── JSON ──
+payload = {
+    "only_ref": only_ref,
+    "only_impl": only_impl,
+    "shared_diffs": shared_diffs,
+}
 js = os.path.join(out_dir, "keyframes-diff.json")
 with open(js, "w") as f:
-    json.dump({
-        "only_ref": only_ref,
-        "only_impl": only_impl,
-        "shared_diffs": shared_diffs,
-    }, f, indent=2)
+    json.dump(payload, f, indent=2)
+
+# run-required-checks dispatches this check into <ref-dir>/transitions because
+# verification-plan declares transitions/keyframes-diff-result.txt. Keep the
+# legacy root JSON too so transition-proof-rollup's historical read path
+# (<ref-dir>/keyframes-diff.json) remains populated.
+if os.path.basename(out_dir) == "transitions":
+    root_js = os.path.join(os.path.dirname(out_dir), "keyframes-diff.json")
+    with open(root_js, "w") as f:
+        json.dump(payload, f, indent=2)
 
 # ── Canonical result artifact ──
 # verification-plan declares this check's artifact as

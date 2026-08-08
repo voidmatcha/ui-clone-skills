@@ -110,7 +110,7 @@ fi
 # The 3-field variant is written when 0 sections match (fingerprint extraction
 # failed) — see section-compare.sh line ~1160. Last matching line wins
 # (handles append-to-existing and trailing notes).
-last_result="$(grep -E '^\*\*Result: [0-9]+ PASS, [0-9]+ FAIL, [0-9]+ SKIP(, [0-9]+ STRUCTURAL_ONLY)?\*\*$' "$result_file" | tail -1)"
+last_result="$(grep -E '^\*\*Result: [0-9]+ PASS, [0-9]+ FAIL, [0-9]+ SKIP(, [0-9]+ STRUCTURAL_ONLY(, [0-9]+ UNMEASURED)?)?\*\*$' "$result_file" | tail -1)"
 
 if [[ -z "$last_result" ]]; then
   printf 'check-converged: no `**Result: ...**` line in %s\n' "$result_file" >&2
@@ -126,6 +126,24 @@ pass_count="$(printf '%s\n' "$last_result" | sed -E 's/^.*Result: ([0-9]+) PASS,
 
 if [[ "$fail_count" -ne 0 ]]; then
   printf 'not converged: %s\n' "$last_result"
+  exit 1
+fi
+
+# An UNMEASURED section has no pixel evidence either way — the reference crop
+# carried no signal, so nothing was compared. It is deliberately excluded from
+# FAIL (a blank REF crop is a capture defect, not an impl defect), which is
+# exactly why it has to gate here: 0 FAIL alone does not mean the run measured
+# anything. Read the canonical field when present, and fall back to the table
+# rows so artifacts written before the field existed still gate.
+unmeasured_count=0
+if [[ "$last_result" == *UNMEASURED* ]]; then
+  unmeasured_count="$(printf '%s\n' "$last_result" | sed -E 's/^.*, ([0-9]+) UNMEASURED\*\*$/\1/')"
+elif grep -qE '^\|.*\| *unmeasured *\|' "$result_file" 2>/dev/null; then
+  unmeasured_count="$(grep -cE '^\|.*\| *unmeasured *\|' "$result_file")"
+fi
+if [[ "$unmeasured_count" -ne 0 ]]; then
+  printf 'not converged (%s section(s) UNMEASURED — no pixel evidence; re-capture the reference): %s\n' \
+    "$unmeasured_count" "$last_result"
   exit 1
 fi
 

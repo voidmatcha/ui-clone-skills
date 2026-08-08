@@ -34,6 +34,12 @@ fi
 # transpiler consumes. The LLM does NOT write this schema — Phase 2 does.
 set -euo pipefail
 
+# DOM snapshots are reference evidence. Pin light by default so a host
+# auto-dark flip or reused browser daemon cannot change computed theme styles
+# unless the caller explicitly overrides the environment.
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_COLOR_SCHEME
+
 REF_DIR=""
 SESSION=""
 TARGET=""
@@ -88,264 +94,59 @@ if [[ -n "$VIEWPORT" ]]; then
   fi
 fi
 
-EXTRACT_JS=$(cat <<'JSEOF'
-(() => {
-  const target = document.querySelector(SELECTOR_PLACEHOLDER);
-  if (!target) return JSON.stringify({ error: 'selector not found' });
-  const directText = (el) => {
-    let t = '';
-    for (const n of el.childNodes) {
-      // Text nodes: collapse all whitespace (incl. source-format newlines) to
-      // a single space so only real <br> elements become line breaks.
-      if (n.nodeType === 3) t += n.textContent.replace(/\s+/g, ' ');
-      else if (n.nodeType === 1 && n.tagName === 'BR') t += '\n';
-    }
-    return t.replace(/[ \t]*\n[ \t]*/g, '\n').replace(/[ \t]{2,}/g, ' ').trim().slice(0, 2000);
-  };
-  const LAYOUT_PROPS = [
-    'display','position','top','left','right','bottom',
-    'width','height','min-width','max-width','min-height','max-height',
-    // Fix 93 (B3) — aspect-ratio round-trips losslessly: getComputedStyle returns
-    // it as an author ratio (e.g. "16 / 9"), NOT px-resolved, so capturing it
-    // preserves intrinsic sizing without any relativity inference.
-    'aspect-ratio',
-    'padding','margin','border-radius','border',
-    'background-color','background-image','background-size','background-position',
-    'color','font-family','font-size','font-weight','line-height','letter-spacing',
-    'text-align','text-decoration','text-transform','white-space',
-    'transform','opacity','overflow',
-    'flex','flex-direction','justify-content','align-items','gap',
-    'grid-template-columns','grid-template-rows',
-    'z-index','box-shadow',
-    // Fix 16 — transition + animation. The transpiler emits each captured
-    // value as a property inside style={{ ... }} so the impl renders the
-    // same hover/focus/active transitions as the ref. NOISE filters out
-    // the user-agent defaults ('none', 'all 0s ease 0s', etc.) so only
-    // ref-authored transitions reach the JSX.
-    'transition','transition-property','transition-duration',
-    'transition-timing-function','transition-delay',
-    'animation','animation-name','animation-duration',
-    'animation-timing-function','animation-delay',
-    'animation-iteration-count','animation-direction',
-    'animation-fill-mode','animation-play-state',
-    'cursor','pointer-events',
-  ];
-  const NOISE = new Set([
-    '', 'normal', 'none', 'auto', '0px', 'rgba(0, 0, 0, 0)', 'visible', 'start',
-    // Fix 16 — user-agent defaults for transition/animation. Without these
-    // every node would carry a noisy 'all 0s ease 0s' transition value.
-    'all 0s ease 0s', 'all', '0s', 'ease', '1', 'running', 'forwards', 'backwards',
-  ]);
-  // Fix 19 — :hover / :focus rule extraction. Walks document.styleSheets,
-  // matches each rule's selectorText against the element's class list, and
-  // pulls the LAYOUT_PROPS subset from `:hover` declarations so the
-  // transpiler emits matching CSS that lets the captured transition values
-  // actually animate something. Without this Fix 16's transition properties
-  // exist but have nothing to interpolate to — the impl stays static under
-  // hover. Tries each sheet under try/catch since cross-origin stylesheets
-  // throw on cssRules access. Memoized per element classlist by the caller.
-  let HOVER_RULES = null;  // lazy initialized
-  const buildHoverRules = () => {
-    if (HOVER_RULES !== null) return HOVER_RULES;
-    const out = [];  // [{selPrefix, decls: {prop: value}}]
-    for (const sheet of document.styleSheets) {
-      let rules;
-      try { rules = sheet.cssRules || sheet.rules; } catch (e) { continue; }
-      if (!rules) continue;
-      for (const rule of rules) {
-        if (!rule.selectorText || !rule.style) continue;
-        // Match selectors containing :hover or :focus (skip media-query
-        // wrappers which we'd need recursive walking to handle; covers 95%).
-        if (!rule.selectorText.match(/:(hover|focus(?!-within|-visible))/)) continue;
-        // selectorText can be comma-separated: ".a:hover, .b:hover" — split
-        // and store the prefix BEFORE the pseudo so we can match elements.
-        for (const sel of rule.selectorText.split(',')) {
-          const m = sel.match(/\.([a-zA-Z0-9_-]+)/);  // first .class token
-          if (!m) continue;
-          const cls = m[1];
-          const decls = {};
-          for (const p of LAYOUT_PROPS) {
-            const v = rule.style.getPropertyValue(p);
-            if (v && !NOISE.has(v)) decls[p] = v.slice(0, 800);
-          }
-          if (Object.keys(decls).length) out.push({ cls, decls });
-        }
-      }
-    }
-    HOVER_RULES = out;
-    return out;
-  };
-  const captureHover = (el) => {
-    if (!el.className || typeof el.className !== 'string') return null;
-    const classes = el.className.split(/\s+/).filter(Boolean);
-    if (!classes.length) return null;
-    const rules = buildHoverRules();
-    const merged = {};
-    for (const r of rules) {
-      if (classes.indexOf(r.cls) >= 0) {
-        Object.assign(merged, r.decls);
-      }
-    }
-    return Object.keys(merged).length ? merged : null;
-  };
-  // Fix 18 — pseudo-element capture. Helper extracts a non-empty subset of
-  // LAYOUT_PROPS from a pseudo computed style, plus its `content` so the
-  // transpiler can emit a <span data-pseudo="before" /> with matching styles
-  // when the ref draws decorations via ::before / ::after (glow rings, icon
-  // dots, gradient overlays, divider lines etc.). Without this the impl is
-  // missing the entire pseudo-element layer — a dominant cause of the
-  // "the impl doesn't capture the overall layout" failure mode.
-  const capturePseudo = (el, which) => {
-    const ps = getComputedStyle(el, which);
-    const content = ps.getPropertyValue('content');
-    if (!content || content === 'none' || content === 'normal') return null;
-    const out = { content };
-    for (const p of LAYOUT_PROPS) {
-      const v = ps.getPropertyValue(p);
-      if (v && !NOISE.has(v)) out[p] = v.slice(0, 800);
-    }
-    return out;
-  };
-  const SVG_TAGS = new Set([
-    'svg','g','defs','use','symbol','marker','clippath','clip-path',
-    'mask','pattern','filter','feblend','fecolormatrix',
-    'fecomposite','fegaussianblur','femerge','femergenode','feoffset',
-    'feflood','fetile','feturbulence','fedropshadow','fediffuselighting',
-    'fespecularlighting','femorphology','feimage','fedisplacementmap',
-    'lineargradient','linear-gradient','radialgradient','radial-gradient',
-    'stop',
-    'path','rect','circle','ellipse','line','polyline','polygon',
-    'text','textpath','tspan','title','desc','foreignobject',
-  ]);
-  const SVG_ATTR_KEYS = [
-    'id','viewBox','xmlns','xmlns:xlink',
-    'fill','stroke','stroke-width','stroke-linecap','stroke-linejoin',
-    'stroke-miterlimit','stroke-dasharray','stroke-dashoffset',
-    'fill-rule','fill-opacity','clip-rule','clip-path','mask','filter',
-    'opacity',
-    'd','points','x','y','x1','y1','x2','y2','cx','cy','r','rx','ry',
-    'width','height','transform','preserveAspectRatio',
-    'offset','stop-color','stop-opacity',
-    'gradientTransform','gradientUnits','spreadMethod',
-    'href','xlink:href','xlink:title',
-    'patternUnits','patternContentUnits','patternTransform',
-    'markerUnits','refX','refY','orient','overflow',
-    'in','in2','result','values','operator','mode','type',
-    'stdDeviation','floodColor','floodOpacity',
-  ];
-  const SVG_DEPTH_CAP = 30;
-  const HTML_DEPTH_CAP = 10;
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTRACT_JS_SOURCE="$SCRIPT_DIR/lib/extract-dom.js"
+if [[ ! -r "$EXTRACT_JS_SOURCE" ]]; then
+  echo "extract-dom: JS helper not found: $EXTRACT_JS_SOURCE" >&2
+  exit 7
+fi
 
-  const isSvgNode = (el) => {
-    try {
-      if (typeof SVGElement !== 'undefined' && el instanceof SVGElement) return true;
-    } catch (e) { /* ignore */ }
-    const tag = (el.tagName || '').toLowerCase();
-    return SVG_TAGS.has(tag);
+# Hydrated/translated pages can expose the layout before their visible copy is
+# complete. A single immediate snapshot then preserves empty headings even
+# though the same session contains the real text a moment later. Wait for two
+# consecutive text signatures and no visible empty heading, with a bounded
+# fallback for intentionally-empty or continuously-animated pages.
+# shellcheck disable=SC2016  # JavaScript template interpolation is intentional.
+TEXT_SETTLE_JS='(() => {
+  const visible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 &&
+      style.display !== "none" && style.visibility !== "hidden";
   };
-
-  const MEDIA_TAGS = new Set(['img','source','picture','video','audio','track']);
-  const DEPTH_CAP_BONUS = 8;  // #6 — bounded extra descent past the cap for content
-  const extract = (el, depth = 0, insideSvg = false) => {
-    const elIsSvg = insideSvg || isSvgNode(el);
-    const cap = elIsSvg ? SVG_DEPTH_CAP : HTML_DEPTH_CAP;
-    // U1 / #6 — past the depth cap keep only media leaves and subtrees that
-    // still carry text. Deep React/Tailwind trees push a <picture> to the cap
-    // depth (its <source>/<img> sit one level deeper → zero-image clones), and
-    // nest real copy + split-text word spans past depth 10 (clone text 6521 vs
-    // ref 8202). Empty wrapper subtrees past the cap are still dropped so the
-    // bloat stays bounded; a hard bonus bound caps pathological depth.
-    if (depth > cap) {
-      const tagLc = (el.tagName || '').toLowerCase();
-      const keepsContent = MEDIA_TAGS.has(tagLc) || ((el.textContent || '').trim().length > 0);
-      if (!keepsContent || depth > cap + DEPTH_CAP_BONUS) return null;
-    }
-    const s = getComputedStyle(el);
-    const text = directText(el);
-    const styles = {};
-    for (const p of LAYOUT_PROPS) {
-      const v = s.getPropertyValue(p);
-      if (v && !NOISE.has(v)) styles[p] = v.slice(0, 800);
-    }
-    // Fix 22 — build children while recording inter-element whitespace. A
-    // whitespace-only text node between two element siblings renders as a space
-    // for inline content (word-split spans: <span>For</span> <span>the</span>).
-    // directText collapses that text node into the parent and trims it away, so
-    // without this flag the transpiler runs the words together ("Forthe").
-    const kids = [];
-    for (const c of Array.from(el.children)) {
-      const k = extract(c, depth + 1, elIsSvg);
-      if (!k) continue;
-      let sib = c.nextSibling;
-      while (sib && sib.nodeType === 3 && sib.textContent === '') sib = sib.nextSibling;
-      if (sib && sib.nodeType === 3 && /^\s+$/.test(sib.textContent)) k.wsAfter = true;
-      kids.push(k);
-    }
-    const out = {
-      tag: el.tagName.toLowerCase(),
-      class: (typeof el.className === 'string' ? el.className : el.className?.baseVal || '').slice(0, 300),
-      display: s.display,
-      position: s.position,
-      children: kids,
-    };
-    if (elIsSvg) out.svg = true;
-    if (text) out.text = text;
-    if (Object.keys(styles).length) out.styles = styles;
-    // Fix 18 — pseudo styles attached to the node so the transpiler can
-    // synthesize <span data-pseudo> children with matching CSS.
-    const before = capturePseudo(el, '::before');
-    if (before) out.before_styles = before;
-    const after = capturePseudo(el, '::after');
-    if (after) out.after_styles = after;
-    // Fix 19 — :hover/:focus rule declarations matching this element's
-    // class list, so the transpiler can emit a CSS rule that gives the
-    // captured `transition` (Fix 16) something to animate to.
-    const hover = captureHover(el);
-    if (hover) out.hover_styles = hover;
-    // Capture asset/link attrs so the transpiler can emit <img src>, <a href>,
-    // <video poster>, etc. Without these the scaffold renders empty
-    // placeholder boxes for every media element, which inflates section-compare
-    // AE by ~700k per image-heavy section.
-    const ATTR_KEYS = ['id','src','href','alt','poster','srcset','sizes','type','target','rel','aria-label','title','role','data-src','data-poster','data-srcset','data-lazy-src','data-original','data-lazy'];
-    const keys = elIsSvg ? ATTR_KEYS.concat(SVG_ATTR_KEYS) : ATTR_KEYS;
-    for (const k of keys) {
-      const v = el.getAttribute ? el.getAttribute(k) : null;
-      if (v && v.length < 2000) out[k] = v;
-    }
-    // Universality audit HIGH FN: SVG attr whitelist drops
-    // unfamiliar icon-system attrs silently. For SVG nodes, capture
-    // EVERY attribute (subject to the same length cap), then the
-    // JSX emitter can apply the kebab→camel rename to whatever it
-    // sees. Attrs already in keys[] above are simply overwritten
-    // with the same value — idempotent.
-    if (elIsSvg && el.attributes) {
-      for (const a of el.attributes) {
-        const nm = a.name;
-        // Skip standard HTML attrs already in keys[] and React-
-        // unfriendly attrs starting with `on*` (event handlers).
-        if (nm.startsWith('on')) continue;
-        const v = a.value;
-        if (v && v.length < 2000 && !(nm in out)) {
-          out[nm] = v;
-        }
-      }
-    }
-    return out;
-  };
-  return JSON.stringify(extract(target), null, 2);
-})()
-JSEOF
-)
+  const emptyHeadings = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")]
+    .filter((el) => visible(el) && !(el.innerText || "").trim()).length;
+  const textLength = (document.body?.innerText || "")
+    .normalize("NFC").replace(/\s+/g, " ").trim().length;
+  return `${textLength}:${emptyHeadings}`;
+})()'
+PREVIOUS_TEXT_SIGNATURE=""
+for _settle_attempt in 1 2 3 4 5 6 7 8; do
+  TEXT_SIGNATURE="$(
+    agent-browser --session "$SESSION" eval "$TEXT_SETTLE_JS" 2>/dev/null |
+      tr -d '"\r\n[:space:]'
+  )"
+  if [[ "$TEXT_SIGNATURE" =~ ^[0-9]+:0$ &&
+        "$TEXT_SIGNATURE" == "$PREVIOUS_TEXT_SIGNATURE" ]]; then
+    break
+  fi
+  PREVIOUS_TEXT_SIGNATURE="$TEXT_SIGNATURE"
+  if [[ "$_settle_attempt" -lt 8 ]]; then
+    agent-browser --session "$SESSION" wait 350 >/dev/null 2>&1 || true
+  fi
+done
 
 # Inject the selector — must be a JS string literal. Escape single-quotes,
-# then substitute via sed (avoiding bashs parameter-expansion replacement,
-# which mis-lexes single quotes inside REPL on bash 3.2).
+# then substitute into a temporary script. Keeping the large IIFE in a helper
+# avoids command-substitution size limits while preserving the existing eval.
 SELECTOR_LITERAL=$(printf '%s' "$TARGET" | sed "s/'/\\\\'/g")
-EVAL_JS=$(printf '%s' "$EXTRACT_JS" | sed "s|SELECTOR_PLACEHOLDER|'${SELECTOR_LITERAL}'|")
+EVAL_JS=$(mktemp)
+TMP_OUT=$(mktemp)
+trap 'rm -f "$EVAL_JS" "$TMP_OUT"' EXIT
+sed "s|SELECTOR_PLACEHOLDER|'${SELECTOR_LITERAL}'|" "$EXTRACT_JS_SOURCE" > "$EVAL_JS"
 
 # Run via agent-browser and capture.
-TMP_OUT=$(mktemp)
-agent-browser --session "$SESSION" eval "$EVAL_JS" > "$TMP_OUT" 2>&1 || {
+agent-browser --session "$SESSION" eval --stdin < "$EVAL_JS" > "$TMP_OUT" 2>&1 || {
   echo "extract-dom: agent-browser eval failed:" >&2
   cat "$TMP_OUT" >&2
   rm -f "$TMP_OUT"

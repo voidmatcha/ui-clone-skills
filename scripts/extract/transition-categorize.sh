@@ -21,6 +21,8 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 REF_DIR="${1:-}"
 REBUILD=""
 if [ "${2:-}" = "--rebuild" ]; then
@@ -261,4 +263,17 @@ print(
 )
 PY
 EXIT=$?
+
+# Best-effort: now that the spec is finalized, upgrade regions.json from the
+# real transitions (pure-JSON projection of transition-spec + section-map).
+# Idempotent; never downgrades a real regions.json and never overwrites the
+# honest placeholder when there are no real transitions. Non-blocking: a
+# failure here must not change this step's exit status.
+if [ "$EXIT" -eq 0 ]; then
+  ARTIFACTS_PY="$SCRIPT_DIR/_capture_artifacts.py"
+  if [ -f "$ARTIFACTS_PY" ]; then
+    python3 "$ARTIFACTS_PY" derive-regions "$REF_DIR" || true
+  fi
+fi
+
 exit $EXIT

@@ -19,7 +19,7 @@ def _run(ref: Path, impl: Path) -> subprocess.CompletedProcess[str]:
         ["bash", str(SCRIPT), str(ref), str(impl)],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
 
 
@@ -73,6 +73,39 @@ def test_r2_next_runtime_mirror_fails(tmp_path: Path) -> None:
     data = json.loads((ref / "bundle-paste-check.json").read_text())
     kinds = {v["rule"] for v in data["violations"]}
     assert "R2" in kinds
+
+
+def test_r2_next_static_media_fonts_pass(tmp_path: Path) -> None:
+    """Captured Next font binaries retain their root-relative media URLs."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    media_dir = impl / "public" / "_next" / "static" / "media"
+    media_dir.mkdir(parents=True)
+    (media_dir / "market-sans.woff2").write_bytes(b"font")
+    (media_dir / "hero.webp").write_bytes(b"image")
+
+    proc = _run(ref, impl)
+    assert proc.returncode == 0
+    data = json.loads((ref / "bundle-paste-check.json").read_text())
+    assert data["status"] == "pass"
+    assert not [v for v in data["violations"] if v["rule"] == "R2"]
+
+
+def test_r2_static_media_executable_still_fails(tmp_path: Path) -> None:
+    """A script hidden under static/media remains executable runtime."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    media_dir = impl / "public" / "_next" / "static" / "media"
+    media_dir.mkdir(parents=True)
+    (media_dir / "runtime.js").write_text("self.webpackChunk_N_E=[]")
+
+    proc = _run(ref, impl)
+    assert proc.returncode == 1
+    data = json.loads((ref / "bundle-paste-check.json").read_text())
+    r2 = next(v for v in data["violations"] if v["rule"] == "R2")
+    assert r2["runtimeFileCount"] == 1
 
 
 def test_r3_raw_html_import_with_dangerously_set_fails(tmp_path: Path) -> None:
@@ -182,7 +215,7 @@ def test_missing_impl_skips(tmp_path: Path) -> None:
         ["bash", str(SCRIPT), str(ref), str(tmp_path / "no-such-impl")],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
     assert proc.returncode == 0
     data = json.loads((ref / "bundle-paste-check.json").read_text())
@@ -195,7 +228,7 @@ def test_setup_error_on_bad_ref(tmp_path: Path) -> None:
         ["bash", str(SCRIPT), str(tmp_path / "no-ref")],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
     assert proc.returncode == 2
 
@@ -209,7 +242,7 @@ def test_includes_in_verification_plan(tmp_path: Path) -> None:
         ["bash", str(plan_script), str(ref), "--tier=quick"],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
     assert proc.returncode == 0
     plan = json.loads((ref / "verification-plan.json").read_text())

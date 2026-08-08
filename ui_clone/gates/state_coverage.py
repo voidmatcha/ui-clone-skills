@@ -182,6 +182,27 @@ def _is_motion_rich_ref(ref_dir: Path) -> bool:
     return any(marker in text for marker in _MOTION_RICH_MARKERS)
 
 
+def _required_motion_state_artifact_gaps(ref_dir: Path) -> list[str]:
+    """Return required Phase A/B/C capture artifacts missing for a
+    motion-rich ref. The same completeness contract is used by pre-generate
+    (fail before implementation) and state-coverage (fail before runtime
+    verification) so the two gates cannot drift."""
+    states_root = ref_dir / "states"
+    required = {
+        "splash (states/splash/summary.json + trajectory.json)": (
+            (states_root / "splash" / "summary.json").is_file()
+            and (states_root / "splash" / "trajectory.json").is_file()
+        ),
+        "scroll (states/scroll/summary.json)": (
+            (states_root / "scroll" / "summary.json").is_file()
+        ),
+        "hover (states/hover/manifest.json)": (
+            (states_root / "hover" / "manifest.json").is_file()
+        ),
+    }
+    return [phase for phase, present in required.items() if not present]
+
+
 def _class_referenced(class_name: str, src_text: str) -> bool:
     """True iff `class_name` appears in impl source as a whole class token,
     not embedded inside a longer class (`is-loaded` must not match
@@ -193,17 +214,68 @@ def _class_referenced(class_name: str, src_text: str) -> bool:
     return re.search(pattern, src_text) is not None
 
 
+_SPLASH_RUNTIME_STATE_RE = re.compile(
+    r"\b(?:"
+    r"useEffect|setTimeout|setInterval|requestAnimationFrame|"
+    r"onMount|onMounted|mounted|nextTick|"
+    r"DOMContentLoaded|transitionend|animationend|"
+    r"classList\.(?:add|remove|toggle|replace)|"
+    r"setAttribute\s*\(\s*['\"]class"
+    r")\b",
+    flags=re.I,
+)
+_SPLASH_DYNAMIC_CLASS_RE = re.compile(
+    r"(?:"
+    r"className\s*=\s*\{|"
+    r"(?:^|[\s<])(?::class|v-bind:class|class:)[\w:-]*\s*=|"
+    r"\bclassList\.(?:add|remove|toggle|replace)\s*\(|"
+    r"\bsetAttribute\s*\(\s*['\"]class|"
+    r"\?[^\n;]{0,400}:"
+    r")",
+    flags=re.I | re.M,
+)
+
+
+def _has_splash_state_mechanism(classes: list[str], src_text: str) -> bool:
+    """Return True when class references are wired to a runtime state change.
+
+    A static terminal snapshot such as ``className="is-loading is-loaded"``
+    contains the right class tokens, but it cannot replay the reference entry
+    transition. Accept common React, Vue, Svelte, and vanilla idioms by looking
+    for both a runtime trigger and dynamic class composition/mutation.
+    """
+    if not _SPLASH_RUNTIME_STATE_RE.search(src_text):
+        return False
+    for class_name in classes:
+        class_pattern = re.escape(class_name)
+        nearby_dynamic_use = re.search(
+            rf"(?:{class_pattern}.{{0,400}}{_SPLASH_DYNAMIC_CLASS_RE.pattern}|"
+            rf"{_SPLASH_DYNAMIC_CLASS_RE.pattern}.{{0,400}}{class_pattern})",
+            src_text,
+            flags=re.I | re.M | re.S,
+        )
+        if nearby_dynamic_use:
+            return True
+    return False
+
+
 def _extract_class_strings(trajectory: list[dict]) -> list[str]:
-    """From a splash trajectory, return the unique non-empty body/html
-    class strings — these are the hooks impl must reference.
+    """From a splash trajectory, return changing body/html class tokens.
+
+    These are the hooks impl must reference. A class that is present on every
+    snapshot is an environment/base class, not a transition hook. Treating
+    constant html/body classes as splash hooks falsely blocks pages whose DOM
+    changes during the splash window while an unrelated class such as
+    ``isNotTouchDevice`` remains fixed for the whole trajectory.
 
     Filters _GENERIC_NOISE_CLASSES (Webflow IX modifiers, Lenis state
     classes, base body/html/no-js) — those appear regardless of whether
     the impl actually replicates the splash mechanism, so matching them
     in impl src would false-pass.
     """
-    classes: set[str] = set()
-    for entry in trajectory:
+    seen_by_token: dict[str, list[bool]] = {}
+    for idx, entry in enumerate(trajectory):
+        entry_tokens: set[str] = set()
         for key in ("bodyClass", "htmlClass"):
             raw = entry.get(key, "") if isinstance(entry, dict) else ""
             if not isinstance(raw, str):
@@ -212,7 +284,17 @@ def _extract_class_strings(trajectory: list[dict]) -> list[str]:
                 token = token.strip()
                 if not token or token in _GENERIC_NOISE_CLASSES:
                     continue
-                classes.add(token)
+                entry_tokens.add(token)
+        for token in entry_tokens:
+            seen_by_token.setdefault(token, [False] * idx)
+        for token, presence in seen_by_token.items():
+            presence.append(token in entry_tokens)
+
+    classes = {
+        token
+        for token, presence in seen_by_token.items()
+        if any(presence) and not all(presence)
+    }
     return sorted(classes)
 
 
@@ -246,6 +328,22 @@ def _check_splash_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
         return None
     found = [c for c in classes if _class_referenced(c, src_text)]
     if found:
+        if not _has_splash_state_mechanism(found, src_text):
+            return CheckResult(
+                "state-coverage splash",
+                "fail",
+                (
+                    f"impl references splash class hook(s) {sorted(found)[:5]} "
+                    "but does not wire them through a runtime state mechanism. "
+                    "Static terminal classes bake the settled capture and miss "
+                    "the ref's entry transition."
+                ),
+                fix=(
+                    "Bridge the captured splash states with a delayed/runtime "
+                    "toggle, e.g. React useState/useEffect + setTimeout, "
+                    "Vue/Svelte mount hooks, or vanilla classList mutation."
+                ),
+            )
         return CheckResult(
             "state-coverage splash",
             "pass",
@@ -398,11 +496,11 @@ def _check_hover_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
             "complete-but-feels-dead clones in the 26-site loop."
         ),
         fix=(
-            "Add Tailwind `hover:` variants to buttons/cards/links (e.g. "
-            "`hover:scale-105 hover:bg-red-500`), or React onMouseEnter "
-            "with state, or framer-motion `whileHover`. The ref's hover "
-            "manifest entries point to the exact selectors needing "
-            "treatment (read states/hover/manifest.json)."
+            "Read states/hover/manifest.json and implement only the captured "
+            "targets with their measured properties/timing. Do not add generic "
+            "`hover:scale-*`, rotate, opacity, or whileHover effects as filler; "
+            "extra hover motion on static ref elements is a fidelity failure "
+            "and is checked by hover-tree-diff."
         ),
     )
 
@@ -518,19 +616,7 @@ Reads <ref_dir>/states/{splash,scroll,hover,click}/ and grep-checks impl/src/**.
     # refs must FAIL when any phase artifact is missing — fidelity ground
     # truth cannot be inferred from a partial capture.
     if motion_rich:
-        required = {
-            "splash (states/splash/summary.json + trajectory.json)": (
-                (states_root / "splash" / "summary.json").is_file()
-                and (states_root / "splash" / "trajectory.json").is_file()
-            ),
-            "scroll (states/scroll/summary.json)": (
-                (states_root / "scroll" / "summary.json").is_file()
-            ),
-            "hover (states/hover/manifest.json)": (
-                (states_root / "hover" / "manifest.json").is_file()
-            ),
-        }
-        missing = [phase for phase, present in required.items() if not present]
+        missing = _required_motion_state_artifact_gaps(self.ref_dir)
         if missing:
             return [
                 CheckResult(

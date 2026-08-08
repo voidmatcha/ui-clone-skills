@@ -50,8 +50,11 @@ run_py() { PYTHONPATH="$REPO_ROOT" "$PYBIN" "$@"; }
 # ── Ref geometry + capture viewport (orig-layout.json optional). ─────────
 REF_GEOM_B64=$(run_py - "$REF_DIR" <<'PY'
 import base64, json, os, sys
+from ui_clone.gates.geometry_sanity import parse_viewport, section_anchor_name
+
 ref = sys.argv[1]
 out = {"docH": None, "vpW": 1280, "vpH": 800, "sections": []}
+has_layout_viewport = False
 try:
     ol = json.load(open(os.path.join(ref, "orig-layout.json")))
     if isinstance(ol, dict):
@@ -61,8 +64,24 @@ try:
             out["vpW"] = int(ol["viewportWidth"])
         if isinstance(ol.get("viewportHeight"), (int, float)) and ol["viewportHeight"] > 0:
             out["vpH"] = int(ol["viewportHeight"])
+        has_layout_viewport = (
+            isinstance(ol.get("viewportWidth"), (int, float))
+            and ol["viewportWidth"] > 0
+            and isinstance(ol.get("viewportHeight"), (int, float))
+            and ol["viewportHeight"] > 0
+        )
 except (OSError, json.JSONDecodeError):
     pass
+if not has_layout_viewport:
+    try:
+        provenance = json.load(
+            open(os.path.join(ref, "sections", "frozen-ref-provenance.json"))
+        )
+        viewport = parse_viewport(provenance.get("viewport"))
+        if viewport:
+            out["vpW"], out["vpH"] = viewport
+    except (OSError, json.JSONDecodeError):
+        pass
 try:
     sm = json.load(open(os.path.join(ref, "section-map.json")))
     secs = sm.get("sections") if isinstance(sm, dict) else sm
@@ -73,12 +92,29 @@ try:
         if not isinstance(h, (int, float)):
             continue
         cls = str(s.get("className") or s.get("cls") or "")
+        tag = str(s.get("tag") or s.get("tagName") or "").lower()
+        semantic_tag = tag if tag in {"header", "main", "footer"} else ""
+        name = section_anchor_name(s)
+        if not name:
+            # Anonymous generic nodes are not stable section anchors. Keeping
+            # them would guarantee a false missing-section failure because the
+            # impl probe deliberately does not select arbitrary nth divs.
+            continue
+        srh = s.get("stickyRangeH")
         out["sections"].append({
-            "name": (s.get("id") or (cls.split()[0] if cls.split() else "")) or f"idx{s.get('index')}",
+            "name": name,
             "id": s.get("id") or "",
             "cls": cls.split()[0] if cls.split() else "",
+            "tag": semantic_tag,
             "refH": h,
             "refTop": s.get("top") if isinstance(s.get("top"), (int, float)) else None,
+            # Sticky travel-union provenance (loop-e2e-4 vs e2e-12): the frozen
+            # ref height is a RANGE only when the producer recorded a sticky
+            # travel-union whose stored height already equals the parent range;
+            # if it stored the instant box (no field, or height << range) the
+            # comparable impl extent is the instant box, not the live range.
+            "refStickyRangeH": srh if isinstance(srh, (int, float)) else None,
+            "refPosition": s.get("position") or None,
         })
     # docH fallback: furthest section extent
     if out["docH"] is None and out["sections"]:
@@ -150,7 +186,18 @@ MEASURE_JS="(() => {
   for (const sec of GEOM.sections) {
     let el = null;
     if (sec.id) {
-      el = pick(Array.prototype.slice.call(document.querySelectorAll('[id=\"' + sec.id + '\"]')), sec.refTop);
+      let cands = [];
+      try { cands = Array.prototype.slice.call(document.querySelectorAll('#' + CSS.escape(sec.id))); } catch (_) {}
+      el = pick(cands, sec.refTop);
+    }
+    // Major landmark tags are stable across generated component boundaries
+    // and do not depend on section-only positional indexing. Limit tag
+    // fallback to semantic page landmarks: generic div/section tags repeat too
+    // often to identify a section honestly.
+    if (!el && (sec.tag === 'header' || sec.tag === 'main' || sec.tag === 'footer')) {
+      let cands = [];
+      try { cands = Array.prototype.slice.call(document.querySelectorAll(sec.tag)); } catch (_) {}
+      el = pick(cands, sec.refTop);
     }
     if (!el && sec.cls) {
       let cands = [];
@@ -158,7 +205,24 @@ MEASURE_JS="(() => {
       if (!cands.length) { try { cands = Array.prototype.slice.call(document.querySelectorAll('[class*=\"' + sec.cls + '\"]')); } catch (_) {} }
       el = pick(cands, sec.refTop);
     }
-    out.sections.push({ name: sec.name, implH: el ? el.getBoundingClientRect().height : null });
+    // Sticky travel-union (loop-e2e-4): section-map stores a sticky's parent
+    // scroll-range, not its instant box — report both so the judge can pick
+    // the comparable extent deterministically.
+    let isSticky = false, stickyRangeH = null;
+    if (el) {
+      const pos = getComputedStyle(el).position;
+      isSticky = pos === 'sticky' || pos === '-webkit-sticky';
+      if (isSticky && el.parentElement) {
+        stickyRangeH = el.parentElement.getBoundingClientRect().height;
+      }
+    }
+    out.sections.push({
+      name: sec.name,
+      implH: el ? el.getBoundingClientRect().height : null,
+      isSticky: isSticky,
+      stickyRangeH: stickyRangeH,
+      anchorFound: Boolean(el)
+    });
   }
   return JSON.stringify(out);
 })()"
@@ -185,11 +249,44 @@ if raw.startswith('"') and raw.endswith('"'):
 else:
     impl = json.loads(raw)
 
-impl_by_name = {s.get("name"): s.get("implH") for s in impl.get("sections") or []}
-sections = [
-    {"name": s["name"], "refH": s["refH"], "implH": impl_by_name.get(s["name"])}
-    for s in geom.get("sections") or []
-]
+from ui_clone.gates.geometry_sanity import resolve_impl_height
+
+impl_by_name = {s.get("name"): s for s in impl.get("sections") or []}
+sections = []
+for s in geom.get("sections") or []:
+    m = impl_by_name.get(s["name"]) or {}
+    # The frozen ref height is a sticky TRAVEL UNION (range) only when the
+    # producer recorded a stickyRangeH whose value the stored height already
+    # equals (>= 85% of it). When the ref stored the INSTANT box (legacy
+    # e2e-12: no stickyRangeH field, or height << range), compare the live
+    # instant box against it — substituting the live 2700 travel-union there
+    # is a false 200% fail.
+    ref_srh = s.get("refStickyRangeH")
+    ref_h = s.get("refH")
+    ref_is_range = (
+        isinstance(ref_srh, (int, float)) and ref_srh > 0
+        and isinstance(ref_h, (int, float)) and ref_h >= 0.85 * ref_srh
+    )
+    sections.append(
+        {
+            "name": s["name"],
+            "refH": s["refH"],
+            "implH": resolve_impl_height(
+                m.get("implH"), m.get("stickyRangeH"), bool(m.get("isSticky")),
+                ref_is_range,
+            ),
+            # The impl probe enumerates by the ref's section anchors; no
+            # resolved element means the anchor is ABSENT from the impl DOM —
+            # a missing section, scored fail (omx postmortem), not an
+            # unmeasurable warn. Retain the old entry-presence inference only
+            # for legacy probe payloads that predate the explicit field.
+            "anchorFound": (
+                bool(m.get("anchorFound"))
+                if "anchorFound" in m
+                else bool(m)
+            ),
+        }
+    )
 
 
 def _envf(name, default):
@@ -203,6 +300,7 @@ res = evaluate(
     geom.get("docH"), impl.get("docH"), sections,
     doch_fail_pct=_envf("UI_CLONE_GEOM_DOCH_FAIL_PCT", 15.0),
     doch_warn_pct=_envf("UI_CLONE_GEOM_DOCH_WARN_PCT", 10.0),
+    doch_fail_px=_envf("UI_CLONE_GEOM_DOCH_FAIL_PX", 800.0),
     section_fail_pct=_envf("UI_CLONE_GEOM_SECTION_FAIL_PCT", 25.0),
     section_warn_pct=_envf("UI_CLONE_GEOM_SECTION_WARN_PCT", 16.0),
     min_section_px=_envf("UI_CLONE_GEOM_MIN_SECTION_PX", 200.0),

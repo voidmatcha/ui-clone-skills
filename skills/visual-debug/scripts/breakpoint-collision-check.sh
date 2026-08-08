@@ -26,7 +26,9 @@
 #        jitter — the rem scale is changing on the boundary, fails gate).
 #
 # Usage: bash breakpoint-collision-check.sh <session> <impl-url> [bps]
-#   bps: space-separated list (default: "640 768 1024 1280 1536")
+#   bps: space-separated list (default: "640 768 1024 1280 1536" plus valid
+#        breakpoints from REF_DIR/detected-breakpoints.json and
+#        REF_DIR/impl-detected-breakpoints.json)
 #        e.g. "640 768" to test only sm/md
 #
 # Env:
@@ -47,9 +49,52 @@ fi
 
 SESSION="${1:?Usage: breakpoint-collision-check.sh <session> <impl-url> [bps]}"
 URL="${2:?Missing impl-url}"
-BPS="${3:-640 768 1024 1280 1536}"
 WAIT_MS="${WAIT_MS:-700}"
 HEIGHT="${HEIGHT:-900}"
+
+if [ "$#" -ge 3 ]; then
+  BP_SOURCE="explicit"
+  BP_INPUT="$3"
+else
+  BP_SOURCE="artifacts"
+  BP_INPUT="${REF_DIR:-}"
+fi
+
+BPS="$(
+  node -e "
+const fs = require('fs');
+const path = require('path');
+const source = process.argv[1];
+const input = process.argv[2];
+const values = source === 'explicit'
+  ? input.split(/\s+/)
+  : [640, 768, 1024, 1280, 1536];
+if (source === 'artifacts' && input) {
+  for (const name of ['detected-breakpoints.json', 'impl-detected-breakpoints.json']) {
+    const file = path.join(input, name);
+    if (!fs.existsSync(file)) continue;
+    try {
+      const document = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (Array.isArray(document.breakpoints)) values.push(...document.breakpoints);
+    } catch {}
+  }
+}
+const normalized = new Set();
+for (const value of values) {
+  if (typeof value === 'boolean' || value == null) continue;
+  const match = String(value).trim().match(/^(\\d+)(?:px)?$/i);
+  if (!match) continue;
+  const bp = Number(match[1]);
+  if (Number.isSafeInteger(bp) && bp > 0) normalized.add(bp);
+}
+process.stdout.write([...normalized].sort((a, b) => a - b).join(' '));
+" "$BP_SOURCE" "$BP_INPUT"
+)"
+
+if [ -z "$BPS" ]; then
+  echo "ERROR: no valid breakpoints supplied." >&2
+  exit 2
+fi
 
 # REF_DIR is read later (env-only) to write the gate artifact. Surface the
 # decision now so the user knows whether the run will produce the artifact

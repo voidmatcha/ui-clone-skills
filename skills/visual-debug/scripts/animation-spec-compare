@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+"""Compare reference and implementation transition specs as a motion oracle.
+
+Runtime contract used by navercorp-watcher/ar:
+    animation-spec-compare <impl-url> <ref-dir> --out <motion-distance.json>
+
+The first positional argument is normally an implementation URL. For regression
+tests and pre-extracted runs, --impl-spec may point directly at a JSON spec.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+# Structural per-entry mismatch weights copied from the validated
+# ui_clone/validation/motion_coupling.py:animation_spec_distance prototype.
+W_MISSING = 1.0
+W_EXTRA = 0.5
+W_TYPE = 1.0
+W_PROPERTY = 1.0
+W_EASING = 0.7
+W_DURATION = 0.6
+W_RANGE = 0.8
+# EXTRACT-M1 — a stagger/delay ladder is motion texture: an impl firing 12
+# children at once vs a correct 100ms stagger looks identical without this term.
+W_DELAY = 0.5
+MINKOWSKI_P = 3
+SPEC_SCALE = 1000.0
+
+
+def _range_magnitude(animation: dict[str, Any]) -> float:
+    """Scalar scroll-progress/transform range from from/to endpoints.
+
+    For matrix(...) transforms the y-translation slot is treated as swept
+    distance. For scalar endpoints such as opacity, the absolute delta is used.
+    Missing or unparsable values degrade to 0 so the structural fields still
+    carry the mismatch signal.
+    """
+
+    start, end = str(animation.get("from", "")), str(animation.get("to", ""))
+    if not start and not end:
+        return 0.0
+
+    def _numeric_value(value: str) -> float | None:
+        matrix = re.search(r"matrix\(([^)]+)\)", value)
+        if matrix:
+            parts = [part.strip() for part in matrix.group(1).split(",")]
+            if len(parts) >= 6:
+                try:
+                    return float(parts[5])
+                except ValueError:
+                    return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    start_value, end_value = _numeric_value(start), _numeric_value(end)
+    if start_value is None or end_value is None:
+        return 0.0
+    return abs(start_value - end_value)
+
+
+def _duration_s(animation: dict[str, Any]) -> float:
+    duration = str(animation.get("duration", "")).strip()
+    if duration.endswith("ms"):
+        try:
+            return float(duration[:-2]) / 1000.0
+        except ValueError:
+            return 0.0
+    if duration.endswith("s"):
+        try:
+            return float(duration[:-1])
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _delay_s(animation: dict[str, Any]) -> float:
+    """Start delay / stagger offset in seconds. Accepts a CSS string
+    ('100ms', '0.1s'), a bare numeric string, or a number (seconds). A ref that
+    declares `stagger` (the per-sibling offset) uses it when no explicit delay is
+    present. Returns 0.0 when absent/unparseable — most animations have no
+    delay, so 0 is the common, cost-free case."""
+    raw = animation.get("delay")
+    if raw is None:
+        raw = animation.get("stagger")
+    if raw is None:
+        return 0.0
+    if isinstance(raw, bool):
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip().lower()
+    if not s:
+        return 0.0
+    try:
+        if s.endswith("ms"):
+            return float(s[:-2]) / 1000.0
+        if s.endswith("s"):
+            return float(s[:-1])
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _entry_key(transition: dict[str, Any]) -> str:
+    animation = transition.get("animation") or {}
+    return str(transition.get("id") or f"{transition.get('target')}|{animation.get('property')}")
+
+
+def _norm_props(value: Any) -> frozenset[str]:
+    """'background-color,opacity' / 'backgroundColor' -> {'background-color', 'opacity'}.
+
+    Hand-authored ref specs carry free-form property notes such as
+    'transform: translate3d(x)' or 'transform/scale via scrollYProgress', so
+    ':' and '/' also split — the real CSS property tokens must survive for
+    the intersection tests even when descriptive fragments ride along.
+    """
+
+    out = set()
+    for part in re.split(r"[\s,:/]+", str(value or "").strip()):
+        if part:
+            out.add(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", part).lower())
+    return frozenset(out)
+
+
+def _norm_target_tokens(target: Any) -> frozenset[str]:
+    """Class/id tokens of a selector (pseudo-classes stripped); tag name as fallback.
+
+    Hand-authored ref targets ('.quick-link__button', 'a:hover') and extractor
+    cssPath targets ('button.quick-link__button') only ever share these tokens,
+    never the full selector string.
+    """
+
+    text = re.sub(r"::?[a-zA-Z-]+(\([^)]*\))?", "", str(target or ""))
+    tokens = {token.lower() for token in re.findall(r"[#.][\w-]+", text)}
+    if tokens:
+        return frozenset(tokens)
+    tag = re.match(r"\s*([A-Za-z][\w-]*)", text)
+    return frozenset({tag.group(1).lower()}) if tag else frozenset()
+
+
+def normalize_spec(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """transition-spec.json -> ordered list of normalized animation entries."""
+
+    out: list[dict[str, Any]] = []
+    for transition in spec.get("transitions") or []:
+        animation = transition.get("animation") or {}
+        props = _norm_props(animation.get("property"))
+        out.append(
+            {
+                "key": _entry_key(transition),
+                "target_tokens": _norm_target_tokens(
+                    transition.get("target") or transition.get("selector")
+                ),
+                "props": props,
+                "type": str(animation.get("type", "")).strip().lower(),
+                "property": ",".join(sorted(props)),
+                "easing": str(animation.get("easing") or animation.get("ease", "")).strip().lower(),
+                "duration_s": _duration_s(animation),
+                "delay_s": _delay_s(animation),
+                "range": _range_magnitude(animation),
+                "engine": str(animation.get("engine", "")),
+            }
+        )
+    return out
+
+
+def _type_family(value: str) -> str:
+    """Fold type vocabulary into mechanism families for mismatch costing."""
+
+    folded = re.sub(r"[^a-z]", "", str(value or "").lower())
+    if not folded:
+        return ""
+    if "scroll" in folded:
+        return "scroll"
+    if "hover" in folded or "transition" in folded:
+        return "transition"
+    if "animation" in folded or "keyframes" in folded:
+        return "animation"
+    return folded
+
+
+def _entry_cost(reference: dict[str, Any], implementation: dict[str, Any]) -> float:
+    """Per-matched-entry structural mismatch in ~[0, sum-of-weights]."""
+
+    cost = 0.0
+    # An EMPTY type is schema absence (hand-authored refs omit it; the extractor
+    # always stamps a constructor name), not a motion mismatch — cost only fires
+    # when both sides declare a type and their FAMILIES differ. Vocabulary
+    # differences within one mechanism (ref 'scroll-scrub' vs extractor
+    # 'scroll-observed'; ref 'css-hover' vs WAAPI 'CSSTransition') are schema
+    # artifacts, not motion mismatches — left unfolded they added a constant
+    # W_TYPE to every cross-schema matched pair, making a matched entry cost
+    # MORE than deleting it (measured: distance rose 2608->3481 as matches
+    # engaged on the ebay benchmark).
+    ref_family = _type_family(reference["type"])
+    impl_family = _type_family(implementation["type"])
+    if ref_family and impl_family and ref_family != impl_family:
+        cost += W_TYPE
+    # Property mismatch as Jaccard distance over normalized property tokens:
+    # exact sets -> 0, disjoint sets -> full W_PROPERTY, partial coverage
+    # (impl scrubs border-radius but not width/height) -> proportional. One
+    # side empty = schema absence (cssText-only ref hovers), not a mismatch.
+    ref_props, impl_props = reference["props"], implementation["props"]
+    if ref_props and impl_props and ref_props != impl_props:
+        cost += W_PROPERTY * (1.0 - len(ref_props & impl_props) / len(ref_props | impl_props))
+    if (reference["easing"] or implementation["easing"]) and (
+        reference["easing"] != implementation["easing"]
+    ):
+        cost += W_EASING
+    if reference["duration_s"] > 0:
+        cost += W_DURATION * min(
+            1.0,
+            abs(reference["duration_s"] - implementation["duration_s"]) / reference["duration_s"],
+        )
+    # EXTRACT-M1 — cost a stagger/delay mismatch when the ref declared one, so an
+    # impl that fires everything at 0 delay no longer scores identical to a
+    # correct stagger ladder. Guarded on ref delay > 0 (0-delay is the common,
+    # cost-free case), mirroring the duration term's asymmetry.
+    if reference.get("delay_s", 0.0) > 0:
+        cost += W_DELAY * min(
+            1.0,
+            abs(reference["delay_s"] - implementation.get("delay_s", 0.0)) / reference["delay_s"],
+        )
+    if reference["range"] > 0:
+        cost += W_RANGE * min(
+            1.0,
+            abs(reference["range"] - implementation["range"]) / reference["range"],
+        )
+    return cost
+
+
+def dynamic_degree(entries: list[dict[str, Any]]) -> int:
+    """Count entries that actually animate; used as the motion-floor quantity."""
+
+    return sum(1 for value in entries if value["property"] or value["type"])
+
+
+def _match_entries(
+    ref_entries: list[dict[str, Any]], impl_entries: list[dict[str, Any]]
+) -> tuple[list[tuple[int, int]], list[int], list[int]]:
+    """Greedy deterministic 1:1 pairing: exact id -> target overlap -> property.
+
+    Ref specs carry hand-authored semantic ids (e.g. 'scroll-scrub-hero-resize')
+    while transition-spec-extract stamps 'target|property' ids, so id equality
+    alone essentially never matches and the distance degenerated to a
+    missing/extra count in which STRIPPING impl animations lowered the cost.
+    Stage 2 pairs by shared target class/id tokens with compatible properties;
+    stage 3 pairs by shared property ONLY when a side has no target at all
+    (bundle-mined ref scroll entries carry no selector) so a property-only pair
+    can never erase target identity. Unpaired entries fall through to
+    W_MISSING/W_EXTRA exactly as before.
+    """
+
+    def _by_id(ref: dict[str, Any], impl: dict[str, Any]) -> bool:
+        return bool(ref["key"]) and ref["key"] == impl["key"]
+
+    def _by_target(ref: dict[str, Any], impl: dict[str, Any]) -> bool:
+        if not (ref["target_tokens"] & impl["target_tokens"]):
+            return False
+        return not ref["props"] or not impl["props"] or bool(ref["props"] & impl["props"])
+
+    def _by_property(ref: dict[str, Any], impl: dict[str, Any]) -> bool:
+        if ref["target_tokens"] and impl["target_tokens"]:
+            return False
+        return bool(ref["props"] & impl["props"])
+
+    pairs: list[tuple[int, int]] = []
+    ref_left = list(range(len(ref_entries)))
+    impl_left = list(range(len(impl_entries)))
+    for stage in (_by_id, _by_target, _by_property):
+        for ref_index in list(ref_left):
+            for impl_index in impl_left:
+                if stage(ref_entries[ref_index], impl_entries[impl_index]):
+                    pairs.append((ref_index, impl_index))
+                    ref_left.remove(ref_index)
+                    impl_left.remove(impl_index)
+                    break
+    return pairs, ref_left, impl_left
+
+
+def animation_spec_distance(
+    ref_spec: dict[str, Any], impl_spec: dict[str, Any]
+) -> dict[str, Any]:
+    """Structural ref-vs-impl motion distance with Minkowski pooling, not a mean."""
+
+    ref_norm = normalize_spec(ref_spec)
+    impl_norm = normalize_spec(impl_spec)
+    pairs, ref_unmatched, impl_unmatched = _match_entries(ref_norm, impl_norm)
+    costs = [_entry_cost(ref_norm[i], impl_norm[j]) for i, j in pairs]
+    costs += [W_MISSING] * len(ref_unmatched)
+    costs += [W_EXTRA] * len(impl_unmatched)
+
+    pooled = 0.0 if not costs else sum(cost**MINKOWSKI_P for cost in costs) ** (
+        1.0 / MINKOWSKI_P
+    )
+    p95 = max(costs) if costs else 0.0
+    if len(costs) >= 2:
+        ordered = sorted(costs)
+        p95 = ordered[max(0, round(0.95 * (len(ordered) - 1)))]
+
+    return {
+        "distance": round(pooled * SPEC_SCALE, 4),
+        "p95_cell": round(p95, 4),
+        "n_cells": len(costs),
+        "n_matched": len(pairs),
+        "impl_dynamic_degree": dynamic_degree(impl_norm),
+        "ref_dynamic_degree": dynamic_degree(ref_norm),
+    }
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return data
+
+
+def _ref_spec_path(ref_dir: str, override: str | None) -> Path:
+    if override:
+        return Path(override)
+    ref_path = Path(ref_dir)
+    if ref_path.is_file():
+        return ref_path
+    return ref_path / "transition-spec.json"
+
+
+def _extract_impl_spec(
+    impl_url: str, out_path: Path, timeout_s: int, ref_spec: Path | None = None
+) -> Path:
+    extractor = Path(__file__).with_name("transition-spec-extract")
+    if not extractor.is_file():
+        raise FileNotFoundError(f"missing extractor: {extractor}")
+    cmd = [str(extractor), impl_url, "--out", str(out_path)]
+    if ref_spec is not None:
+        # The ref spec supplies hover/scroll stimulation targets: a rest-state
+        # getAnimations() snapshot sees none of the interaction-triggered
+        # transitions the ref declares (measured: 0/16 on the ebay benchmark).
+        cmd += ["--ref-spec", str(ref_spec)]
+    subprocess.run(cmd, check=True, timeout=timeout_s)
+    return out_path
+
+
+def _write_result(path: Path | None, result: dict[str, Any]) -> None:
+    encoded = json.dumps(result, indent=2, sort_keys=True)
+    if path is None:
+        print(encoded)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(encoded + "\n", encoding="utf-8")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("impl_url", help="Implementation URL, or ignored when --impl-spec is set")
+    parser.add_argument("ref_dir", help="Reference dir containing transition-spec.json, or a spec file")
+    parser.add_argument("--out", help="Write result JSON here; stdout when omitted")
+    parser.add_argument("--impl-spec", help="Use a pre-extracted implementation transition spec")
+    parser.add_argument("--ref-spec", help="Use an explicit reference transition spec")
+    parser.add_argument("--timeout-s", type=int, default=900)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    out_path = Path(args.out) if args.out else None
+    try:
+        ref_path = _ref_spec_path(args.ref_dir, args.ref_spec)
+        if args.impl_spec:
+            impl_path = Path(args.impl_spec)
+        else:
+            tmp_dir = Path(tempfile.mkdtemp(prefix="animation-spec-compare-"))
+            impl_path = _extract_impl_spec(
+                args.impl_url, tmp_dir / "impl-transition-spec.json", args.timeout_s,
+                ref_spec=ref_path if ref_path.is_file() else None,
+            )
+
+        ref_spec = _load_json(ref_path)
+        impl_spec = _load_json(impl_path)
+        result = animation_spec_distance(ref_spec, impl_spec)
+        result.update(
+            {
+                "ok": True,
+                "ref_spec": str(ref_path),
+                "impl_spec": str(impl_path),
+            }
+        )
+        _write_result(out_path, result)
+        return 0
+    except Exception as exc:
+        error = {"ok": False, "error": str(exc), "distance": 0.0}
+        if out_path is not None:
+            _write_result(out_path, error)
+        else:
+            print(json.dumps(error, indent=2, sort_keys=True), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

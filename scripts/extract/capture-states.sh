@@ -64,10 +64,11 @@ mkdir -p "$OUTDIR"
 
 # Open page in the derived session unless reusing the caller's session.
 if [ "$REUSE_SESSION" = "false" ]; then
-  if ! agent-browser --session "$STATES_SESSION" open "$URL" --wait 1500 >/dev/null 2>&1; then
+  if ! agent-browser --session "$STATES_SESSION" open "$URL" >/dev/null 2>&1; then
     echo "capture-states: agent-browser open failed for $URL (session=$STATES_SESSION)" >&2
     exit 2
   fi
+  sleep 2  # open --wait is not a supported flag; settle explicitly
 fi
 
 # In-page state-hash poller. Single eval — no CLI round-trip per poll.

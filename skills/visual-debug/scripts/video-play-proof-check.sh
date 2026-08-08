@@ -45,97 +45,21 @@ fi
 OUT="$REF_DIR/video-play-proof.json"
 PROBE_SESSION="${SESSION}-vpp"
 PROBE_RAW=$(mktemp -t vpp.XXXX.json)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPER="$SCRIPT_DIR/video_play_proof.py"
 trap 'rm -f "$PROBE_RAW"; agent-browser --session "$PROBE_SESSION" close >/dev/null 2>&1 || true' EXIT
 
 # ── Detect whether ref needs video ────────────────────────────────────
-REF_HAS_VIDEO=$(python3 - "$REF_DIR" <<'PY'
-from __future__ import annotations
-
-import json
-import re
-import sys
-from pathlib import Path
-
-ref_dir = Path(sys.argv[1])
-video_ext = re.compile(r"\.(mp4|webm|mov|m3u8|mpd)(?:$|[?#\"'])", re.I)
-
-def load_json(name: str):
-    path = ref_dir / name
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-def contains_video_url(value) -> bool:
-    if isinstance(value, str):
-        return bool(video_ext.search(value))
-    if isinstance(value, list):
-        return any(contains_video_url(v) for v in value)
-    if isinstance(value, dict):
-        return any(contains_video_url(v) for v in value.values())
-    return False
-
-required = load_json("required-media.json")
-if isinstance(required, dict):
-    for key in ("videos", "videoUrls", "videoURLs", "video", "requiredVideos"):
-        value = required.get(key)
-        if isinstance(value, list) and any(contains_video_url(v) for v in value):
-            print("true")
-            raise SystemExit(0)
-    totals = required.get("totals")
-    if isinstance(totals, dict) and int(totals.get("video", 0) or 0) > 0:
-        print("true")
-        raise SystemExit(0)
-    if contains_video_url(required):
-        print("true")
-        raise SystemExit(0)
-
-coverage = load_json("required-media-coverage.json")
-if isinstance(coverage, dict) and contains_video_url(coverage.get("videos")):
-    print("true")
-    raise SystemExit(0)
-
-for name in ("transition-spec.json", "animations-detected.json"):
-    data = load_json(name)
-    if not isinstance(data, dict):
-        continue
-    if contains_video_url(data):
-        print("true")
-        raise SystemExit(0)
-    text = json.dumps(data).lower()
-    if "hero-video" in text or "videoMime".lower() in text:
-        print("true")
-        raise SystemExit(0)
-
-print("false")
-PY
-)
+REF_HAS_VIDEO=$(python3 "$HELPER" detect-ref "$REF_DIR")
 
 if [ "$REF_HAS_VIDEO" != "true" ]; then
-  python3 - "$OUT" <<'PY'
-import json, sys
-from pathlib import Path
-payload = {
-    "schemaVersion": 1,
-    "status": "skip",
-    "reasons": ["ref has no video signal — gate does not apply"],
-    "rule": (
-        "When ref artifacts reference .mp4/.webm/.mov media or a video-class "
-        "transition, the impl page must contain ≥1 <video> element AND that "
-        "element must advance currentTime by >0.1s within a 2s observation "
-        "window after attempted play()."
-    ),
-}
-Path(sys.argv[1]).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-print(json.dumps({"status": "skip", "out": sys.argv[1]}))
-PY
+  python3 "$HELPER" write-skip "$OUT"
   exit 0
 fi
 
 # ── Runtime probe ─────────────────────────────────────────────────────
-agent-browser --session "$PROBE_SESSION" open "$IMPL_URL" --wait 2500 >/dev/null 2>&1 || true
+agent-browser --session "$PROBE_SESSION" open "$IMPL_URL" >/dev/null 2>&1 || true
+sleep 3  # open --wait is not a supported flag; settle explicitly
 
 agent-browser --session "$PROBE_SESSION" eval "
 (async () => {
@@ -190,103 +114,4 @@ agent-browser --session "$PROBE_SESSION" eval "
 })()
 " > "$PROBE_RAW" 2>/dev/null || true
 
-python3 - "$OUT" "$PROBE_RAW" "$IMPL_URL" <<'PY'
-from __future__ import annotations
-
-import json
-import sys
-from pathlib import Path
-
-out_path, probe_path, impl_url = sys.argv[1:4]
-
-def read_probe(path: str) -> dict:
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except Exception:
-        return {"error": "probe-missing"}
-    for line in reversed(text.strip().splitlines()):
-        s = line.strip()
-        # agent-browser may wrap the eval result in outer quotes
-        # ("{...}") or emit a bare object ({...}). Accept both forms.
-        if not (s.startswith("{") or s.startswith('"{')):
-            continue
-        try:
-            value = json.loads(s)
-            if isinstance(value, str):
-                value = json.loads(value)
-            if isinstance(value, dict):
-                return value
-        except Exception:
-            continue
-    return {"error": "probe-parse-failed"}
-
-probe = read_probe(probe_path)
-reasons: list[str] = []
-count = int(probe.get("count", 0))
-advanced = int(probe.get("advancedCount", 0))
-
-eligible = int(probe.get("eligibleCount", count))
-gesture_only = int(probe.get("gestureOnlyCount", 0))
-wait_ms = int(probe.get("waitMs", 2000))
-
-if probe.get("error"):
-    status = "fail"
-    reasons.append(f"probe failed: {probe['error']}")
-elif count == 0:
-    status = "fail"
-    reasons.append(
-        "ref signaled video but impl page has zero <video> elements. "
-        "required-media-coverage may pass on the .mp4 file existing in "
-        "public/, but the element that renders it is missing."
-    )
-elif eligible == 0 and gesture_only > 0:
-    # All videos require user gesture — gate cannot test them without UI.
-    # Pass with informational note (skipped, not failed).
-    status = "pass"
-    reasons.append(
-        f"informational: all {gesture_only} <video> element(s) are "
-        "gesture-required (unmuted, non-autoplay) — cannot be tested "
-        "without UI interaction. Gate passed without runtime advancement."
-    )
-elif advanced == 0:
-    status = "fail"
-    reasons.append(
-        f"{eligible} <video> element(s) eligible for autoplay (muted/autoplay) "
-        f"but none advanced currentTime by >0.1s in {wait_ms}ms. Causes: "
-        "missing `autoplay muted playsinline`, src URL 404, codec mismatch, "
-        "IntersectionObserver hiding the video before play() could fire, or "
-        "src= bound to state that hasn't initialized."
-    )
-else:
-    status = "pass"
-
-payload = {
-    "schemaVersion": 1,
-    "status": status,
-    "implUrl": impl_url,
-    "videoCount": count,
-    "advancedCount": advanced,
-    "before": probe.get("before", [])[:10],
-    "after": probe.get("after", [])[:10],
-    "reasons": reasons,
-    "nextAction": (
-        "Add `autoplay muted playsinline` attributes to the impl <video>, "
-        "OR programmatically call play() after the play-trigger condition "
-        "is met. Confirm the src URL serves 200 and the codec is supported."
-        if reasons else "all required videos advanced"
-    ),
-    "rule": (
-        "When ref artifacts reference .mp4/.webm/.mov/.m3u8/.mpd media or a "
-        "video-class transition, the impl page must contain ≥1 <video> element "
-        "AND that element must advance currentTime by >0.1s within the "
-        "observation window after attempted play(). Browsers allow muted "
-        "autoplay without user gesture, so muted videos must demonstrate "
-        "playback automatically; user-gesture-required (non-muted, non-autoplay) "
-        "videos are not faulted because they cannot be triggered without UI."
-    ),
-}
-
-Path(out_path).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-print(json.dumps({"status": status, "videos": count, "advanced": advanced, "out": out_path}, ensure_ascii=False))
-sys.exit(0 if status in ("pass", "skip") else 1)
-PY
+python3 "$HELPER" write-result "$OUT" "$PROBE_RAW" "$IMPL_URL"

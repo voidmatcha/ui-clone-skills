@@ -424,6 +424,51 @@ def test_resolve_impl_dir_picks_up_scratch_loop_impl(tmp_path: Path) -> None:
     )
 
 
+def test_stop_hook_ignores_state_impl_root_pointing_at_other_scratch_run(
+    tmp_path: Path,
+) -> None:
+    """A stale local state wire must not make a fresh ref enforce another run.
+
+    Regression from project-a-main: its pipeline-state.json and .impl-root
+    pointed at scratch/project-a-sustainability-04. The Stop hook then asked a
+    read-only reviewer to verify that unrelated implementation.
+    """
+    repo = tmp_path
+    ref_dir = repo / "tmp" / "ref" / "project-a-main"
+    ref_dir.mkdir(parents=True)
+    stale_impl = repo / "scratch" / "project-a-sustainability-04"
+    (stale_impl / "src").mkdir(parents=True)
+    (stale_impl / "src" / "App.tsx").write_text(
+        "export default function App(){return null}\n", encoding="utf-8",
+    )
+    (stale_impl / "package.json").write_text("{}", encoding="utf-8")
+    (repo / "impl").symlink_to(stale_impl, target_is_directory=True)
+    (ref_dir / ".impl-root").write_text(str(stale_impl) + "\n", encoding="utf-8")
+    (ref_dir / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": "project-a-main",
+                "started_at": "2026-06-05T00:00:00Z",
+                "completed_steps": ["reference", "extraction", "bundle", "paid-features", "spec"],
+                "current_gate": "pre-generate",
+                "last_updated": "2026-06-05T01:00:00Z",
+                "implRoot": str(stale_impl),
+                "impl_root": str(stale_impl),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_hook(
+        "ui_clone.hooks.section_gate",
+        env={"CLAUDE_PROJECT_DIR": str(repo)},
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "", (
+        f"cross-scratch stale implRoot must not activate Stop; got {result.stdout!r}"
+    )
+
+
 def test_bash_scratch_nested_ref_target_detects_codex_22_layout() -> None:
     """Loop-codex-22 bypass closure: detect writes to nested ref trees.
 
@@ -464,3 +509,29 @@ def test_bash_scratch_nested_ref_target_detects_codex_22_layout() -> None:
     # Negative: tmp/ref with no scratch ancestor
     no_scratch = f"tee {TMPREF}/site/extracted.json"
     assert _bash_scratch_nested_ref_target(no_scratch) is None
+
+
+def test_bash_adhoc_guard_allows_canonical_ref_artifact_writes() -> None:
+    """Canonical top-level ref artifacts may be produced by shell writers.
+
+    Claude loop 01 reported friction around redirects/cp for canonical names
+    (`element-roles.json`, `component-map.json`, ...). The guard should deny
+    invented names, not the same artifact names the gates require.
+    """
+    from ui_clone.hooks.pre_bash_rules.bash_write import _bash_adhoc_ref_target
+
+    TMPREF = "t" + "mp/r" + "ef"
+
+    allowed = [
+        f"node extract.js > {TMPREF}/site/element-roles.json",
+        f"cp /tmp/component-map.json {TMPREF}/site/component-map.json",
+        (
+            "python3 -c \"open('"
+            f"{TMPREF}/site/layout-decisions.json"
+            "', 'w').write('{}')\""
+        ),
+    ]
+    for cmd in allowed:
+        assert _bash_adhoc_ref_target(cmd) is None
+
+    assert _bash_adhoc_ref_target(f"node extract.js > {TMPREF}/site/sections.json")

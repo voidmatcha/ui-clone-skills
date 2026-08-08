@@ -197,10 +197,12 @@ ELEMENTS_JSON=$(agent-browser --session "$SESSION" eval "(() => {
       const tag = el.tagName.toLowerCase();
       const id = el.id || '';
       const name = id || cn.trim().split(/\\s+/)[0] || tag;
+      const clipId = 'clip-' + String(elements.length);
+      el.setAttribute('data-ui-clone-clip-id', clipId);
 
       elements.push({
         name: name.replace(/[^a-zA-Z0-9_-]/g, '-').substring(0, 40),
-        tag, selector: id ? '#' + id : tag + (cn.trim().split(/\\s+/)[0] ? '.' + cn.trim().split(/\\s+/)[0] : ''),
+        tag, selector: '[data-ui-clone-clip-id=' + clipId + ']',
         x: Math.round(r.left), y: Math.round(r.top + scrollY),
         width: Math.round(r.width), height: Math.round(r.height)
       });
@@ -231,7 +233,8 @@ element_dir = '$ELEMENT_DIR'
 
 for i, elem in enumerate(elements):
     name = elem['name']
-    x, y, w, h = elem['x'], elem['y'], elem['width'], elem['height']
+    selector = elem['selector']
+    y, w, h = elem['y'], elem['width'], elem['height']
 
     # Scroll element into view
     subprocess.run(['agent-browser', '--session', session, 'eval',
@@ -240,15 +243,10 @@ for i, elem in enumerate(elements):
     subprocess.run(['agent-browser', '--session', session, 'wait', '400'],
                    capture_output=True, timeout=10)
 
-    # Take clip screenshot
+    # Capture the element with the current screenshot selector/path interface.
     out_path = f'{element_dir}/{i:02d}-{name}.png'
-
-    # Recalculate position after scroll
-    clip_y = y - max(0, y - 100)
-    clip_arg = f'{x},{clip_y},{w},{h}'
-
     result = subprocess.run(['agent-browser', '--session', session, 'screenshot',
-                            '--clip', clip_arg, out_path],
+                            selector, out_path],
                            capture_output=True, timeout=15)
 
     if result.returncode == 0:

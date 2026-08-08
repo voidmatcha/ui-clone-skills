@@ -210,7 +210,7 @@ for path in impl_files:
             })
         elif name in ref_css_filenames and name not in GENERIC_NAMES:
             # Non-generic basename match — likely the ref's authored
-            # bundle name (e.g. naver-main.min.css, dga-loginPage-abc123.css).
+            # bundle name (e.g. app-main.min.css, login-page-abc123.css).
             violations.append({
                 "kind": "import-of-ref-css-filename",
                 "file": rel,

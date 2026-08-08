@@ -105,7 +105,7 @@ fi
 REF_DIR="$REF_DIR" IMPL_DIR="$IMPL_DIR" DIM_TOLERANCE="$DIM_TOLERANCE" OUT="$OUT" python3 <<'PY'
 import json, os, re, sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 ref_dir = Path(os.environ["REF_DIR"])
 impl_dir = Path(os.environ["IMPL_DIR"])
@@ -183,15 +183,18 @@ source_manifest_issues = []
 visible_urls = [e.get("src", "") for e in entries if isinstance(e.get("src", ""), str)]
 visible_needles = set()
 for url in visible_urls:
-    parsed = urlparse(url)
-    base = os.path.basename(parsed.path)
-    if base:
-        visible_needles.add(base)
-        stem, _ = os.path.splitext(base)
-        if len(stem) >= 4:
-            visible_needles.add(stem)
-    if url:
-        visible_needles.add(url)
+    # Both encoded and decoded forms — keeps needle derivation consistent
+    # with asset-placement-check for percent-encoded asset names.
+    for candidate in {url, unquote(url)}:
+        parsed = urlparse(candidate)
+        base = os.path.basename(parsed.path)
+        if base:
+            visible_needles.add(base)
+            stem, _ = os.path.splitext(base)
+            if len(stem) >= 4:
+                visible_needles.add(stem)
+        if candidate:
+            visible_needles.add(candidate)
 for p in impl_dir.rglob("*"):
     if p.is_file() and p.suffix.lower() in TEXT_EXTS:
         try:
@@ -235,31 +238,44 @@ def find_match(url: str):
                 return path, needle
     return None, None
 
-NUM = r"(?:\d+)"
-# width/height as JSX prop ({N}), HTML attr ("N" or N), or inline style.
+# width/height as JSX prop ({N}), HTML attr ("N" or N), or inline style. The
+# leading (?<![A-Za-z-]) is load-bearing: without it the case-insensitive `width`
+# also matches inside `maxWidth`/`minWidth`/`min-width` (and `height` inside
+# `minHeight`/`max-height`), so the reader would pick an ANCESTOR container's
+# maxWidth/minHeight instead of the element's own width/height (the eBay
+# grid-tile false 1344×220 read). The boundary anchors to the real property name.
 DIM_RE = re.compile(
-    rf'(?:width|height)\s*[:=]\s*[{{"\']?\s*({NUM})\s*[}}"\']?',
+    r'(?<![A-Za-z-])(width|height)\s*[:=]\s*[{"\']?\s*(\d+)',
     re.IGNORECASE,
 )
 
+def _dims_in(text: str) -> dict:
+    dims: dict = {}
+    for m in DIM_RE.finditer(text):
+        k = m.group(1).lower()
+        if k not in dims:
+            dims[k] = int(m.group(2))
+    return dims
+
 def extract_nearby_dims(content: str, needle: str, window: int = 5):
-    """Find the line containing needle, return any width/height numbers within
-    ±window lines (a single dict mapping 'width'/'height' → int)."""
+    """Return the element's own width/height numbers (a dict mapping
+    'width'/'height' → int). Prefer dims on the needle line ITSELF — that is the
+    element carrying the matched URL, so its own `width`/`height` win over an
+    ancestor container's within ±window lines. Only widen to the ±window when the
+    needle line carries no dimension of its own."""
     lines = content.splitlines()
-    dims = {}
     for i, line in enumerate(lines):
         if needle not in line:
             continue
+        own = _dims_in(line)
+        if own:
+            return own
         lo = max(0, i - window)
         hi = min(len(lines), i + window + 1)
-        snippet = "\n".join(lines[lo:hi])
-        for m in re.finditer(r'(width|height)\s*[:=]\s*[{"\']?\s*(\d+)', snippet, re.IGNORECASE):
-            k = m.group(1).lower()
-            if k not in dims:
-                dims[k] = int(m.group(2))
-        if dims:
-            return dims
-    return dims
+        widened = _dims_in("\n".join(lines[lo:hi]))
+        if widened:
+            return widened
+    return {}
 
 def within_tol(ref: int, impl: int) -> bool:
     if ref <= 0:

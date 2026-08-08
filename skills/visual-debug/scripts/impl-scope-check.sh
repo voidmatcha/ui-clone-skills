@@ -107,6 +107,17 @@ def parse_status_path(line):
     return path or None
 
 
+def expand_status_path(path):
+    p = Path(path)
+    if p.is_dir():
+        return sorted(
+            str(child)
+            for child in p.rglob("*")
+            if child.is_file()
+        )
+    return [path]
+
+
 def snapshot_dirty():
     proc = subprocess.run(
         ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
@@ -119,12 +130,13 @@ def snapshot_dirty():
         path = parse_status_path(line)
         if not path:
             continue
-        record = {
-            "path": path,
-            "status": line[:2],
-            **file_fingerprint(path),
-        }
-        records.append(record)
+        for expanded_path in expand_status_path(path):
+            record = {
+                "path": expanded_path,
+                "status": line[:2],
+                **file_fingerprint(expanded_path),
+            }
+            records.append(record)
     return records
 
 

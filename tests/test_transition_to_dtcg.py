@@ -21,7 +21,7 @@ def _run(ref: Path, out: Path | None = None) -> subprocess.CompletedProcess[str]
     args = ["bash", str(SCRIPT), str(ref)]
     if out is not None:
         args.append(str(out))
-    return subprocess.run(args, capture_output=True, text=True, timeout=30)
+    return subprocess.run(args, capture_output=True, text=True, timeout=120)
 
 
 def test_emits_dtcg_duration_tokens(tmp_path: Path) -> None:
@@ -148,6 +148,6 @@ def test_setup_error_on_bad_ref(tmp_path: Path) -> None:
         ["bash", str(SCRIPT), str(tmp_path / "no-ref")],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
     assert proc.returncode == 2

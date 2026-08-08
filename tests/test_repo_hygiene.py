@@ -43,6 +43,17 @@ def test_local_docs_artifact_patterns_are_ignored_without_hiding_all_docs() -> N
     assert "docs/*-E1.md" in active_lines
 
 
+def test_tokensave_runtime_state_is_ignored() -> None:
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    active_lines = [
+        line.strip()
+        for line in gitignore.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    assert ".tokensave/" in active_lines
+
+
 def test_runtime_install_guidance_avoids_curl_pipe_shell() -> None:
     checked_paths = [
         ROOT / "README.md",

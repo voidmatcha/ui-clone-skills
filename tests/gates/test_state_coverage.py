@@ -140,7 +140,7 @@ def test_splash_transitions_with_class_hooks_pass(
     ref_dir: Path, impl_root: Path,
 ) -> None:
     """trajectory has is-loading / is-loaded class hooks; impl/src
-    references them → pass."""
+    references them through a runtime state toggle → pass."""
     _write_splash(
         ref_dir,
         trajectory=[
@@ -151,8 +151,13 @@ def test_splash_transitions_with_class_hooks_pass(
     )
     _write_impl_src(impl_root, {
         "App.tsx": (
+            "import { useEffect, useState } from 'react';\n"
             "export function App() {\n"
             "  const [loaded, setLoaded] = useState(false);\n"
+            "  useEffect(() => {\n"
+            "    const id = setTimeout(() => setLoaded(true), 800);\n"
+            "    return () => clearTimeout(id);\n"
+            "  }, []);\n"
             "  return <body className={loaded ? 'is-loaded' : 'is-loading'}>\n"
         ),
     })
@@ -236,6 +241,41 @@ def test_splash_no_transitions_no_check(ref_dir: Path, impl_root: Path) -> None:
     ]
     assert not splash_fails, (
         f"static splash must not fail; got: {[(r.label, r.status) for r in results]}"
+    )
+
+
+def test_splash_constant_html_class_is_not_transition_hook(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """A class present on every splash snapshot is environment state, not a
+    class transition hook.
+
+    Navercorp keeps ``isNotTouchDevice`` on <html> for the whole splash
+    trajectory while DOM/layout measurements still change. The gate must not
+    require generated impl source to reference that constant class just because
+    polls > 1.
+    """
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "hash": 1, "bodyClass": "", "htmlClass": "isNotTouchDevice"},
+            {
+                "ts_ms": 800,
+                "hash": 2,
+                "bodyClass": "",
+                "htmlClass": "isNotTouchDevice",
+            },
+        ],
+        summary={"checked": True, "polls": 2, "reason": "dom-settled"},
+    )
+    _write_impl_src(impl_root, {"App.tsx": "export function App() { return null; }"})
+    results = Gate(ref_dir).gate_state_coverage()
+    splash_fails = [
+        r for r in results if r.status == "fail" and "splash" in r.label.lower()
+    ]
+    assert not splash_fails, (
+        "constant html/body classes must not be treated as produced splash hooks; "
+        f"got: {[(r.label, r.status, r.message) for r in results]}"
     )
 
 
@@ -403,6 +443,76 @@ def test_partial_states_dir_emits_only_present_checks(
     assert "splash" in labels
     assert "scroll-coverage" not in labels and "scroll coverage" not in labels
     assert "hover-coverage" not in labels and "hover coverage" not in labels
+
+
+def test_splash_static_terminal_classes_do_not_pass(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Static source that bakes both terminal splash classes is not a state
+    bridge. It renders the settled capture, but it cannot reproduce the entry
+    transition."""
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "hash": 1, "bodyClass": "is-loading", "htmlClass": ""},
+            {"ts_ms": 800, "hash": 2, "bodyClass": "is-loaded", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2, "reason": "stable-2s"},
+    )
+    _write_impl_src(impl_root, {
+        "App.tsx": "<body className='is-loading is-loaded'>",
+    })
+    results = Gate(ref_dir).gate_state_coverage()
+    splash_fails = [
+        r for r in results
+        if r.status == "fail" and "splash" in r.label.lower()
+    ]
+    assert splash_fails, (
+        "static terminal splash classes must fail; got: "
+        f"{[(r.label, r.status, r.message) for r in results]}"
+    )
+    assert "runtime state" in splash_fails[0].message.lower()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "setTimeout(() => {\n"
+            "  document.body.classList.remove('is-loading');\n"
+            "  document.body.classList.add('is-loaded');\n"
+            "}, 800);\n"
+        ),
+        (
+            "<template><main :class=\"{ 'is-loaded': loaded, 'is-loading': !loaded }\" /></template>\n"
+            "<script>export default { mounted() { setTimeout(() => { this.loaded = true }, 800) } }</script>\n"
+        ),
+        (
+            "<script>import { onMount } from 'svelte'; let loaded = false;\n"
+            "onMount(() => setTimeout(() => loaded = true, 800));</script>\n"
+            "<main class:is-loaded={loaded} class:is-loading={!loaded}></main>\n"
+        ),
+    ],
+)
+def test_splash_runtime_state_mechanisms_pass(
+    ref_dir: Path, impl_root: Path, source: str,
+) -> None:
+    """Common vanilla/Vue/Svelte runtime toggles satisfy splash coverage."""
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "hash": 1, "bodyClass": "is-loading", "htmlClass": ""},
+            {"ts_ms": 800, "hash": 2, "bodyClass": "is-loaded", "htmlClass": ""},
+        ],
+        summary={"checked": True, "polls": 2, "reason": "stable-2s"},
+    )
+    _write_impl_src(impl_root, {"App.tsx": source})
+    results = Gate(ref_dir).gate_state_coverage()
+    splash_passes = [
+        r for r in results
+        if r.status == "pass" and "splash" in r.label.lower()
+    ]
+    assert splash_passes, f"expected splash pass, got: {[(r.label, r.status) for r in results]}"
 
 
 def test_hover_handler_vue_at_mouseenter_pass(
@@ -751,6 +861,7 @@ def test_url_double_slash_not_stripped_as_comment(
     _write_impl_src(impl_root, {
         "App.tsx": (
             "const ref = 'https://example.test'; // see ref\n"
+            "setTimeout(() => setLoaded(true), 800);\n"
             "const cls = loaded ? 'is-loaded' : 'is-loading';\n"
         ),
     })

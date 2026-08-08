@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 from ._helpers import (
     _project_root,
 )
+
+
+def test_proxy_mirror_dispatcher_passes_impl_root() -> None:
+    """The required-check dispatcher must use the resolved implementation."""
+    dispatcher = _project_root() / "scripts" / "verify" / "build_required_dispatch.py"
+    text = dispatcher.read_text(encoding="utf-8")
+    match = re.search(r'"proxy-mirror-check\.sh":\s*"([^"]+)"', text)
+
+    assert match, "proxy-mirror-check.sh signature missing from dispatcher"
+    recipe = match.group(1)
+    assert "{ref_dir}" in recipe
+    assert "{impl_root}" in recipe, (
+        "proxy-mirror-check.sh must receive the resolved impl root; otherwise "
+        "external scratch implementations are incorrectly skipped"
+    )
 
 
 def test_proxy_mirror_check_fails_proxy_backed_original_runtime(tmp_path: Path) -> None:
@@ -69,4 +85,3 @@ def test_proxy_mirror_check_passes_source_component_impl(tmp_path: Path) -> None
     assert proc.returncode == 0, f"source component impl should pass: {proc.stdout}\n{proc.stderr}"
     artifact = json.loads((ref / "proxy-mirror-check.json").read_text())
     assert artifact["status"] == "pass"
-

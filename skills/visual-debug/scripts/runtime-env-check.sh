@@ -45,8 +45,15 @@ fi
 
 OUT="$REF_DIR/runtime-env.json"
 SESSION="runtime-env-$$"
+SESSION_OPENED="false"
 PROBE_RAW=$(mktemp -t rt-env.XXXX.json)
-trap 'rm -f "$PROBE_RAW"; agent-browser --session "$SESSION" close >/dev/null 2>&1 || true' EXIT
+cleanup_runtime_env() {
+  rm -f "$PROBE_RAW"
+  if [ "$SESSION_OPENED" = "true" ]; then
+    agent-browser --session "$SESSION" close >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_runtime_env EXIT
 
 PORT=$(python3 -c "from urllib.parse import urlparse; import sys; p = urlparse(sys.argv[1]); print(p.port or (443 if p.scheme=='https' else 80))" "$IMPL_URL" 2>/dev/null || echo 0)
 SERVING_PID=""
@@ -87,8 +94,78 @@ if command -v curl >/dev/null 2>&1; then
   fi
 fi
 
+if [ "$URL_REACHABLE" != "true" ]; then
+  python3 - "$OUT" "$IMPL_URL" "$IMPL_ROOT" "$PORT_OWNER_MISMATCH" "${SERVING_PID:-}" "${SERVING_CWD:-}" "$URL_REACHABLE_DETAIL" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+(
+    out_path,
+    impl_url,
+    impl_root,
+    port_mismatch,
+    serving_pid,
+    serving_cwd,
+    url_reachable_detail,
+) = sys.argv[1:8]
+
+reasons = [
+    f"impl-url {impl_url!r} is not reachable "
+    f"({url_reachable_detail or 'connection failed'}). "
+    "Start the dev server bound to the expected port before running "
+    "the runtime gate. Without a reachable URL the downstream runtime "
+    "probe is unreliable and may silently produce a misleading 'pass'."
+]
+if port_mismatch == "true":
+    reasons.insert(
+        0,
+        f"port-routing mismatch: <impl-url> port is served by PID {serving_pid} "
+        f"with cwd {serving_cwd!r}, which does not match impl-root {impl_root!r}. "
+        "Likely an orphan dev server from a previous loop.",
+    )
+
+payload = {
+    "schemaVersion": 1,
+    "status": "fail",
+    "portRouting": {
+        "implUrl": impl_url,
+        "implRoot": impl_root,
+        "mismatch": port_mismatch == "true",
+        "servingPid": serving_pid or None,
+        "servingCwd": serving_cwd or None,
+    },
+    "runtime": {
+        "skipped": "impl-url-unreachable",
+        "bodyChildren": 0,
+        "refreshTrap": False,
+        "moduleErr": False,
+        "hydrationErr": False,
+        "errorCount": 0,
+    },
+    "reasons": reasons,
+    "nextAction": (
+        "Start the correct dev server before re-running downstream gates; "
+        "dependent runtime checks should skip until runtime-env passes."
+    ),
+    "rule": (
+        "Impl-url must be reachable before browser runtime probes run. "
+        "Unreachable URLs can make agent-browser evaluate a stale tab and "
+        "produce misleading downstream verdicts."
+    ),
+}
+Path(out_path).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+print(json.dumps({"status": "fail", "reasons": len(reasons), "out": out_path}, ensure_ascii=False))
+PY
+  exit 1
+fi
+
 # ── Runtime probe ─────────────────────────────────────────────────────
-agent-browser --session "$SESSION" open "$IMPL_URL" --wait "$WAIT_MS" >/dev/null 2>&1 || true
+SESSION_OPENED="true"
+agent-browser --session "$SESSION" open "$IMPL_URL" >/dev/null 2>&1 || true
+sleep "$(( (WAIT_MS + 999) / 1000 ))"  # open --wait is not a supported flag; settle explicitly
 
 agent-browser --session "$SESSION" eval '
 (() => {

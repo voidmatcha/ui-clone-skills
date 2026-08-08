@@ -22,6 +22,9 @@
 
 set -uo pipefail
 
+# shellcheck source=../../../scripts/lib/viewport.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/lib/viewport.sh"
+
 SESSION="${1:?Usage: mobile-viewport-parity-check.sh <session> <ref-url> <impl-url> <ref-dir>}"
 REF_URL="${2:?ref-url required}"
 IMPL_URL="${3:?impl-url required}"
@@ -48,30 +51,124 @@ PROBE_JS='
   if (!body) return JSON.stringify({ ok: false, error: "no-body" });
   const html = document.documentElement;
   const overflow = body.scrollWidth - window.innerWidth;
+  const isVisible = (el) => {
+    for (let node = el; node instanceof Element; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        Number.parseFloat(style.opacity || "1") <= 0.01
+      ) {
+        return false;
+      }
+    }
+    const rect = el.getBoundingClientRect();
+    return rect.width >= 2 && rect.height >= 2;
+  };
+  const interactiveControlSelector =
+    ":is(button, [role=button], summary, label)";
+  const directMobileNavControlSelectors = [
+    ":is(button, [role=button], summary, label)[data-mobile-nav]",
+    ":is(button, [role=button], summary, label)[data-testid*=\"mobile-menu\" i]",
+    ":is(button, [role=button], summary, label)[class*=\"mobile-nav\"]",
+    ":is(button, [role=button], summary, label)[class*=\"hamburger\"]",
+    ":is(button, [role=button], summary, label)[class*=\"menu-toggle\"]",
+    ":is(button, [role=button], summary, label)[class*=\"nav-toggle\"]",
+    ":is(button, [role=button], summary, label)[class*=\"burger\"]",
+    ":is(button, [role=button])[aria-label*=\"menu\" i]",
+    ":is(button, [role=button])[aria-label*=\"navigation\" i]",
+    ":is(button, [role=button])[aria-controls*=\"nav\" i]",
+    ":is(button, [role=button])[aria-controls*=\"menu\" i]",
+    "details > summary",
+    "input[type=checkbox][id*=\"menu\" i] ~ label",
+    "input[type=checkbox][id*=\"nav\" i] ~ label",
+  ];
   const mobileNavSelectors = [
     "[data-mobile-nav]",
+    "[data-testid*=\"mobile-menu\" i]",
     "[class*=\"mobile-nav\"]",
     "[class*=\"hamburger\"]",
     "[class*=\"menu-toggle\"]",
     "[class*=\"nav-toggle\"]",
     "[class*=\"burger\"]",
-    "[aria-label*=\"menu\" i]",
-    "[aria-label*=\"navigation\" i]",
-    "[aria-controls*=\"nav\" i]",
-    "[aria-controls*=\"menu\" i]",
-    "button[aria-expanded]",
-    "details > summary",
-    "input[type=checkbox][id*=\"menu\" i] ~ label",
-    "input[type=checkbox][id*=\"nav\" i] ~ label",
+    ...directMobileNavControlSelectors,
   ];
-  let mobileNavCount = 0;
-  for (const sel of mobileNavSelectors) {
-    mobileNavCount += document.querySelectorAll(sel).length;
+  const directMobileNavControlSelector =
+    directMobileNavControlSelectors.join(",");
+  const mobileNavCandidates = new Set(
+    mobileNavSelectors.flatMap((selector) => [
+      ...document.querySelectorAll(selector),
+    ])
+  );
+  const mobileNavControls = new Set();
+  for (const candidate of mobileNavCandidates) {
+    if (!isVisible(candidate)) continue;
+    if (candidate.matches(interactiveControlSelector)) {
+      mobileNavControls.add(candidate);
+      continue;
+    }
+    const explicitDescendants = [
+      ...candidate.querySelectorAll(directMobileNavControlSelector),
+    ].filter((el) => isVisible(el));
+    if (explicitDescendants.length > 0) {
+      explicitDescendants.forEach((el) => mobileNavControls.add(el));
+      continue;
+    }
+    const visibleInteractiveDescendants = [
+      ...candidate.querySelectorAll(interactiveControlSelector),
+    ].filter((el) => isVisible(el));
+    if (visibleInteractiveDescendants.length === 1) {
+      mobileNavControls.add(visibleInteractiveDescendants[0]);
+    }
   }
+  const mobileNavCount = mobileNavControls.size;
   const text = body.innerText.slice(0, 1000);
-  const sectionCount = document.querySelectorAll(
-    "section, main, article, [role=region], [role=main], [role=contentinfo]"
-  ).length;
+  const landmarkGroups = [
+    { category: "banner", selectors: ["header", "[role=banner]"] },
+    { category: "navigation", selectors: ["nav", "[role=navigation]"] },
+    { category: "main", selectors: ["main", "[role=main]"] },
+    { category: "contentinfo", selectors: ["footer", "[role=contentinfo]"] },
+    { category: "complementary", selectors: ["aside", "[role=complementary]"] },
+    {
+      category: "region",
+      selectors: ["section", "article", "[role=region]"],
+    },
+  ];
+  const landmarkSelector = landmarkGroups.flatMap((group) => group.selectors).join(",");
+  const visibleLandmarks = new Set(
+    [...document.querySelectorAll(landmarkSelector)].filter((el) => isVisible(el))
+  );
+  const categoryByElement = new Map();
+  for (const group of landmarkGroups) {
+    for (const el of visibleLandmarks) {
+      if (
+        !categoryByElement.has(el) &&
+        group.selectors.some((selector) => el.matches(selector))
+      ) {
+        categoryByElement.set(el, group.category);
+      }
+    }
+  }
+  const stableLandmarks = [...visibleLandmarks].filter((el) => {
+    const category = categoryByElement.get(el);
+    for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      if (visibleLandmarks.has(ancestor) && categoryByElement.get(ancestor) === category) {
+        return false;
+      }
+    }
+    return true;
+  });
+  const landmarkCounts = Object.fromEntries(
+    landmarkGroups.map((group) => [
+      group.category,
+      stableLandmarks.filter((el) => categoryByElement.get(el) === group.category).length,
+    ])
+  );
+  const landmarkCategories = landmarkGroups
+    .filter((group) => landmarkCounts[group.category] > 0)
+    .map((group) => group.category);
+  const sectionCount = stableLandmarks.length;
   return JSON.stringify({
     ok: true,
     viewport: [window.innerWidth, window.innerHeight],
@@ -83,6 +180,8 @@ PROBE_JS='
     bodyClasses: body.className || "",
     mobileNavCount,
     sectionCount,
+    landmarkCategories,
+    landmarkCounts,
     textLen: text.length,
     title: document.title || "",
   });
@@ -91,7 +190,10 @@ PROBE_JS='
 
 probe() {
   local session="$1" url="$2" out_file="$3"
-  agent-browser --session "$session" open "$url" --viewport "${WIDTH}x${HEIGHT}" --wait 2000 >/dev/null 2>&1 || true
+  if ! ab_open_at_viewport "$session" "$url" "$WIDTH" "$HEIGHT" 2; then
+    echo "mobile-viewport-parity-check: cannot probe at declared viewport ${WIDTH}x${HEIGHT}; failing closed" >&2
+    exit 1
+  fi
   agent-browser --session "$session" eval "$PROBE_JS" > "$out_file" 2>/dev/null || true
 }
 
@@ -139,12 +241,23 @@ elif not impl.get("ok"):
     status = "fail"
     reasons.append(f"impl probe failed at mobile viewport: {impl.get('error','unknown')}")
 else:
-    if int(impl.get("overflowPx", 0)) > 4:
+    # Ref-relative overflow (batch-12 ITEM 6 achievability): the REFERENCE itself
+    # may carry inherent horizontal overflow at mobile — e.g. realfood's
+    # JS-positioned foods/pyramid strip extends to ~1151px (overflow ~776px),
+    # clipped by overflow-x:clip. An ABSOLUTE "overflow>4px => fail" rule fails the
+    # reference against its OWN ground truth (a gate so strict it cannot self-pass).
+    # Fail only when the impl overflows MORE than the ref does (beyond a small
+    # tolerance): a clone that ADDS overflow is a real defect, but faithfully
+    # reproducing the ref's own overflow is parity (and gives ref-vs-ref self-pass).
+    ref_overflow = int(ref.get("overflowPx", 0))
+    impl_overflow = int(impl.get("overflowPx", 0))
+    if impl_overflow > 4 and impl_overflow > ref_overflow + 4:
         reasons.append(
-            f"impl has horizontal overflow at {width}x{height}: "
+            f"impl has horizontal overflow at {width}x{height} beyond the ref: "
             f"body.scrollWidth={impl.get('scrollWidth')}, innerWidth={width}, "
-            f"overflow={impl.get('overflowPx')}px. Typical cause: a fixed-width "
-            "element or wide image without max-width:100%."
+            f"impl overflow={impl_overflow}px vs ref overflow={ref_overflow}px. "
+            "Typical cause: a fixed-width element or wide image without "
+            "max-width:100% that the ref does not have."
         )
     if int(ref.get("mobileNavCount", 0)) > 0 and int(impl.get("mobileNavCount", 0)) == 0:
         reasons.append(
@@ -156,6 +269,14 @@ else:
         reasons.append("impl <body> is empty at mobile viewport — page failed to render")
     if int(impl.get("textLen", 0)) < 20:
         reasons.append("impl rendered <20 chars of text — likely a render error at this width")
+    ref_title = " ".join(str(ref.get("title", "")).split())
+    impl_title = " ".join(str(impl.get("title", "")).split())
+    if ref_title and impl_title != ref_title:
+        reasons.append(
+            f"impl document title differs from ref: {impl_title!r} vs "
+            f"{ref_title!r}. Preserve the rendered page title copy instead of "
+            "using a clone/debug label."
+        )
     # Vertical-stacking parity: impl total height should be within ±50% of ref
     # mobile (stricter than desktop because mobile reflow accumulates more).
     rh = int(ref.get("scrollHeight", 0))
@@ -170,16 +291,46 @@ else:
             )
     # Section/landmark count parity: a
     # severely-broken mobile layout often loses sections entirely while
-    # remaining within height tolerance. Compare top-level <section> +
-    # role=region counts; FAIL if impl has <50% of ref's count.
-    ref_sections = int(ref.get("sectionCount", 0))
-    impl_sections = int(impl.get("sectionCount", 0))
-    if ref_sections > 0 and impl_sections < ref_sections * 0.5:
-        reasons.append(
-            f"impl has {impl_sections} top-level sections vs ref {ref_sections} "
-            "— more than half the sections missing at mobile. Likely "
-            "responsive-hidden via display:none or never rendered."
+    # remaining within height tolerance. Compare stable visible landmarks:
+    # selector aliases resolve to one DOM element and same-category nesting is
+    # collapsed, while sibling landmarks remain independently countable.
+    ref_landmark_counts = ref.get("landmarkCounts", {})
+    impl_landmark_counts = impl.get("landmarkCounts", {})
+    if isinstance(ref_landmark_counts, dict) and isinstance(impl_landmark_counts, dict):
+        core_categories = ("banner", "navigation", "main", "contentinfo")
+        major_categories = (*core_categories, "complementary")
+        ref_major_count = sum(
+            int(ref_landmark_counts.get(category, 0))
+            for category in major_categories
         )
+        impl_major_count = sum(
+            int(impl_landmark_counts.get(category, 0))
+            for category in major_categories
+        )
+        if ref_major_count > 0 and impl_major_count < ref_major_count * 0.5:
+            reasons.append(
+                f"impl has {impl_major_count} stable major landmarks vs ref "
+                f"{ref_major_count} — more than half the core page structure "
+                "is missing at mobile. Likely responsive-hidden via "
+                "display:none or never rendered."
+            )
+        for category in core_categories:
+            ref_count = int(ref_landmark_counts.get(category, 0))
+            impl_count = int(impl_landmark_counts.get(category, 0))
+            if ref_count > 0 and impl_count == 0:
+                reasons.append(
+                    f"impl lost the core {category} landmark present in the ref "
+                    "at mobile viewport."
+                )
+        for category in major_categories:
+            raw_ref_count = ref_landmark_counts.get(category, 0)
+            ref_count = int(raw_ref_count)
+            impl_count = int(impl_landmark_counts.get(category, 0))
+            if ref_count >= 3 and impl_count < ref_count * 0.5:
+                reasons.append(
+                    f"impl has {impl_count} stable {category} landmarks vs ref "
+                    f"{ref_count} — major per-category landmark loss at mobile."
+                )
     status = "fail" if reasons else "pass"
 
 payload = {
@@ -192,14 +343,15 @@ payload = {
     "nextAction": (
         "Fix mobile-specific layout: add max-width:100% to wide elements, "
         "ensure mobile nav (hamburger) is rendered, verify content stacks "
-        "vertically at <768px. Test the impl at 375x812 in DevTools before "
-        "re-running the gate."
+        "vertically at <768px, and preserve the reference document title. "
+        "Test the impl at 375x812 in DevTools before re-running the gate."
         if (status == "fail") else "mobile viewport parity verified"
     ),
     "rule": (
         f"At {width}x{height}, the impl must: (1) have no horizontal "
         "overflow (>4px), (2) include a mobile-nav element when ref has one, "
-        "(3) render non-empty body content, (4) total height within 2x of ref."
+        "(3) render non-empty body content, (4) preserve core landmarks and "
+        "document title, (5) total height within the ref-relative tolerance."
     ),
 }
 

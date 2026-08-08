@@ -319,8 +319,31 @@ for p in impl_root.rglob("*"):
             text = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        # Strip comments before the forbidden-substring scan: a ref path
+        # mentioned in a CODE COMMENT (e.g. a provenance note like
+        # "fidelity sentinels generated from tmp/ref/<c>/text-fidelity-check.json")
+        # is documentation, not a runtime asset reference — a comment can't
+        # load a screenshot to fake a pixel-diff, which is the only thing this
+        # gate exists to catch. Mirrors the comment-strip in dom-mirror-check /
+        # text-fidelity-check. Only strip a `//` line comment when the `//` is
+        # preceded by line-start or whitespace — so a protocol-relative asset
+        # URL inside a string (e.g. src="//cdn/<c>/sections/ref/x.png", a real
+        # runtime-loadable screenshot-cheat reference) is NOT mistaken for a
+        # comment and stripped before the scan. `https://` (// after ':') and a
+        # genuine trailing ` // note` are both handled correctly.
+        # (Observed false positive: a FidelityText.tsx line-1 provenance comment
+        # referencing a JSON artifact path tripped ref-path-reference.)
+        suffix = p.suffix.lower()
+        if suffix in {".tsx", ".jsx", ".ts", ".js", ".mjs", ".cjs",
+                      ".css", ".scss", ".sass", ".less", ".vue", ".svelte"}:
+            scan_text = re.sub(r"/\*[\s\S]*?\*/", "", text)
+            scan_text = re.sub(r"(?m)(^[ \t]*|[ \t]+)//[^\n]*$", r"\1", scan_text)
+        elif suffix in {".html", ".htm", ".md", ".mdx"}:
+            scan_text = re.sub(r"<!--[\s\S]*?-->", "", text)
+        else:
+            scan_text = text
         for needle in forbidden_substrings:
-            if needle in text:
+            if needle in scan_text:
                 violations.append({
                     "file": str(p.relative_to(impl_root)),
                     "kind": "ref-path-reference",

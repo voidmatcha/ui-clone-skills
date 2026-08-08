@@ -264,6 +264,48 @@ def test_invalid_eval_response_exit_3(tmp_path: Path) -> None:
     assert proc.returncode == 3
 
 
+def test_eval_channel_failure_reopens_and_retries(tmp_path: Path) -> None:
+    """A transient CDP response-channel failure should not invalidate the
+    whole scroll capture. The derived session is re-opened and the full eval
+    is retried; only a complete retry payload is accepted."""
+    ref_dir = tmp_path / "ref"
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(exist_ok=True)
+    counter = tmp_path / "eval-count"
+    counter.write_text("0")
+    payload = _eval_payload([_stop(0, 0, outer_html="<html><body>ok</body></html>")])
+    fake = bin_dir / "agent-browser"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        f"echo \"$@\" >> '{tmp_path / 'calls.log'}'\n"
+        "shift 2\n"
+        'if [ "$1" = "open" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "eval" ]; then\n'
+        f"  count=$(cat '{counter}')\n"
+        '  if [ "$count" = "0" ]; then\n'
+        f"    echo 1 > '{counter}'\n"
+        '    echo \'{"success":false,"data":null,"error":"CDP response channel closed"}\'\n'
+        "    exit 7\n"
+        "  fi\n"
+        f"  echo '{payload}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    fake.chmod(0o755)
+
+    proc = _run_capture_scroll(ref_dir, bin_dir)
+    assert proc.returncode == 0, proc.stderr
+    assert "attempt=1/3" in proc.stderr
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert sum(" open " in f" {line} " for line in calls) == 2
+    assert sum(" eval " in f" {line} " for line in calls) == 2
+    snap_0 = json.loads((ref_dir / "states" / "scroll" / "0pct.json").read_text())
+    assert "ok" in snap_0["outerHTML"]
+
+
 def test_derived_session_used_by_default(tmp_path: Path) -> None:
     """Default behavior uses ${SESSION}-scroll derived session, not the
     caller's session directly. Prevents race with parallel splash capture

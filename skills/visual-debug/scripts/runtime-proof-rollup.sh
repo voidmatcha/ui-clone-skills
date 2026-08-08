@@ -21,6 +21,7 @@
 # Aggregated source artifacts (read-only):
 #   lottie-runtime.json            — Tier 2 media (Lottie)
 #   runtime-image-validity.json    — Tier 2 media (<img> validity)
+#   blank-viewport.json            — Tier 2 first-paint visibility
 #   runtime-dom-parity.json        — Tier 2 (DOM node count + structure)
 #   motion-coverage.json           — Tier 2 + Tier 3 (motion presence)
 #   runtime-spec-coverage.json     — Tier 3 (spec coverage runtime)
@@ -89,17 +90,30 @@ def runtime_frame_measure(d: dict) -> tuple[bool, str]:
         webgl_adv = int(d.get("webglAdvanced", 0) or 0)
         lottie_inst = int(d.get("lottieInstances", 0) or 0)
         lottie_adv = int(d.get("lottieAdvanced", 0) or 0)
+        video_total = int(d.get("videoTotal", 0) or 0)
+        video_adv = int(d.get("videoAdvanced", 0) or 0)
     except (TypeError, ValueError):
         return False, "pass but frame counters are not numeric"
-    if canvas_total == 0 and lottie_inst == 0:
+    video_kind = str(d.get("videoFrameProofKind") or d.get("videoSurfaceKind") or "")
+    video_counts_as_surface = bool(d.get("videoCountsAsAnimationSurface")) or video_kind == "canvas-replay-video"
+    if not video_counts_as_surface:
+        # Back-compat for artifacts written before videoFrameProofKind existed.
+        reasons_text = " ".join(str(r) for r in (d.get("reasons") or [])).lower()
+        video_counts_as_surface = "canvas-replay" in reasons_text
+    if canvas_total == 0 and lottie_inst == 0 and not video_counts_as_surface:
         return False, "pass but no animation surface was measured"
     if canvas_total > 0 and canvas_adv == 0 and webgl_adv == 0:
         return False, f"{canvas_total} canvas surface(s) but 0 frame deltas"
     if lottie_inst > 0 and lottie_adv == 0:
         return False, f"{lottie_inst} Lottie instance(s) but 0 frame deltas"
+    if video_counts_as_surface and video_total > 0 and video_adv == 0:
+        return False, f"{video_total} video surface(s) but 0 frame deltas"
+    if video_counts_as_surface and video_total == 0:
+        return False, "canvas-replay pass but no video surface was measured"
     return True, (
         f"canvas={canvas_adv}/{canvas_total} webgl={webgl_adv} "
         f"lottie={lottie_adv}/{lottie_inst}"
+        + (f" video={video_adv}/{video_total}" if video_counts_as_surface else "")
     )
 
 def header_measure(d: dict) -> tuple[bool, str]:
@@ -122,7 +136,13 @@ def header_measure(d: dict) -> tuple[bool, str]:
             return False, "ref mutates but impl static — measurement contradicts status"
         if ref_geo and not impl_geo:
             return False, "ref header geometry moves on scroll but impl static — class parity alone cannot prove it"
-        return (impl_m == ref_m) and (impl_geo == ref_geo), "header mutation+geometry parity"
+        # Geometry is the user-visible contract for NAV-like shrinking
+        # headers. Extra implementation-side class/data toggles are allowed
+        # when they are the mechanism used to reproduce a reference header
+        # whose geometry changes without exposing class mutations.
+        if ref_geo:
+            return True, "header geometry parity"
+        return (impl_m == ref_m), "header mutation parity"
     return False, f"status={d.get('status')}"
 
 def hero_composite_measure(d: dict) -> tuple[bool, str]:
@@ -240,6 +260,7 @@ components = [
     ("hero-composite.json",        "Tier 1 static",   hero_composite_measure),
     ("lottie-runtime.json",        "Tier 2 media",    lottie_measure),
     ("runtime-image-validity.json","Tier 2 media",    generic_pass),
+    ("blank-viewport.json",        "Tier 2 first-paint", generic_pass),
     ("runtime-dom-parity.json",    "Tier 2 structure", runtime_dom_measure),
     ("motion-coverage.json",       "Tier 2 motion",   motion_coverage_measure),
     ("runtime-spec-coverage.json", "Tier 3 spec",     runtime_spec_coverage_measure),

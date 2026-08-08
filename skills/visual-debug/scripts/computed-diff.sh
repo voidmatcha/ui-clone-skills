@@ -73,8 +73,14 @@ SESSION_ORIG="${SESSION}-orig"
 SESSION_IMPL="${SESSION}-impl"
 
 # Temp files for style JSON (avoids heredoc interpolation issues with special chars)
-TMP_ORIG=$(mktemp /tmp/computed-diff-orig-XXXXXX.json)
-TMP_IMPL=$(mktemp /tmp/computed-diff-impl-XXXXXX.json)
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+TMP_ORIG="$(mktemp /tmp/computed-diff-orig-XXXXXX)"
+mv "$TMP_ORIG" "${TMP_ORIG}.json"
+TMP_ORIG="${TMP_ORIG}.json"
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+TMP_IMPL="$(mktemp /tmp/computed-diff-impl-XXXXXX)"
+mv "$TMP_IMPL" "${TMP_IMPL}.json"
+TMP_IMPL="${TMP_IMPL}.json"
 
 cleanup() {
   agent-browser --session "$SESSION_ORIG" close >/dev/null 2>&1 || true

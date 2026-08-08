@@ -105,12 +105,18 @@ def select_items(items: Sequence[ShowcaseItem], slugs: str | None, limit: int | 
     return selected
 
 
-def _copy_ref_if_present(showcase_root: Path, site: SiteWorkspace) -> None:
+def _copy_ref_if_present(showcase_root: Path, site: SiteWorkspace) -> bool:
+    """Copy a prebuilt reference tree into the site ref dir if one exists.
+
+    Returns True when an external prebuilt reference was supplied (copied in),
+    so the caller can mark it acquisition-satisfied-by-supply (LAND item A).
+    """
     src = showcase_root / "tmp" / "ref" / site.item.slug
     if not src.is_dir() or site.ref_dir.exists():
         site.ref_dir.mkdir(parents=True, exist_ok=True)
-        return
+        return False
     shutil.copytree(src, site.ref_dir)
+    return True
 
 
 def _candidate_context_paths(showcase_root: Path, slug: str) -> list[Path]:
@@ -515,7 +521,30 @@ def prepare_site_workspace(
     site_dir.mkdir(parents=True, exist_ok=True)
     impl_dir.mkdir(parents=True, exist_ok=True)
     site = SiteWorkspace(item, site_dir, ref_dir, impl_dir, handover_path)
-    _copy_ref_if_present(showcase_root, site)
+    supplied_prebuilt = _copy_ref_if_present(showcase_root, site)
+    if supplied_prebuilt:
+        # LAND item A: an externally-supplied prebuilt reference is acquisition-
+        # satisfied-by-supply. Advisory only — inspect_site() still gates "done"
+        # via check_strict_done + `goal --check-done`, so the self-pass /
+        # localized-defect / ref-variance guards and the pinned-scorer verdict
+        # remain authoritative.
+        from ui_clone.pipeline import reference_evidence_satisfied
+
+        satisfied, missing = reference_evidence_satisfied(
+            site.ref_dir, external_prebuilt=True
+        )
+        (site.site_dir / "reference-evidence-supply.json").write_text(
+            json.dumps(
+                {
+                    "external_prebuilt": True,
+                    "ref_dir": str(site.ref_dir),
+                    "satisfied": satisfied,
+                    "missing_acquisition_artifacts": missing,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
     write_handover(showcase_root, site)
     write_impl_agents(site, Path(__file__).resolve().parents[1])
     write_clone_research(site)

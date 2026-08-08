@@ -30,15 +30,21 @@ if ! command -v agent-browser >/dev/null 2>&1; then
   exit 1
 fi
 
-# `agent-browser session list` prints "Active sessions:" then "  <name>" lines.
-# Bash 3.2 on macOS lacks `mapfile`, so collect via newline-delimited string.
-MATCHES=$(
+_matching_sessions() {
+  # `agent-browser session list` prints "Active sessions:" then "  <name>"
+  # lines. Bash 3.2 on macOS lacks `mapfile`, so return newline-delimited text.
   agent-browser session list 2>/dev/null \
-    | awk -v p="^${PREFIX}" '/^  / { sub(/^  +/, ""); if ($0 ~ p) print }'
-)
+    | awk -v p="${PREFIX}" '/^  / { sub(/^  +/, ""); if (index($0, p) == 1) print }'
+}
+
+MATCHES=$(_matching_sessions)
 
 if [ -z "$MATCHES" ]; then
   echo "no active sessions matching prefix '${PREFIX}'"
+  # Session unregister and Chrome teardown are asynchronous on some releases.
+  # A tiny settle prevents the next open from racing the previous daemon exit
+  # even when the registry is already empty.
+  sleep "${UI_CLONE_SESSION_SETTLE_SEC:-0.2}"
   exit 0
 fi
 
@@ -51,18 +57,41 @@ if [ "$DRY" -eq 1 ]; then
   exit 0
 fi
 
-FAILED=0
+CLOSE_FAILURES=""
 while IFS= read -r name; do
   [ -z "$name" ] && continue
   if agent-browser --session "$name" close >/dev/null 2>&1; then
     echo "  ✓ closed $name"
   else
-    echo "  ! failed to close $name" >&2
-    FAILED=$((FAILED + 1))
+    echo "  ! close returned nonzero for $name; waiting for registry settle" >&2
+    CLOSE_FAILURES="${CLOSE_FAILURES}${name}
+"
   fi
 done <<< "$MATCHES"
 
-if [ "$FAILED" -gt 0 ]; then
-  echo "${FAILED} session(s) failed to close — run \`agent-browser session list\` to inspect" >&2
+# A successful close response can precede registry removal by a few hundred
+# milliseconds. Wait until this exact run prefix is truly absent before the
+# caller launches another browser family. A nonzero close response is also
+# provisional: agent-browser can return before an already-started unregister is
+# visible to `session list`.
+REMAINING=""
+WAIT_ATTEMPT=0
+while [ "$WAIT_ATTEMPT" -lt 20 ]; do
+  REMAINING=$(_matching_sessions)
+  [ -z "$REMAINING" ] && break
+  WAIT_ATTEMPT=$((WAIT_ATTEMPT + 1))
+  sleep 0.1
+done
+if [ -n "$REMAINING" ]; then
+  echo "session cleanup did not settle for prefix '${PREFIX}':" >&2
+  printf '%s\n' "$REMAINING" | sed 's/^/  /' >&2
+  if [ -n "$CLOSE_FAILURES" ]; then
+    echo "close returned nonzero for:" >&2
+    printf '%s\n' "$CLOSE_FAILURES" | sed '/^$/d; s/^/  /' >&2
+  fi
   exit 1
 fi
+if [ -n "$CLOSE_FAILURES" ]; then
+  echo "nonzero close response settled after registry removal"
+fi
+sleep "${UI_CLONE_SESSION_SETTLE_SEC:-0.2}"

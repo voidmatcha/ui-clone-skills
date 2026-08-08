@@ -30,7 +30,8 @@
 #   <ref_dir>/states/hover/elem-<id>.json    — per-candidate snapshot
 #   <ref_dir>/states/hover/manifest.json     — {entries: [{id,kind,file,selector,activation,changedCount,schemaVersion}]}
 #   <ref_dir>/states/hover/summary.json      — {checked, durationMs, candidatesFound, candidatesProcessed,
-#                                              candidatesCappedAt, candidatesWithCssRule, candidatesWithJsDiff,
+#                                              candidatesCappedAt, selectorsAbsentFromPage, selectorsInvalid,
+#                                              candidatesWithCssRule, candidatesWithJsDiff,
 #                                              candidatesWithAnySignal, schemaVersion}
 #
 # Exit codes:
@@ -40,6 +41,13 @@
 #   3  agent-browser eval returned unparseable / unexpected-shape response
 
 set -euo pipefail
+
+# W-4 (loop-ebpb-0): pin the light color scheme at CAPTURE time too — a
+# dark-evening Phase-0 capture bakes dark styles into the ref corpus
+# PERMANENTLY, and every light-pinned verify then honestly-fails against
+# poisoned ground truth. Caller override intact (default only when unset).
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_COLOR_SCHEME
 
 if [ "$#" -lt 3 ]; then
   echo "Usage: $0 <url> <session> <ref_dir> [--reuse-session]" >&2
@@ -64,10 +72,11 @@ mkdir -p "$OUTDIR"
 
 # Open page in the derived session unless reusing the caller's session.
 if [ "$REUSE_SESSION" = "false" ]; then
-  if ! agent-browser --session "$HOVER_SESSION" open "$URL" --wait 1500 >/dev/null 2>&1; then
+  if ! agent-browser --session "$HOVER_SESSION" open "$URL" >/dev/null 2>&1; then
     echo "capture-hover: agent-browser open failed for $URL (session=$HOVER_SESSION)" >&2
     exit 2
   fi
+  sleep 2  # open --wait is not a supported flag; settle explicitly
 fi
 
 # Single in-page eval — CSS rule extraction + JS-handler probing in one
@@ -78,10 +87,14 @@ EVAL_JS='(async () => {
   const SETTLE_MS = 200;
   const RESTORE_MS = 50;
   const startedAt = performance.now();
+  const normalizeSelector = (selector) => selector.trim()
+    .replace(/\s+/g, " ")
+    .replace(/\s*([>+~])\s*/g, "$1");
 
   // 1. Parse CSSOM for :hover rules. Skip CORS-blocked sheets silently.
   const cssHoverRules = [];
   for (const sheet of document.styleSheets) {
+    const sourceHref = typeof sheet.href === "string" ? sheet.href : "";
     let rules;
     try { rules = sheet.cssRules; } catch (e) { continue; }
     if (!rules) continue;
@@ -98,15 +111,20 @@ EVAL_JS='(async () => {
         // full selector with :hover removed. `.card:hover .title` →
         // activation=".card", affected=".card .title".
         const idx = trimmed.indexOf(":hover");
-        const activation = trimmed.slice(0, idx).trim();
-        const affected = trimmed.replace(":hover", "").trim();
+        const activation = normalizeSelector(trimmed.slice(0, idx));
+        const affected = normalizeSelector(trimmed.replace(":hover", ""));
         if (!activation) continue;
         const props = {};
         for (let i = 0; i < rule.style.length; i++) {
           const p = rule.style[i];
           props[p] = rule.style.getPropertyValue(p);
         }
-        cssHoverRules.push({ activation, affected, cssProperties: props });
+        cssHoverRules.push({
+          activation,
+          affected,
+          cssProperties: props,
+          sourceHrefs: sourceHref ? [sourceHref] : [],
+        });
       }
     }
   }
@@ -117,13 +135,41 @@ EVAL_JS='(async () => {
     const key = r.activation + "|" + r.affected;
     if (candidates.has(key)) {
       Object.assign(candidates.get(key).cssProperties, r.cssProperties);
+      for (const href of r.sourceHrefs) {
+        if (!candidates.get(key).sourceHrefs.includes(href)) {
+          candidates.get(key).sourceHrefs.push(href);
+        }
+      }
     } else {
       candidates.set(key, { activation: r.activation, affected: r.affected,
-                            cssProperties: { ...r.cssProperties } });
+                            cssProperties: { ...r.cssProperties },
+                            sourceHrefs: [...r.sourceHrefs] });
     }
   }
-  const candidatesFound = candidates.size;
-  const orderedCandidates = Array.from(candidates.values()).slice(0, CAP);
+  // Validate before applying CAP so unused global stylesheet rules cannot
+  // consume the live-page capture budget. Affected selectors only need valid
+  // syntax: pseudo-elements and other stateful suffixes may not match until
+  // the real pointer state is active.
+  let selectorsAbsentFromPage = 0;
+  let selectorsInvalid = 0;
+  const presentCandidates = [];
+  for (const cand of candidates.values()) {
+    let activationEl;
+    try {
+      activationEl = document.querySelector(cand.activation);
+      document.querySelector(cand.affected);
+    } catch (e) {
+      selectorsInvalid++;
+      continue;
+    }
+    if (!activationEl) {
+      selectorsAbsentFromPage++;
+      continue;
+    }
+    presentCandidates.push(cand);
+  }
+  const candidatesFound = presentCandidates.length;
+  const orderedCandidates = presentCandidates.slice(0, CAP);
 
   // Fixed property set for computed-style hash.
   const TRACKED = [
@@ -167,83 +213,90 @@ EVAL_JS='(async () => {
   for (const cand of orderedCandidates) {
     let activationEl = null;
     try { activationEl = document.querySelector(cand.activation); }
-    catch (e) {}
+    catch (e) {
+      selectorsInvalid++;
+      continue;
+    }
+    if (!activationEl) {
+      selectorsAbsentFromPage++;
+      continue;
+    }
 
     const result = {
       activation: cand.activation,
       affected: cand.affected,
+      activationValidated: true,
       kind: "css",
       cssProperties: cand.cssProperties,
+      sourceHrefs: cand.sourceHrefs,
       jsChanges: [],
       domChanges: [],
       eventDriver: "agent-browser.eval.synthetic-hover",
     };
 
-    if (activationEl) {
-      // Snapshot affected scope BEFORE (cap 10 elements per candidate).
-      const observed = [];
-      try {
-        for (const el of document.querySelectorAll(cand.affected)) {
-          observed.push(el);
-          if (observed.length >= 10) break;
-        }
-      } catch (e) {}
-
-      const before = new Map();
-      const beforeDom = new Map();
-      for (const el of observed) before.set(el, csSnapshot(el));
-      for (const el of observed) beforeDom.set(el, domSnapshot(el));
-
-      // Dispatch synthetic hover events. Catches JS-attached handlers
-      // (GSAP, Framer Motion, vanilla listeners). Does NOT activate CSS
-      // :hover — that signal is already captured from CSSOM above.
-      const opts = { bubbles: true, cancelable: true, view: window };
-      const optsNoBubble = { bubbles: false, cancelable: true, view: window };
-      try {
-        activationEl.dispatchEvent(new MouseEvent("mouseover", opts));
-        activationEl.dispatchEvent(new MouseEvent("mouseenter", optsNoBubble));
-        activationEl.dispatchEvent(new MouseEvent("mousemove", opts));
-      } catch (e) {}
-
-      await new Promise(r => requestAnimationFrame(() => setTimeout(r, SETTLE_MS)));
-
-      // Snapshot AFTER + diff.
-      for (const [el, b] of before) {
-        if (!el.isConnected) continue;
-        const a = csSnapshot(el);
-        const changedProps = TRACKED.filter(k => a[k] !== b[k]);
-        if (changedProps.length > 0) {
-          result.jsChanges.push({
-            selector: elSelector(el),
-            computedStyleBefore: Object.fromEntries(changedProps.map(k => [k, b[k]])),
-            computedStyleAfter: Object.fromEntries(changedProps.map(k => [k, a[k]])),
-          });
-        }
+    // Snapshot affected scope BEFORE (cap 10 elements per candidate).
+    const observed = [];
+    try {
+      for (const el of document.querySelectorAll(cand.affected)) {
+        observed.push(el);
+        if (observed.length >= 10) break;
       }
-      for (const [el, b] of beforeDom) {
-        if (!el.isConnected) {
-          result.domChanges.push({ selector: b.selector, disconnectedAfterHover: true });
-          continue;
-        }
-        const a = domSnapshot(el);
-        const changed = {};
-        for (const key of ["className", "childElementCount", "textHash", "ariaExpanded", "dataState"]) {
-          if (a[key] !== b[key]) changed[key] = { before: b[key], after: a[key] };
-        }
-        if (Object.keys(changed).length > 0) {
-          result.domChanges.push({ selector: b.selector, changes: changed });
-        }
+    } catch (e) {}
+
+    const before = new Map();
+    const beforeDom = new Map();
+    for (const el of observed) before.set(el, csSnapshot(el));
+    for (const el of observed) beforeDom.set(el, domSnapshot(el));
+
+    // Dispatch synthetic hover events. Catches JS-attached handlers
+    // (GSAP, Framer Motion, vanilla listeners). Does NOT activate CSS
+    // :hover — that signal is already captured from CSSOM above.
+    const opts = { bubbles: true, cancelable: true, view: window };
+    const optsNoBubble = { bubbles: false, cancelable: true, view: window };
+    try {
+      activationEl.dispatchEvent(new MouseEvent("mouseover", opts));
+      activationEl.dispatchEvent(new MouseEvent("mouseenter", optsNoBubble));
+      activationEl.dispatchEvent(new MouseEvent("mousemove", opts));
+    } catch (e) {}
+
+    await new Promise(r => requestAnimationFrame(() => setTimeout(r, SETTLE_MS)));
+
+    // Snapshot AFTER + diff.
+    for (const [el, b] of before) {
+      if (!el.isConnected) continue;
+      const a = csSnapshot(el);
+      const changedProps = TRACKED.filter(k => a[k] !== b[k]);
+      if (changedProps.length > 0) {
+        result.jsChanges.push({
+          selector: elSelector(el),
+          computedStyleBefore: Object.fromEntries(changedProps.map(k => [k, b[k]])),
+          computedStyleAfter: Object.fromEntries(changedProps.map(k => [k, a[k]])),
+        });
       }
-
-      // Restore hover state.
-      try {
-        activationEl.dispatchEvent(new MouseEvent("mouseout", opts));
-        activationEl.dispatchEvent(new MouseEvent("mouseleave", optsNoBubble));
-      } catch (e) {}
-      await new Promise(r => setTimeout(r, RESTORE_MS));
-
-      if (result.jsChanges.length > 0) result.kind = "css+js";
     }
+    for (const [el, b] of beforeDom) {
+      if (!el.isConnected) {
+        result.domChanges.push({ selector: b.selector, disconnectedAfterHover: true });
+        continue;
+      }
+      const a = domSnapshot(el);
+      const changed = {};
+      for (const key of ["className", "childElementCount", "textHash", "ariaExpanded", "dataState"]) {
+        if (a[key] !== b[key]) changed[key] = { before: b[key], after: a[key] };
+      }
+      if (Object.keys(changed).length > 0) {
+        result.domChanges.push({ selector: b.selector, changes: changed });
+      }
+    }
+
+    // Restore hover state.
+    try {
+      activationEl.dispatchEvent(new MouseEvent("mouseout", opts));
+      activationEl.dispatchEvent(new MouseEvent("mouseleave", optsNoBubble));
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, RESTORE_MS));
+
+    if (result.jsChanges.length > 0) result.kind = "css+js";
 
     results.push(result);
   }
@@ -262,8 +315,10 @@ EVAL_JS='(async () => {
     results,
     durationMs: Math.round(performance.now() - startedAt),
     candidatesFound,
-    candidatesProcessed: orderedCandidates.length,
+    candidatesProcessed: results.length,
     candidatesCappedAt: CAP,
+    selectorsAbsentFromPage,
+    selectorsInvalid,
     candidatesWithCssRule: cssCount,
     candidatesWithJsDiff: jsCount,
     candidatesWithAnySignal: anySignal,
@@ -280,14 +335,17 @@ RESPONSE_RAW="$(agent-browser --session "$HOVER_SESSION" eval --json "$EVAL_JS" 
 RESPONSE_TMP="$(mktemp -t capture-hover-resp.XXXX)"
 printf '%s' "$RESPONSE_RAW" > "$RESPONSE_TMP"
 trap 'rm -f "$RESPONSE_TMP"' EXIT
-python3 - "$OUTDIR" "$RESPONSE_TMP" <<'PY'
+python3 - "$OUTDIR" "$RESPONSE_TMP" "$REF_DIR" <<'PY'
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 outdir = Path(sys.argv[1])
 raw = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
+ref_dir = Path(sys.argv[3])
 
 try:
     parsed = json.loads(raw)
@@ -322,12 +380,48 @@ if not isinstance(parsed, dict) or "results" not in parsed:
     print(f"capture-hover: unexpected payload shape:\n{json.dumps(parsed)[:300]}", file=sys.stderr)
     sys.exit(3)
 
-results = parsed.get("results", [])
+def normalize_selector(selector: object) -> str:
+    normalized = re.sub(r"\s+", " ", str(selector or "").strip())
+    return re.sub(r"\s*([>+~])\s*", r"\1", normalized)
+
+
+# Keep the writer fail-closed if a stale/fake payload bypasses live discovery,
+# and collapse equivalent selector spellings before creating artifacts.
+deduped_results = {}
+for raw_result in parsed.get("results", []):
+    if raw_result.get("activationValidated") is not True:
+        continue
+    activation = normalize_selector(raw_result.get("activation"))
+    affected = normalize_selector(raw_result.get("affected", activation))
+    key = (activation, affected)
+    if key not in deduped_results:
+        result = dict(raw_result)
+        result["activation"] = activation
+        result["affected"] = affected
+        result["cssProperties"] = dict(raw_result.get("cssProperties", {}) or {})
+        result["sourceHrefs"] = list(raw_result.get("sourceHrefs", []) or [])
+        result["jsChanges"] = list(raw_result.get("jsChanges", []) or [])
+        result["domChanges"] = list(raw_result.get("domChanges", []) or [])
+        deduped_results[key] = result
+        continue
+    result = deduped_results[key]
+    result["cssProperties"].update(raw_result.get("cssProperties", {}) or {})
+    for href in raw_result.get("sourceHrefs", []) or []:
+        if href not in result["sourceHrefs"]:
+            result["sourceHrefs"].append(href)
+    result["jsChanges"].extend(raw_result.get("jsChanges", []) or [])
+    result["domChanges"].extend(raw_result.get("domChanges", []) or [])
+
+results = list(deduped_results.values())
+for result in results:
+    has_css = bool(result["cssProperties"])
+    has_runtime = bool(result["jsChanges"] or result["domChanges"])
+    result["kind"] = "css+js" if has_css and has_runtime else ("css" if has_css else "js")
 
 # Build manifest with a stable record shape:
 # {id, kind, file, selector, activation, changedCount, schemaVersion}.
 manifest_entries = []
-seen_ids: set[str] = set()
+seen_ids = set()
 for r in results:
     activation = r.get("activation", "")
     affected = r.get("affected", activation)
@@ -357,6 +451,7 @@ for r in results:
         "affected": affected,
         "kind": kind,
         "cssProperties": css_props,
+        "sourceHrefs": r.get("sourceHrefs", []) or [],
         "jsChanges": js_changes,
         "domChanges": dom_changes,
         "eventDriver": r.get("eventDriver", "agent-browser.eval.synthetic-hover"),
@@ -385,15 +480,30 @@ summary = {
     "checked": True,
     "durationMs": parsed.get("durationMs", 0),
     "candidatesFound": parsed.get("candidatesFound", 0),
-    "candidatesProcessed": parsed.get("candidatesProcessed", 0),
+    "candidatesProcessed": len(results),
     "candidatesCappedAt": parsed.get("candidatesCappedAt", 50),
-    "candidatesWithCssRule": parsed.get("candidatesWithCssRule", 0),
-    "candidatesWithJsDiff": parsed.get("candidatesWithJsDiff", 0),
+    "selectorsAbsentFromPage": parsed.get("selectorsAbsentFromPage", 0),
+    "selectorsInvalid": parsed.get("selectorsInvalid", 0),
+    "candidatesWithCssRule": len([
+        r for r in results
+        if r.get("cssProperties", {}) or {}
+    ]),
+    "candidatesWithJsDiff": len([
+        r for r in results
+        if (r.get("jsChanges", []) or [])
+    ]),
     "candidatesWithDomDiff": len([
         r for r in results
         if (r.get("domChanges", []) or [])
     ]),
-    "candidatesWithAnySignal": parsed.get("candidatesWithAnySignal", 0),
+    "candidatesWithAnySignal": len([
+        r for r in results
+        if (
+            (r.get("cssProperties", {}) or {})
+            or (r.get("jsChanges", []) or [])
+            or (r.get("domChanges", []) or [])
+        )
+    ]),
     "schemaVersion": 1,
 }
 (outdir / "summary.json").write_text(
@@ -401,11 +511,72 @@ summary = {
     encoding="utf-8",
 )
 
+hover_css_rules = []
+css_files_by_basename = {
+    path.name: str(path.relative_to(ref_dir))
+    for path in sorted((ref_dir / "css").glob("*.css"))
+    if path.is_file()
+}
+
+
+def mapped_css_source(result):
+    for href in result.get("sourceHrefs", []) or []:
+        basename = Path(unquote(urlparse(str(href)).path)).name
+        if basename in css_files_by_basename:
+            return css_files_by_basename[basename]
+    return None
+
+
+for r in results:
+    css_props = r.get("cssProperties", {}) or {}
+    if not css_props:
+        continue
+    activation = str(r.get("activation", "") or "")
+    affected = str(r.get("affected", activation) or activation)
+    selector = f"{activation}:hover"
+    if activation and affected.startswith(activation):
+        selector = f"{activation}:hover{affected[len(activation):]}"
+    declarations = "; ".join(f"{name}: {value}" for name, value in css_props.items())
+    source_file = mapped_css_source(r)
+    hover_rule = {
+        "selector": selector,
+        "activation": activation,
+        "affected": affected,
+        "declarations": declarations,
+        "cssProperties": css_props,
+        "sourceHrefs": r.get("sourceHrefs", []) or [],
+        "source": "scripts/extract/capture-hover.sh:live-cssom",
+    }
+    if source_file:
+        hover_rule["sourceFile"] = source_file
+    hover_css_rules.append(hover_rule)
+
+(ref_dir / "hover-css-rules.json").write_text(
+    json.dumps({
+        "schemaVersion": 1,
+        "source": "scripts/extract/capture-hover.sh",
+        "status": "pass",
+        "observation": (
+            "hover-css-rules"
+            if hover_css_rules
+            else "no-hover-css-rules-observed"
+        ),
+        "count": len(hover_css_rules),
+        "rules": hover_css_rules,
+        "derivedFrom": ["live-cssom", str(outdir.relative_to(ref_dir))],
+    }, ensure_ascii=False, indent=2),
+    encoding="utf-8",
+)
+
 print(f"capture-hover: wrote {len(manifest_entries)} entry/entries to {outdir}/",
       file=sys.stderr)
 PY
 
+if [ "${STATE_STRUCTURE_SPEC:-1}" = "0" ]; then
+  exit 0
+fi
+
 SPEC_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/state-structure-spec.py"
-if [ "${STATE_STRUCTURE_SPEC:-1}" != "0" ] && [ -f "$SPEC_PY" ]; then
+if [ -f "$SPEC_PY" ]; then
   python3 "$SPEC_PY" "$REF_DIR" >/dev/null
 fi

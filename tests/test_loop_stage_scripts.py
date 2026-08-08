@@ -139,7 +139,7 @@ def _run_finalize(
         ["bash", str(FINALIZE), str(ref), stage],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         env={"PLUGIN_ROOT": str(outbox_root), "PATH": "/usr/bin:/bin"},
     )
 

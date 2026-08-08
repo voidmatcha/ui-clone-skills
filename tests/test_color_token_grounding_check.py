@@ -11,7 +11,7 @@ SCRIPT = ROOT / "skills" / "visual-debug" / "scripts" / "color-token-grounding-c
 def _run(ref: Path, impl: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
 
 

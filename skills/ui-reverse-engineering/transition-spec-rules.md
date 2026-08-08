@@ -45,18 +45,23 @@ One entry per distinct transition. Each entry is **self-contained**:
 }
 ```
 
-**`dynamic` field (optional, default `false`):** set to `true` for entries whose visual is RAF-driven and never settles to a deterministic frame — auto-timer canvases, looping shaders, `<video>` autoplay, Lottie loops. `EXCLUDE_DYNAMIC=1 bash section-compare.sh ...` reads `transition-spec.json` and auto-augments its mask list with each `"dynamic": true` entry's `target` selector, hiding those regions from AE diff on both ref and impl. Per-frame pixel parity for these is unmatchable; layout-only verification is the right bar. Leave `false` (or omit) for entries with a deterministic end state (page-load reveal, scroll trigger, hover settle).
+**`dynamic` field (optional, default `false`):** set to `true` for entries whose visual cannot settle to the same frame across fresh loads — auto-timer canvases, looping shaders, `<video>` autoplay, Lottie loops, and randomized initialization such as `Math.random()`, `gsap.utils.random()`, or `randomScaleRange`. `EXCLUDE_DYNAMIC=1 bash section-compare.sh ...` reads `transition-spec.json` and auto-augments its mask list with each `"dynamic": true` entry's narrow `target` selector, hiding those regions from AE diff on both ref and impl. Per-frame pixel parity for these is unmatchable; masked-region static and runtime checks remain the verification bar. Leave `false` (or omit) for entries with a deterministic end state and deterministic initialization (page-load reveal, scroll trigger, hover settle).
 
 ## 3. Rules
 
 1. **One entry per distinct visual transition.** Don't merge different triggers.
 2. **Include `bundle_branch`** — which `if/else` branch and under what condition.
 3. **Include `source_chunk`** — which file to re-read if updating.
-4. **Include `reference_frames`** — frame paths that show this transition.
+4. **Include `reference_frames`** — paths to existing, non-empty local image or
+   video evidence under the reference directory. A string, a list of paths, or
+   range text such as `verify/intro/f010.png to f030.png` is accepted only when
+   every named media file exists. Placeholder values such as `"none"` do not
+   satisfy the spec gate.
 5. **Convert GSAP easing to CSS** — write both GSAP name and `cubic-bezier()`.
 6. **Include `simultaneous`** — transitions that co-occur with specific delays.
 7. **Consult `animation-runtime-dump.json`** when present — easing functions, resolved ScrollTrigger pixel offsets, Lenis/IX2 timings live there even when bundle-grep misses them. Phase 0 of `animation-detection.md` writes this file.
 8. **Consult `state-structure-spec.json`** when a transition depends on DOM/class/content state — page-load splash swaps, sticky threshold class flips, hover class/data-state mutations, accordions, tabs, modals, or click navigation. This file is the compact browser-observed state index; raw `states/**` HTML dumps are fallback evidence for `source-forensics`, not first-pass generation context.
+9. **Run `verification-plan.sh` before finalizing the spec, then run it again after the spec changes.** Plan signals decide which runtime checks must execute; they are not transition proof. In particular, `hasIOReveal` can come from a conservative boolean CSS classifier over `structure.json` plus captured CSS. Map that signal to an evidence-backed `transitions[]` entry only when captured source/frames prove the reveal, otherwise add a structured `skipped[]` reason. Never promote a dispatch hint into a fabricated transition.
 
 ## 4. Gate
 
@@ -66,9 +71,31 @@ $ cat tmp/ref/<c>/bundle-map.json
 
 $ cat tmp/ref/<c>/transition-spec.json
  □ Exists, ≥1 transition entry
+ □ NOT the Phase-2 placeholder: `source` must not be `ui_clone.extraction_artifacts`
+   and `placeholder` must not be true — the auto-minted floor never satisfies
+   the gate on a motion site; you must draft the real spec
+ □ COMPLETENESS (enforced by `gate spec` spec-inventory-coverage): every row in
+   `interactions-detected.json`, every `scroll-transitions.json` entry, and every
+   motion construction site in `bundle-extraction.json` maps to a `transitions[]`
+   id OR a `skipped[]` entry `{sourceArtifact, sourceId, reason}`; every true
+   `verification-plan.json` signal class (scroll-scrub, scroll-state-machine,
+   IO-reveal, hover, click) has ≥1 matching entry. An unmapped detection = FAIL
+ □ `verification-plan.sh` was run once before the final inventory pass and once
+   after editing the spec; a classifier signal alone never counts as spec proof
+ □ Every `target` parses as a CSS selector (querySelector-able — never a
+   declaration fragment)
+ □ Every `target` names the element whose animated property the runtime probe
+   measures. When a state class is toggled on an ancestor but CSS animates a
+   descendant, target the animated descendant (optionally constrained by the
+   ancestor's pre-trigger state) and record the class owner in the animation
+   metadata. For hover only, an ancestor may be the target when it owns the
+   pointer hit area and contains the animated descendants; declare
+   `animation.measurement: target-and-descendants`. An ancestor without that
+   explicit measurement scope is not motion evidence
  □ Each entry has: id, trigger, source_chunk, bundle_branch, target, animation
- □ Each entry has: reference_frames (or "none" if not yet captured)
- □ Each RAF-driven entry (auto-timer canvas, looping shader, video) has: "dynamic": true
+ □ Each entry has: reference_frames naming existing, non-empty local image/video
+   evidence; missing files, empty values, and placeholders such as "none" FAIL
+ □ Each non-deterministic entry (auto-timer canvas, looping shader, video, or randomized initialization) has top-level `"dynamic": true`; stochastic animation fields without it FAIL the spec gate
  □ Entries that depend on DOM structure/class/content swaps reference the matching `state-structure-spec.json` event in notes or `state_structure_ref`
  □ GSAP easing converted to cubic-bezier
  □ Capture verification passed (Step 5e below)

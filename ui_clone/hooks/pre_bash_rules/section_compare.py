@@ -13,16 +13,29 @@ import json
 import re
 from pathlib import Path
 
+from ui_clone.hooks._common import CMD_POSITION_PREFIX, sanitize_command_for_deny
+
+# Command-position anchored (batch-4 review MINOR 4): an unanchored pattern read
+# `grep .../section-compare.sh` (a diagnostic) as a real invocation and blocked
+# it. The script is invoked at command position via an optional bash/sh
+# interpreter (`bash .../section-compare.sh`) or directly; the python form runs
+# `python -m ui_clone.measure section-compare` at command position. A bare path
+# as a grep/argument is no longer at command position, so it is not matched.
 _SECTION_COMPARE_COMMAND_PATTERNS = re.compile(
-    r"skills/visual-debug/scripts/section-compare\.sh\b"
-    r"|python(?:3)?\s+-m\s+ui_clone\.measure\s+section-compare\b",
+    CMD_POSITION_PREFIX
+    + r"(?:(?:ba)?sh\s+)?[^\s;|&]*skills/visual-debug/scripts/section-compare\.sh\b"
+    r"|"
+    + CMD_POSITION_PREFIX
+    + r"python(?:3)?\s+-m\s+ui_clone\.measure\s+section-compare\b",
     re.IGNORECASE,
 )
 
 
 def _section_compare_precondition_reason(ref_dir: Path, cmd: str) -> str | None:
     """Block section-compare while earlier block-severity static gates are missing."""
-    if not _SECTION_COMPARE_COMMAND_PATTERNS.search(cmd):
+    # Command-position: a quoted "section-compare.sh" in a diagnostic (pgrep/
+    # grep) or a heredoc doc body must not be read as a real invocation.
+    if not _SECTION_COMPARE_COMMAND_PATTERNS.search(sanitize_command_for_deny(cmd)):
         return None
 
     plan_path = ref_dir / "verification-plan.json"

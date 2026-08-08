@@ -210,45 +210,35 @@ Phase D gate:
 
 > Runs automatically when Phase D fails. Classifies defects, applies targeted fixes, re-verifies. Max 3 iterations.
 
-**Prerequisite:** `section-compare.sh` must have been run (Step 8b). The defect list is in `<dir>/sections/result.txt`.
+**Prerequisite:** `section-compare.sh` must have been run (Step 8b). The machine-readable defect list is `<dir>/sections/result.json` (emitted alongside the human table in `result.txt`).
 
 #### H1: Defect Classification
 
-Read `sections/result.txt` and parse defects:
+Parse `sections/result.json` (per-section `{name, ae, aePerMpx, severity, status, diffCrop}`):
 
 ```bash
 python3 -c "
 import json
-data = json.load(open('<dir>/sections/result.txt'))
-defects = data.get('defects', [])
-severity_order = {'CRITICAL': 0, 'MAJOR': 1, 'MINOR': 2}
-defects.sort(key=lambda d: (severity_order.get(d.get('severity','MINOR'), 3), d.get('category','')))
-for d in defects:
-    print(f\"{d.get('severity','?'):8s} {d.get('category','?'):12s} {d.get('selector','?')} → {d.get('property','?')}: expected={d.get('expected','?')} actual={d.get('actual','?')}\")
+data = json.load(open('<dir>/sections/result.json'))
+order = {'missing': 0, 'saturated': 1, 'fail': 2, 'structural-only': 3}
+rows = [s for s in data['sections'] if s['status'] not in ('pass',)]
+rows.sort(key=lambda s: (order.get(s['status'], 4), -(s.get('aePerMpx') or 0)))
+for s in rows:
+    print(f\"{s['status']:16s} {s.get('severity') or '?':10s} aePerMpx={s.get('aePerMpx')} {s['name']} diff={s.get('diffCrop')}\")
 "
 ```
 
-**Priority order:** CRITICAL → MAJOR → MINOR. Within same severity: LAYOUT → TYPOGRAPHY → COLOR → ANIMATION → CONTENT.
+**Priority order:** `missing` → `saturated` → `fail` (by descending AE/Mpx) → `structural-only`.
 
-#### H2: Targeted Fix
+#### H2: Routed Fix (route by status, not per-property tweaks)
 
-For each defect, in priority order:
-
-1. **Locate the file.** The `selector` maps to a component — find it via grep:
-   ```bash
-   grep -rn "<selector-class>" src/components/
-   ```
-
-2. **Determine the fix.** Based on category:
-   - **LAYOUT:** Adjust spacing/sizing. Use extracted `expected` value directly.
-   - **TYPOGRAPHY:** Fix font-size/weight/family. Use exact computed value, not Tailwind approximation.
-   - **COLOR:** Fix color/background values. Match extracted hex/rgb exactly.
-   - **ANIMATION:** Re-read `transition-spec.json` for correct timing/easing values.
-   - **CONTENT:** Check for missing text/images. Re-extract from DOM if needed.
-
-3. **Apply minimal Edit.** Change only the specific property — do not regenerate the entire component.
-
-4. **If defect is in a design bundle** (`design-bundles.json`): check all sibling properties in the bundle. Fixing one property without its co-varying partners will create new mismatches.
+- **`missing` or `severity=critical` or `saturated`:** the section's DOM is wrong or absent — per-property LAYOUT/COLOR edits cannot converge. Route to the **per-section DOM rebuild** procedure: rebuild the component's inner structure from the ground-truth `html/<name>.json` (and `section-map.json` entry), preserving real class names, then re-run section-compare for that section. This was the decisive fix path in prior loops (hero AE 218k → 0 came from structure rebuild, not style tweaks).
+- **`fail` with moderate AE/Mpx:** targeted property fixes:
+  1. **Locate the file.** `grep -rn "<section-class>" src/components/`
+  2. **Diagnose textually first:** `auto-diagnose.sh <session> <orig> <impl> <dir>/sections/diff/<name>.png` (hotspot selectors + computed-style diff), then `tree-diff.sh` / `computed-diff.sh` if needed. Do NOT read the PNGs.
+  3. **Apply minimal Edit** per finding — exact computed values, not Tailwind approximations; for ANIMATION findings re-read `transition-spec.json`.
+  4. **If the defect is in a design bundle** (`design-bundles.json`): fix all co-varying sibling properties together.
+- **Capture-suspect sections:** if `sections/capture-confidence.json` lists the section in `suspectSections`, the AE failure may be the capture harness freezing mid-animation — re-run section-compare once before editing code.
 
 #### H3: Re-verify
 

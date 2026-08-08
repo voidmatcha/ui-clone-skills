@@ -40,10 +40,18 @@ if grep -qE 'drift-test' AGENTS.md 2>/dev/null; then
   [ "$QUIET" = "1" ] || echo "  ⚠️  resetting AGENTS.md (stale drift-test marker from interrupted run)" >&2
   git checkout -- AGENTS.md 2>/dev/null || true
 fi
-for _p in ".codex-plugin/plugin.json" ".claude-plugin/plugin.json"; do
-  if [ -f "$_p" ] && ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$_p" 2>/dev/null; then
-    [ "$QUIET" = "1" ] || echo "  ⚠️  resetting $_p (invalid JSON from interrupted run)" >&2
-    git checkout -- "$_p" 2>/dev/null || true
+for _p in ".codex-plugin/plugin.json" ".claude-plugin/plugin.json" ".claude-plugin/marketplace.json"; do
+  if [ -f "$_p" ]; then
+    # Reset on invalid JSON OR the 9.9.9 version-drift sentinel. test-parity Case 2
+    # sets a manifest version to "9.9.9" (VALID JSON) — a leaked mutation from an
+    # interrupted run is valid JSON, so the validity check alone missed it and the
+    # drift persisted across runs (self-perpetuating via test-parity's backup).
+    # 9.9.9 is never a real version → safe to reset from HEAD.
+    if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$_p" 2>/dev/null \
+       || grep -q '"9\.9\.9"' "$_p" 2>/dev/null; then
+      [ "$QUIET" = "1" ] || echo "  ⚠️  resetting $_p (stale drift marker from interrupted run)" >&2
+      git checkout -- "$_p" 2>/dev/null || true
+    fi
   fi
 done
 
@@ -55,12 +63,44 @@ fi
 step() { [ "$QUIET" = "1" ] || echo "── $* ──"; }
 fail() { echo "❌ ci-local: $1 FAILED" >&2; exit 1; }
 
+# Resolve a bash 4+ binary and put it FIRST on PATH before anything runs.
+# macOS ships bash 3.2 as /bin/bash, which cannot parse a heredoc nested inside
+# `$(...)` command substitution (a 3.2 limitation). Tests that shell out via
+# subprocess.run(["bash", <script>, ...]) would otherwise pick up that 3.2 and
+# false-fail on valid scripts. Project policy is bash 4+ minimum (enforced in
+# the shell-syntax step below); pin it for the whole run so pytest subprocesses
+# inherit it. On Linux CI `bash` is already 4+, so this is a no-op there.
+BASH_BIN=$(command -v bash)
+if [ "$("$BASH_BIN" -c 'echo ${BASH_VERSION%%.*}')" -lt 4 ] 2>/dev/null; then
+  for cand in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [ -x "$cand" ]; then BASH_BIN="$cand"; break; fi
+  done
+fi
+# Always prepend (not "add if absent") so bash 4+ wins even when its dir is
+# already on PATH but sits behind /bin (where macOS's 3.2 lives).
+PATH="$(dirname "$BASH_BIN"):$PATH"; export PATH
+
+# Bash 5.1+ changed large heredocs from tempfile-backed input to pipes. The
+# suite exercises legacy internal check scripts directly, outside the
+# dispatcher that normally contains this compatibility setting. Scope the
+# Bash 5.0 behavior to pytest's child process tree only: do not change later
+# CI shell/review semantics, and honor an explicitly inherited BASH_COMPAT.
+PYTEST_ENV=()
+read -r PYTEST_BASH_MAJOR PYTEST_BASH_MINOR < <(
+  "$BASH_BIN" -c 'printf "%s %s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'
+)
+if [ -z "${BASH_COMPAT:-}" ] \
+   && { [ "${PYTEST_BASH_MAJOR:-0}" -gt 5 ] \
+        || { [ "${PYTEST_BASH_MAJOR:-0}" -eq 5 ] && [ "${PYTEST_BASH_MINOR:-0}" -ge 1 ]; }; }; then
+  PYTEST_ENV=(env "BASH_COMPAT=${UI_CLONE_TEST_BASH_COMPAT:-5.0}")
+fi
+
 # 1. Tests
 step "Tests"
 if [ "$QUIET" = "1" ]; then
-  uv run python -m pytest tests/ -q >/dev/null 2>&1 || fail "tests"
+  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q >/dev/null 2>&1 || fail "tests"
 else
-  uv run python -m pytest tests/ -q || fail "tests"
+  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q || fail "tests"
 fi
 
 # 2. Type check (mypy)

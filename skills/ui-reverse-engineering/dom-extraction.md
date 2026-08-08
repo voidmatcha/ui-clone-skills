@@ -181,43 +181,96 @@ agent-browser --session <project-name> eval "
   // no semantic children. Sites where `<main>` contains nothing but
   // `<div>`s with opaque hashed classes (no `<section>` / `<article>` /
   // role="region") produced only 2 sections (main + footer) for a
-  // 21k-tall page. Two recursion triggers added:
+  // 21k-tall page. Recursion triggers:
   //   1. Semantic containers taller than 2× viewport are decomposed
   //      instead of being added wholesale — they're almost certainly
   //      wrapping the page-scrolled content.
-  //   2. Div containers with >= 2 large div children (each >= 50% of
-  //      viewport height) recurse even without semantic children —
-  //      catches the opaque-hashed-class sibling pattern.
+  //   2. Div containers with >= 2 vertically distinct large div children
+  //      (each >= 50% of viewport height) recurse even without semantic
+  //      children. Same-row grid/flex columns keep their shared parent so
+  //      their layout context is not flattened into a vertical stack.
+  //   3. Pass-through wrapper: a div whose height is carried by a chain of
+  //      single dominant children (>= 90% height) that eventually branches
+  //      into >= 2 real children. Modern SPAs can nest the whole page under
+  //      several framework roots with no semantic boundary. Trigger 3 is ONLY
+  //      enabled on a degenerate retry (see below) so sites that already
+  //      segment cleanly are byte-for-byte unchanged.
   const VIEWPORT_H = window.innerHeight || 800;
   const LARGE_DIV_H = Math.min(VIEWPORT_H * 0.5, 600);
-  function collectSections(parent, depth = 0) {
-    if (depth > 4) return;  // safety bound
+  const SKIP_TAGS = ['script','style','noscript','template'];
+  const elementChildren = (el) =>
+    Array.from(el.children).filter(c => !SKIP_TAGS.includes(c.tagName.toLowerCase()));
+  const leadsToBranch = (el, remaining = 5) => {
+    const children = elementChildren(el);
+    if (children.length >= 2) return true;
+    if (children.length !== 1 || remaining <= 0) return false;
+    const child = children[0];
+    const h = el.getBoundingClientRect().height;
+    return child.getBoundingClientRect().height >= h * 0.9
+      && leadsToBranch(child, remaining - 1);
+  };
+  const hasVerticallyDistinctChildren = (children) =>
+    children.some((first, index) => {
+      const a = first.getBoundingClientRect();
+      return children.slice(index + 1).some(second => {
+        const b = second.getBoundingClientRect();
+        const overlap = Math.max(
+          0,
+          Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top)
+        );
+        return overlap < Math.min(a.height, b.height) * 0.5;
+      });
+    });
+  function collectSections(parent, depth, allowPassThrough) {
+    // Base pass keeps the original depth-4 bound; the degenerate retry gets
+    // 2 extra levels to unwrap opaque pass-through wrappers.
+    if (depth > (allowPassThrough ? 6 : 4)) return;
     Array.from(parent.children).forEach(el => {
       const tag = el.tagName.toLowerCase();
-      if (['script','style','noscript','template'].includes(tag)) return;
+      if (SKIP_TAGS.includes(tag)) return;
       const h = el.getBoundingClientRect().height;
       const role = el.getAttribute('role');
-      if ((semanticTags.has(tag) || semanticRoles.has(role)) && h > 50) {
-        // Decompose huge semantic containers (>2× viewport) into
-        // their sub-sections; otherwise add as-is.
+      const style = getComputedStyle(el);
+      if (style.display === 'contents') {
+        // Layout-transparent wrappers have a zero-height rect but can own the
+        // page's real landmarks. Do not let them consume the recursion budget.
+        collectSections(el, depth, allowPassThrough);
+      } else if ((semanticTags.has(tag) || semanticRoles.has(role)) && h > 50) {
+        // Decompose huge semantic containers (>2x viewport) into
+        // their sub-sections; otherwise add as-is. Decompose-then-keep
+        // (D1): when the recursion collects nothing inside (children are
+        // runtime-built or collapsed at capture time, e.g. GSAP page-stack
+        // panels), keep the section itself instead of dropping it.
         if (h > VIEWPORT_H * 2) {
-          collectSections(el, depth + 1);
+          const before = containers.length;
+          collectSections(el, depth + 1, allowPassThrough);
+          if (containers.length === before) containers.push(el);
         } else {
           containers.push(el);
         }
       } else if (tag === 'div' && h > 100) {
-        const childrenArr = Array.from(el.children);
+        const childrenArr = elementChildren(el);
         const hasSemanticChildren = childrenArr.some(c =>
           semanticTags.has(c.tagName.toLowerCase()) || semanticRoles.has(c.getAttribute('role') || '')
         );
-        const bigDivChildren = childrenArr.filter(c =>
-          c.tagName === 'DIV' && c.getBoundingClientRect().height >= LARGE_DIV_H
-        );
+        const bigDivChildren = childrenArr.filter(c => {
+          if (c.tagName !== 'DIV') return false;
+          if (c.getBoundingClientRect().height < LARGE_DIV_H) return false;
+          const pos = getComputedStyle(c).position;
+          return pos !== 'absolute' && pos !== 'fixed';
+        });
+        const hasVerticalSectionStack =
+          bigDivChildren.length >= 2
+          && hasVerticallyDistinctChildren(bigDivChildren);
+        const dominantChild = childrenArr.find(c => c.getBoundingClientRect().height >= h * 0.9);
+        const passThroughWrapper = dominantChild && leadsToBranch(dominantChild);
         if (hasSemanticChildren) {
-          collectSections(el, depth + 1);
-        } else if (bigDivChildren.length >= 2) {
+          collectSections(el, depth + 1, allowPassThrough);
+        } else if (hasVerticalSectionStack) {
           // Multi-sub-container div (opaque hashed-class section pattern) — descend.
-          collectSections(el, depth + 1);
+          collectSections(el, depth + 1, allowPassThrough);
+        } else if (allowPassThrough && passThroughWrapper) {
+          collectSections(el, depth + 1, allowPassThrough);
         } else if (h > Math.min(VIEWPORT_H * 0.25, 400)) {
           containers.push(el);
         }
@@ -225,9 +278,20 @@ agent-browser --session <project-name> eval "
     });
   }
 
-  collectSections(document.body);
-
-  const unique = containers.filter((el, i) => !containers.some((other, j) => j !== i && other.contains(el)));
+  // Two-pass with a degenerate fallback: run the standard heuristic first so
+  // sites that already segment cleanly keep their exact behavior. Only when
+  // that collapses to <= 2 sections (the opaque-single-wrapper SPA pattern)
+  // do we retry with pass-through unwrapping enabled.
+  const dedupe = (arr) => arr.filter((el, i) => !arr.some((other, j) => j !== i && other.contains(el)));
+  containers.length = 0;
+  collectSections(document.body, 0, false);
+  let unique = dedupe(containers);
+  if (unique.length <= 2) {
+    containers.length = 0;
+    collectSections(document.body, 0, true);
+    const retry = dedupe(containers);
+    if (retry.length > unique.length) unique = retry;
+  }
   unique.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
 
   // Detect footer/header by tag, role, id, or class

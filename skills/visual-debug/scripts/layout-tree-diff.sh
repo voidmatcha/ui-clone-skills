@@ -48,8 +48,14 @@ mkdir -p "$OUT_DIR"
 REF_SESS="${SESSION}-ltd-ref"
 IMPL_SESS="${SESSION}-ltd-impl"
 
-TMP_IMPL=$(mktemp /tmp/ltd-impl-XXXXXX.json)
-TMP_REF=$(mktemp /tmp/ltd-ref-XXXXXX.json)
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+TMP_IMPL="$(mktemp /tmp/ltd-impl-XXXXXX)"
+mv "$TMP_IMPL" "${TMP_IMPL}.json"
+TMP_IMPL="${TMP_IMPL}.json"
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+TMP_REF="$(mktemp /tmp/ltd-ref-XXXXXX)"
+mv "$TMP_REF" "${TMP_REF}.json"
+TMP_REF="${TMP_REF}.json"
 
 cleanup() {
   agent-browser --session "$REF_SESS"  close >/dev/null 2>&1 || true

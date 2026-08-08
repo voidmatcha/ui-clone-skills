@@ -28,6 +28,14 @@
 
 set -euo pipefail
 
+# W-4 (loop-ebpb-0): the reference follows prefers-color-scheme — a host
+# OS theme flip (macOS auto-dark in the evening) silently captured the ref
+# in dark mode and poisoned an entire compare cycle (footer dSSIM
+# 0.0000065 -> 0.687 reading as catastrophic regression). Pin light unless
+# the caller explicitly overrides.
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_COLOR_SCHEME
+
 ORIG_URL="${1:?Usage: batch-scroll.sh <original-url> <impl-url> <session> [output-dir]}"
 IMPL_URL="${2:?Usage: batch-scroll.sh <original-url> <impl-url> <session> [output-dir]}"
 SESSION="${3:?Usage: batch-scroll.sh <original-url> <impl-url> <session> [output-dir]}"
@@ -45,6 +53,18 @@ SCROLL_ANCHOR_MAX="${SCROLL_ANCHOR_MAX:-24}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
+# Daemon hygiene: agent-browser leaks orphan Chrome renderer processes and never
+# prunes ~/.agent-browser/*.engine registrations, so both accumulate across loop
+# iterations and degrade the daemon under sustained load (the os error 35
+# territory). Clear that accumulation before this batch opens its own sessions.
+# DESTRUCTIVE — ab_reap runs `agent-browser close --all` + kills every
+# agent-browser Chrome on the machine (it cannot target one loop's sessions).
+# Do NOT run batch-scroll concurrently with another capture, or disable the reap
+# for that run with UI_CLONE_AB_REAP=0. Default on per the daemon-stability call.
+# shellcheck source=lib/agent-browser-preflight.sh
+. "$SCRIPT_DIR/lib/agent-browser-preflight.sh"
+ab_reap
+
 SESSION_REF="${SESSION}-ref"
 SESSION_IMPL="${SESSION}-impl"
 BROWSER_ARGS=""
@@ -59,6 +79,25 @@ cleanup_browsers() {
 trap cleanup_browsers EXIT
 
 mkdir -p "$DIR/static/ref" "$DIR/static/impl" "$DIR/static/diff"
+
+cleanup_generated_pngs() {
+  local nullglob_was_set=0
+  local capture_dir
+  local -a generated_pngs
+  shopt -q nullglob && nullglob_was_set=1
+  shopt -s nullglob
+  for capture_dir in "$DIR/static/ref" "$DIR/static/impl" "$DIR/static/diff"; do
+    generated_pngs=("$capture_dir"/*.png)
+    if [ "${#generated_pngs[@]}" -gt 0 ]; then
+      rm -- "${generated_pngs[@]}"
+    fi
+  done
+  if [ "$nullglob_was_set" -eq 0 ]; then
+    shopt -u nullglob
+  fi
+}
+
+cleanup_generated_pngs
 
 POSITIONS=(0 10 20 30 40 50 60 70 80 90 100)
 
@@ -129,7 +168,24 @@ SMART_FREEZE='(() => {
       if (tl.repeat && tl.repeat() === -1) { tl.pause(); gsapPaused++; }
     });
   }
-  // 3. Freeze carousel DOM mutations (classList + inline style)
+  // 3. Stop existing Swiper autoplay and pin both pages to the same logical
+  // slide before taking static screenshots. Blocking future intervals alone
+  // does not stop Swiper instances that were initialized during WAIT_INIT.
+  let swiperPinned = 0;
+  const seenSwipers = new Set();
+  document.querySelectorAll(".swiper, .swiper-container, .swiper-wrapper").forEach(function(el) {
+    const owner = el.closest(".swiper, .swiper-container");
+    const swiper = el.swiper || (owner && owner.swiper);
+    if (!swiper || seenSwipers.has(swiper)) return;
+    seenSwipers.add(swiper);
+    try { if (swiper.autoplay && swiper.autoplay.stop) swiper.autoplay.stop(); } catch (_) {}
+    try {
+      if (swiper.slideToLoop) swiper.slideToLoop(0, 0, false);
+      else if (swiper.slideTo) swiper.slideTo(0, 0, false);
+      swiperPinned++;
+    } catch (_) {}
+  });
+  // 4. Freeze carousel DOM mutations (classList + inline style)
   // GSAP changes both CSS classes AND inline styles (backgroundColor, opacity, transform)
   try {
     // Freeze classList on carousel and its children
@@ -160,7 +216,7 @@ SMART_FREEZE='(() => {
     });
     gsapPaused = frozen > 0 ? -frozen : 0;
   } catch(e) { gsapPaused = -999; }
-  return "smart-freeze (frozen=" + gsapPaused + ")";
+  return "smart-freeze (frozen=" + gsapPaused + ", swiperPinned=" + swiperPinned + ")";
 })()'
 
 agent-browser --session "$SESSION_REF" eval "$SMART_FREEZE" 2>&1 | sed 's/^/  Ref: /'
@@ -282,8 +338,9 @@ if [ "$SCROLL_CAPTURE_MODE" != "percent" ]; then
     const anchors = [];
     const seen = new Set();
     const add = (el, rect) => {
+      const cs = getComputedStyle(el);
       const text = textOf(el);
-      const top = Math.max(0, Math.round(rect.top + window.scrollY));
+      const top = Math.round(rect.top + window.scrollY);
       const key = `${Math.round(top / 80)}:${el.tagName}:${(text || identity(el)).slice(0, 60)}`;
       if (seen.has(key)) return;
       seen.add(key);
@@ -292,6 +349,7 @@ if [ "$SCROLL_CAPTURE_MODE" != "percent" ]; then
         tag: el.tagName.toLowerCase(),
         id: el.id || null,
         className: classOf(el),
+        position: cs.position,
         childCount: el.children ? el.children.length : 0,
         rect: {
           top,

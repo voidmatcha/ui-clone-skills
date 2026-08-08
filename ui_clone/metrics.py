@@ -11,8 +11,14 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from skimage.color import deltaE_ciede2000, rgb2lab
 from skimage.metrics import structural_similarity
 from skimage.transform import resize as sk_resize
+
+# Perceptual just-noticeable difference in CIEDE2000 units. A color shift below
+# ~2.3 ΔE is generally imperceptible; at/above it the drift is visible to the
+# eye even when a fuzz-tolerant pixel AE counts the pixels as "identical".
+JND_DELTA_E2000 = 2.3
 
 # ---------------------------------------------------------------------------
 # multiscale_ssim
@@ -108,6 +114,44 @@ def multiscale_ssim(ref: Path, impl: Path) -> float:
     if total_weight == 0.0:
         return 0.0  # degenerate case: all scales too small
     return weighted_sum / total_weight
+
+
+# ---------------------------------------------------------------------------
+# mean_delta_e2000 — perceptual color drift
+# ---------------------------------------------------------------------------
+
+
+def _load_rgb(path: Path) -> np.ndarray:
+    """Load an image as a float32 [0, 1] RGB array."""
+    try:
+        img = Image.open(path).convert("RGB")
+    except (OSError, ValueError) as e:
+        raise ValueError(f"Cannot load image {path}: {e}") from e
+    return np.asarray(img, dtype=np.float32) / 255.0
+
+
+def mean_delta_e2000(ref: Path, impl: Path) -> float:
+    """Mean CIEDE2000 perceptual color distance between two images.
+
+    Catches uniform tint/gamma drift that a fuzz-tolerant pixel AE misses: a
+    clone shifted a couple of ΔE across every pixel registers ~0 AE under an 8%
+    fuzz yet is perceptibly off-color. The mean over all pixels is a *systematic*
+    drift signal — a handful of locally-divergent regions on an otherwise
+    faithful clone average out below the JND, so this stays orthogonal to the
+    structural (dssim) and pixel (AE) signals rather than double-counting them.
+
+    Impl is resized to the ref grid when sizes differ. Returns the mean ΔE2000
+    over all pixels; 0.0 = identical.
+    """
+    ref_rgb = _load_rgb(ref)
+    impl_rgb = _load_rgb(impl)
+    if impl_rgb.shape != ref_rgb.shape:
+        impl_rgb = sk_resize(
+            impl_rgb, ref_rgb.shape, order=1, mode="reflect", anti_aliasing=True
+        ).astype(np.float32)
+    ref_lab = rgb2lab(ref_rgb)
+    impl_lab = rgb2lab(impl_rgb)
+    return float(deltaE_ciede2000(ref_lab, impl_lab).mean())
 
 
 # ---------------------------------------------------------------------------

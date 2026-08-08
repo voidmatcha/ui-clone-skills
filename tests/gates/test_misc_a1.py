@@ -275,10 +275,8 @@ def test_find_impl_root_detects_renamed_sibling(tmp_path: Path) -> None:
     loop_root = tmp_path / "scratch" / "loop-X"
     ref = loop_root / "tmp" / "ref" / "realfood-main"
     ref.mkdir(parents=True)
-    _post_implement_baseline(ref)
     _build_renamed_impl(loop_root, "realfood-clone", page_loc=220)
     gate = Gate(ref)
     resolved = gate._find_impl_root()
     assert resolved is not None, "resolver must locate renamed impl dir"
     assert resolved.name == "realfood-clone", f"got {resolved}"
-

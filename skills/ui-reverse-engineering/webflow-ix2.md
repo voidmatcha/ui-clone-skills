@@ -14,15 +14,21 @@ agent-browser --session <s> eval "(() => {
   const isWebflow = meta.includes('Webflow') || !!document.querySelector('html[data-wf-page], html[data-wf-site]');
   if (!isWebflow) return JSON.stringify({ isWebflow: false });
 
-  const ix2Active = document.documentElement.classList.contains('w-mod-ix3');
+  // Match BOTH markers: classic IX2 stamps `w-mod-ix2`, newer builds `w-mod-ix3`.
+  // Matching only ix3 silently missed every classic-IX2 site's hide-rule
+  // inventory (initial opacity:0 / translate states), so candidates fell back to
+  // bare [data-w-id] without their captured initial states.
+  const ix2Active =
+    document.documentElement.classList.contains('w-mod-ix2') ||
+    document.documentElement.classList.contains('w-mod-ix3');
   const wIdElements = document.querySelectorAll('[data-w-id]');
   const wTargetElements = document.querySelectorAll('[data-wf-target]');
 
-  // Hide rule pattern: <style>html.w-mod-js:not(.w-mod-ix3) :is(...selectors...) { display:none/opacity:0; visibility:hidden; ... }</style>
-  // This is the giant inline <style> in the <head> that hides IX2-targeted elements
-  // until the IX2 engine adds 'w-mod-ix3' to <html>.
+  // Hide rule pattern: <style>html.w-mod-js:not(.w-mod-ix[23]) :is(...selectors...) { display:none/opacity:0; visibility:hidden; ... }</style>
+  // This is the giant inline <style> in the <head> that hides IX-targeted elements
+  // until the IX engine adds 'w-mod-ix2'/'w-mod-ix3' to <html>.
   const hideRuleStyle = [...document.querySelectorAll('style')].find(s =>
-    s.textContent.includes('w-mod-js:not(.w-mod-ix3)')
+    /w-mod-js:not\(\.w-mod-ix[23]\)/.test(s.textContent || '')
   );
   const hideRuleLength = hideRuleStyle?.textContent.length || 0;
 
@@ -54,7 +60,7 @@ agent-browser --session <s> eval "(() => {
 ```bash
 agent-browser --session <s> eval "(() => {
   const style = [...document.querySelectorAll('style')].find(s =>
-    s.textContent.includes('w-mod-js:not(.w-mod-ix3)')
+    /w-mod-js:not\(\.w-mod-ix[23]\)/.test(s.textContent || '')
   );
   if (!style) return JSON.stringify({ error: 'no hide rule' });
   const text = style.textContent;

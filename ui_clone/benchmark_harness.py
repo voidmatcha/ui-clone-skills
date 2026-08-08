@@ -249,6 +249,16 @@ def check_strict_done(ref_dir: Path, impl_dir: Path) -> tuple[bool, list[str]]:
         if downloaded < 5:
             unmet.append(f"asset-utilization downloaded={downloaded} < 5")
 
+    # The sha-pinned proof that verification actually ran. Shared with the Stop
+    # hook and `goal --check-done` so all three agree on what "verified" means;
+    # without it the harness would converge on state and artifacts alone, which
+    # a run that edited impl files after a passing verify can still satisfy.
+    from ui_clone.pipeline_phases.verify import canonical_stamp_problem
+
+    stamp_problem = canonical_stamp_problem(ref_dir)
+    if stamp_problem:
+        unmet.append(f"verify stamp: {stamp_problem}")
+
     return (len(unmet) == 0), unmet
 
 
@@ -415,7 +425,13 @@ def invoke_claude(
         cmd,
         capture_output=True, text=True,
         cwd=str(cwd),
-        env={**os.environ},
+        # UI_RE_HEADLESS_DRIVER tells section_gate that nothing is reading
+        # stdout interactively: a Stop block would cost this iteration its
+        # printed answer for a nudge the between-iteration Python gates
+        # already make. pre_bash deliberately keeps blocking — its PreToolUse
+        # deny arrives as a tool result mid-turn, and it is the only thing
+        # stopping the agent committing an unverified clone INSIDE a round.
+        env={**os.environ, "UI_RE_HEADLESS_DRIVER": "1"},
     )
     out = proc.stdout
     err = proc.stderr
@@ -431,6 +447,28 @@ def invoke_claude(
     return parsed
 
 
+_MAX_CONSECUTIVE_INVALID_ITERS = 3
+
+
+def _driver_failure_reason(claude_result: dict[str, Any]) -> str | None:
+    """Why this iteration carried no usable answer, or None when it did.
+
+    A driver failure is not gate evidence: the agent never spoke, so nothing
+    was learned about the clone. It also hides itself — an unparseable stdout
+    lands in the `_raw` fallback, which carries no `usage`, so `_extract_tokens`
+    scores it 0 and the token budget never moves while the API is still billed.
+    """
+    if claude_result.get("_exit_code") not in (0, None):
+        return f"exit code {claude_result.get('_exit_code')}"
+    if claude_result.get("is_error"):
+        return "claude reported is_error"
+    if "result" not in claude_result:
+        return "response did not parse as a result object"
+    if not str(claude_result.get("result") or "").strip():
+        return "empty response body"
+    return None
+
+
 def _extract_tokens(claude_result: dict[str, Any]) -> int:
     """Pull total tokens from the JSON response. Best-effort."""
     usage = claude_result.get("usage") or {}
@@ -443,8 +481,16 @@ def _extract_tokens(claude_result: dict[str, Any]) -> int:
 
 
 def run_loop(args: argparse.Namespace) -> str:
-    ref_dir = Path(args.ref_dir).resolve()
+    # LAND item A: --run-dir explicitly binds the run/reference dir (overrides
+    # the ref_dir positional); --reuse-frozen-ref marks an externally-supplied
+    # prebuilt reference as acquisition-satisfied-by-supply. Both are
+    # acquisition-only — check_strict_done() below stays the convergence
+    # authority, so the self-pass / localized-defect / ref-variance guards and
+    # the pinned-scorer verdict are untouched.
+    run_dir = getattr(args, "run_dir", None)
+    ref_dir = Path(run_dir).resolve() if run_dir else Path(args.ref_dir).resolve()
     impl_dir = Path(args.impl_dir).resolve() if args.impl_dir else ref_dir.parent / "impl"
+    reuse_frozen_ref = getattr(args, "reuse_frozen_ref", None)
     plugin_dir = Path(__file__).resolve().parents[1]
     session_id = args.session_id or str(uuid.uuid4())
 
@@ -469,9 +515,27 @@ def run_loop(args: argparse.Namespace) -> str:
         "max_iter": args.max_iter,
         "token_budget": args.token_budget,
         "wall_budget_s": args.wall_budget_s,
+        "reuse_frozen_ref": str(reuse_frozen_ref) if reuse_frozen_ref else None,
     })
 
+    # LAND item A: acquisition-only satisfied-by-supply telemetry for an
+    # externally-supplied prebuilt reference. Advisory; the loop below still
+    # converges via check_strict_done (pinned-scorer evidence).
+    if reuse_frozen_ref:
+        from ui_clone.pipeline import reference_evidence_satisfied
+
+        satisfied, missing = reference_evidence_satisfied(
+            ref_dir, external_prebuilt=True
+        )
+        _log({
+            "event": "reference_evidence_satisfied_by_supply",
+            "ref_dir": str(ref_dir),
+            "satisfied": satisfied,
+            "missing_acquisition_artifacts": missing,
+        })
+
     outcome = "INCOMPLETE_UNKNOWN"
+    consecutive_invalid = 0
     while True:
         # Stop checks BEFORE invoking
         if iter_count >= args.max_iter:
@@ -558,6 +622,26 @@ def run_loop(args: argparse.Namespace) -> str:
             "exit_code": result.get("_exit_code"),
         })
 
+        # Keyed on CONSECUTIVE failures: a transient empty response between
+        # working iterations is a retry, while a run of them is a dead driver
+        # that would otherwise spend every remaining iteration in silence.
+        # Deliberately kept out of gate_fail_counts — the agent never answered,
+        # so this says nothing about the clone.
+        driver_failure = _driver_failure_reason(result)
+        if driver_failure is None:
+            consecutive_invalid = 0
+        else:
+            consecutive_invalid += 1
+            _log({
+                "event": "iter_invalid",
+                "iter": iter_count,
+                "reason": driver_failure,
+                "consecutive": consecutive_invalid,
+            })
+            if consecutive_invalid >= _MAX_CONSECUTIVE_INVALID_ITERS:
+                outcome = "ABORTED_DRIVER_FAILURE"
+                break
+
     # Final state snapshot
     _, final_unmet = check_strict_done(ref_dir, impl_dir)
     _log({
@@ -588,6 +672,21 @@ def build_parser() -> argparse.ArgumentParser:
         description="Python-driven benchmark loop with focused per-iter prompts.",
     )
     p.add_argument("ref_dir", help="ref dir (e.g. benchmark/work/<sha>/ref)")
+    p.add_argument(
+        "--run-dir",
+        default=None,
+        help="Bind the run/reference dir explicitly (overrides the ref_dir positional)",
+    )
+    p.add_argument(
+        "--reuse-frozen-ref",
+        dest="reuse_frozen_ref",
+        default=None,
+        help=(
+            "Externally-supplied prebuilt reference: mark its acquisition "
+            "evidence satisfied-by-supply (advisory; convergence still gated "
+            "by check_strict_done)"
+        ),
+    )
     p.add_argument("--impl-dir", default=None, help="impl dir (defaults to <ref>/../impl)")
     p.add_argument("--orig-url", required=True, help="reference site URL")
     p.add_argument("--impl-url", default="http://localhost:3000", help="local impl URL")

@@ -40,13 +40,28 @@
 
 set -euo pipefail
 
+# shellcheck source=../../../scripts/lib/viewport.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/lib/viewport.sh"
+# AE unit normalization (ImageMagick Q16 returns AE as count*65535). Without
+# this the trajectory AE/Mpx ceiling saw 65535x-inflated values and rejected
+# every point. See skills/visual-debug/scripts/lib/ae-quantum.sh.
+# shellcheck source=lib/ae-quantum.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ae-quantum.sh"
+
 VIEW_W="${VIEW_W:-1440}"
 VIEW_H="${VIEW_H:-900}"
 WAIT_REF="${WAIT_REF:-8000}"
 WAIT_IMPL="${WAIT_IMPL:-6000}"
 WAIT_SCROLL_SETTLE_MS="${WAIT_SCROLL_SETTLE_MS:-600}"
 TRAJECTORY_POINTS="${TRAJECTORY_POINTS:-0 25 50 75 100}"
-TRAJECTORY_AE_PER_MPX_MAX="${TRAJECTORY_AE_PER_MPX_MAX:-4000}"
+# Ceiling calibration (loop-e2e-6): a layout-aligned clone (DOM tops within
+# 0.08px, Phase E "visually indistinguishable") measured a deterministic
+# 4011 AE/Mpx at one sample point — cumulative 1/32px font-metric rounding
+# rasterizes display-type glyphs one pixel apart. That is the documented
+# sub-pixel-AA noise class this ceiling exists to absorb, so 4000 sat below
+# the real noise floor. Every genuine divergence observed while calibrating
+# measured 8k-175k AE/Mpx; 4200 keeps full detection power.
+TRAJECTORY_AE_PER_MPX_MAX="${TRAJECTORY_AE_PER_MPX_MAX:-4200}"
 FUZZ="${TRAJECTORY_FUZZ:-8%}"
 
 ORIG_URL="${1:?Usage: transition-trajectory-compare.sh <orig-url> <impl-url> <session> <ref-dir>}"
@@ -115,8 +130,37 @@ PY
 
 # Open both sites once; reuse the session for every scroll-sample point so
 # scroll-scrub timelines stay continuous instead of re-initializing per probe.
-agent-browser --session "$SESSION_REF"  open "$ORIG_URL" --viewport "${VIEW_W}x${VIEW_H}" --wait "$WAIT_REF"  >/dev/null
-agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" --viewport "${VIEW_W}x${VIEW_H}" --wait "$WAIT_IMPL" >/dev/null
+ab_open_at_viewport "$SESSION_REF"  "$ORIG_URL" "$VIEW_W" "$VIEW_H" "$((WAIT_REF / 1000))"
+ab_open_at_viewport "$SESSION_IMPL" "$IMPL_URL" "$VIEW_W" "$VIEW_H" "$((WAIT_IMPL / 1000))"
+
+# Dynamic-element masking (loop-e2e-5): trajectory compares FULL frames at
+# matched scroll fractions, so content whose state is TIME-coupled — video
+# frames, timer carousels, autoplaying media — diverges by phase on every
+# sample and buries the actual scroll-driven trajectory under noise (all 5
+# points exceeded the ceiling on a 14/14-section-PASS clone). Mask the same
+# dynamic families section-compare masks: base media tags + transition-spec
+# entries declared dynamic:true. Both sides get the identical mask, so this
+# cannot hide a one-sided defect.
+DYN_SELECTORS="canvas, video, iframe, nav, [class*=\"slideshow\"], [class*=\"carousel\"], section:has(canvas), [class*=\"playground\"]:has(canvas)"
+if [ -f "$DIR/transition-spec.json" ]; then
+  EXTRA_DYN=$(python3 - "$DIR/transition-spec.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+targets = [
+    str(t.get("target") or "") for t in d.get("transitions") or []
+    if isinstance(t, dict) and t.get("dynamic") is True
+]
+print(", ".join(t for t in targets if t and '"' not in t))
+PY
+)
+  [ -n "$EXTRA_DYN" ] && DYN_SELECTORS="$DYN_SELECTORS, $EXTRA_DYN"
+fi
+MASK_JS="(() => { const st = document.createElement('style'); st.id='__traj-mask__'; st.textContent = '${DYN_SELECTORS} { visibility: hidden !important; }'; document.head.appendChild(st); return 'masked'; })()"
+agent-browser --session "$SESSION_REF" eval "$MASK_JS" >/dev/null 2>&1 || true
+agent-browser --session "$SESSION_IMPL" eval "$MASK_JS" >/dev/null 2>&1 || true
 
 # Scroll height may differ between ref and impl when the impl viewport's
 # content is shorter (lazy images, missing sections). Use ref's scrollHeight
@@ -147,10 +191,36 @@ STRUCTURAL_ONLY_MODE="${STRUCTURAL_TRAJECTORY_MODE:-$(structural_only_mode)}"
 if [ "$STRUCTURAL_ONLY_MODE" = "true" ]; then
   SIG_DIR="$OUT_DIR/structural"
   mkdir -p "$SIG_DIR"
-  SIGNATURE_JS='(() => JSON.stringify([...document.querySelectorAll(".patch[parallax=\"patch\"]")].map((el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el); const key = [...el.classList].filter((c) => c !== "patch").sort().join(".") || el.className; const matrix = st.transform && st.transform !== "none" ? st.transform.match(/matrix.*\(([^)]+)\)/) : null; const parts = matrix ? matrix[1].split(",").map((v) => Number.parseFloat(v.trim())) : []; const ty = parts.length >= 6 ? parts[5] : 0; return { key, className: el.className, top: r.top, left: r.left, width: r.width, height: r.height, bottom: r.bottom, right: r.right, transform: st.transform, ty, visible: r.width > 1 && r.height > 1 && r.bottom >= -200 && r.top <= window.innerHeight + 200 }; }), null, 2))()'
+  # F8: the structural-motion target selector must come from config, not be
+  # hardcoded to one site's DOM. Structural mode is a GENERAL mechanism (any site
+  # whose asset-substitution.json declares structuralOnlySections triggers it), so
+  # a hardcoded `.patch[parallax="patch"]` (ebpb only) meant every OTHER site that
+  # opted in sampled zero targets -> vacuous exit 1 -> video-motion-compare early-
+  # exits and the authoritative 60fps SSIM pass never runs. Resolve: explicit env
+  # override, else `structuralMotionSelector` in asset-substitution.json, else the
+  # historical ebpb default (back-compat). Injected via base64/atob so any quotes
+  # in the selector cannot break the JS string.
+  STRUCT_SELECTOR="${STRUCTURAL_TRAJECTORY_SELECTOR:-}"
+  if [ -z "$STRUCT_SELECTOR" ]; then
+    STRUCT_SELECTOR=$(python3 - "$DIR/asset-substitution.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+sel = d.get("structuralMotionSelector")
+if isinstance(sel, str) and sel.strip():
+    sys.stdout.write(sel.strip())
+PY
+)
+  fi
+  [ -n "$STRUCT_SELECTOR" ] || STRUCT_SELECTOR='.patch[parallax="patch"]'
+  STRUCT_SEL_B64=$(printf '%s' "$STRUCT_SELECTOR" | base64 | tr -d '\n')
+  SIGNATURE_JS='(() => JSON.stringify([...document.querySelectorAll(atob("'"$STRUCT_SEL_B64"'"))].map((el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el); const key = [...el.classList].filter((c) => c !== "patch").sort().join(".") || el.className; const matrix = st.transform && st.transform !== "none" ? st.transform.match(/matrix.*\(([^)]+)\)/) : null; const parts = matrix ? matrix[1].split(",").map((v) => Number.parseFloat(v.trim())) : []; const ty = parts.length >= 6 ? parts[5] : 0; return { key, className: el.className, top: r.top, left: r.left, width: r.width, height: r.height, bottom: r.bottom, right: r.right, transform: st.transform, ty, visible: r.width > 1 && r.height > 1 && r.bottom >= -200 && r.top <= window.innerHeight + 200 }; }), null, 2))()'
   {
     echo "# transition-trajectory-compare"
     echo "# mode: structural-motion"
+    echo "# structural-motion selector: $STRUCT_SELECTOR"
     echo "# sampled points: $TRAJECTORY_POINTS"
     echo "# ref scroll-range: ${REF_HEIGHT}px  impl scroll-range: ${IMPL_HEIGHT}px"
     echo
@@ -313,7 +383,9 @@ for pct in $TRAJECTORY_POINTS; do
   fi
 
   AE=$(magick compare -metric AE -fuzz "$FUZZ" "$REF_PNG" "$IMPL_PNG" "$DIFF_PNG" 2>&1 || true)
-  AE=$(echo "$AE" | head -1 | awk '{ if ($1 ~ /^[0-9.eE+-]+$/) printf "%.0f\n", $1 }')
+  AE=$(echo "$AE" | head -1 | awk '{ if ($1 ~ /^[0-9.eE+-]+$/) printf "%.0f", $1 }')
+  # Normalize count*QuantumRange back to a raw pixel count (see ae-quantum.sh).
+  [ -n "$AE" ] && AE=$(_ae_normalize "$AE")
 
   if [ -z "$AE" ]; then
     printf "| %s%% | ERROR | — | ⚠️ |\n" "$pct" >> "$REPORT"

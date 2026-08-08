@@ -153,7 +153,7 @@ copy local CSS chunks into the impl, preserve CSS-module className tokens, add
 runtime libraries/data/controllers locally, and run the normal verification gates.
 
 1. Extract/consume `dom-scaffold.json` as the visible DOM authority.
-2. Copy ALL local `tmp/ref/<component>/css/*.css` chunks into `impl/src/ref-css/` and import them before local overrides. If the plan says `missingCssArtifacts=true`, stop and recover those CSS chunks first instead of writing a freehand Tailwind approximation.
+2. Copy ALL local `tmp/ref/<component>/css/*.css` chunks into `impl/src/ref-css/` with `bash "$PLUGIN_ROOT/scripts/extract/sanitize-ref-css.sh" "$(pwd)/tmp/ref/<component>" "<impl-root>"`, then import them before local overrides. If the plan says `missingCssArtifacts=true`, stop and recover those CSS chunks first instead of writing a freehand Tailwind approximation.
 3. Download ALL fonts, images, videos, Lottie JSON to `/public/assets/` (or the host's public asset layout).
 4. Translate scaffold nodes to JSX with original tags, depth, text, media elements, and CSS-module className tokens intact. Use section-level `dangerouslySetInnerHTML` only when it preserves depth better than manual JSX, never as a whole-page paste.
 5. Port animations to project animation library, WAAPI, or a local controller using extracted durations/easing.

@@ -90,6 +90,29 @@ print("true" if fail == 0 and structural > 0 else "false")
 PY
 }
 
+section_result_pass_mode() {
+  python3 - "$REF_DIR" <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+result = Path(sys.argv[1]) / "sections" / "result.txt"
+if not result.exists():
+    print("false")
+    raise SystemExit(0)
+text = result.read_text(encoding="utf-8", errors="replace")
+m = re.search(r"\*\*Result:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL", text)
+if not m:
+    print("false")
+    raise SystemExit(0)
+passed = int(m.group(1))
+failed = int(m.group(2))
+print("true" if passed > 0 and failed == 0 else "false")
+PY
+}
+
 write_visual_debug_stamp() {
   local passed="$1"
   local exit_code="$2"
@@ -161,6 +184,13 @@ echo "Original: $ORIG_URL"
 echo "Implementation: $IMPL_URL"
 echo "Ref dir: $REF_DIR"
 STRUCTURAL_ONLY_MODE="$(structural_only_mode)"
+SECTION_RESULT_PASS_MODE="$(section_result_pass_mode)"
+
+# Guard local impl URLs before any agent-browser screenshot/eval work. This
+# catches orphan dev servers serving the requested port from a previous loop.
+if [ -f "$REPO_ROOT/scripts/verify/impl-url-guard.sh" ]; then
+  bash "$REPO_ROOT/scripts/verify/impl-url-guard.sh" "$REF_DIR" "$IMPL_URL"
+fi
 
 # ── Pre-check: ensure both URLs are reachable ──
 echo -e "\n${BOLD}Pre-check: URL reachability${NC}"
@@ -181,6 +211,9 @@ done
 if [ "$STRUCTURAL_ONLY_MODE" = "true" ]; then
   run_check "D0: Structural-only layout health" true
   echo -e "  ${GREEN}STRUCTURAL_ONLY${NC}: layout-health pixel/section heuristics bypassed; sections/result.txt carries structural verdict."
+elif [ "$SECTION_RESULT_PASS_MODE" = "true" ]; then
+  run_check "D0: Section-result layout health" true
+  echo -e "  ${GREEN}SECTION_RESULT${NC}: sections/result.txt has zero FAIL rows; section-level geometry carries the layout verdict."
 elif [ -f "$VISUAL_DEBUG_SCRIPTS/layout-health-check.sh" ]; then
   run_check "D0: Layout health check" \
     bash "$VISUAL_DEBUG_SCRIPTS/layout-health-check.sh" "$SESSION" "$ORIG_URL" "$IMPL_URL" "$REF_DIR"
@@ -192,6 +225,9 @@ fi
 if [ "$STRUCTURAL_ONLY_MODE" = "true" ]; then
   run_check "C: Structural-only section result" true
   echo -e "  ${GREEN}STRUCTURAL_ONLY${NC}: using sections/result.txt + required anti-cheat gates; full-frame AE is intentionally bypassed for declared asset/font substitutions."
+elif [ "$SECTION_RESULT_PASS_MODE" = "true" ]; then
+  run_check "C: Section AE comparison result" true
+  echo -e "  ${GREEN}SECTION_RESULT${NC}: using sections/result.txt + required anti-cheat gates instead of percent-scroll batch comparison."
 else
   echo -e "\n${BOLD}Capturing implementation screenshots...${NC}"
   mkdir -p "$REF_DIR/static/impl" "$REF_DIR/static/diff"

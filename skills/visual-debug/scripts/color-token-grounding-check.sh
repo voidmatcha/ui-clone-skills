@@ -186,6 +186,21 @@ for name in ("styles.json", "extracted.json", "design-tokens.json",
     # Raw scan as fallback / additional source
     ref_colors.update(extract_colors_from_text(text))
 
+# Full ref CSS corpus — sampled palette artifacts can miss colors the site
+# genuinely uses (e.g. brand colors only present in raw CSS), which made
+# verbatim-faithful impl colors register as "invented". Scan bounded chunks
+# of every captured ref stylesheet so any color present in the ref counts
+# as grounded.
+css_dir = ref_p / "css"
+if css_dir.is_dir():
+    for css_file in sorted(css_dir.glob("*.css")):
+        try:
+            ref_colors.update(extract_colors_from_text(
+                css_file.read_text(encoding="utf-8", errors="ignore")[:4_000_000]
+            ))
+        except OSError:
+            continue
+
 if not ref_colors:
     out_p.write_text(json.dumps({
         "schemaVersion": 1,

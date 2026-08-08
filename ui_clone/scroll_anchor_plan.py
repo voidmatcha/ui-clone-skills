@@ -25,6 +25,7 @@ PlanRow = dict[str, Any]
 
 _SCROLL_TRIGGER_RE = re.compile(r"scroll|sticky|pin|scrub|intersection|inview|parallax", re.I)
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{4,}")
+_DOCUMENT_ROOT_IDS = {"root", "__next", "__nuxt", "app", "svelte"}
 
 
 def _as_float(value: object, default: float = 0.0) -> float:
@@ -52,6 +53,31 @@ def _top(row: Section) -> float:
 
 def _height(row: Section) -> float:
     return _as_float(_rect(row).get("height"))
+
+
+def _is_document_wrapper(row: Section, viewport_height: int) -> bool:
+    tag = _norm_text(row.get("tag")).lower()
+    if tag in {"html", "body"}:
+        return True
+    row_id = _norm_text(row.get("id")).lower()
+    return (
+        row_id in _DOCUMENT_ROOT_IDS
+        and _height(row) >= viewport_height * 1.5
+    )
+
+
+def _is_fixed_overlay(row: Section, viewport_height: int) -> bool:
+    position = _norm_text(row.get("position")).lower()
+    return position == "fixed" and (
+        _top(row) < 0 or _height(row) >= viewport_height * 0.5
+    )
+
+
+def _is_scroll_anchor_candidate(row: Section, viewport_height: int) -> bool:
+    return not (
+        _is_document_wrapper(row, viewport_height)
+        or _is_fixed_overlay(row, viewport_height)
+    )
 
 
 def _norm_text(value: object) -> str:
@@ -264,9 +290,17 @@ def build_scroll_anchor_plan(
     sticky: object | None = None,
     transition_spec: object | None = None,
 ) -> list[PlanRow]:
-    ref = _coerce_sections(ref_sections)
-    impl = _coerce_sections(impl_sections)
-    if len(ref) < 2 or len(impl) < 2:
+    ref = [
+        row
+        for row in _coerce_sections(ref_sections)
+        if _is_scroll_anchor_candidate(row, viewport_height)
+    ]
+    impl = [
+        row
+        for row in _coerce_sections(impl_sections)
+        if _is_scroll_anchor_candidate(row, viewport_height)
+    ]
+    if not ref or not impl:
         return []
 
     sticky_tok = _sticky_tokens(sticky)

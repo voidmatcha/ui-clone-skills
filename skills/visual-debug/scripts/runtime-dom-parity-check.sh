@@ -73,8 +73,14 @@ sys.exit(0 if d.get("lottie") else 1)
 fi
 
 
-REF_TMP="$(mktemp -t ref-dom-parity-XXXXXX.json)"
-IMPL_TMP="$(mktemp -t impl-dom-parity-XXXXXX.json)"
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+REF_TMP="$(mktemp -t ref-dom-parity-XXXXXX)"
+mv "$REF_TMP" "${REF_TMP}.json"
+REF_TMP="${REF_TMP}.json"
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+IMPL_TMP="$(mktemp -t impl-dom-parity-XXXXXX)"
+mv "$IMPL_TMP" "${IMPL_TMP}.json"
+IMPL_TMP="${IMPL_TMP}.json"
 trap 'rm -f "$REF_TMP" "$IMPL_TMP"' EXIT
 
 ANALYSIS_JS='(() => {
@@ -233,11 +239,19 @@ ANALYSIS_JS='(() => {
 
 run_capture() {
   local url="$1" out="$2" sess="$3"
-  agent-browser --session "$sess" open "$url" >/dev/null 2>&1 || {
-    echo "{\"error\": \"open failed: $url\"}" > "$out"
-    return 1
-  }
+  local open_status=0
+  # Some reference pages keep network activity alive long enough for
+  # agent-browser `open` to exit with a timeout even when the document has
+  # loaded and is scriptable. Verify the page state instead of treating that
+  # timeout as an automatic browser failure.
+  agent-browser --session "$sess" open "$url" >/dev/null 2>&1 || open_status=$?
   agent-browser --session "$sess" wait 2500 >/dev/null 2>&1 || true
+  local href=""
+  href="$(agent-browser --session "$sess" eval '(() => location.href)()' 2>/dev/null || true)"
+  if [ -z "$href" ] || printf '%s' "$href" | grep -Eiq 'about:blank'; then
+    echo "{\"error\": \"open failed: $url\", \"openStatus\": $open_status}" > "$out"
+    return 1
+  fi
   # Scroll mid + bottom + top to surface lazily-mounted Lottie / IO
   # reveals.
   agent-browser --session "$sess" eval 'window.scrollTo(0, document.body.scrollHeight/2)' >/dev/null 2>&1 || true

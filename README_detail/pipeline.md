@@ -2,7 +2,7 @@
 
 ## Pipeline hooks (automatic)
 
-Hooks register through `hooks/hooks.json` for Claude Code (plugin manifest) and, for Codex, via `install.sh` merging `hooks/codex-hooks.json` into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` manifest path). All hooks route through a single `hooks/shim.sh` that fast-skips when no `tmp/ref/` directory exists.
+Hooks register through the Claude Code plugin source's `hooks/hooks.json` and, for Codex, via `install.sh` merging `hooks/codex-hooks.json` into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` manifest path). Both hosts are installed from the lightweight local projection at `~/plugins/ui-clone-skills`, and all hooks route through a single `hooks/shim.sh` that fast-skips when no `tmp/ref/` directory exists.
 
 | Hook module | Event | Purpose |
 |------|-------|---------|

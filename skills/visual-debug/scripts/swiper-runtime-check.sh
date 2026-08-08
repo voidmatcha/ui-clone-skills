@@ -36,7 +36,13 @@ RUNTIME_RE = re.compile(
     r"|new\s+Swiper\s*\(|<\s*Swiper\b",
     re.IGNORECASE,
 )
-INLINE_SIZE_RE = re.compile(r"spaceBetween|slidesPerView|marginRight|translate3d|swiper-slide-active", re.IGNORECASE)
+# Genuine "explicit extracted sizing logic" is Swiper CONFIG the impl author
+# wrote (spaceBetween / slidesPerView / marginRight). `translate3d` and
+# `swiper-slide-active` are NOT sizing logic — they are baked-capture residue (the
+# transpiler froze the running Swiper's inline transform and its runtime
+# active-slide class), so counting them here let a dead, runtime-less baked
+# carousel — exactly what this gate exists to block — evade class_only (F5).
+INLINE_SIZE_RE = re.compile(r"spaceBetween|slidesPerView|marginRight", re.IGNORECASE)
 
 
 def read_limited(path: Path, limit: int = 1_000_000) -> str:

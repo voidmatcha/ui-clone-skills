@@ -37,6 +37,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from ui_clone.shell import bash_bin
+
 __all__ = [
     "VisualJudgeError",
     "dispatch_visual_judge",
@@ -246,7 +248,7 @@ def dispatch_visual_judge(
         try:
             proc = subprocess.run(
                 [
-                    "bash",
+                    bash_bin(),
                     str(script),
                     str(ref_png),
                     str(impl_png),

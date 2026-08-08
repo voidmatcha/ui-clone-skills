@@ -55,10 +55,11 @@ mkdir -p "$OUTDIR"
 
 # Open page in the derived session unless reusing the caller's session.
 if [ "$REUSE_SESSION" = "false" ]; then
-  if ! agent-browser --session "$SCROLL_SESSION" open "$URL" --wait 1500 >/dev/null 2>&1; then
+  if ! agent-browser --session "$SCROLL_SESSION" open "$URL" >/dev/null 2>&1; then
     echo "capture-scroll: agent-browser open failed for $URL (session=$SCROLL_SESSION)" >&2
     exit 2
   fi
+  sleep 2  # open --wait is not a supported flag; settle explicitly
 fi
 
 # In-page scroll sweep. Single eval — no CLI round-trip per stop.
@@ -266,11 +267,38 @@ EVAL_JS='(async () => {
   };
 })();'
 
-RESPONSE_RAW="$(agent-browser --session "$SCROLL_SESSION" eval --json "$EVAL_JS" 2>&1)" || {
-  echo "capture-scroll: agent-browser eval failed (session=$SCROLL_SESSION)" >&2
+EVAL_ATTEMPTS="${CAPTURE_SCROLL_EVAL_ATTEMPTS:-3}"
+if ! [[ "$EVAL_ATTEMPTS" =~ ^[0-9]+$ ]] || [ "$EVAL_ATTEMPTS" -lt 1 ]; then
+  EVAL_ATTEMPTS=1
+fi
+
+RESPONSE_RAW=""
+EVAL_OK="false"
+for attempt in $(seq 1 "$EVAL_ATTEMPTS"); do
+  if RESPONSE_RAW="$(agent-browser --session "$SCROLL_SESSION" eval --json "$EVAL_JS" 2>&1)"; then
+    EVAL_OK="true"
+    break
+  fi
+
+  echo "capture-scroll: agent-browser eval failed (session=$SCROLL_SESSION attempt=${attempt}/${EVAL_ATTEMPTS})" >&2
   echo "$RESPONSE_RAW" >&2
+
+  if [ "$attempt" -lt "$EVAL_ATTEMPTS" ]; then
+    # Long single-eval scroll sweeps occasionally lose the CDP response
+    # channel on large animated pages. Re-opening the derived session gives
+    # the next attempt a fresh page target without weakening capture
+    # requirements or accepting partial scroll data.
+    if [ "$REUSE_SESSION" = "false" ]; then
+      agent-browser --session "$SCROLL_SESSION" open "$URL" >/dev/null 2>&1 || true
+    fi
+    sleep 2  # open --wait is not a supported flag; settle explicitly
+  fi
+done
+
+if [ "$EVAL_OK" != "true" ]; then
+  echo "capture-scroll: agent-browser eval failed after ${EVAL_ATTEMPTS} attempt(s) (session=$SCROLL_SESSION)" >&2
   exit 3
-}
+fi
 
 # Validate + split into trajectory / summary / per-pct files via python.
 # Heredoc + stdin pipe conflict — write response to a temp file the python

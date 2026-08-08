@@ -79,6 +79,7 @@ python3 - "$REF_DIR" "$IMPL_ROOT" "$OUT_PATH" <<'PY'
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -144,9 +145,18 @@ if isinstance(ts, dict):
 
 es = read_json(ref_dir / "external-sdks.json")
 if isinstance(es, dict):
-    detected = es.get("detected") or []
+    detected = es.get("detected")
+    # `detected` is a dict {lib: {matches: n}}; older payloads used a list of
+    # lib-name strings. Normalize both to a list of names (the prior code only
+    # handled the list shape and silently dropped all dict-shaped SDK signal).
+    if isinstance(detected, dict):
+        detected_names = list(detected.keys())
+    elif isinstance(detected, list):
+        detected_names = detected
+    else:
+        detected_names = []
     motion_sdks = {"gsap", "lottie", "bodymovin", "framer", "anime"}
-    for d in (detected if isinstance(detected, list) else []):
+    for d in detected_names:
         ds = str(d).lower()
         if any(m in ds for m in motion_sdks):
             signal_strength += 1
@@ -169,6 +179,92 @@ if isinstance(ts, dict):
             strong_feel = True
             strong_feel_label = dominant
             signals.append(f"motion_signature.dominant_feel:{dominant}")
+
+
+# 1b. Library-driven detection — same animation-library allowlist as
+# library-usage-check.sh. When the ref's motion runs through a JS animation
+# library (evidenced in bundle-map.json / external-sdks.json), impl motion
+# coverage must come from that library's usage. Two impl signals then stop
+# being evidence of reproduced motion:
+#   * bare requestAnimationFrame() — the hand-rolled shim used to fake
+#     useScroll/useTransform with scale();
+#   * @keyframes / animation that live only in the mirrored ref CSS
+#     (from-ref/, ref-css/) — a byte copy of the ref stylesheet that does not
+#     re-create the library's runtime scrub/spring.
+# For refs WITHOUT library evidence (vanilla-JS / pure-CSS), rAF and mirrored
+# keyframes still count exactly as before — those refs legitimately implement
+# motion that way.
+ANIM_LIBS = [
+    ("framer-motion", ("framer", "framermotion", "motion-like", "usescroll",
+                       "usetransform", "scrollyprogress", "motionvalue",
+                       "animatepresence")),
+    ("gsap", ("gsap", "scrolltrigger", "scrollsmoother")),
+    ("lenis", ("lenis",)),
+    ("lottie", ("lottie", "bodymovin")),
+    ("three", ("three-like", "react-three", "threejs")),
+    ("swiper", ("swiper",)),
+    ("embla", ("embla",)),
+    ("splide", ("splide",)),
+    ("keen-slider", ("keen-slider", "keenslider")),
+    ("react-spring", ("react-spring", "reactspring")),
+    ("popmotion", ("popmotion",)),
+    ("locomotive-scroll", ("locomotive",)),
+]
+
+
+def _library_tokens() -> list[str]:
+    tokens: list[str] = []
+    if isinstance(bm, dict):
+        chunks = bm.get("chunks")
+        chunk_iter = chunks.values() if isinstance(chunks, dict) else (
+            chunks if isinstance(chunks, list) else [])
+        for ch in chunk_iter:
+            if isinstance(ch, dict):
+                tokens += [str(x) for x in (ch.get("libs") or []) if isinstance(x, str)]
+        libraries = bm.get("libraries")
+        if isinstance(libraries, dict):
+            tokens += [str(k) for k, v in libraries.items() if v]
+        elif isinstance(libraries, list):
+            for lib in libraries:
+                tokens.append(
+                    str(lib.get("name") or lib.get("id") or "")
+                    if isinstance(lib, dict) else str(lib))
+        for extra in ("detectedLibraries",):
+            val = bm.get(extra)
+            if isinstance(val, list):
+                tokens += [str(x) for x in val]
+        evidence = bm.get("evidence")
+        if isinstance(evidence, dict):
+            tokens += [str(k) for k, v in evidence.items() if v]
+        notes = bm.get("notes")
+        if isinstance(notes, str):
+            tokens.append(notes)
+    if isinstance(es, dict):
+        detected = es.get("detected")
+        if isinstance(detected, dict):
+            tokens += [str(k) for k in detected.keys()]
+        elif isinstance(detected, list):
+            tokens += [str(k) for k in detected]
+        for k, v in es.items():
+            if k != "detected" and v is True:
+                tokens.append(str(k))
+    return tokens
+
+
+_token_blob = " ".join(_library_tokens()).lower()
+ref_motion_libraries = sorted(
+    name for name, needles in ANIM_LIBS if any(n in _token_blob for n in needles)
+)
+ref_library_driven = bool(ref_motion_libraries)
+
+# Mirror dirs whose CSS is a byte copy of the ref stylesheet — same set
+# transition-spec-coverage.sh excludes (from-ref/, ref-css/, plus any
+# UI_CLONE_GENERATED_EVIDENCE_DIRS override). Not counted as impl-authored
+# motion for library-driven refs.
+MIRROR_DIRS = {"from-ref", "ref-css"}
+for _d in re.split(r"[,\s]+", os.environ.get("UI_CLONE_GENERATED_EVIDENCE_DIRS", "")):
+    if _d:
+        MIRROR_DIRS.add(_d)
 
 
 # 2. Score impl-side motion strength.
@@ -211,14 +307,31 @@ HOOK_RE = re.compile(
     r"useScrollPosition|useGSAP"
     r")\s*\("
 )
-# Browser APIs for scroll-driven motion.
+# Browser APIs for scroll-driven motion. requestAnimationFrame is split out
+# (RAF_RE) so it can be discounted for library-driven refs — a bare rAF loop is
+# the classic shim used to fake a library's scroll-scrub. IntersectionObserver /
+# ScrollTimeline stay counted (legitimate native reveal / scroll-driven APIs).
 SCROLL_API_RE = re.compile(
-    r"\b(IntersectionObserver|ScrollTimeline|requestAnimationFrame)\s*\("
+    r"\b(IntersectionObserver|ScrollTimeline)\s*\("
 )
+RAF_RE = re.compile(r"\brequestAnimationFrame\s*\(")
 # Inline GSAP-style calls.
 GSAP_CALL_RE = re.compile(
     r"\b(gsap|ScrollTrigger)\s*\.\s*(to|from|fromTo|set|timeline|create|registerPlugin)\s*\("
 )
+
+
+rejected_signals: list[dict] = []
+
+
+def award(amount: int, sig: str) -> None:
+    global impl_strength
+    impl_strength += amount
+    impl_signals.append(sig)
+
+
+def reject(sig: str, reason: str) -> None:
+    rejected_signals.append({"signal": sig, "reason": reason})
 
 
 for sd in SRC_DIRS:
@@ -229,23 +342,27 @@ for sd in SRC_DIRS:
             continue
         if any(part in {"node_modules", ".next", "dist", "build"} for part in p.parts):
             continue
+        is_mirror = any(part in MIRROR_DIRS for part in p.parts)
         try:
             text = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         if p.suffix in SUFFIXES:
             for m in IMPORT_RE.finditer(text):
-                impl_strength += 2
-                impl_signals.append(f"{p.name}:import {m.group(1)}")
+                award(2, f"{p.name}:import {m.group(1)}")
             for m in HOOK_RE.finditer(text):
-                impl_strength += 1
-                impl_signals.append(f"{p.name}:hook {m.group(1)}")
+                award(1, f"{p.name}:hook {m.group(1)}")
             for m in SCROLL_API_RE.finditer(text):
-                impl_strength += 1
-                impl_signals.append(f"{p.name}:api {m.group(1)}")
+                award(1, f"{p.name}:api {m.group(1)}")
+            for _ in RAF_RE.finditer(text):
+                sig = f"{p.name}:api requestAnimationFrame"
+                if ref_library_driven:
+                    reject(sig, "bare requestAnimationFrame shim not counted "
+                                "for a library-driven ref")
+                else:
+                    award(1, sig)
             for m in GSAP_CALL_RE.finditer(text):
-                impl_strength += 1
-                impl_signals.append(f"{p.name}:gsap {m.group(1)}.{m.group(2)}")
+                award(1, f"{p.name}:gsap {m.group(1)}.{m.group(2)}")
         if p.suffix in CSS_SUFFIXES:
             scope = text
             if p.suffix in {".vue", ".svelte", ".astro"}:
@@ -254,27 +371,48 @@ for sd in SRC_DIRS:
                     r"<style[^>]*>([\s\S]*?)</style>", text, re.IGNORECASE,
                 )
                 scope = "\n".join(style_blocks)
+            # For a library-driven ref, CSS motion inside a mirrored ref-CSS dir
+            # is a byte copy of the ref stylesheet — not impl-authored motion, so
+            # it must not count toward coverage.
+            mirror_discount = ref_library_driven and is_mirror
             kf = CSS_KEYFRAMES_RE.findall(scope)
             if kf:
-                impl_strength += min(3, len(kf))
-                impl_signals.append(f"{p.name}:keyframes x{len(kf)}")
+                sig = f"{p.name}:keyframes x{len(kf)}"
+                if mirror_discount:
+                    reject(sig, "@keyframes in mirrored ref CSS not counted "
+                                "for a library-driven ref")
+                else:
+                    award(min(3, len(kf)), sig)
             anim = CSS_ANIM_RE.findall(scope)
             if anim:
-                impl_strength += min(2, len(anim))
-                impl_signals.append(f"{p.name}:animation x{len(anim)}")
+                sig = f"{p.name}:animation x{len(anim)}"
+                if mirror_discount:
+                    reject(sig, "animation in mirrored ref CSS not counted "
+                                "for a library-driven ref")
+                else:
+                    award(min(2, len(anim)), sig)
             trans = CSS_TRANS_RE.findall(scope)
             if trans:
-                # Transition declarations are common (hover etc) — cap
-                # contribution so one .css file doesn't dominate.
-                impl_strength += min(2, len(trans) // 5)
-                if len(trans) >= 5:
-                    impl_signals.append(
-                        f"{p.name}:transitions x{len(trans)}"
-                    )
+                sig = f"{p.name}:transitions x{len(trans)}"
+                if mirror_discount:
+                    reject(sig, "transition in mirrored ref CSS not counted "
+                                "for a library-driven ref")
+                else:
+                    # Transition declarations are common (hover etc) — cap
+                    # contribution so one .css file doesn't dominate. Only log a
+                    # signal string when the count is notable (>= 5), matching
+                    # the pre-existing behavior.
+                    impl_strength += min(2, len(trans) // 5)
+                    if len(trans) >= 5:
+                        impl_signals.append(sig)
             st = CSS_SCROLL_TIMELINE_RE.findall(scope)
             if st:
-                impl_strength += 2
-                impl_signals.append(f"{p.name}:scroll-timeline")
+                sig = f"{p.name}:scroll-timeline"
+                if mirror_discount:
+                    reject(sig, "scroll-timeline in mirrored ref CSS not counted "
+                                "for a library-driven ref")
+                else:
+                    award(2, sig)
 
 
 # 3. Score → status.
@@ -333,13 +471,24 @@ result = {
     "implMotionStrength": impl_strength,
     "refSignals": signals[:20],
     "implSignals": impl_signals[:20],
+    # Provenance superset: whether the ref motion is library-driven, which
+    # animation libraries were detected, and every impl signal that was
+    # DISCOUNTED (rAF shim / mirrored-ref-CSS motion) so rejected coverage is
+    # auditable rather than silently dropped.
+    "refIsLibraryDriven": ref_library_driven,
+    "refMotionLibraries": ref_motion_libraries,
+    "rejectedImplSignals": rejected_signals[:20],
     "violations": violations,
     "rule": (
         "When ref bundle-map / transition-spec / external-sdks "
         "evidence motion (score >= 3), impl source must show "
         "matching motion implementation (imports, hooks, "
         "IntersectionObserver, GSAP calls). Score 0 with ref >= 3, "
-        "or score < 2 with ref >= 5, fails."
+        "or score < 2 with ref >= 5, fails. For a library-driven ref "
+        "(animation lib in bundle-map/external-sdks), bare "
+        "requestAnimationFrame and @keyframes/animation in mirrored ref "
+        "CSS (from-ref/, ref-css/) do NOT count as impl motion; refs "
+        "without library evidence keep counting them."
     ),
 }
 

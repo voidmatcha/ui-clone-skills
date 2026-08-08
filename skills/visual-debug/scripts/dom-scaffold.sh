@@ -133,6 +133,26 @@ _PER_NODE_NOISE = {"", "normal", "none", "auto", "0px", "rgba(0, 0, 0, 0)"}
 # fs/fw/color/lh/ls and the generator freehanded typography. These 5 strings
 # are cheap; the heavy structural props stay dropped past the cap.
 _TYPOGRAPHY_KEYS = {"fs", "fw", "color", "lh", "ls"}
+_EVIDENCE_ATTR_KEYS = ("aria-label", "alt", "title", "placeholder")
+
+# These element subtrees do not contribute rendered page copy or layout.
+# Keeping their payloads pollutes the Phase-4 prompt with framework/runtime
+# source (notably Next.js RSC scripts) and CSS/template text.
+_NON_RENDERED_TAGS = {"script", "style", "noscript", "template"}
+
+
+def is_non_rendered(node):
+    if not isinstance(node, dict):
+        return False
+    return str(node.get("tag", "")).strip().lower() in _NON_RENDERED_TAGS
+
+
+def copy_evidence_attrs(node, item):
+    """Keep captured user-facing accessibility/asset copy as allowlist evidence."""
+    for key in _EVIDENCE_ATTR_KEYS:
+        value = node.get(key)
+        if isinstance(value, str) and value.strip():
+            item[key] = value
 
 
 def shorten_node_styles(raw):
@@ -202,7 +222,10 @@ def walk(node, styles_map, depth=0, max_depth=8):
     """
     if not isinstance(node, dict):
         return None
+    if is_non_rendered(node):
+        return None
     tag = node.get("tag", "")
+    cls = (node.get("class") or "")[:80]
     text = node.get("text", "") or ""
     children = []
     for c in node.get("children", []) or []:
@@ -211,13 +234,29 @@ def walk(node, styles_map, depth=0, max_depth=8):
             children.append(sub)
     if depth > max_depth:
         # Past the cap: keep the node ONLY if it (or a descendant) carries
-        # text; emit it lightweight (tag/text/children) so the deep copy
-        # survives without re-bloating the prompt with full style dicts.
-        if not text and not children:
+        # text or user-facing evidence; emit it lightweight so deep copy and
+        # accessibility labels survive without re-bloating the prompt with
+        # full style dicts. Attribute-only SVGs are common (`aria-label` on an
+        # external-link icon), and dropping them makes faithful JSX look
+        # fabricated to the bidirectional text checker.
+        has_evidence_attrs = any(
+            isinstance(node.get(key), str) and node[key].strip()
+            for key in _EVIDENCE_ATTR_KEYS
+        )
+        if not text and not children and not has_evidence_attrs:
             return None
         item = {"tag": tag}
+        if cls:
+            # Class tokens are the cheap bridge back to mirrored CSS. Dropping
+            # them past the prompt-depth cap preserves copy but disconnects
+            # deep cards, lists, and media wrappers from their real layout.
+            item["class"] = cls
         if text:
             item["text"] = text
+            # textFull = live-rendered order for mid-text-span paragraphs
+            # (loop-e2e-9); text-fidelity keys on it. Never drop it.
+            if node.get("textFull"):
+                item["textFull"] = node["textFull"]
             # RANK-4 fix (ADDITIVE): the skill says "copy the measured px/weight
             # for ALL text" — so deep text must carry its real typography, not
             # be freehanded. Attach ONLY the cheap typography subset
@@ -233,8 +272,8 @@ def walk(node, styles_map, depth=0, max_depth=8):
                 item["styles"] = type_styles
         if children:
             item["children"] = children
+        copy_evidence_attrs(node, item)
         return item
-    cls = (node.get("class") or "")[:80]
     # Per-node styles win over the class/tag aggregate: the aggregate is a
     # fallback for nodes that did not capture a computed value, but the raw
     # per-node styles already reflect the exceptional-instance layout
@@ -245,12 +284,15 @@ def walk(node, styles_map, depth=0, max_depth=8):
     item = {"tag": tag}
     if text:
         item["text"] = text
+        if node.get("textFull"):
+            item["textFull"] = node["textFull"]
     if cls:
         item["class"] = cls
     if styles:
         item["styles"] = styles
     if children:
         item["children"] = children
+    copy_evidence_attrs(node, item)
     return item
 
 
@@ -280,6 +322,8 @@ def find_section_node(root, section):
     def visit(node):
         if not isinstance(node, dict):
             return
+        if is_non_rendered(node):
+            return
         if id_match[0] is None and sid:
             nid = (node.get("id") or "").strip()
             if nid and nid == sid:
@@ -299,6 +343,8 @@ def count_nodes(node):
     """Total node count in the structure.json tree — the 'substantial content'
     signal for the degenerate-sections guard."""
     if not isinstance(node, dict):
+        return 0
+    if is_non_rendered(node):
         return 0
     n = 1
     for c in node.get("children", []) or []:
@@ -340,6 +386,8 @@ global_tree = walk(structure, styles_map)
 sec_out = []
 for s in sections:
     if not isinstance(s, dict):
+        continue
+    if is_non_rendered(s):
         continue
     sid = normalize_section_id(s)
     cls = (s.get("cls") or s.get("className") or "").strip()

@@ -66,7 +66,7 @@ fi
 # ── Impl canvas count (the "blank hero" trigger) ──────────────────────────
 IMPL_CANVAS_COUNT="-1"   # -1 == unknown (impl not probed)
 if [ -n "$IMPL_URL" ] && command -v agent-browser >/dev/null 2>&1; then
-  RAW="$(agent-browser --session "$SESSION" open "$IMPL_URL" --wait 2000 >/dev/null 2>&1; \
+  RAW="$(agent-browser --session "$SESSION" open "$IMPL_URL" >/dev/null 2>&1; sleep 2; \
     agent-browser --session "$SESSION" eval '(() => document.querySelectorAll("canvas").length)()' 2>/dev/null || echo '')"
   agent-browser --session "$SESSION" close >/dev/null 2>&1 || true
   num="$(printf '%s' "$RAW" | grep -oE '[0-9]+' | head -1)"

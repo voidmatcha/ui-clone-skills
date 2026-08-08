@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .base import CheckResult
+from .reference import _has_real_detection_provenance
 
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
@@ -35,6 +37,153 @@ def _check_webflow(self: Gate) -> list[CheckResult]:
             )
         )
     return results
+
+
+def _safe_ref_json(ref_dir: Path, relative: Any) -> dict[str, Any] | None:
+    if not isinstance(relative, str) or not relative.strip():
+        return None
+    rel = Path(relative)
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    try:
+        path = (ref_dir / rel).resolve()
+        path.relative_to(ref_dir.resolve())
+        if not path.is_file() or path.stat().st_size <= 0:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _is_static_no_signal_evidence(data: dict[str, Any]) -> bool:
+    verdict = str(data.get("verdict") or data.get("result") or "").strip().lower()
+    observation = str(data.get("observation") or data.get("reason") or "").strip().lower()
+    probe_completed = (
+        data.get("checked") is True
+        or data.get("probeCompleted") is True
+        or data.get("runtimeScanned") is True
+    )
+    explicit_static = (
+        data.get("static") is True
+        or data.get("hasMotion") is False
+        or data.get("motionDetected") is False
+        or verdict in {"static", "no-signal", "no_signal", "no motion", "no-motion"}
+        or observation
+        in {"no-signal", "no_signal", "no motion", "no-motion", "static"}
+    )
+    return probe_completed and explicit_static
+
+
+def _positive_motion_evidence(self: Gate) -> bool:
+    plan = self._load_json("verification-plan.json")
+    signals = plan.get("signals") if isinstance(plan, dict) else None
+    if isinstance(signals, dict) and any(
+        signals.get(key)
+        for key in ("hasScrollScrub", "hasScrollStateMachine", "hasIOReveal", "hasHover")
+    ):
+        return True
+
+    interactions = self._load_json("interactions-detected.json")
+    rows = interactions.get("interactions") if isinstance(interactions, dict) else None
+    if isinstance(rows, list) and any(isinstance(row, dict) for row in rows):
+        return True
+
+    hover = self._load_json("hover-css-rules.json")
+    rules = hover.get("rules") if isinstance(hover, dict) else hover
+    if isinstance(rules, list) and any(isinstance(rule, dict) for rule in rules):
+        return True
+
+    runtime = self._load_json("animation-runtime-dump.json")
+    if isinstance(runtime, dict):
+        if runtime.get("scrollLinkedStyles") or runtime.get("animations"):
+            return True
+        timelines = runtime.get("timelines")
+        if isinstance(timelines, list) and timelines:
+            return True
+    return False
+
+
+def _has_typed_static_no_motion_classification(self: Gate) -> bool:
+    """Accept a future explicit static/no-motion classifier, not placeholders."""
+    data = self._load_json("motion-classification.json")
+    if not isinstance(data, dict):
+        return False
+    classification = str(
+        data.get("classification") or data.get("motion") or ""
+    ).strip().lower()
+    source = str(data.get("source") or "").strip().lower()
+    evidence = data.get("evidence")
+    if _positive_motion_evidence(self):
+        return False
+    evidence_items = evidence if isinstance(evidence, list) else []
+    evidence_payloads = [_safe_ref_json(self.ref_dir, item) for item in evidence_items]
+    return (
+        data.get("status") == "pass"
+        and classification in {"static", "no-motion", "no_motion"}
+        and source in {"browser-capture", "agent-browser", "runtime-probe"}
+        and bool(evidence_payloads)
+        and all(
+            payload is not None and _is_static_no_signal_evidence(payload)
+            for payload in evidence_payloads
+        )
+    )
+
+
+def _check_regions_generation_readiness(self: Gate) -> list[CheckResult]:
+    """Block generation unless regions are real or explicitly static-classified."""
+    regions = self._load_json("regions.json")
+    if not isinstance(regions, dict):
+        return []
+    is_placeholder = bool(regions.get("placeholder")) or (
+        regions.get("detectionRan") is False
+    )
+    if is_placeholder:
+        if _has_typed_static_no_motion_classification(self):
+            return [
+                CheckResult(
+                    "regions.json generation readiness",
+                    "pass",
+                    "regions.json is placeholder-only, but a typed static/no-motion "
+                    "classification exists; generation may proceed without motion regions.",
+                )
+            ]
+        return [
+            CheckResult(
+                "regions.json generation readiness",
+                "fail",
+                "regions.json is an auto placeholder (placeholder=true or "
+                "detectionRan=false). This is enough for provisional reference "
+                "capture, but not enough to generate a transition-faithful clone. "
+                "A typed static/no-motion classification is required and must not "
+                "be missing, forged, or contradicted by positive motion evidence.",
+                fix="Run Phase 2 transition detection / capture-region-artifacts so "
+                "regions.json is browser-measured or transition-spec-derived. For a "
+                "genuinely static page, write a typed motion-classification.json "
+                "from browser/runtime evidence.",
+            )
+        ]
+
+    entries = regions.get("regions")
+    entries = entries if isinstance(entries, list) else []
+    has_trigger_types = any(
+        isinstance(region, dict) and region.get("triggerType") for region in entries
+    )
+    if has_trigger_types and not _has_real_detection_provenance(self, regions):
+        return [
+            CheckResult(
+                "regions.json generation readiness",
+                "fail",
+                "regions.json claims real transition regions, but its "
+                "transition-spec derivation or live-capture evidence is missing, "
+                "failed, partial, or does not match the declared region artifacts.",
+                fix="Re-derive regions.json from transition-spec.json + section-map.json, "
+                "or rerun capture-region-artifacts.py until "
+                "capture-region-artifacts-summary.json has status=pass and every "
+                "active region is captured.",
+            )
+        ]
+    return []
 
 
 def _check_hover_timing(self: Gate, interactions_data: dict[str, Any]
@@ -180,7 +329,21 @@ def _check_audit_artifacts(self: Gate) -> list[CheckResult]:
     section_map = self._load_json("section-map.json")
     if not section_map:
         return results
-    sec_ids = {s.get("id") for s in section_map.get("sections", []) if s.get("id")}
+    sec_ids: set[str] = set()
+    for index, section in enumerate(section_map.get("sections", [])):
+        if not isinstance(section, dict):
+            continue
+        raw = section.get("id") or section.get("sectionId")
+        if isinstance(raw, str) and raw.strip():
+            sec_ids.add(raw.strip())
+            continue
+        tag = str(section.get("tag") or "section").lower()
+        cls = re.sub(
+            r"[^a-zA-Z0-9]+",
+            "-",
+            str(section.get("className") or "").strip(),
+        ).strip("-")
+        sec_ids.add(f"section-{index}-{cls or tag}")
     if not sec_ids:
         return results
 
@@ -332,6 +495,17 @@ def _observed_scroll_motion(self: Gate) -> bool:
     decoded.position) or element-tracking cross-position property change.
     """
     cov = self._load_json("transition-coverage.json")
+    # Provenance guard: transition-coverage.json minted by the Phase-2
+    # finalizer is DERIVED FROM transition-spec.json — spec-derived artifacts
+    # may never serve as observation evidence about the spec (a 1-entry
+    # placeholder spec manufactured the evidence of its own adequacy on
+    # realfood-e2e-1).
+    if isinstance(cov, dict) and cov.get("source") == "ui_clone.extraction_artifacts":
+        cov = None
+    if isinstance(cov, dict) and any(
+        "transition-spec" in str(d) for d in (cov.get("derivedFrom") or [])
+    ):
+        cov = None
     if isinstance(cov, dict):
         for el in cov.get("animatedElements") or []:
             if not isinstance(el, dict):
@@ -376,7 +550,8 @@ def _scroll_motion_signals(self: Gate) -> bool:
     """
     # 1) framer-motion / IntersectionObserver path via scroll-engine.json.
     scroll_engine = self._load_json("scroll-engine.json") or {}
-    detected = (scroll_engine.get("detected") or {}) if isinstance(scroll_engine, dict) else {}
+    detected_raw = scroll_engine.get("detected") if isinstance(scroll_engine, dict) else None
+    detected = detected_raw if isinstance(detected_raw, dict) else {}
     for key in ("motion", "useScroll", "scrollYProgress", "IntersectionObserver"):
         entry = detected.get(key) or {}
         if isinstance(entry, dict) and (entry.get("matches") or 0) > 0:
@@ -419,25 +594,15 @@ def _check_scroll_spec_coverage(self: Gate, spec: Any) -> list[CheckResult]:
       - transition-spec.json has zero entries whose trigger / type / mechanism
         contains scroll | intersection | inview | viewport | scrub
     """
-    # sticky-elements.json can be a list OR a wrapper dict — coerce to list[Any].
-    raw_sticky = self._load_json_any("sticky-elements.json")
-    sticky: list[Any] = []
-    if isinstance(raw_sticky, list):
-        sticky = raw_sticky
-    elif isinstance(raw_sticky, dict):
-        entries = raw_sticky.get("elements") or raw_sticky.get("stickyElements")
-        if isinstance(entries, list):
-            sticky = entries
-    if not sticky:
-        extracted = self._load_json("extracted.json") or {}
-        ext_sticky = extracted.get("stickyElements") if isinstance(extracted, dict) else None
-        if isinstance(ext_sticky, list):
-            sticky = ext_sticky
-    observed = _observed_scroll_motion(self)
-    # Drop the sticky-ONLY precondition: any observed scroll-classified element
-    # (sticky OR non-sticky parallax/reveal) requires a scroll-trigger spec entry.
-    if not sticky and not observed:
-        return []
+    # Trust order inverted deliberately: STRONG independent evidence
+    # (_scroll_motion_signals: bundle tokens, generation-plan markers) ALONE
+    # satisfies the precondition. The old order gated on sticky/observed
+    # first — and `observed` read transition-coverage.json, an artifact
+    # DERIVED from the spec under audit, so a 1-entry placeholder spec
+    # manufactured the evidence of its own adequacy and the check returned
+    # [] before ever consulting the independent signals (realfood-e2e-1).
+    # sticky-elements / _observed_scroll_motion remain available as
+    # corroboration for diagnostics but no longer gate this check.
     if not self._scroll_motion_signals():
         return []
     spec_entries: list[Any] = []
@@ -454,15 +619,7 @@ def _check_scroll_spec_coverage(self: Gate, spec: Any) -> list[CheckResult]:
         if scroll_pattern.search(blob):
             has_scroll_entry = True
             break
-    if sticky:
-        sample_sticky = ", ".join(
-            (e.get("className") or e.get("cls") or e.get("tag") or "?")
-            for e in sticky[:3]
-            if isinstance(e, dict)
-        )
-        observed_desc = f"{len(sticky)} sticky element(s) ({sample_sticky})"
-    else:
-        observed_desc = "observed scroll motion (non-sticky parallax/reveal)"
+    observed_desc = "scroll-motion evidence (bundle tokens / plan signals)"
     if has_scroll_entry:
         return [
             CheckResult(
@@ -489,5 +646,3 @@ def _check_scroll_spec_coverage(self: Gate, spec: Any) -> list[CheckResult]:
             "sticky-elements.json; consult animation-detection.md Phase B.",
         )
     ]
-
-

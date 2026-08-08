@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -26,7 +27,7 @@ const STYLE = {
 };
 
 function makeEl(tag, cls, rect, children, text) {
-  return {
+  const el = {
     tagName: tag,
     id: "",
     className: cls,
@@ -34,7 +35,17 @@ function makeEl(tag, cls, rect, children, text) {
     children: children || [],
     getBoundingClientRect: () => rect,
     querySelectorAll: () => [],
+    contains: (other) => {
+      const stack = [...(children || [])];
+      while (stack.length) {
+        const current = stack.shift();
+        if (current === other) return true;
+        stack.push(...(current.children || []));
+      }
+      return false;
+    },
   };
+  return el;
 }
 
 const child = makeEl("DIV", "box",
@@ -55,7 +66,12 @@ global.document = {
 def _extract_iife(script_text: str) -> str:
     marker = 'eval "'
     start = script_text.index(marker) + len(marker)
-    end = script_text.index('" 2>/dev/null || echo "[]")', start)
+    end_markers = ['" > "$RAW_RESULT"', '" 2>/dev/null || echo "[]")']
+    end = min(
+        script_text.index(end_marker, start)
+        for end_marker in end_markers
+        if end_marker in script_text[start:]
+    )
     return script_text[start:end]
 
 
@@ -94,3 +110,79 @@ def test_extract_section_html_keeps_subpixel_geometry(tmp_path: Path) -> None:
     assert child["width"] == pytest.approx(199.84), child
     assert child["x"] == pytest.approx(12.34), child
     assert child["y"] == pytest.approx(50.6), child
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_extract_section_html_includes_large_div_children_when_no_sections(tmp_path: Path) -> None:
+    iife = _extract_iife(SCRIPT.read_text(encoding="utf-8"))
+
+    dom_stub = (
+        DOM_STUB
+        + r"""
+const heroDiv = makeEl("DIV", "main-hero",
+  { width: 1000.5, height: 420.25, left: 0, top: 0 }, [], "Hero div");
+const contentDiv = makeEl("DIV", "feature-band",
+  { width: 1000.5, height: 260.5, left: 0, top: 450 }, [], "Feature div");
+const main = makeEl("MAIN", "main",
+  { width: 1000.5, height: 700, left: 0, top: 0 }, [heroDiv, contentDiv], "");
+global.document.querySelectorAll = () => [];
+global.document.querySelector = (selector) => selector === "main" ? main : null;
+global.document.body = { children: [main] };
+"""
+    )
+
+    harness = tmp_path / "harness-divs.js"
+    harness.write_text(dom_stub + "\nconsole.log(" + iife + ");\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        ["node", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    sections = json.loads(proc.stdout.strip())
+    assert [section["name"] for section in sections] == ["hero", "features"]
+    assert sections[0]["tag"] == "div"
+    assert sections[0]["rect"]["height"] == pytest.approx(420.25)
+
+
+def test_extract_section_html_script_unwraps_agent_browser_wrapped_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    agent_browser = fake_bin / "agent-browser"
+    wrapped_sections = json.dumps([
+        {
+            "name": "hero",
+            "tag": "div",
+            "rect": {"top": 0, "height": 320.5, "width": 1000.25},
+            "section": {"styles": {"width": 1000.25}},
+            "children": [],
+            "media": [],
+        }
+    ])
+    agent_browser.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "if 'eval' in sys.argv:\n"
+        f"    print(json.dumps({{'data': {{'result': {wrapped_sections!r}}}}}))\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    agent_browser.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    out_dir = tmp_path / "ref"
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), "test-session", str(out_dir)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+        cwd=REPO,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = json.loads((out_dir / "html" / "hero.json").read_text(encoding="utf-8"))
+    assert payload["rect"]["height"] == pytest.approx(320.5)

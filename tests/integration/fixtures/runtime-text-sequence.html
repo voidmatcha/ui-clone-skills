@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Runtime text sequence fixture</title>
+    <style>
+      body { margin: 0; font: 20px/1.5 sans-serif; }
+      section { min-height: 900px; padding: 32px; box-sizing: border-box; }
+      .closed-menu { transform: translateX(-3000px); }
+      .vertical-secret { transform: translateY(-3000px); }
+      .clipped-menu { width: 0; height: 0; overflow: hidden; }
+      .transparent-color { color: transparent; }
+      .transparent-fill { -webkit-text-fill-color: transparent; }
+      .visible-explicit-fill {
+        color: transparent;
+        -webkit-text-fill-color: rgb(220, 20, 60);
+      }
+      .visible-gradient-text {
+        color: transparent;
+        -webkit-text-fill-color: transparent;
+        background-image: linear-gradient(90deg, #f00, #00f);
+        background-clip: text;
+        -webkit-background-clip: text;
+      }
+      #staggered-copy { opacity: 0; transition: opacity 1ms; }
+      #staggered-copy.visible { opacity: 1; }
+      #timer-copy { opacity: 0; }
+      #timer-copy.visible { opacity: 1; }
+    </style>
+  </head>
+  <body>
+    <h1>Visible page heading</h1>
+    <nav class="closed-menu"><a href="#">Closed menu secret</a></nav>
+    <aside class="vertical-secret">Vertical offcanvas secret</aside>
+    <div class="clipped-menu"><button>Clipped menu secret</button></div>
+    <p class="transparent-color">Transparent color secret</p>
+    <p class="transparent-fill">Transparent fill secret</p>
+    <p class="visible-explicit-fill">Visible explicit fill copy</p>
+    <p class="visible-gradient-text">Visible gradient text copy</p>
+    <section>
+      <p id="inline-copy">Correct prefix <a href="#">Inline link</a> suffix</p>
+    </section>
+    <section id="lazy-middle">
+      <h2 id="staggered-copy">Transient staggered copy</h2>
+    </section>
+    <section>
+      <p>Timer phase before</p>
+      <h4 id="timer-copy">Timer carousel variant</h4>
+      <p>Timer phase after</p>
+    </section>
+    <section><p>Final visible copy</p></section>
+    <script>
+      const target = document.querySelector("#lazy-middle");
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries.some((entry) => entry.isIntersecting);
+        document.querySelector("#staggered-copy").classList.toggle("visible", visible);
+        if (visible && !document.querySelector("#lazy-copy")) {
+          target.insertAdjacentHTML(
+            "beforeend",
+            '<h2 id="lazy-copy">Lazy intermediate copy</h2>',
+          );
+        }
+      }, { threshold: 0.1 });
+      observer.observe(target);
+      if (new URLSearchParams(location.search).has("wrong-hero")) {
+        document.querySelector("h1").textContent = "Incorrect page heading";
+      }
+      if (new URLSearchParams(location.search).has("wrong-prefix")) {
+        document.querySelector("#inline-copy").firstChild.nodeValue = "Wrong prefix ";
+      }
+      if (new URLSearchParams(location.search).has("smooth-reset")) {
+        document.documentElement.style.scrollBehavior = "smooth";
+      }
+      if (new URLSearchParams(location.search).has("body-horizontal-clip")) {
+        document.body.style.height = "100vh";
+        document.body.style.overflowX = "clip";
+        document.body.style.overflowY = "visible";
+      }
+      if (new URLSearchParams(location.search).has("generated-pseudo")) {
+        document.querySelector("h1").insertAdjacentHTML(
+          "beforeend",
+          '<span data-pseudo="before">01</span>',
+        );
+      }
+      const timerCopy = document.querySelector("#timer-copy");
+      let swept = false;
+      let phaseSettling = false;
+      const timer = setInterval(() => {
+        timerCopy.classList.toggle("visible");
+      }, 220);
+      addEventListener("scroll", () => {
+        if (scrollY > 0) swept = true;
+        if (!swept || scrollY !== 0 || phaseSettling) return;
+        phaseSettling = true;
+        clearInterval(timer);
+        timerCopy.classList.remove("visible");
+        const phaseTimer = setInterval(() => {
+          timerCopy.classList.toggle("visible");
+        }, 1500);
+        setTimeout(() => {
+          clearInterval(phaseTimer);
+          timerCopy.classList.toggle(
+            "visible",
+            new URLSearchParams(location.search).get("phase-final") === "on",
+          );
+        }, 4000);
+      });
+    </script>
+  </body>
+</html>

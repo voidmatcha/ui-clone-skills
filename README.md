@@ -51,7 +51,7 @@ These are the decisions that shape how the plugin is structured. They aim to kee
 - **Near-zero vision tokens for comparison.** AE and SSIM CLI tools handle pixel diff — the LLM never reads ref vs impl screenshots side-by-side. Vision tokens are only used when: (1) reading a single diff image on AE/SSIM failure, (2) Phase E final semantic review (~44K tokens, mandatory).
 - **Progressive-disclosure sub-docs.** Each SKILL.md contains only the pipeline and core rules (~5.9K tokens total across 3 skills). Detailed procedures live in 51 focused sub-docs loaded only when that step runs. Common paths stay lean; specialized paths expand on demand.
 - **Single source of truth for transitions.** `transition-spec.json` is produced once from bundle analysis. Implementation reads the spec, never re-greps the bundle — avoiding wasted work and the risk of picking the wrong conditional branch.
-- **Automation over introspection.** Python gates (`python -m ui_clone.gate`, `python -m ui_clone.pipeline`, `scripts/verify/auto-verify.sh`) decide whether a step is complete. Agents don't self-certify "looks good enough."
+- **Automation over introspection.** CLI gates (`python -m ui_clone.*` / `node bin/ui-clone`, published: `npx ui-clone-cli`, plus `scripts/verify/auto-verify.sh`) decide whether a step is complete. Agents don't self-certify "looks good enough."
 - **No judgment, data only.** Every decision must be backed by extracted data, captured screenshots, or script output. "Probably", "close enough", and "just a content difference" are forbidden — each has a documented failure case.
 
 ## Skills
@@ -74,9 +74,11 @@ The public surface stays small: Claude Code and Codex expose the same three skil
 tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"
 ```
 
-The default install registers **both** Claude Code and Codex marketplaces in one pass; each registration is skipped silently if that host's CLI is not on PATH. Inside Claude Code: `/plugin install ui-clone-skills@voidmatcha`. For Codex, the installer also merges the gate hooks into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` feature, so plugin-manifest hooks no longer load) — accept the one-time hook-trust prompt on the next Codex session.
+The default install registers **both** Claude Code and Codex marketplaces in one pass; each registration is skipped silently if that host's CLI is not on PATH. Neither host is pointed at the development checkout, so `tmp/`, `scratch/`, `.venv`, and other local artifacts are never copied into plugin caches. The two hosts need **different** sources: Codex reads its install in place, so it gets the symlink projection under `~/plugins/ui-clone-skills` and stays live with the checkout; Claude Code *copies* its marketplace source into a per-version cache without following symlinks, so it gets a real-file source under `~/.local/share/ui-clone-skills/claude-src`. For Claude Code, the installer also installs the plugin (`ui-clone-skills@voidmatcha`, user scope) — new Claude Code sessions load it automatically. For Codex, the installer also merges the gate hooks into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` feature, so plugin-manifest hooks no longer load) — accept the one-time hook-trust prompt on the next Codex session.
 
-For one-host installs, using a local development checkout as the Codex plugin source, the manual git-clone path, the SKILL.md-only no-hooks copy, and the manual system-deps recipe, see [`README_detail/install.md`](./README_detail/install.md).
+After installing, the installer **runs one of the installed hooks out of Claude's plugin cache** and fails if it does not execute. An install can otherwise report success while delivering an empty plugin — that failure is invisible to `claude plugin list`, which reports such a plugin as installed and enabled. If the probe itself misbehaves on your host, `UI_CLONE_SKIP_HOOK_PROBE=1` skips it; do not use it to get past a genuine delivery failure, because the result is a plugin that silently enforces nothing.
+
+For one-host installs, using a local development checkout as the plugin source, the manual git-clone path, the SKILL.md-only no-hooks copy, and the manual system-deps recipe, see [`README_detail/install.md`](./README_detail/install.md).
 
 ## Requirements
 
@@ -90,7 +92,7 @@ For one-host installs, using a local development checkout as the Codex plugin so
 | `ffmpeg` | Video capture + frame extraction |
 | `uv` + Python 3.11+ | Gate / hook system (`ui_clone/`) |
 
-Pipeline hooks register through `hooks/hooks.json` for Claude Code (plugin manifest) and, for Codex, via `install.sh` merging `hooks/codex-hooks.json` into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` manifest path). For the full hook table, the goal-driven continuation pattern, and the gate-system CLI, see [`README_detail/pipeline.md`](./README_detail/pipeline.md).
+Pipeline hooks register through the Claude Code plugin source's `hooks/hooks.json` and, for Codex, via `install.sh` merging `hooks/codex-hooks.json` into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` manifest path). For the full hook table, the goal-driven continuation pattern, and the gate-system CLI, see [`README_detail/pipeline.md`](./README_detail/pipeline.md).
 
 ## Quickstart
 
@@ -100,7 +102,7 @@ After installing, give the agent a URL and a target. Use `ui-reverse-engineering
 Clone the hero section from https://stripe.com/payments into React + Tailwind. Output to ./out/
 ```
 
-The pipeline runs automatically. `python -m ui_clone.pipeline` detects the current phase and prints the next action; you don't invoke phases manually.
+The pipeline runs automatically. `python -m ui_clone.pipeline ... status --json` (or `node bin/ui-clone ... status --json`; published: `npx ui-clone-cli`) detects the current phase and prints the next action; you don't invoke phases manually. See `docs/agent-cli.md` for the agent-readable CLI contract.
 
 **What happens:**
 
@@ -111,7 +113,9 @@ The pipeline runs automatically. `python -m ui_clone.pipeline` detects the curre
 
 If verification fails, the pipeline iterates up to 3 rounds (Phase H self-healing loop) before asking for human review.
 
-**Hooks are registered on install** and both Claude Code and Codex route through `hooks/shim.sh`, so premature write blocks and unverified-completion warnings stay shared. Claude Code loads them from the plugin manifest (`hooks/hooks.json`). Codex loads them from `~/.codex/hooks.json`, into which `install.sh` merges the gate entries (idempotently) — `plugin_hooks` was removed in codex-cli 0.137 and is no longer used. Re-run `install.sh` after pulling hook-registration changes; plain script-logic edits are picked up live via the install marker on the next session.
+**Hooks are registered on install** and both Claude Code and Codex route through `hooks/shim.sh`, so premature write blocks and unverified-completion warnings stay shared. Claude Code loads them from the installed plugin source's `hooks/hooks.json`. Codex loads them from `~/.codex/hooks.json`, into which `install.sh` merges the gate entries (idempotently) — `plugin_hooks` was removed in codex-cli 0.137 and is no longer used. Re-run `install.sh` after pulling hook-registration changes; plain script-logic edits are picked up live via the install marker on the next session.
+
+**Recovering a stalled run.** Symptom: a session goes quiet for >15 min showing "N shells still running", but `ps`/`pgrep` find no live processes. Cause: a background-shell completion wake-up was lost at the runtime level — the completion event failed to re-invoke the agent and was not retried. Nothing is corrupted. Recovery: **send any message** — the pipeline resumes losslessly from `pipeline-state.json` and the on-disk artifacts. To shrink the exposure window, long verification sweeps are split into sub-8-minute, idempotent chunks with persisted intermediate state: the video-motion scroll sweep checkpoints each captured position to `scroll-chunk-manifest.json` (`UI_CLONE_VMC_SCROLL_CHUNK` bounds positions per invocation), so a resumed run re-captures at most one in-flight chunk instead of restarting the whole sweep, and the aggregated verdict is identical to a monolithic run.
 
 ## Skill deep dives
 

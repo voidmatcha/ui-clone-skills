@@ -42,7 +42,10 @@ if [ ! -d "$REF_DIR" ]; then
 fi
 
 OUT_PATH="$REF_DIR/hidden-children.json"
-EVAL_OUT="$(mktemp -t hidden-children-XXXXXX.json)"
+# L-MEA-13 class: macOS mktemp needs TRAILING Xs — create then rename.
+EVAL_OUT="$(mktemp -t hidden-children-XXXXXX)"
+mv "$EVAL_OUT" "${EVAL_OUT}.json"
+EVAL_OUT="${EVAL_OUT}.json"
 trap 'rm -f "$EVAL_OUT"' EXIT
 
 agent-browser --session "$SESSION" open "$IMPL_URL" >/dev/null 2>&1 || {

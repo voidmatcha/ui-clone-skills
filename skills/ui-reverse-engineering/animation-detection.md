@@ -15,7 +15,17 @@ Detect ALL motion on the page: splash/intro, auto-timers, scroll-driven, paralla
 | **B — Scroll capture** | Full scroll video at 60fps, consistent speed. | Parallax, scale transitions, sticky, clip-path reveals, opacity fades, position changes |
 | **C — Per-element tracking** | Targeted video per section/element from A or B. | Exact transform/opacity/scale at each scroll % |
 
-All 4 phases are MANDATORY. Phase 0 is cheap (one eval) and recovers runtime-only params that bundle-grep (Step 4) and video phases never see — `"top 80%"` → resolved pixel start, custom cubic-bezier arrow-function ease, IX2 timeline keys.
+All 4 phases are required for **completion**, but they are not all a prerequisite for the **first generation** — ordering matters under a time budget. Phase 0 is cheap (one eval) and recovers runtime-only params that bundle-grep (Step 4) and video phases never see — `"top 80%"` → resolved pixel start, custom cubic-bezier arrow-function ease, IX2 timeline keys — so run it **before** generation by default (with a tight timeout; skip only as a known fidelity debt under hard time pressure).
+
+**Generate-first / time-box discipline.** Phases A/B/C (60fps idle/scroll/per-element video) are expensive and *refine* motion on an existing impl — they do **not** *gate* the scaffold. Reach a `generation-plan.json` and a base scaffold from Steps 1–5 + Phase 0 **first**, then run A/B/C to add exact motion timings and satisfy the post-implement / runtime-proof gates. Do NOT spend the whole extraction budget on A/B/C before any impl exists — frames are *verification* of the bundle spec, not a precondition for it (observed failure: a full A/B/C + runtime-dump pass consumed the entire budget and reached the generation-plan with zero time left to generate, producing no deliverable; a host that deferred A/B/C generated a working impl in the same budget).
+
+**Exception — capture motion before generation when it is load-bearing for STRUCTURE, not just polish. Decide this from CHEAP pre-Step-6 artifacts only (Phase-0 runtime dump + Steps 0A/2.6-pre/5/5c-a outputs that already exist before any A/B/C video runs). Never gate this decision on `state-structure-spec.json`, which is itself written by the A/B/C capture scripts you are deciding whether to run:**
+- **Canvas/WebGL** experiences — `hasCanvas` in `canvas-webgl-detection.json` (Step 0A). Read `canvas-webgl-extraction.md` before Phase 2.
+- **Timed splash/preloader** overlays — a preloader / class-flip / >20% DOM mutation between states already flagged in `dom-state-diff.json` (Step 2.6-pre dual-snapshot). The deterministic test harness + dual-snapshot state capture gate scaffold shape, so capture this before generating.
+- A **custom scroll engine** — non-native wrapper/API in `scroll-engine.json` (Step 5c-a) whose wrapper choice dictates layout coupling.
+- A **structure-altering interaction** — a splash / scroll / hover / click interaction already flagged in `interactions-detected.json` (Step 5) that changes component NESTING (not just visual polish). Use this cheap interaction inventory, not the post-capture `state-structure-spec.json`, to decide.
+
+Everything else (exact transform/opacity/scale at each scroll %, hover deltas, per-element timings) is polish: defer to A/B/C after the base scaffold exists. If none of the four cheap signals above fire, generate the scaffold first and run A/B/C afterward to satisfy the post-implement / runtime-proof gates.
 
 ## Multi-snapshot DOM state inputs (v0.7.0+)
 
@@ -362,10 +372,16 @@ ffmpeg -i tmp/ref/<component>/scroll-capture.webm -vf fps=60 \
 > 60fps extraction above is for AE/SSIM automated comparison (Phase 4 verification), NOT for LLM reading. Do NOT Read scroll frames visually — use the DOM tracking eval below for exact property values at each scroll position.
 
 ```bash
+# NOTE: do NOT infer the scroll container from [class*=scroll] — it matches
+# decorative nodes (.scroll-indicator, .pill-scroll) and writes scrollTop to a
+# non-scrollable div, so the page never moves and every sample is identical
+# (all-static -> scroll animations silently dropped). Consult scroll-engine.json
+# (from B-1) for the real engine; on a custom engine (Lenis/Locomotive)
+# scrollTop/scrollTo is intercepted — drive wheel events (see B-1) instead.
 agent-browser --session <project> eval "(() => {
-  const lenis = document.querySelector('[class*=lenis], [class*=scroll]');
-  const container = lenis || document.documentElement;
-  const maxScroll = container.scrollHeight - window.innerHeight;
+  const engine = document.querySelector('[class*=lenis], [data-scroll-container], [class*=locomotive]');
+  const container = document.scrollingElement || document.documentElement;
+  const maxScroll = Math.max(container.scrollHeight, document.body.scrollHeight) - window.innerHeight;
 
   const targets = [];
   document.querySelectorAll('section, [class*=banner], [class*=hero], [class*=asset], [class*=project], [class*=review], footer').forEach(el => {
@@ -383,9 +399,14 @@ agent-browser --session <project> eval "(() => {
   const capture = () => {
     if (posIndex >= positions.length) { window.__elementTracking = samples; return; }
     const scrollPos = positions[posIndex];
-    if (lenis) lenis.scrollTop = scrollPos; else window.scrollTo(0, scrollPos);
+    window.scrollTo(0, scrollPos);
+    if (engine && engine !== document.documentElement) engine.scrollTop = scrollPos;
     requestAnimationFrame(() => {
-      const snapshot = { scrollY: scrollPos, scrollPct: Math.round(scrollPos / maxScroll * 100), elements: [] };
+      // Record the REAL scrolled position, never the intended scrollPos — on an
+      // intercepted engine the page may not have moved, and a snapshot that
+      // lies about scrollY makes an all-static sweep look like a valid one.
+      const realY = Math.round(window.scrollY || document.documentElement.scrollTop || (engine ? engine.scrollTop : 0));
+      const snapshot = { scrollY: realY, scrollPct: maxScroll > 0 ? Math.round(realY / maxScroll * 100) : 0, elements: [] };
       targets.forEach(({ el, selector }) => {
         const s = getComputedStyle(el);
         const r = el.getBoundingClientRect();

@@ -203,6 +203,32 @@ def test_multi_viewport_section_compare_routes_visual_judge_to_viewport_pngs(
     assert "--label '[375x812] Hero Section'" in card
 
 
+
+def _write_fresh_canonical_stamp(ref_dir: Path) -> None:
+    """New contract (omx follow-up): --check-done requires the canonical
+    verify-stamp with a sections/result.txt hash pin."""
+    import datetime
+    import hashlib
+
+    from ui_clone.state import POST_IMPL_VERIFY_GATES
+
+    result_file = ref_dir / "sections" / "result.txt"
+    stamp = {
+        "verifiedAt": datetime.datetime.now(datetime.UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "gatesPassed": list(POST_IMPL_VERIFY_GATES),
+        "stampedBy": "pipeline.execute_verify",
+        "implDir": str(ref_dir / "impl"),
+        "refDir": str(ref_dir),
+    }
+    if result_file.is_file():
+        stamp["sectionsResultSha256"] = hashlib.sha256(
+            result_file.read_bytes()
+        ).hexdigest()
+    (ref_dir / "verify-stamp.json").write_text(json.dumps(stamp))
+
+
 def test_done_goal_card_surfaces_broad_structural_only_warning(tmp_path: Path) -> None:
     """Broad STRUCTURAL_ONLY coverage is non-blocking, but it must be visible
     in the next-action surface so agents do not report clean pixel polish.
@@ -238,6 +264,7 @@ def test_done_goal_card_surfaces_broad_structural_only_warning(tmp_path: Path) -
     assert "structural-only broad coverage" in card.next_action
     assert "Narrow asset-substitution.json" in card.next_action
     assert "pixel AE polishing skipped" in card.next_action
+    _write_fresh_canonical_stamp(ref_dir)
     proc = subprocess.run(
         [sys.executable, "-m", "ui_clone.goal", str(ref_dir), "--check-done"],
         capture_output=True,
@@ -920,6 +947,7 @@ def test_goal_check_done_exits_zero_when_done_and_clean(tmp_path: Path) -> None:
     result_file = ref_dir / "sections" / "result.txt"
     result_file.parent.mkdir(parents=True)
     result_file.write_text("| hero | PASS | ok |\n", encoding="utf-8")
+    _write_fresh_canonical_stamp(ref_dir)
 
     result = subprocess.run(
         [sys.executable, "-m", "ui_clone.goal", str(ref_dir), "--check-done"],
@@ -985,6 +1013,7 @@ def test_goal_check_done_ignores_result_footer_fail_substring(tmp_path: Path) ->
         "**Result: 2 PASS, 0 FAIL, 0 SKIP, 2 STRUCTURAL_ONLY**\n",
         encoding="utf-8",
     )
+    _write_fresh_canonical_stamp(ref_dir)
 
     result = subprocess.run(
         [sys.executable, "-m", "ui_clone.goal", str(ref_dir), "--check-done"],

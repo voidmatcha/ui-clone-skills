@@ -169,3 +169,47 @@ def test_gate_font_parity_fails_when_invalid_parity_value(tmp_path: Path) -> Non
     failures = [r for r in results if r.status == "fail"]
     assert failures, "unknown parity value must fail"
 
+
+
+def test_gate_font_parity_fails_when_a_secondary_face_loads_only_on_the_ref(
+    tmp_path: Path,
+) -> None:
+    """Sampling one element's primary family cannot see a second declared face.
+
+    A page whose body text is Die Grotesk and whose banner is Geist Mono passes
+    a primary-family probe while Geist Mono silently renders as Arial. Once the
+    artifact enumerates every declared @font-face, a face the ref loads and the
+    impl does not must fail — otherwise the gate certifies typography it never
+    looked at.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "font-parity.json").write_text(
+        json.dumps(
+            {
+                "ref": {
+                    "family": "Die Grotesk A",
+                    "loaded": True,
+                    "families": [
+                        {"family": "Die Grotesk A", "loaded": True},
+                        {"family": "Geist Mono", "loaded": True},
+                    ],
+                },
+                "impl": {
+                    "family": "Die Grotesk A",
+                    "loaded": True,
+                    "families": [
+                        {"family": "Die Grotesk A", "loaded": True},
+                        {"family": "Geist Mono", "loaded": False},
+                    ],
+                },
+                "parity": "match",
+            }
+        )
+    )
+
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_font_parity() if r.status == "fail"]
+    assert any("Geist Mono" in r.message for r in failures), (
+        f"a declared face the impl never loaded must fail: {failures}"
+    )

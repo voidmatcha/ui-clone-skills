@@ -76,7 +76,7 @@ If hero is still visible, increase crop_t by 1.0s and reconvert. Repeat until ta
 
 ## Step 2B: Scroll transitions
 
-Two phases: **exploration (video)** → **verification (clip screenshot)**
+Two phases: **exploration (video)** → **verification (element screenshot)**
 
 ### Step 2B-1: Exploration — identify transition range via video
 
@@ -114,9 +114,9 @@ Open the video with the Read tool to confirm:
 - Scroll y value where change fully ends (`settled_y`)
 - Midpoint y value (`mid_y = (trigger_y + settled_y) / 2`)
 
-### Step 2B-2: Verification — precise comparison via clip screenshots
+### Step 2B-2: Verification — precise comparison via element screenshots
 
-Capture 3 states as clip screenshots at y values identified during exploration.
+Capture 3 states as selector screenshots at y values identified during exploration.
 
 ```bash
 # before: just before change begins
@@ -127,7 +127,7 @@ agent-browser --session <project> eval "(() => {
   const r = el.getBoundingClientRect();
   return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
 })()"
-agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
+agent-browser --session <project> screenshot '<selector>' \
   $OUT_DIR/clip/ref/<name>-before.png
 
 # mid: midpoint of change (re-measure rect — transform may change size depending on scroll position)
@@ -138,7 +138,7 @@ agent-browser --session <project> eval "(() => {
   const r = el.getBoundingClientRect();
   return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
 })()"
-agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
+agent-browser --session <project> screenshot '<selector>' \
   $OUT_DIR/clip/ref/<name>-mid.png
 
 # after: after change completes
@@ -149,13 +149,26 @@ agent-browser --session <project> eval "(() => {
   const r = el.getBoundingClientRect();
   return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
 })()"
-agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
+agent-browser --session <project> screenshot '<selector>' \
   $OUT_DIR/clip/ref/<name>-after.png
 ```
 
 > **Role of mid state:** Comparing only before/after cannot verify easing curves. Checking whether transform/opacity values are exactly 50% at mid catches easing differences like linear vs ease-in-out.
 
 **Repeat identically for impl** (change ref → impl in paths, use the same y values).
+
+The screenshot command accepts `screenshot [selector] [path]`; keep the selector
+before the output path. If the changing visual region has no selector of its
+own (for example, a canvas subregion), capture the viewport and crop it
+afterward:
+
+```bash
+agent-browser --session <project> screenshot /tmp/<name>-viewport.png
+magick /tmp/<name>-viewport.png -crop <width>x<height>+<x>+<y> +repage \
+  $OUT_DIR/clip/ref/<name>.png
+```
+
+Measure the rectangle after scrolling and after activating the target state.
 
 Update that region in `regions.json` with:
 
@@ -171,56 +184,74 @@ Update that region in `regions.json` with:
 
 ## Step 2C: Hover / interactive transitions
 
-**Capture idle/active two states via eval + clip screenshot instead of video.**
+**Capture idle/active two states via eval + selector screenshot instead of video.**
 Use video only when mid-transition frames matter — most hover/class/intersection comparisons need only two states.
 
 **Choose activation method based on `triggerType`:**
 
 ### css-hover
 
+Use the capture bridge for reference hover regions. It derives `regions.json`
+from the transition spec when necessary, deduplicates identical
+selector/trigger pairs, drives both real CDP hover and JavaScript hover events,
+and records only non-identical PNG pairs:
+
 ```bash
-# Confirm element position
-agent-browser --session <project> eval "(() => {
-  const el = document.querySelector('<selector>');
-  el.scrollIntoView({ block: 'center' });
-  const r = el.getBoundingClientRect();
-  return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
-})()"
-agent-browser --session <project> wait 500
-
-# Capture idle state
-agent-browser --session <project> screenshot \
-  --clip <x>,<y>,<width>,<height> \
-  $OUT_DIR/clip/ref/<name>-idle.png
-
-# Force hover state
-agent-browser --session <project> eval "(() => {
-  const el = document.querySelector('<selector>');
-  el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-  el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-})()"
-agent-browser --session <project> wait <transitionDuration + 100>
-
-# Capture hover state
-agent-browser --session <project> screenshot \
-  --clip <x>,<y>,<width>,<height> \
-  $OUT_DIR/clip/ref/<name>-active.png
-
-# Release hover
-agent-browser --session <project> eval "(() => {
-  const el = document.querySelector('<selector>');
-  el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
-  el.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
-})()"
+python3 scripts/extract/capture-region-artifacts.py \
+  <reference-url> <project> "$OUT_DIR"
 ```
 
-> **CSS `:hover` pseudo-class may not be triggered by JS events.** In that case, use `agent-browser --session <project> hover <selector>` for CDP-level hover, then screenshot immediately:
-> ```bash
-> agent-browser --session <project> hover <unique-selector>
-> agent-browser --session <project> wait <transitionDuration + 100>
-> agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> $OUT_DIR/clip/ref/<name>-active.png
-> agent-browser --session <project> hover body
-> ```
+The bridge uses the current `agent-browser screenshot [selector] [path]`
+interface. It writes explicit `artifacts.idle` and
+`artifacts.active` paths plus `capture-region-artifacts-summary.json`.
+Successfully observed pairs also replace auto-placeholder hover stubs in
+`transition-spec.json` with live-capture provenance, the actual reference
+frames, and measured property/duration/easing values. A region the bridge
+probed successfully and found inert is removed instead of being promoted as
+evidence. A region whose probe failed (selector not observable, screenshot or
+crop failure, or a computed-style change with no pixel delta) is kept as an
+unproven candidate so a corrected re-run still has something to re-probe.
+It opens and closes `<project>-region-artifacts`; pass
+`--reuse-session` only when the caller owns the named session lifecycle.
+Auto-generated specs, dispatch-only regions, and interaction inventories are
+reconciled to the selectors that live capture actually proved, with structured
+skip reasons for stale entries. A non-hover dispatch stub is stale only when
+its corresponding current `verification-plan.json` signals are explicitly
+false; active or unknown scroll/reveal/canvas/carousel signals remain
+unsupported failures. Authored/manual inventories are never pruned; any
+uncaptured obligation remains a failure for its owner to resolve.
+Before capture, a non-capture-backed `regions.json` derived from an older
+transition spec is refreshed when the current auto spec or its selector/trigger
+signature differs. Authored regions and bridge-stamped live captures are not
+overwritten.
+Promoted `source_chunk` values must resolve to real files under `css/`,
+`bundles/`, or `html/`. Legacy tooling labels are replaced from a matching
+`hover-css-rules.json` `sourceFile` when available, otherwise with the explicit
+`inline init` sentinel. This repair also runs for preserved live hover
+transitions that were not recaptured, without changing their animation fields
+or reference frames.
+
+### Swiper carousel
+
+When `verification-plan.json` reports `signals.hasSwiper: true`, capture the
+live runtime instance instead of treating library detection as sufficient:
+
+```bash
+python3 scripts/extract/capture-swiper-artifacts.py \
+  <reference-url> <project> "$OUT_DIR"
+```
+
+The bridge owns and closes `<project>-swiper-artifacts`, discovers visible
+`.swiper` elements that expose `el.swiper`, stops autoplay while measuring,
+captures the current and `slideNext()` states, then restores the original
+slide and autoplay state. It records `slidesPerView`, `spaceBetween`, `effect`,
+`loop`, `speed`, and `autoplay` with explicit reference frames and merges the
+result into existing live hover transitions. Selector screenshots are the
+primary path. If an offscreen Swiper yields a blank or identical selector
+capture, the bridge explicitly scrolls it into view, captures the viewport,
+and post-crops the measured rectangle with ImageMagick. A missing or
+pixel-identical live result remains an unsupported obligation and exits
+non-zero; it is never promoted as transition evidence.
 
 ### js-class (e.g. flip card toggled by JS class)
 
@@ -235,8 +266,7 @@ agent-browser --session <project> eval "(() => {
 agent-browser --session <project> wait 500
 
 # Capture idle state
-agent-browser --session <project> screenshot \
-  --clip <x>,<y>,<width>,<height> \
+agent-browser --session <project> screenshot '<selector>' \
   $OUT_DIR/clip/ref/<name>-idle.png
 
 # Force active state
@@ -246,8 +276,7 @@ agent-browser --session <project> eval "(() => {
 agent-browser --session <project> wait <transitionDuration + 100>
 
 # Capture active state
-agent-browser --session <project> screenshot \
-  --clip <x>,<y>,<width>,<height> \
+agent-browser --session <project> screenshot '<selector>' \
   $OUT_DIR/clip/ref/<name>-active.png
 
 # Restore original state
@@ -277,8 +306,7 @@ agent-browser --session <project> eval "(() => {
 agent-browser --session <project> wait 300
 
 # Capture before-animate state (without class)
-agent-browser --session <project> screenshot \
-  --clip <x>,<y>,<width>,<height> \
+agent-browser --session <project> screenshot '<selector>' \
   $OUT_DIR/clip/ref/<name>-before.png
 
 # Force in-view state
@@ -291,8 +319,7 @@ agent-browser --session <project> eval "(() => {
 agent-browser --session <project> wait <transitionDuration + 100>
 
 # Capture after-animate state
-agent-browser --session <project> screenshot \
-  --clip <x>,<y>,<width>,<height> \
+agent-browser --session <project> screenshot '<selector>' \
   $OUT_DIR/clip/ref/<name>-after.png
 ```
 
@@ -328,7 +355,7 @@ agent-browser --session <project> wait 500
 
 # 2. Capture idle state — clip the CONTENT area, not just the button
 # The content area is the sibling/child that changes (panel, dropdown, accordion body)
-agent-browser --session <project> screenshot --clip <content_x>,<content_y>,<content_w>,<content_h> \
+agent-browser --session <project> screenshot '<content-selector>' \
   $OUT_DIR/transitions/ref/<name>-idle.png
 
 # 3. Click to activate
@@ -345,7 +372,7 @@ agent-browser --session <project> eval "(() => {
 })()"
 
 # 5. Capture active state
-agent-browser --session <project> screenshot --clip <content_x>,<content_y>,<content_w>,<content_h> \
+agent-browser --session <project> screenshot '<content-selector>' \
   $OUT_DIR/transitions/ref/<name>-active.png
 
 # 6. Restore: click again to toggle back (or reload if one-way)
@@ -360,13 +387,13 @@ agent-browser --session <project> wait 300
 # Click tab 0 (should already be active, but ensure consistent state)
 agent-browser --session <project> click <tab-selector-0>
 agent-browser --session <project> wait 500
-agent-browser --session <project> screenshot --clip <content_x>,<content_y>,<content_w>,<content_h> \
+agent-browser --session <project> screenshot '<content-selector>' \
   $OUT_DIR/transitions/ref/<name>-state-0.png
 
 # Click tab 1
 agent-browser --session <project> click <tab-selector-1>
 agent-browser --session <project> wait 500
-agent-browser --session <project> screenshot --clip <content_x>,<content_y>,<content_w>,<content_h> \
+agent-browser --session <project> screenshot '<content-selector>' \
   $OUT_DIR/transitions/ref/<name>-state-1.png
 
 # ... repeat for all tabs
@@ -378,7 +405,7 @@ agent-browser --session <project> wait 300
 
 ### Validation
 
-- Each screenshot must be > 10KB
+- Each selector crop must decode as a nonempty image; small valid element crops may be under 10KB
 - idle vs active must differ (if identical, the click had no effect — remove from `regions.json`)
 - For click-cycle: at least 2 states must differ from each other
 

@@ -29,10 +29,21 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+VERIFICATION_PLAN_HELPER="$SCRIPT_DIR/lib/verification_plan_helpers.py"
+
 TIER="${UI_CLONE_VERIFY_TIER:-comprehensive}"
 REF_DIR=""
+# --amend: after generation-plan.sh derives plan-specific rows (signatureEffects
+# / scrollScrub), re-evaluate ONLY those plan-conditional add_check rows and
+# append any missing ones to the EXISTING plan, leaving every other row frozen.
+# Closes the ordering hole where the plan is minted at Step 5d (before
+# generation-plan.json exists) so signature-effects-coverage never registered.
+AMEND=0
 for arg in "$@"; do
   case "$arg" in
+    --amend) AMEND=1 ;;
     --tier=*) TIER="${arg#--tier=}" ;;
     --tier)
       echo "ERROR: --tier requires =value form (e.g. --tier=quick)" >&2
@@ -66,6 +77,37 @@ case "$TIER" in
     ;;
 esac
 
+# Check ids whose add_check condition reads generation-plan.json (Step 7-pre
+# output). These are the ONLY rows --amend may append to an existing plan; every
+# other row stays frozen so the closed-list property is preserved. Keep in sync
+# with the generation-plan.json-gated add_check blocks below.
+PLAN_DERIVED_CHECK_IDS="signature-effects-coverage"
+
+# --amend snapshot: capture the existing plan (and adopt its tier) BEFORE the
+# staleness block can delete it. With no existing plan, amend degrades to a
+# normal full generation (which now naturally includes the plan-derived rows
+# because generation-plan.json exists by Step 7-pre).
+AMEND_BASE=""
+if [ "$AMEND" = "1" ]; then
+  if [ -f "$REF_DIR/verification-plan.json" ]; then
+    AMEND_BASE="$(mktemp "${TMPDIR:-/tmp}/verification-plan-amend-base.XXXXXX")" || {
+      echo "ERROR: cannot create amend snapshot file" >&2
+      exit 2
+    }
+    cp "$REF_DIR/verification-plan.json" "$AMEND_BASE"
+    BASE_TIER="$(python3 -c "import json,sys
+try:
+    print(json.load(open('$AMEND_BASE')).get('tier',''))
+except Exception:
+    pass" 2>/dev/null || true)"
+    case "$BASE_TIER" in
+      quick|standard|comprehensive) TIER="$BASE_TIER" ;;
+    esac
+  else
+    echo "verification-plan.sh --amend: no existing plan at $REF_DIR/verification-plan.json — generating a fresh plan." >&2
+  fi
+fi
+
 # Benchmark hardening: when the ref dir is under benchmark/work/, force
 # comprehensive tier regardless of UI_CLONE_VERIFY_TIER / --tier. The 077d8c3
 # benchmark exposed a gaming pattern where the agent set tier=quick to drop
@@ -92,6 +134,10 @@ tier_level() {
   esac
 }
 CURRENT_TIER_LEVEL=$(tier_level "$TIER")
+case "${UI_CLONE_STRICT_WARNINGS:-}" in
+  1|true|TRUE|yes|YES|on|ON) STRICT_WARNINGS_JSON=true ;;
+  *) STRICT_WARNINGS_JSON=false ;;
+esac
 
 if [ ! -d "$REF_DIR" ]; then
   echo "ERROR: ref-dir not found: $REF_DIR" >&2
@@ -112,7 +158,11 @@ fi
 # enough to trip CI smoke timeouts. Callers such as bench-verification.sh may
 # export PYTHON_BIN to avoid even this one resolution call.
 if [ -z "${PYTHON_BIN:-}" ]; then
-  if command -v python3 >/dev/null 2>&1; then
+  if [ -x "$ROOT_DIR/.venv/bin/python3" ]; then
+    PYTHON_BIN="$ROOT_DIR/.venv/bin/python3"
+  elif [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+    PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN=$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || command -v python3)
   else
     echo "ERROR: python3 required for verification-plan JSON probes" >&2
@@ -155,12 +205,49 @@ contains_pattern() {
 
 contains_ref_pattern() {
   local pattern="$1"
-  grep -R -Eiq "$pattern" \
+  if grep -R -Eiq "$pattern" \
     "$REF_DIR/bundles" \
-    "$REF_DIR/transition-spec.json" \
     "$REF_DIR/scroll-engine.json" \
     "$REF_DIR/animation-runtime-dump.json" \
-    2>/dev/null
+    2>/dev/null; then
+    return 0
+  fi
+  [ "${TRANSITION_SPEC_SIGNAL_ELIGIBLE:-false}" = "true" ] \
+    && grep -Eiq "$pattern" "$TRANSITION_SPEC" 2>/dev/null
+}
+
+contains_ref_source_pattern() {
+  local pattern="$1"
+  if grep -R -Eiq "$pattern" \
+    "$REF_DIR/bundles" \
+    "$REF_DIR/scroll-engine.json" \
+    2>/dev/null; then
+    return 0
+  fi
+  [ "${TRANSITION_SPEC_SIGNAL_ELIGIBLE:-false}" = "true" ] \
+    && grep -Eiq "$pattern" "$TRANSITION_SPEC" 2>/dev/null
+}
+
+runtime_scroll_trigger_signal() {
+  "$PYTHON_BIN" -c 'import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(1)
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(data, dict):
+    raise SystemExit(1)
+value = data.get("scrollTrigger") or data.get("scrollTriggers")
+raise SystemExit(0 if bool(value) else 1)' \
+    "$REF_DIR/animation-runtime-dump.json" 2>/dev/null
+}
+
+transition_spec_scroll_scrub_signal() {
+  "$PYTHON_BIN" "$VERIFICATION_PLAN_HELPER" \
+    transition-spec-scroll-scrub "$TRANSITION_SPEC" 2>/dev/null
 }
 
 BUNDLE_MAP="$REF_DIR/bundle-map.json"
@@ -174,226 +261,39 @@ TRANSITION_COVERAGE="$REF_DIR/transition-coverage.json"
 ANIMATIONS_DETECTED="$REF_DIR/animations-detected.json"
 ELEMENT_TRACKING="$REF_DIR/element-tracking.json"
 
+# Auto-finalized placeholder specs describe a conservative implementation floor,
+# not independently observed reference behavior. They must not feed motion
+# signals back into the next plan and re-mint themselves indefinitely.
+TRANSITION_SPEC_SIGNAL_ELIGIBLE="true"
+if [ -f "$TRANSITION_SPEC" ]; then
+  TRANSITION_SPEC_SOURCE=$(read_json "$TRANSITION_SPEC" ".source")
+  TRANSITION_SPEC_PLACEHOLDER=$(read_json "$TRANSITION_SPEC" ".placeholder")
+  if [ "$TRANSITION_SPEC_PLACEHOLDER" = "true" ] \
+     || [ "$TRANSITION_SPEC_SOURCE" = "ui_clone.extraction_artifacts" ]; then
+    TRANSITION_SPEC_SIGNAL_ELIGIBLE="false"
+  fi
+fi
+
+# transition-coverage synthesized by the extraction finalizer is only a
+# projection of transition-spec.json, not an observed-motion artifact. Keep
+# real captured coverage eligible, but do not count the auto projection as an
+# independent observed scroll signal.
+TRANSITION_COVERAGE_SIGNAL="$TRANSITION_COVERAGE"
+if [ "$(read_json "$TRANSITION_COVERAGE" ".source")" = "ui_clone.extraction_artifacts" ]; then
+  TRANSITION_COVERAGE_SIGNAL="$REF_DIR/.no-observed-transition-coverage"
+fi
+
 # observed_motion_signal MODE — library-agnostic, closed-form detection of
 # motion that was actually OBSERVED during extraction, independent of any
 # library/token allowlist. Prints "true" / "false".
 #   MODE=scroll  → page moved under scroll (scroll-scrub / parallax / sticky-pin)
 #   MODE=reveal  → element entered an on-state as it scrolled into the viewport
-# Signals (any-of) per the behavioral artifacts:
-#   transition-coverage.json animatedElements[].trigger ~ /scroll/
-#   animations-detected.json scrollAnimations[] non-empty (scroll) / textReveals|reveals (reveal)
-#   element-tracking.json: same selector's transform/opacity/scale/clipPath/top
-#     changes across >=2 scroll positions (scroll); off->on viewport entry with a
-#     property change (reveal).
-# A fully static page (no observed motion anywhere) returns "false" so the
-# expensive motion checks never falsely dispatch.
+# Python logic lives in a helper file instead of a Bash heredoc. Homebrew Bash
+# can block in heredoc_write on macOS before the child interpreter ever runs.
 observed_motion_signal() {
   local mode="$1"
-  "$PYTHON_BIN" - "$mode" "$TRANSITION_COVERAGE" "$ANIMATIONS_DETECTED" "$ELEMENT_TRACKING" <<'PY'
-import json, re, sys
-
-mode = sys.argv[1]
-tc_path, ad_path, et_path = sys.argv[2], sys.argv[3], sys.argv[4]
-
-
-def load(path):
-    try:
-        with open(path) as fh:
-            return json.load(fh)
-    except Exception:
-        return None
-
-
-def transition_coverage_scroll():
-    d = load(tc_path)
-    if not isinstance(d, dict):
-        return False
-    for el in d.get("animatedElements", []) or []:
-        if not isinstance(el, dict):
-            continue
-        trig = str(el.get("trigger", "")).lower()
-        if "scroll" in trig:
-            return True
-        dec = el.get("decoded") or {}
-        if isinstance(dec, dict) and str(dec.get("position", "")).lower() == "sticky":
-            return True
-    return False
-
-
-def animations_detected_scroll():
-    d = load(ad_path)
-    if not isinstance(d, dict):
-        return False
-    return bool(d.get("scrollAnimations"))
-
-
-def animations_detected_reveal():
-    d = load(ad_path)
-    if not isinstance(d, dict):
-        return False
-    if d.get("textReveals") or d.get("reveals"):
-        return True
-    for sa in d.get("scrollAnimations", []) or []:
-        if isinstance(sa, dict) and "reveal" in str(sa.get("type", "")).lower():
-            return True
-    return False
-
-
-_PROPS = ("transform", "opacity", "scale", "clipPath", "top")
-
-
-def element_tracking_frames():
-    d = load(et_path)
-    if not isinstance(d, list) or len(d) < 2:
-        return None
-    return d
-
-
-def element_tracking_scroll():
-    frames = element_tracking_frames()
-    if not frames:
-        return False
-    # selector -> {prop -> set(values seen)}
-    seen = {}
-    for frame in frames:
-        for el in (frame.get("elements", []) if isinstance(frame, dict) else []) or []:
-            if not isinstance(el, dict):
-                continue
-            sel = el.get("selector")
-            if sel is None:
-                continue
-            bucket = seen.setdefault(sel, {p: set() for p in _PROPS})
-            for p in _PROPS:
-                bucket[p].add(json.dumps(el.get(p), sort_keys=True))
-    for props in seen.values():
-        for p in _PROPS:
-            if len(props[p]) >= 2:
-                return True
-    return False
-
-
-def element_tracking_reveal():
-    frames = element_tracking_frames()
-    if not frames:
-        return False
-    # selector -> ordered list of (inViewport, prop-fingerprint)
-    states = {}
-    for frame in frames:
-        for el in (frame.get("elements", []) if isinstance(frame, dict) else []) or []:
-            if not isinstance(el, dict):
-                continue
-            sel = el.get("selector")
-            if sel is None:
-                continue
-            fp = json.dumps([el.get(p) for p in _PROPS], sort_keys=True)
-            states.setdefault(sel, []).append((bool(el.get("inViewport")), fp))
-    for seq in states.values():
-        entered = False
-        for i in range(1, len(seq)):
-            prev_in, prev_fp = seq[i - 1]
-            cur_in, cur_fp = seq[i]
-            # off-state (out of viewport) -> on-state (in viewport) with a
-            # property change between the two samples = reveal-on-enter.
-            if (not prev_in) and cur_in and prev_fp != cur_fp:
-                entered = True
-                break
-        if entered:
-            return True
-    return False
-
-
-# Fix B — library-agnostic OR-inputs (additive). Auto-rotation and canvas/SVG
-# frame-advance are OBSERVED behaviors that the Swiper / Lottie name-greps miss
-# for Embla/Splide/keen-slider/hand-rolled carousels and Rive (.riv) / custom
-# canvas vector players. These widen dispatch only; a static page hits none.
-_CAROUSEL_RE = re.compile(
-    r"slide|carousel|rotat|gallery|marquee|slider|embla|splide|keen|swiper|rail",
-    re.IGNORECASE,
-)
-_VECTOR_RE = re.compile(r"canvas|svg|rive|\.riv|lottie|bodymovin", re.IGNORECASE)
-
-
-def animations_detected_carousel():
-    """An OBSERVED auto-rotating carousel/slideshow timer (periodic transform/
-    content change), regardless of slider library."""
-    d = load(ad_path)
-    if not isinstance(d, dict):
-        return False
-    for t in d.get("autoTimers", []) or []:
-        if not isinstance(t, dict):
-            continue
-        hay = str(t.get("type", "")) + " " + str(t.get("selector", ""))
-        if _CAROUSEL_RE.search(hay):
-            return True
-    return False
-
-
-def animations_detected_vector():
-    """A canvas/SVG region that was OBSERVED animating (auto-timer / scroll /
-    reveal entry on a canvas|svg|rive|lottie selector) — a vector/canvas player
-    regardless of which runtime drives it."""
-    d = load(ad_path)
-    if not isinstance(d, dict):
-        return False
-    for key in ("autoTimers", "scrollAnimations", "textReveals", "reveals"):
-        for e in d.get(key, []) or []:
-            if isinstance(e, dict) and _VECTOR_RE.search(str(e.get("selector", ""))):
-                return True
-    return False
-
-
-def element_tracking_vector():
-    """A canvas/SVG-ish selector whose tracked props change across >=2 frames —
-    observed continuous frame change on a vector surface."""
-    frames = element_tracking_frames()
-    if not frames:
-        return False
-    seen = {}
-    for frame in frames:
-        for el in (frame.get("elements", []) if isinstance(frame, dict) else []) or []:
-            if not isinstance(el, dict):
-                continue
-            sel = el.get("selector")
-            if sel is None or not _VECTOR_RE.search(str(sel)):
-                continue
-            bucket = seen.setdefault(sel, {p: set() for p in _PROPS})
-            for p in _PROPS:
-                bucket[p].add(json.dumps(el.get(p), sort_keys=True))
-    for props in seen.values():
-        for p in _PROPS:
-            if len(props[p]) >= 2:
-                return True
-    return False
-
-
-if mode == "scroll":
-    result = (
-        transition_coverage_scroll()
-        or animations_detected_scroll()
-        or element_tracking_scroll()
-    )
-elif mode == "reveal":
-    result = animations_detected_reveal() or element_tracking_reveal()
-elif mode == "carousel":
-    result = animations_detected_carousel()
-elif mode == "vector":
-    result = animations_detected_vector() or element_tracking_vector()
-elif mode == "all":
-    values = (
-        transition_coverage_scroll()
-        or animations_detected_scroll()
-        or element_tracking_scroll(),
-        animations_detected_reveal() or element_tracking_reveal(),
-        animations_detected_carousel(),
-        animations_detected_vector() or element_tracking_vector(),
-    )
-    print(" ".join("true" if v else "false" for v in values))
-    sys.exit(0)
-else:
-    result = False
-
-print("true" if result else "false")
-PY
+  "$PYTHON_BIN" "$VERIFICATION_PLAN_HELPER" observed-motion \
+    "$mode" "$TRANSITION_COVERAGE_SIGNAL" "$ANIMATIONS_DETECTED" "$ELEMENT_TRACKING"
 }
 
 OBSERVED_MOTION_FIELDS=$(observed_motion_signal all 2>/dev/null || echo "false false false false")
@@ -414,6 +314,9 @@ observed_motion_signal() {
   esac
 }
 
+BOOLEAN_CSS_REVEAL_SIGNAL=$("$PYTHON_BIN" "$VERIFICATION_PLAN_HELPER" \
+  boolean-css-reveal "$REF_DIR" 2>/dev/null || echo "false")
+
 file_mtime_epoch() {
   local path="$1"
   stat -f %m "$path" 2>/dev/null \
@@ -422,21 +325,7 @@ file_mtime_epoch() {
 }
 
 plan_generated_epoch() {
-  "$PYTHON_BIN" - "$1" <<'PY'
-import datetime
-import json
-import sys
-
-try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
-    value = data.get("generatedAt")
-    if not isinstance(value, str) or not value:
-        raise ValueError("missing generatedAt")
-    value = value.replace("Z", "+00:00")
-    print(int(datetime.datetime.fromisoformat(value).timestamp()))
-except Exception:
-    sys.exit(1)
-PY
+  "$PYTHON_BIN" "$VERIFICATION_PLAN_HELPER" plan-generated-epoch "$1"
 }
 
 PLAN_PATH="$REF_DIR/verification-plan.json"
@@ -456,7 +345,8 @@ if [ -f "$PLAN_PATH" ]; then
     "$REF_DIR/state-structure-spec.json" \
     "$REF_DIR/states/splash/summary.json" \
     "$REF_DIR/states/scroll/summary.json" \
-    "$REF_DIR/states/hover/summary.json"; do
+    "$REF_DIR/states/hover/summary.json" \
+    "$REF_DIR/states/hover/manifest.json"; do
     if [ -f "$EXTRACTION_ARTIFACT" ]; then
       ARTIFACT_MTIME=$(file_mtime_epoch "$EXTRACTION_ARTIFACT" || echo 0)
       if [ "$ARTIFACT_MTIME" -gt "$NEWEST_EXTRACTION_MTIME" ]; then
@@ -469,6 +359,10 @@ if [ -f "$PLAN_PATH" ]; then
     if [ "$PLAN_GENERATED_AT" -lt "$NEWEST_EXTRACTION_MTIME" ]; then
       echo "verification-plan.json is stale (generated before latest extraction OR Phase A/B/C/0 capture); regenerating." >&2
       rm -f "$PLAN_PATH"
+      if [ -n "$AMEND_BASE" ]; then
+        rm -f "$AMEND_BASE"
+        AMEND_BASE=""
+      fi
     fi
   fi
 fi
@@ -489,9 +383,10 @@ HAS_SCROLL_SCRUB="false"
 if contains_pattern "$EXTERNAL_SDKS" '"(useScroll|scrollYProgress|ScrollTrigger|scrubbed|scrub)"' \
    || contains_pattern "$SCROLL_ENGINE" '"library":\s*"(Lenis|Locomotive|ScrollSmoother)"' \
    || contains_pattern "$SCROLL_ENGINE" '"(motion|useScroll|scrollYProgress)":\s*\{[^}]*"matches":\s*[1-9]' \
-   || contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"scroll' \
+   || { [ "$TRANSITION_SPEC_SIGNAL_ELIGIBLE" = "true" ] \
+        && [ "$(transition_spec_scroll_scrub_signal)" = "true" ]; } \
    || contains_pattern "$INTERACTIONS" '"engine":\s*"scroll"' \
-   || contains_pattern "$BUNDLE_MAP" '"(framer-motion|motion-one|gsap-scrolltrigger)"' \
+   || contains_pattern "$BUNDLE_MAP" '"(useScroll|scrollYProgress|ScrollTrigger|scrub|gsap-scrolltrigger)"' \
    || [ "$(observed_motion_signal scroll)" = "true" ]; then
   HAS_SCROLL_SCRUB="true"
 fi
@@ -503,28 +398,37 @@ fi
 # tested viewport, so false positives cost one browser probe instead of hiding
 # a missing settled/returned phase.
 HAS_SCROLL_STATE_MACHINE="false"
-if contains_ref_pattern 'scrollYProgress|useScroll|ScrollTrigger|scrollY\.on|scroll[^[:alnum:]]*progress' \
-   && contains_ref_pattern 'window\.scrollTo|[^[:alnum:]_]scrollTo[[:space:]]*\(|scrollIntoView|setTimeout|clearTimeout|getVelocity|velocity|guardRef|autoReturning|isScrolling'; then
+if { contains_ref_source_pattern 'scrollYProgress|(^|[^[:alnum:]_])useScroll([^[:alnum:]_]|$)|ScrollTrigger|scrollY\.on|scroll[^[:alnum:]]*progress' \
+     || runtime_scroll_trigger_signal; } \
+   && contains_ref_source_pattern 'window\.scrollTo|[^[:alnum:]_]scrollTo[[:space:]]*\(|scrollIntoView|(^|[^[:alnum:]_])(setTimeout|clearTimeout|getVelocity|velocity|guardRef|autoReturning|isScrolling)([^[:alnum:]_]|$)'; then
   HAS_SCROLL_STATE_MACHINE="true"
 elif contains_pattern "$SCROLL_ENGINE" 'ScrollTrigger|gsap-scrolltrigger|GSAP' \
    && contains_pattern "$SCROLL_ENGINE" '"(pin|scrub)":\s*true|\b(sticky-scrub|scroll-scrub|scroll-pin)\b'; then
   HAS_SCROLL_STATE_MACHINE="true"
-elif contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(sticky-scrub|scroll-scrub|scroll-pin)"' \
+elif [ "$TRANSITION_SPEC_SIGNAL_ELIGIBLE" = "true" ] \
+   && contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(sticky-scrub|scroll-scrub|scroll-pin)"' \
    && contains_pattern "$SCROLL_ENGINE" 'ScrollTrigger|gsap-scrolltrigger|GSAP|Lenis'; then
   HAS_SCROLL_STATE_MACHINE="true"
 fi
 
-# hasIOReveal: IntersectionObserver-driven entry animations. As with
+# hasIOReveal: viewport-entry animation dispatch signal. This classifier decides
+# whether reveal-trigger must run; it is NOT transition-spec truth. In particular,
+# BOOLEAN_CSS_REVEAL_SIGNAL is conservative structure+CSS evidence that a runtime
+# probe is required. Step 5d must still add an evidence-backed transitions[] entry
+# or a structured skipped[] reason before the spec gate can pass.
+# As with
 # hasScrollScrub, observed reveal-on-enter motion (observed_motion_signal
 # reveal) is an authoritative OR-input — an element that went off-state→on-state
 # as it entered the viewport, or a non-empty textReveals/reveals list, fires the
 # reveal-trigger check even when no IO token is present.
 HAS_IO_REVEAL="false"
-if contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(intersection|inview|onView)"' \
+if { [ "$TRANSITION_SPEC_SIGNAL_ELIGIBLE" = "true" ] \
+     && contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(intersection|inview|onView)"'; } \
    || contains_pattern "$INTERACTIONS" '"trigger":\s*"intersection"' \
    || contains_pattern "$SCROLL_ENGINE" '"IntersectionObserver":\s*\{[^}]*"matches":\s*[1-9]' \
    || contains_pattern "$BUNDLE_MAP" 'IntersectionObserver' \
-   || [ "$(observed_motion_signal reveal)" = "true" ]; then
+   || [ "$(observed_motion_signal reveal)" = "true" ] \
+   || [ "$BOOLEAN_CSS_REVEAL_SIGNAL" = "true" ]; then
   HAS_IO_REVEAL="true"
 fi
 
@@ -540,7 +444,6 @@ fi
 HAS_HOVER="false"
 HOVER_MANIFEST="$REF_DIR/states/hover/manifest.json"
 if contains_pattern "$INTERACTIONS" '"trigger":\s*"[^"]*[Hh]over[^"]*"' \
-   || contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"[^"]*[Hh]over[^"]*"' \
    || contains_pattern "$INTERACTIONS" '"whileHover"\s*:' \
    || contains_pattern "$INTERACTIONS" '"hoverDelta"\s*:'; then
   HAS_HOVER="true"
@@ -687,7 +590,18 @@ fi
 
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-CHECKS=""
+CHECKS_FILE="$(mktemp "${TMPDIR:-/tmp}/verification-plan-checks.XXXXXX")" || {
+  echo "ERROR: cannot create temporary checks file" >&2
+  exit 2
+}
+CHECK_COUNT=0
+DEFERRED_FILE="$(mktemp "${TMPDIR:-/tmp}/verification-plan-deferred.XXXXXX")" || {
+  echo "ERROR: cannot create temporary deferred-checks file" >&2
+  exit 2
+}
+DEFERRED_COUNT=0
+trap 'rm -f "$CHECKS_FILE" "$DEFERRED_FILE"' EXIT
+
 # add_check id script produces reason severity [min_tier]
 #   min_tier: quick | standard | comprehensive (default: standard)
 #             — see tier table at top of file. A check is dispatched only when
@@ -696,17 +610,39 @@ add_check() {
   local id="$1" script="$2" produces="$3" reason="$4" severity="$5"
   local min_tier="${6:-standard}"
   local depends_on="${7:-}"
+  # Optional 8th arg: argsRecipe — a dispatch template using {ref_dir},
+  # {impl_url}, {ref_url}, {session} placeholders (same vocabulary as
+  # run-required-checks.sh SIGNATURES). When present, the dispatcher uses
+  # it directly and the check needs NO SIGNATURES entry — new checks
+  # self-describe instead of requiring the second hand-synced table.
+  local args_recipe="${8:-}"
   local check_level
-  check_level=$(tier_level "$min_tier")
-  if [ "$check_level" -eq 0 ]; then
-    echo "ERROR: add_check '$id' got invalid min_tier '$min_tier'" >&2
-    exit 2
-  fi
+  case "$min_tier" in
+    quick) check_level=1 ;;
+    standard) check_level=2 ;;
+    comprehensive) check_level=3 ;;
+    *)
+      echo "ERROR: add_check '$id' got invalid min_tier '$min_tier'" >&2
+      exit 2
+      ;;
+  esac
   if [ "$check_level" -gt "$CURRENT_TIER_LEVEL" ]; then
+    # Tier-dropped checks are recorded, not silently discarded — the plan
+    # must say what was NOT verified at this tier so closeout consumers can
+    # treat it as tracked debt instead of reading absence as coverage.
+    if [ "$DEFERRED_COUNT" -gt 0 ]; then
+      printf ',\n' >> "$DEFERRED_FILE"
+    fi
+    printf '    { "id": "%s", "minTier": "%s", "severity": "%s" }' \
+      "$id" "$min_tier" "$severity" >> "$DEFERRED_FILE"
+    DEFERRED_COUNT=$((DEFERRED_COUNT + 1))
     return 0
   fi
-  local sep=""
-  [ -n "$CHECKS" ] && sep=","
+  local recipe_field=""
+  if [ -n "$args_recipe" ]; then
+    recipe_field=",
+      \"argsRecipe\": \"$args_recipe\""
+  fi
   local depends_field=""
   if [ -n "$depends_on" ]; then
     local deps_json="["
@@ -723,18 +659,45 @@ add_check() {
     depends_field=",
       \"dependsOn\": $deps_json"
   fi
-  CHECKS="${CHECKS}${sep}
-    {
-      \"id\": \"$id\",
-      \"script\": \"$script\",
-      \"produces\": \"$produces\",
-      \"reason\": \"$reason\",
-      \"severity\": \"$severity\",
-      \"tier\": \"$min_tier\"${depends_field}
-    }"
+  if [ "$CHECK_COUNT" -gt 0 ]; then
+    printf ',\n' >> "$CHECKS_FILE"
+  fi
+  {
+    printf '    {\n'
+    printf '      "id": "%s",\n' "$id"
+    printf '      "script": "%s",\n' "$script"
+    printf '      "produces": "%s",\n' "$produces"
+    printf '      "reason": "%s",\n' "$reason"
+    printf '      "severity": "%s",\n' "$severity"
+    printf '      "tier": "%s"%s%s\n' "$min_tier" "$recipe_field" "$depends_field"
+    printf '    }'
+  } >> "$CHECKS_FILE"
+  CHECK_COUNT=$((CHECK_COUNT + 1))
 }
 
-# Universal — runtime-env MUST be first in the dispatch order. Every
+# Universal local-port guard — must run before any agent-browser comparison
+# that opens <impl-url>. runtime-env still performs deeper browser checks, but
+# this cheap lsof/cwd guard prevents stale dev servers from making direct
+# live-parity/compare runs inspect the wrong impl tree.
+add_check "impl-url-guard" \
+          "scripts/verify/impl-url-guard.sh" \
+          "impl-url-guard.json" \
+          "Local impl-url ports must be served by the canonical implRoot recorded for this ref; stale/orphan dev servers are hard failures before browser comparison" \
+          "block" \
+          "standard"
+
+# Capacity probe — materializes conservative local concurrency guidance for
+# browser-heavy verification. The dispatcher is sequential today, but the
+# artifact gives Team/ultrawork/agent loops a repo-native source of truth for
+# safe wave sizing instead of guessing from machine class.
+add_check "capacity-probe" \
+          "scripts/verify/capacity-check.sh" \
+          "capacity-report.json" \
+          "Estimate safe browser verification wave size before heavy visual checks" \
+          "block" \
+          "quick"
+
+# Universal — runtime-env MUST be near the top in the dispatch order. Every
 # browser-probe gate downstream declares dependsOn:runtime-env, but
 # scripts/verify/run-required-checks.sh only cascades skips for deps
 # that have already failed (in array iteration order). So runtime-env
@@ -746,7 +709,29 @@ add_check "runtime-env" \
           "runtime-env.json" \
           "Impl-url must serve current iteration's impl-root AND render without env traps (Vite preamble missing, hydration mismatch, port-routing mismatch)" \
           "block" \
-          "standard"
+          "standard" \
+          "impl-url-guard"
+
+add_check "preview-runtime-health" \
+            "skills/visual-debug/scripts/preview-runtime-health-check.sh" \
+            "preview-runtime-health.json" \
+            "Preview runtime must keep impl build assets same-origin, avoid mobile/tablet horizontal overflow, and match reference scroll-state/header mutations" \
+            "block" \
+            "standard" \
+            "runtime-env"
+
+# Universal first-paint visibility. This is a cheap browser probe, but it is
+# intentionally standard-tier (not quick) because it opens a page. It catches a
+# class that hydration/runtime-env can miss: DOM exists and selectors work, but
+# copied loader CSS such as `body { opacity: 0 }` keeps the entire viewport
+# blank because the original ready/unlock JS was not reproduced.
+add_check "blank-viewport" \
+          "skills/visual-debug/scripts/blank-viewport-check.sh" \
+          "blank-viewport.json" \
+          "Impl first paint must be visible; DOM/text with html/body/root opacity:0, visibility:hidden, display:none, or no paintable content is a hard failure" \
+          "block" \
+          "standard" \
+          "runtime-env"
 
 # Universal — always.
 # Tier=quick: hydration-check launches a single agent-browser session and
@@ -857,6 +842,20 @@ if [ "$HAS_LOTTIE" = "true" ]; then
             "Lottie/bodymovin/dotlottie detected — impl must use a real runtime package and downloaded animation JSON" \
             "block" \
             "quick"
+  # Static slot-identity gate: bundle-impl-coverage/required-media pass on the
+  # mere presence of the JSON string, but the navercorp clone mounted only 2 of
+  # 5 slots with inverted loop/autoplay and one asset in an invented container.
+  # This parses the actual loadAnimation()/mount call sites against the spec's
+  # container->asset map. Self-describing argsRecipe -> no SIGNATURES entry (the
+  # script takes <ref-dir> and resolves impl via find-impl-root).
+  add_check "lottie-slot-identity" \
+            "skills/visual-debug/scripts/lottie-slot-identity-check.sh" \
+            "lottie-slot-identity.json" \
+            "Lottie detected — every spec slot must mount its exact container/asset with matching loop/autoplay" \
+            "block" \
+            "quick" \
+            "" \
+            "{ref_dir} {impl_root}"
 fi
 
 # Unconditional.
@@ -871,6 +870,39 @@ add_check "geometry-sanity" \
           "rendered docH + major section heights must track the ref capture (docH >15% or any major section >25% off = fail; warn band below)" \
           "block" \
           "standard"
+
+# Unconditional.
+# Tier=quick: junk-token is a static impl-source scan plus ONE cheap DOM
+# eval (same cost class as hydration-check, which is also quick). Catches
+# serialization junk — 'undefined'/'null'/'NaN'/'[object Object]' as
+# standalone tokens in className/id/src/href/alt/style — in source and in
+# the live DOM (template-string junk only materializes at runtime).
+add_check "junk-token" \
+          "skills/visual-debug/scripts/junk-token-check.sh" \
+          "junk-token.json" \
+          "serialization junk (undefined/null/NaN/[object Object]) must never appear as a standalone token in className/id/src/href/alt/style — impl source or runtime DOM" \
+          "block" \
+          "quick" \
+          "" \
+          "{ref_dir} {impl_src} {session}-junk {impl_url}"
+
+# Unconditional.
+# Tier=quick: alignment-parity is pure file IO over the section-compare
+# enumeration artifacts (matches.json already records both sides' rects,
+# contentBox and contentGroups per fan-out viewport — zero extra browser
+# time). Catches the loop-9 class AE crops are structurally blind to: a
+# full-bleed section whose rect is IDENTICAL ref-vs-impl while the inner
+# content column / a card group is horizontally off-center (pixel constants
+# baked for one design width). Frozen refs without contentBox surface as
+# warn (unmeasurable + recapture remediation), never a silent pass.
+add_check "alignment-parity" \
+          "skills/visual-debug/scripts/alignment-parity-check.sh" \
+          "alignment-parity.json" \
+          "matched sections must keep the ref's horizontal alignment: section-center offset, contentBox gap asymmetry, and per-container group asymmetry are compared ref-relative per fan-out viewport" \
+          "block" \
+          "quick" \
+          "" \
+          "{ref_dir}"
 
 # Conditional.
 # Tier=standard: scroll-end-completion opens ref + impl in agent-browser,
@@ -950,6 +982,30 @@ add_check "forced-state-class" \
           "Impl must not force dynamic reveal/state classes or final styles at load; scroll/intersection transitions need runtime triggers" \
           "block" \
           "quick"
+
+# When sanitize-ref-css.sh flags a first-paint root lock (body{opacity:0} et
+# al.) the impl must release it at runtime, or the whole page renders invisible
+# and every visual compare degrades into blank-vs-content noise. Skips itself
+# when no sanitize report / no lock exists.
+add_check "body-opacity-unlock" \
+          "skills/visual-debug/scripts/body-opacity-unlock-check.sh" \
+          "body-opacity-unlock.json" \
+          "Ref CSS first-paint root lock (e.g. body{opacity:0}) must be released by impl runtime or a local override" \
+          "block" \
+          "quick"
+
+# Dual-session live sweep — catches the defect classes section-compare's
+# dynamic-region masks can hide (missing/extra images incl. percent-encoded
+# filenames, stray oversized text such as visibly-rendered pseudo content,
+# global geometry drift). Deterministic DOM census findings block; the
+# full-frame AE/dssim depths remain advisory inside live-parity.json.
+add_check "live-parity-sweep" \
+          "skills/visual-debug/scripts/live-parity-sweep.sh" \
+          "live-parity.json" \
+          "Live dual-session DOM census must not reveal mask-hidden generic defects: missing images, visible pseudo duplication, broken assets, or global geometry/count drift" \
+          "block" \
+          "standard" \
+          "runtime-env"
 
 if [ "$HAS_LOTTIE" = "true" ] && { [ "$HAS_SCROLL_SCRUB" = "true" ] || [ "$HAS_SCROLL_STATE_MACHINE" = "true" ] || contains_ref_pattern 'ScrollTrigger|scrollYProgress|scrub\s*:\s*true|useScroll'; }; then
   add_check "lottie-scroll-scrub" \
@@ -1043,12 +1099,28 @@ add_check "header-state-runtime" \
           "standard" \
           "runtime-env"
 
+# Cheap 5-point scroll-trajectory pre-check at STANDARD tier. A trajectory
+# FAIL is a reliable gross-scroll-motion mismatch signal during inner
+# iteration loops (seconds, not the 5min+ 60fps sweep); a PASS is
+# INCONCLUSIVE on easing — video-motion-compare below stays the authority.
+# Self-describing argsRecipe -> no SIGNATURES entry needed.
+if [ "$HAS_SCROLL_SCRUB" = "true" ] || [ "$HAS_IO_REVEAL" = "true" ]; then
+  add_check "transition-trajectory" \
+            "skills/visual-debug/scripts/transition-trajectory-compare.sh" \
+            "transitions/trajectory-result.txt" \
+            "scroll motion present — 5-point scroll-trajectory AE pre-check; FAIL = gross scroll-motion mismatch (easing verdict stays with video-motion-compare)" \
+            "block" \
+            "standard" \
+            "runtime-env" \
+            "{ref_url} {impl_url} {session} {ref_dir}"
+fi
+
 # 60fps video motion compare. Fires whenever any motion signal is true.
 # Closes the "right destination, wrong velocity-curve" failure class that the
-# prior 5-point trajectory probe could not see — easeOutCubic vs easeOutQuint
+# 5-point trajectory probe above cannot see — easeOutCubic vs easeOutQuint
 # read identical at 0/25/50/75/100 % of scroll but feel different to a user.
-# transition-trajectory-compare.sh is kept available for ad-hoc debug; it is
-# no longer in dispatch. Splash mode adds page-load motion coverage that the
+# transition-trajectory now runs as the standard-tier pre-filter row above;
+# video-motion-compare also invokes it internally as its pre-filter. Splash mode adds page-load motion coverage that the
 # rest of the verification pipeline (static screenshots, hover compare) misses.
 # Tier=comprehensive: records ~5-10s of 60fps video per signal class and
 # SSIMs every pair — the most expensive row in the dispatch.
@@ -1058,7 +1130,8 @@ if [ "$HAS_SCROLL_SCRUB" = "true" ] || [ "$HAS_IO_REVEAL" = "true" ] || [ "$HAS_
             "transitions/video-motion-result.txt" \
             "any motion signal true — 60fps frame-by-frame match (catches different easing / threshold / splash timing)" \
             "block" \
-            "comprehensive"
+            "comprehensive" \
+            "runtime-env"
 fi
 
 if [ "$HAS_HOVER" = "true" ]; then
@@ -1084,7 +1157,58 @@ if [ "$HAS_HOVER" = "true" ]; then
             "block" \
             "comprehensive" \
           "runtime-env"
+  # Exhaustive impl-side hover sweep. The two rows above start from ref hover
+  # targets; this one starts from impl hover candidates and fails extra motion
+  # not present in the ref (e.g. invented header rotation or hover opacity
+  # disappearance on static elements).
+  add_check "hover-tree-diff" \
+            "skills/visual-debug/scripts/hover-tree-diff.sh" \
+            "hover-tree-diff.md" \
+            "signals.hasHover=true — impl must not invent hover transforms/opacity on elements that are static in ref" \
+            "block" \
+            "comprehensive" \
+            "runtime-env"
 fi
+
+# Unconditional advisory — the VLM "automated eyeball". Every other fidelity row
+# above measures ONE axis (pixels, transition coverage, runtime oracles); none
+# looks at the whole scroll-motion arc the way a human eye does. The
+# loop-nvti-2 denominator-capture incident is the canonical miss: gates green
+# while the eye caught dead scroll choreography instantly. Web research on
+# clone/diff fidelity converges on a VLM-as-judge for exactly this gap, which is
+# the one signal class our stack lacks. severity=warn keeps normal iteration
+# advisory; strictWarnings promotes it to blocking for release/closeout. The
+# check itself is fail-closed (browser/CLI failure => status=error, never a
+# silent pass).
+# Self-describing argsRecipe -> no SIGNATURES entry needed.
+add_check "visual-fidelity-judge" \
+          "skills/visual-debug/scripts/visual-fidelity-judge-check.sh" \
+          "visual-fidelity-judge.json" \
+          "Advisory VLM eyeball — impl must reproduce the ref's static section fidelity AND its scroll-driven motion arc (layout/text/color/animation axes); catches dead scroll choreography that per-axis gates miss" \
+          "warn" \
+          "standard" \
+          "runtime-env" \
+          "ENV:ROW_TIMEOUT_SEC=600 -- {session} {ref_url} {impl_url} {ref_dir}"
+# ^ own row budget (codex P1): the motion pass waits up to ~330s on the VLM
+# call; under the default 180s row budget the dispatcher would process-group-
+# kill it BEFORE the artifact is written, turning a warn-only row into a hard
+# dispatcher failure (advisory rows are non-blocking only when an artifact
+# exists).
+
+# Unconditional blocking check — source/static text checks can match while the
+# rendered DOM exposes the wrong visible text or document order after runtime
+# and scroll effects. Compare reference and implementation in a dedicated
+# browser session. Bounded phase variance remains accepted only when the
+# runtime artifact contains the comparator's recurrence proof.
+# Self-describing argsRecipe keeps plan dispatch independent of SIGNATURES.
+add_check "runtime-text-sequence" \
+          "skills/visual-debug/scripts/runtime-text-sequence-check.sh" \
+          "runtime-text-sequence.json" \
+          "Rendered reference and implementation text must match in document order after runtime and scroll effects" \
+          "block" \
+          "standard" \
+          "runtime-env" \
+          "{session}-rts {ref_url} {impl_url} {ref_dir}"
 
 # Click-state video compare. Catches the failure class where tabs / accordions /
 # modals / hamburger menus open with the wrong motion arc — same end-state but
@@ -1097,7 +1221,8 @@ if [ "$HAS_CLICK_STATE" = "true" ]; then
             "transitions/click-state-result.txt" \
             "signals.hasClickStateTransition=true — click-driven state transitions must match motion arc" \
             "block" \
-            "comprehensive"
+            "comprehensive" \
+            "runtime-env"
 fi
 
 if contains_pattern "$REGIONS_JSON" '"triggerType":\s*"'; then
@@ -1122,7 +1247,7 @@ fi
 # still must wire the scroll-bound scale, so keying on signatureEffects alone left
 # the scrub-scale contract silently unenforced. Mirror signature-effects-coverage-
 # check.sh's scrub_has_scale logic so registration and validation agree.
-if [ -f "$REF_DIR/generation-plan.json" ] && python3 -c "import json,sys
+if [ -f "$REF_DIR/generation-plan.json" ] && "$PYTHON_BIN" -c "import json,sys
 d=json.load(open('$REF_DIR/generation-plan.json'))
 se=d.get('signatureEffects')
 ss=d.get('scrollScrub') if isinstance(d.get('scrollScrub'), dict) else {}
@@ -1145,13 +1270,175 @@ fi
 # so a generic non-responsive rebuild (≈no media queries / fluid sizing) passes
 # it while looking broken on mobile. Warn-only — surfaces the gap without
 # blocking convergence. Dispatched only when the ref has detected breakpoints.
+# Unconditional (review-1 MINOR 5: the plan always declares multiple desktop
+# viewports, and a responsive ref without detected-breakpoints.json must not
+# lose intermediate-width coverage — breakpoints are an optional extra input
+# to the sweep-width derivation, not the dispatch condition).
+# Tier=standard: one impl-only browser session sweeping intermediate widths
+# (midpoints between plan viewports + breakpoints ±1px when available) and
+# asserting ref-classified alignment invariants (centered / fixed-gutter)
+# via DOM rects — no screenshots. Self-skips when no per-viewport ref
+# enumeration data exists to classify from. Blocks only on two adjacent
+# sweep-width violations or one enforced-width violation.
+add_check "alignment-sweep" \
+          "skills/visual-debug/scripts/alignment-sweep-check.sh" \
+          "alignment-sweep.json" \
+          "ref-centered / fixed-gutter sections must keep their invariant at intermediate viewport widths (impl-only DOM-rect sweep)" \
+          "block" \
+          "standard" \
+          "runtime-env" \
+          "{session}-align {impl_url} {ref_dir}"
+
 if [ -f "$REF_DIR/detected-breakpoints.json" ]; then
+  # Static source-signal density is diagnostic only: generated/dummy media
+  # queries can satisfy this lexical check without proving that the rendered
+  # layout responds. Runtime resize-behavior and desktop-band-fluidity remain
+  # the blocking responsive contracts below.
   add_check "mobile-responsive-coverage" \
             "skills/visual-debug/scripts/mobile-responsive-coverage-check.sh" \
             "mobile-responsive-coverage.json" \
-            "Impl should carry responsive CSS proportional to the responsive ref (advisory)" \
+            "Diagnostic source coverage for responsive CSS/JS signals (runtime responsive checks decide blocking status)" \
             "warn" \
             "quick"
+fi
+
+# resize-behavior — live resize probe. A ref with >=2 breakpoints must have an
+# impl whose layout actually RESPONDS to viewport resize (fluid / @media per key
+# selector + a JS resize handler), not a one-shot matchMedia snapshot read at
+# init. Static coverage can't see this; the probe resizes the served impl across
+# the detected breakpoints. Tier=standard (one browser session). Self-describing
+# argsRecipe -> no SIGNATURES entry ({impl_url} is a supported placeholder).
+if [ -f "$REF_DIR/detected-breakpoints.json" ] && "$PYTHON_BIN" -c "import json,sys
+try:
+    d=json.load(open('$REF_DIR/detected-breakpoints.json'))
+except Exception:
+    sys.exit(1)
+bps=d.get('breakpoints') if isinstance(d, dict) else d
+n=len(bps) if isinstance(bps, list) else (
+    (d.get('summary') or {}).get('count', 0) if isinstance(d, dict) else 0)
+sys.exit(0 if isinstance(n, int) and n >= 2 else 1)" 2>/dev/null; then
+  add_check "resize-behavior" \
+            "skills/visual-debug/scripts/resize-behavior-probe.sh" \
+            "resize-behavior.json" \
+            "Ref responsive — impl layout must respond to resize (fluid/@media per key selector + a JS resize handler, not a one-shot matchMedia read)" \
+            "block" \
+            "standard" \
+            "runtime-env" \
+            "{impl_url} {ref_dir}"
+  # Desktop-band fluidity (loop-nvti-0 briefing): capture-time widths baked
+  # inline keep the clone frozen while the ref reflows across the desktop
+  # band (widths above the wholesale-UI breakpoint). Compares ref-vs-impl
+  # docHeight parity + horizontal overflow at several in-band widths and
+  # flags the width-baked signature (ref reflows, impl constant). Same
+  # responsive gating as resize-behavior. Self-describing argsRecipe ->
+  # no SIGNATURES entry.
+  add_check "desktop-band-fluidity" \
+            "skills/visual-debug/scripts/desktop-band-fluidity-check.sh" \
+            "desktop-band-fluidity.json" \
+            "Ref responsive — impl must reflow like the ref across the desktop band (docHeight parity per width, no impl-only horizontal overflow, no width-baked freeze)" \
+            "block" \
+            "standard" \
+            "runtime-env" \
+            "{session} {ref_url} {impl_url} {ref_dir}"
+fi
+
+# Dynamic-behavior parity (loop-nvti-0 briefing): dynamic content is part of
+# transition fidelity — freezing it for static AE/dSSIM is a measurement
+# technique, not a scope reduction. On fresh UNPINNED sessions, verify each
+# declared dynamic region still CHANGES over time in the impl with a
+# compatible mechanism/period (content equality not required). Self-skips
+# to pass when the page declares no dynamic regions, so static pages are
+# unaffected. Self-describing argsRecipe -> no SIGNATURES entry.
+add_check "dynamic-behavior-parity" \
+          "skills/visual-debug/scripts/dynamic-behavior-parity.sh" \
+          "dynamic-behavior-parity.json" \
+          "Declared dynamic regions must stay dynamic in the impl: unpinned T0/T0+delta fingerprints show ref-and-impl both changing with compatible period — a frozen-in-impl region is a transition-fidelity defect" \
+          "block" \
+          "standard" \
+          "runtime-env" \
+          "{session} {ref_url} {impl_url} {ref_dir}"
+
+# Conditional: dynamic:true timer/carousel spec entries. These regions are
+# dynamic-masked out of pixel comparison (frame is timer-phase-dependent),
+# which previously left them with NO compensating verification — loop-9's
+# carousel timer ran and swapped content instantly while the spec-declared
+# card motion never happened, and every gate passed. The motion proof
+# samples the live impl DOM per entry and asserts phase-free properties
+# (state count, cadence, channel coverage, bundle item sequence) from spec/
+# bundle truth only. Tier=standard: one browser session, ~5-8s per entry.
+HAS_DYNAMIC_TIMER="false"
+if [ -f "$TRANSITION_SPEC" ]; then
+  _mrm_entries="$(PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" -m ui_clone.gates.masked_region_motion plan "$REF_DIR" 2>/dev/null \
+    | "$PYTHON_BIN" -c 'import json,sys;print(len(json.load(sys.stdin)))' 2>/dev/null \
+    || echo 0)"
+  if [ "${_mrm_entries:-0}" -gt 0 ] 2>/dev/null; then
+    HAS_DYNAMIC_TIMER="true"
+  fi
+fi
+if [ "$HAS_DYNAMIC_TIMER" = "true" ]; then
+  add_check "masked-region-motion" \
+            "skills/visual-debug/scripts/masked-region-motion-proof-check.sh" \
+            "masked-region-motion.json" \
+            "dynamic:true timer/carousel entries must prove live motion (state count, cadence, declared-channel coverage, item sequence) — masked regions get no pixel verdict, so this is their only verification" \
+            "block" \
+            "standard" \
+            "runtime-env" \
+            "{session}-mrm {impl_url} {ref_dir}"
+fi
+
+# Conditional: any dynamic:true masked selector. The motion proof checks MOTION
+# only; the dynamic mask (visibility:hidden) also hides the region's STATIC
+# style/geometry from section-compare, video-motion, and the motion proof. A
+# static style defect under a mask (loop-11 eatReal "Eat Real" h2 lost
+# text-align:center) thus passed every gate. This check probes the live impl DOM
+# (un-masked) and compares phase-free computed styles to the extraction-time ref
+# ground truth (dom-scaffold.json). Pure artifact-vs-DOM, no pixel capture.
+HAS_DYNAMIC_MASK="false"
+if [ -f "$TRANSITION_SPEC" ]; then
+  _mrs_sels="$(PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" -m ui_clone.gates.masked_region_static plan "$REF_DIR" 2>/dev/null \
+    | "$PYTHON_BIN" -c 'import json,sys;p=json.load(sys.stdin);print(len(p.get("selectors") or [])+len(p.get("unresolvableSelectors") or []))' 2>/dev/null \
+    || echo 0)"
+  if [ "${_mrs_sels:-0}" -gt 0 ] 2>/dev/null; then
+    HAS_DYNAMIC_MASK="true"
+  fi
+fi
+if [ "$HAS_DYNAMIC_MASK" = "true" ]; then
+  add_check "masked-region-static" \
+            "skills/visual-debug/scripts/masked-region-static-check.sh" \
+            "masked-region-static.json" \
+            "dynamic:true masked selectors must keep the ref's static computed styles (text-align, justify-content, align-items, font-family/weight, color) — the mask absorbs motion only, so a static style defect under a mask must still fail" \
+            "block" \
+            "standard" \
+            "runtime-env" \
+            "{session}-mrs {impl_url} {ref_dir} {ref_url}"
+fi
+
+# Conditional: bundle declares an active-state width reveal (nav active-section
+# label expansion). The hover-fallback gate only covers hover-triggered reveals;
+# an active-state (scroll) reveal had no compensating verification (loop-11: the
+# newly-active nav button's label stayed width:0 on scroll). This drives the
+# active state on the live impl and asserts the bundle-declared reveal fires.
+HAS_ACTIVE_REVEAL="false"
+if [ -f "$REF_DIR/bundle-extraction.json" ]; then
+  _sr_sels="$(PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" -m ui_clone.gates.state_reveal plan "$REF_DIR" 2>/dev/null \
+    | "$PYTHON_BIN" -c 'import json,sys;print(len(json.load(sys.stdin).get("selectors") or []))' 2>/dev/null \
+    || echo 0)"
+  if [ "${_sr_sels:-0}" -gt 0 ] 2>/dev/null; then
+    HAS_ACTIVE_REVEAL="true"
+  fi
+fi
+if [ "$HAS_ACTIVE_REVEAL" = "true" ]; then
+  add_check "state-reveal" \
+            "skills/visual-debug/scripts/state-reveal-proof-check.sh" \
+            "state-reveal.json" \
+            "bundle-declared active-state reveals (nav active-section label width 0->auto) must fire on the live impl: driving the state change (scroll) must expand the active element's label to show its text — a label that stays collapsed when active is the loop-11 defect" \
+            "block" \
+            "standard" \
+            "runtime-env" \
+            "{session}-sr {impl_url} {ref_dir}"
 fi
 
 if [ -f "$TRANSITION_SPEC" ]; then
@@ -1218,16 +1505,72 @@ if [ -f "$ANIM_DUMP" ]; then
             "quick"
 fi
 
-# Tier=standard: one-shot browser load + document.fonts.check() in both
-# sessions. Fast but requires real browser context, so not at quick.
-if [ "$HAS_COMMERCIAL_FONT" = "true" ]; then
-  add_check "font-parity" \
-            "skills/visual-debug/scripts/font-parity-check.sh" \
-            "font-parity.json" \
-            "signals.hasCommercialFont=true — declared substitution must be honored" \
+# Canonical boundary and font-parity gates require these artifacts for every
+# implementation, regardless of detected signals. Both checks are standard
+# tier because they use a live browser; the dispatcher supplies their existing
+# script signatures (including REF_DIR for breakpoint-collision).
+add_check "breakpoint-collision" \
+          "skills/visual-debug/scripts/breakpoint-collision-check.sh" \
+          "responsive/boundary-collisions.json" \
+          "canonical boundary gate requires a live breakpoint collision sweep" \
+          "block" \
+          "standard" \
+          "runtime-env"
+
+add_check "font-parity" \
+          "skills/visual-debug/scripts/font-parity-check.sh" \
+          "font-parity.json" \
+          "canonical font-parity gate requires measured ref-vs-impl font evidence" \
+          "block" \
+          "standard" \
+          "runtime-env"
+
+# font-binaries-present — root-relative @font-face binaries must actually be
+# delivered to impl/public, not just referenced in mirrored CSS (navercorp
+# shipped 0 files in impl/public/font while asset-transfer reported 44/44).
+# Reads transfer-fonts.sh's font-transfer.json + verifies files on disk;
+# self-skips (pass) when the transfer report is absent. Unconditional because
+# transfer-fonts.sh runs after this plan is minted, so the report may not yet
+# exist at mint time — the check resolves it at run time. Self-describing
+# argsRecipe -> no SIGNATURES entry.
+add_check "font-binaries-present" \
+          "skills/visual-debug/scripts/font-binaries-present-check.sh" \
+          "font-binaries-present.json" \
+          "root-relative font binaries referenced by ref CSS must be present under impl/public (not just referenced) — else custom fonts 404 to system fallbacks" \
+          "block" \
+          "quick" \
+          "" \
+          "{ref_dir}"
+
+# Content cardinality — repeated-group count parity against ref ground
+# truth (omx postmortem: 9 hardcoded storyCards shipped where the ref
+# rendered the full list; AE/section masks can hide a short repeated list
+# and nothing counted rendered members). Signatures from dom-scaffold.json
+# sibling groups >=3; counts from rendered runtime DOM with a visible-box
+# filter. Tier=standard (one impl browser load), severity=block.
+if [ -f "$REF_DIR/dom-scaffold.json" ]; then
+  add_check "content-cardinality" \
+            "skills/visual-debug/scripts/content-cardinality-check.sh" \
+            "content-cardinality.json" \
+            "dom-scaffold.json present — every ref repeated group (>=3 siblings) must render at full count in the impl runtime DOM" \
             "block" \
             "standard"
 fi
+
+# Typography parity — per-element font-weight / letter-spacing + global
+# body-rule diff. font-parity only compares the primary font FAMILY; this
+# row catches the silent class where the family matches but the impl
+# dropped a global tracking rule (body letter-spacing -0.5px) or generated
+# headings at 400/600 where the ref uses 800/900 (omx navercorp evidence).
+# Universal: every page renders text. Tier=standard (one ref+impl browser
+# pair, same cost class as font-parity); severity=block — a dropped global
+# rule or wrong weight is a generation defect, not a style choice.
+add_check "typography-parity" \
+          "skills/visual-debug/scripts/typography-parity-check.sh" \
+          "typography-parity.json" \
+          "universal — font-weight/letter-spacing/body-rule parity (family parity alone misses tracking/weight divergence)" \
+          "block" \
+          "standard"
 
 # Image fidelity — closes the "impl dropped or swapped a ref image" failure
 # class statically. AE/SSIM catches the pixel diff but buries the cause; this
@@ -1365,7 +1708,8 @@ add_check "svg-dom-parity" \
           "svg-dom-parity.json" \
           "Impl runtime SVG inventory must match ref (page total >=50%, inline <svg> must have geometry children, no per-section SVG dropout)" \
           "block" \
-          "standard"
+          "standard" \
+          "runtime-env"
 
 add_check "invalidation" \
           "skills/visual-debug/scripts/invalidation-check.sh" \
@@ -1440,6 +1784,23 @@ if [ -f "$BUNDLE_MAP" ]; then
             "quick"
 fi
 
+# library-usage — the import-level counterpart to bundle-impl-coverage. A
+# package.json install proves nothing runs: on the ebay run framer-motion was
+# declared but never imported, and the entire useScroll/useTransform surface was
+# faked with a requestAnimationFrame shim + scale(). This row fails when a ref
+# animation library (bundle-map.json / external-sdks.json) has ZERO import/require
+# hits in impl source. Self-describing argsRecipe -> no SIGNATURES entry needed.
+if [ -f "$BUNDLE_MAP" ] || [ -f "$REF_DIR/external-sdks.json" ]; then
+  add_check "library-usage" \
+            "skills/visual-debug/scripts/library-usage-check.sh" \
+            "library-usage.json" \
+            "Every ref-detected animation library (bundle-map.json / external-sdks.json) must be actually imported in impl source — package.json presence alone is the rAF-shim loophole" \
+            "block" \
+            "quick" \
+            "" \
+            "{ref_dir}"
+fi
+
 # tree-diff — element pairing via elementFromPoint, per-element style+layout
 # diff. 17-iteration measurement (2026-05-22): hero-area elements
 # (BUTTON.hero-video, VIDEO, SPAN.hero-video__label, H1) were unpaired in
@@ -1458,7 +1819,8 @@ add_check "tree-diff" \
           "tree-diff-status.json" \
           "Element-pairing diff (advisory) — informational only; hero composite enforced by hero-composite-check" \
           "warn" \
-          "standard"
+          "standard" \
+          "runtime-env"
 
 # scroll-coverage — revives the previously-orphan batch-scroll + batch-compare
 # pair as a dispatchable check. Catches the "section-compare collapsed to N
@@ -1466,13 +1828,15 @@ add_check "tree-diff" \
 # by sweeping section-aligned anchors (plus sticky/scroll-transition phase
 # probes) on both sides; legacy every-10% scroll capture remains a fallback.
 REGIONS_JSON="$REF_DIR/regions.json"
-if [ -f "$REGIONS_JSON" ]; then
+SECTION_MAP_JSON="$REF_DIR/section-map.json"
+if [ -f "$REGIONS_JSON" ] || [ -f "$SECTION_MAP_JSON" ]; then
   add_check "scroll-coverage" \
             "skills/visual-debug/scripts/scroll-coverage-check.sh" \
             "scroll-coverage.json" \
             "≥70% of section-aligned scroll/sticky probes must match within AE/Mpx threshold (fallback: percent scroll probes)" \
             "warn" \
-            "standard"
+            "standard" \
+            "runtime-env"
 fi
 
 # keyframes-diff — when extracted CSS declares @keyframes rules, verify
@@ -1493,7 +1857,8 @@ if [ "$HAS_KEYFRAMES" = "true" ]; then
             "transitions/keyframes-diff-result.txt" \
             "@keyframes declarations in ref must match impl (catches missing entrance animations + wrong steps)" \
             "warn" \
-            "standard"
+            "standard" \
+            "runtime-env"
 fi
 
 # scroll-anim-temporal-diff — when transition-spec declares scroll-driven
@@ -1519,46 +1884,74 @@ if [ "$HAS_REPEATING" = "true" ]; then
 fi
 
 OUT="$REF_DIR/verification-plan.json"
-cat > "$OUT" <<JSON
-{
-  "schemaVersion": 1,
-  "generatedAt": "$NOW",
-  "component": "$COMPONENT",
-  "tier": "$TIER",
-  "signals": {
-    "hasScrollScrub": $HAS_SCROLL_SCRUB,
-    "hasScrollStateMachine": $HAS_SCROLL_STATE_MACHINE,
-    "hasIOReveal": $HAS_IO_REVEAL,
-    "hasHover": $HAS_HOVER,
-    "hasSplash": $HAS_SPLASH,
-    "hasCanvas": $HAS_CANVAS,
-    "hasCustomScroll": $HAS_CUSTOM_SCROLL,
-    "hasCommercialFont": $HAS_COMMERCIAL_FONT,
-    "hasClickStateTransition": $HAS_CLICK_STATE,
-    "hasLottie": $HAS_LOTTIE,
-    "hasSwiper": $HAS_SWIPER
-  },
-  "requiredChecks": [$CHECKS
-  ],
-  "viewports": [
-    { "w": 375,  "h": 812,  "label": "mobile" },
-    { "w": 1280, "h": 800,  "label": "laptop" },
-    { "w": 1600, "h": 900,  "label": "desktop-mid" },
-    { "w": 1920, "h": 1080, "label": "desktop-large" }
-  ]
+# Build the fresh plan to a temp first. In --amend mode we splice only the
+# plan-derived rows from this fresh build into the frozen base; otherwise the
+# fresh plan IS the output.
+FRESH_PLAN="$(mktemp "${TMPDIR:-/tmp}/verification-plan-fresh.XXXXXX")" || {
+  echo "ERROR: cannot create temporary plan file" >&2
+  exit 2
 }
-JSON
+{
+  printf '{\n'
+  printf '  "schemaVersion": 1,\n'
+  printf '  "generatedAt": "%s",\n' "$NOW"
+  printf '  "component": "%s",\n' "$COMPONENT"
+  printf '  "tier": "%s",\n' "$TIER"
+  printf '  "strictWarnings": %s,\n' "$STRICT_WARNINGS_JSON"
+  printf '  "signals": {\n'
+  printf '    "hasScrollScrub": %s,\n' "$HAS_SCROLL_SCRUB"
+  printf '    "hasScrollStateMachine": %s,\n' "$HAS_SCROLL_STATE_MACHINE"
+  printf '    "hasIOReveal": %s,\n' "$HAS_IO_REVEAL"
+  printf '    "hasHover": %s,\n' "$HAS_HOVER"
+  printf '    "hasSplash": %s,\n' "$HAS_SPLASH"
+  printf '    "hasCanvas": %s,\n' "$HAS_CANVAS"
+  printf '    "hasCustomScroll": %s,\n' "$HAS_CUSTOM_SCROLL"
+  printf '    "hasCommercialFont": %s,\n' "$HAS_COMMERCIAL_FONT"
+  printf '    "hasClickStateTransition": %s,\n' "$HAS_CLICK_STATE"
+  printf '    "hasLottie": %s,\n' "$HAS_LOTTIE"
+  printf '    "hasSwiper": %s\n' "$HAS_SWIPER"
+  printf '  },\n'
+  printf '  "requiredChecks": [\n'
+  cat "$CHECKS_FILE"
+  printf '\n  ],\n'
+  printf '  "deferredChecks": [\n'
+  cat "$DEFERRED_FILE"
+  printf '\n  ],\n'
+  printf '  "viewports": [\n'
+  printf '    { "w": 375,  "h": 812,  "label": "mobile" },\n'
+  printf '    { "w": 1280, "h": 800,  "label": "laptop" },\n'
+  printf '    { "w": 1440, "h": 900,  "label": "capture" },\n'
+  printf '    { "w": 1600, "h": 900,  "label": "desktop-mid" },\n'
+  printf '    { "w": 1920, "h": 1080, "label": "desktop-large" }\n'
+  printf '  ]\n'
+  printf '}\n'
+} > "$FRESH_PLAN"
+
+if [ "$AMEND" = "1" ] && [ -n "$AMEND_BASE" ]; then
+  # Append-only merge: keep the base plan authoritative for every existing row;
+  # add only PLAN_DERIVED_CHECK_IDS rows that the fresh build now emits (because
+  # generation-plan.json exists) and the base lacks. Preserves tier/deferred
+  # placement from the fresh build and the closed list for everything else.
+  "$PYTHON_BIN" "$VERIFICATION_PLAN_HELPER" amend-plan \
+    "$AMEND_BASE" "$FRESH_PLAN" "$OUT" "$PLAN_DERIVED_CHECK_IDS"
+  rm -f "$FRESH_PLAN" "$AMEND_BASE"
+else
+  mv "$FRESH_PLAN" "$OUT"
+fi
 
 echo "Wrote $OUT"
 echo "Tier: $TIER"
 echo "Signals: scrollScrub=$HAS_SCROLL_SCRUB scrollStateMachine=$HAS_SCROLL_STATE_MACHINE ioReveal=$HAS_IO_REVEAL hover=$HAS_HOVER splash=$HAS_SPLASH canvas=$HAS_CANVAS customScroll=$HAS_CUSTOM_SCROLL commercialFont=$HAS_COMMERCIAL_FONT clickState=$HAS_CLICK_STATE lottie=$HAS_LOTTIE swiper=$HAS_SWIPER"
 
-# Validate JSON
-if [ "$HAS_JQ" -eq 1 ]; then
-  if ! jq empty "$OUT" 2>/dev/null; then
-    echo "ERROR: produced file is not valid JSON" >&2
-    exit 2
-  fi
+# Validate JSON. Use the already-resolved Python interpreter instead of
+# spawning jq here: repeated CI invocations exposed a slow jq cold-start/tail
+# hang after the plan had already been written, causing otherwise-valid plans to
+# exceed the 30s smoke-test timeout. Python is already required above for the
+# signal probes, so this keeps validation deterministic without adding a second
+# tool startup path.
+if ! "$PYTHON_BIN" -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$OUT" 2>/dev/null; then
+  echo "ERROR: produced file is not valid JSON" >&2
+  exit 2
 fi
 
 exit 0

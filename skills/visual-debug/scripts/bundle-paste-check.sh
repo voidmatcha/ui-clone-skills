@@ -17,7 +17,10 @@
 #       /^[0-9a-f]{8,}\.css$/ (Webpack/Next CSS-Modules content-hash naming).
 #       Same pattern caught by html-paste-check at <style>-inline level —
 #       this catches the static-file form.
-#   R2: any directory under impl/public/_next/ (full Next runtime mirror).
+#   R2: any runtime file under impl/public/_next/ (compiled Next runtime
+#       mirror). Static assets under _next/static/media/ are allowed because
+#       downloaded fonts and images must retain their captured root-relative
+#       URLs for font/asset parity.
 #   R3: any *.html file under impl/src/ or impl/app/ imported with `?raw`
 #       (Vite raw-import shape) AND mounted via dangerouslySetInnerHTML.
 #   R4: impl/public/<anywhere> contains a file whose first 200 bytes
@@ -78,6 +81,23 @@ out_path = Path(sys.argv[2])
 
 violations: list[dict] = []
 HEXHASH_CSS = re.compile(r"^[0-9a-f]{8,}\.css$")
+STATIC_MEDIA_EXTENSIONS = {
+    ".avif",
+    ".eot",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".mp4",
+    ".otf",
+    ".png",
+    ".svg",
+    ".ttf",
+    ".webm",
+    ".webp",
+    ".woff",
+    ".woff2",
+}
 
 def rel(p: Path) -> str:
     try:
@@ -109,21 +129,33 @@ if public_dir.is_dir():
                 ),
             })
 
-# R2: _next/ runtime mirror anywhere under public/
+# R2: _next/ runtime mirror anywhere under public/. Captured media assets are
+# not executable runtime and are required at their original root-relative URL.
 for cand in (public_dir / "_next", impl_root / "_next"):
     if cand.is_dir() and cand.exists():
-        # Count any files within
-        count = sum(1 for _ in cand.rglob("*") if _.is_file())
-        if count > 0:
+        files = [path for path in cand.rglob("*") if path.is_file()]
+        runtime_files = [
+            path
+            for path in files
+            if not (
+                tuple(path.relative_to(cand).parts[:2]) == ("static", "media")
+                and path.suffix.lower() in STATIC_MEDIA_EXTENSIONS
+            )
+        ]
+        if runtime_files:
             violations.append({
                 "rule": "R2",
                 "kind": "next-runtime-mirror",
                 "dir": rel(cand),
-                "fileCount": count,
+                "fileCount": len(files),
+                "runtimeFileCount": len(runtime_files),
+                "sample": sorted(rel(path) for path in runtime_files)[:5],
                 "reason": (
-                    f"impl contains _next/ directory with {count} file(s). "
+                    f"impl contains _next/ directory with {len(runtime_files)} "
+                    f"runtime file(s) among {len(files)} total file(s). "
                     f"Pasting ref's Next.js compiled chunks into impl is a runtime "
-                    f"mirror, not a clone."
+                    f"mirror, not a clone. Static assets under _next/static/media/ "
+                    f"are allowed."
                 ),
             })
 

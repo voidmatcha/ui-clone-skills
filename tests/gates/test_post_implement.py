@@ -7,6 +7,7 @@ from ui_clone.gate import Gate
 
 from ._helpers import (
     _post_implement_baseline,
+    _stamp_check_input_hash,
 )
 
 
@@ -62,6 +63,7 @@ def test_gate_post_implement_passes_with_required_files(tmp_path: Path) -> None:
     """gate_post_implement must pass when required closeout artifacts exist."""
     ref = tmp_path / "ref"
     ref.mkdir()
+    _post_implement_baseline(ref)
     (ref / "extracted.json").write_text(json.dumps({"sections": [], "url": "https://example.com"}))
     (ref / "transition-spec.json").write_text(json.dumps({
         "transitions": [{
@@ -75,7 +77,7 @@ def test_gate_post_implement_passes_with_required_files(tmp_path: Path) -> None:
         }]
     }))
     screenshots = ref / "static" / "ref"
-    screenshots.mkdir(parents=True)
+    screenshots.mkdir(parents=True, exist_ok=True)
     for i in range(5):
         (screenshots / f"scroll_{i:02d}.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
     (ref / "verification-plan.json").write_text(
@@ -90,18 +92,22 @@ def test_gate_post_implement_passes_with_required_files(tmp_path: Path) -> None:
         }),
         encoding="utf-8",
     )
-    (ref / "html-paste.json").write_text(json.dumps({"status": "pass"}))
+    impl = (ref / ".impl-root").read_text(encoding="utf-8").strip()
+    (ref / "html-paste.json").write_text(
+        json.dumps({"status": "pass", "implRoot": impl}), encoding="utf-8"
+    )
+    _stamp_check_input_hash(ref, "html-paste")
     # Seed fixture.js into bundles/ so _check_spec_bundle_grounding passes.
-    (ref / "bundles").mkdir()
+    (ref / "bundles").mkdir(exist_ok=True)
     (ref / "bundles" / "fixture.js").write_text("// fixture bundle", encoding="utf-8")
     sections = ref / "sections"
-    sections.mkdir()
+    sections.mkdir(exist_ok=True)
     (sections / "result.txt").write_text(
         "**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
         encoding="utf-8",
     )
     transitions = ref / "transitions"
-    transitions.mkdir()
+    transitions.mkdir(exist_ok=True)
     (transitions / "result.txt").write_text(
         "Transition compare: 1 PASS, 0 FAIL\n"
         "✅ PASS .fixture\n",
@@ -181,6 +187,7 @@ def test_post_implement_enforces_forensic_preservation_when_required(tmp_path: P
     impl = loop / "impl"
     (impl / "src").mkdir(parents=True)
     (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
     (ref / "html-paste.json").write_text(
         json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
     )
@@ -235,6 +242,7 @@ def test_post_implement_accepts_ref_css_and_preserved_class_tokens(tmp_path: Pat
     impl = loop / "impl"
     (impl / "src" / "ref-css").mkdir(parents=True)
     (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
     (ref / "html-paste.json").write_text(
         json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
     )
@@ -247,6 +255,7 @@ def test_post_implement_accepts_ref_css_and_preserved_class_tokens(tmp_path: Pat
         f"export function App(){{return <main className=\"{tokens}\">Hi</main>}}\n",
         encoding="utf-8",
     )
+    _stamp_check_input_hash(ref, "html-paste", impl)
 
     results = Gate(ref).gate_post_implement()
 
@@ -280,6 +289,7 @@ def test_post_implement_forensic_threshold_uses_dom_class_count(tmp_path: Path) 
     impl = loop / "impl"
     (impl / "src" / "ref-css").mkdir(parents=True)
     (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
     (ref / "html-paste.json").write_text(
         json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
     )
@@ -304,6 +314,7 @@ def test_post_implement_forensic_threshold_uses_dom_class_count(tmp_path: Path) 
         f"export function App(){{return <main className=\"{tokens}\">Hi</main>}}\n",
         encoding="utf-8",
     )
+    _stamp_check_input_hash(ref, "html-paste", impl)
 
     results = Gate(ref).gate_post_implement()
 
@@ -338,6 +349,7 @@ def test_post_implement_forensic_counts_only_classname_attrs(tmp_path: Path) -> 
     impl = loop / "impl"
     (impl / "src" / "ref-css").mkdir(parents=True)
     (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
     (ref / "html-paste.json").write_text(
         json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
     )
@@ -402,6 +414,7 @@ def test_post_implement_blocks_forensic_mode_when_ref_css_artifacts_missing(
     impl = loop / "impl"
     (impl / "src" / "ref-css").mkdir(parents=True)
     (impl / "package.json").write_text('{"name":"clone"}', encoding="utf-8")
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
     (ref / "html-paste.json").write_text(
         json.dumps({"status": "pass", "implRoot": str(impl)}), encoding="utf-8"
     )
@@ -891,6 +904,7 @@ def _setup_impl_root_for_anti_cheat(tmp_path: Path, src_files: dict[str, str]) -
     src = impl / "src"
     src.mkdir(parents=True)
     (impl / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
     for relpath, contents in src_files.items():
         f = src / relpath
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -1250,3 +1264,189 @@ def test_bundle_grep_inject_uses_active_gate_max(tmp_path: Path) -> None:
     results = Gate(ref).gate_post_implement()
     injects = [r for r in results if r.label == "bundle-grep-context-inject"]
     assert injects, "E1 must use max() of counters across gates"
+
+
+# --- scaffold-base-stamp transpiler-provenance gate ------------------------
+
+import hashlib as _hashlib  # noqa: E402
+
+
+def _write_structure(ref: Path, payload: dict | None = None) -> str:
+    """Write structure.json and return the sha256 the stamp must record."""
+    data = json.dumps(payload if payload is not None else {"tag": "body", "children": []})
+    (ref / "structure.json").write_text(data, encoding="utf-8")
+    return _hashlib.sha256((ref / "structure.json").read_bytes()).hexdigest()
+
+
+def _write_stamp(ref: Path, structure_sha: str) -> None:
+    (ref / "scaffold-base-stamp.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "producer": "skills/visual-debug/scripts/scaffold-to-jsx.sh",
+            "structureSha256": structure_sha,
+            "componentsWritten": 3,
+            "components": ["Page.tsx"],
+        }),
+        encoding="utf-8",
+    )
+
+
+def _stamp_results(ref: Path) -> list:
+    return [r for r in Gate(ref).gate_post_implement() if r.label == "scaffold-base-stamp"]
+
+
+def test_scaffold_base_stamp_missing_fails(tmp_path: Path) -> None:
+    """structure.json present but no stamp → the transpiler was bypassed (hand-
+    rolled HTML-to-JSX) → fail with a re-run-scaffold remediation."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _write_structure(ref)
+    stamp = _stamp_results(ref)
+    assert stamp, "check must fire when structure.json exists"
+    assert stamp[0].status == "fail"
+    assert "MISSING" in stamp[0].message
+    assert "scaffold-to-jsx.sh" in stamp[0].fix
+
+
+def test_scaffold_base_stamp_matching_passes(tmp_path: Path) -> None:
+    """A stamp whose structureSha256 matches structure.json proves the base is
+    transpiler-produced → pass, and it adds no failure to the baseline."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    sha = _write_structure(ref)
+    _write_stamp(ref, sha)
+    results = Gate(ref).gate_post_implement()
+    stamp = [r for r in results if r.label == "scaffold-base-stamp"]
+    assert stamp and stamp[0].status == "pass", stamp
+    # A matching stamp must not itself contribute a failure (other baseline
+    # gaps are exercised by the dedicated passing-fixture test).
+    assert not [r for r in results if r.label == "scaffold-base-stamp" and r.status == "fail"]
+
+
+def test_scaffold_base_stamp_sha_mismatch_fails(tmp_path: Path) -> None:
+    """Stamp present but structureSha256 does not match the current
+    structure.json → stale/mismatched base → fail."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _write_structure(ref)
+    _write_stamp(ref, "deadbeef" * 8)  # 64 hex chars, wrong value
+    stamp = _stamp_results(ref)
+    assert stamp and stamp[0].status == "fail"
+    assert "does not match" in stamp[0].message
+
+
+def test_scaffold_base_stamp_forged_without_sha_fails(tmp_path: Path) -> None:
+    """A hand-written stamp lacking structureSha256 cannot prove provenance."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _write_structure(ref)
+    (ref / "scaffold-base-stamp.json").write_text(
+        json.dumps({"schemaVersion": 1, "producer": "hand"}), encoding="utf-8"
+    )
+    stamp = _stamp_results(ref)
+    assert stamp and stamp[0].status == "fail"
+    assert "structureSha256" in stamp[0].message
+
+
+def test_scaffold_base_stamp_skipped_without_structure(tmp_path: Path) -> None:
+    """No structure.json (nothing to transpile) → the check does not fire."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    assert not (ref / "structure.json").exists()
+    assert not _stamp_results(ref), "check must skip when there is no DOM to transpile"
+
+
+# --- scaffold-base-stamp baseFile (reconciliation-aware, structure.merged.json) ---
+
+
+def _write_merged(ref: Path, payload: dict | None = None) -> str:
+    data = json.dumps(payload if payload is not None else {"tag": "body", "merged": True})
+    (ref / "structure.merged.json").write_text(data, encoding="utf-8")
+    return _hashlib.sha256((ref / "structure.merged.json").read_bytes()).hexdigest()
+
+
+def _write_stamp_basefile(ref: Path, sha: str, base_file: str) -> None:
+    (ref / "scaffold-base-stamp.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "producer": "skills/visual-debug/scripts/scaffold-to-jsx.sh",
+            "structureSha256": sha,
+            "baseFile": base_file,
+            "componentsWritten": 3,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_scaffold_base_stamp_merged_basefile_valid_passes(tmp_path: Path) -> None:
+    """A stamp binding to structure.merged.json validates its sha against THAT
+    file (not structure.json) → pass."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _write_structure(ref, {"tag": "body", "raw": True})  # top-guard file
+    merged_sha = _write_merged(ref)
+    _write_stamp_basefile(ref, merged_sha, "structure.merged.json")
+    stamp = _stamp_results(ref)
+    assert stamp and stamp[0].status == "pass", stamp
+
+
+def test_scaffold_base_stamp_merged_basefile_stale_sha_fails(tmp_path: Path) -> None:
+    """baseFile=structure.merged.json but the recorded sha doesn't match it → fail."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _write_structure(ref)
+    _write_merged(ref)
+    _write_stamp_basefile(ref, "deadbeef" * 8, "structure.merged.json")
+    stamp = _stamp_results(ref)
+    assert stamp and stamp[0].status == "fail"
+    assert "does not match" in stamp[0].message
+    assert "structure.merged.json" in stamp[0].message
+
+
+def test_scaffold_base_stamp_legacy_no_basefile_unchanged(tmp_path: Path) -> None:
+    """A stamp WITHOUT baseFile keeps binding to structure.json exactly as before:
+    matching sha passes even when a structure.merged.json also exists."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    sha = _write_structure(ref)
+    _write_merged(ref, {"tag": "body", "unrelated": True})  # present but not the base
+    _write_stamp(ref, sha)  # legacy stamp, no baseFile
+    stamp = _stamp_results(ref)
+    assert stamp and stamp[0].status == "pass", stamp
+
+
+def test_scaffold_base_stamp_disallowed_basefile_fails(tmp_path: Path) -> None:
+    """A baseFile outside the {structure.json, structure.merged.json} allowlist
+    (including path traversal) is rejected."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    sha = _write_structure(ref)
+    for bad in ("../../etc/passwd", "secrets.json", "nested/structure.json"):
+        _write_stamp_basefile(ref, sha, bad)
+        stamp = _stamp_results(ref)
+        assert stamp and stamp[0].status == "fail", bad
+        assert "disallowed baseFile" in stamp[0].message
+
+
+def test_scaffold_base_stamp_merged_basefile_missing_file_fails(tmp_path: Path) -> None:
+    """baseFile=structure.merged.json but the reconciled file is gone → fail with
+    a re-run-reconcile-merge remediation."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _write_structure(ref)
+    # deliberately do NOT create structure.merged.json
+    _write_stamp_basefile(ref, "deadbeef" * 8, "structure.merged.json")
+    stamp = _stamp_results(ref)
+    assert stamp and stamp[0].status == "fail"
+    assert "no longer exists" in stamp[0].message
+    assert "reconcile-spec-targets.sh" in stamp[0].fix

@@ -145,6 +145,28 @@ for name in ("transition-coverage.json", "runtime-spec-coverage.json",
     except Exception:
         continue
 
+# Full ref CSS corpus — spec/coverage artifacts sample only the transitions
+# the extractor noticed; durations/easings copied verbatim from raw ref CSS
+# must also count as grounded (mirrors color-token-grounding css scan).
+css_dir = ref_p / "css"
+if css_dir.is_dir():
+    for css_file in sorted(css_dir.glob("*.css")):
+        try:
+            css_text = css_file.read_text(encoding="utf-8", errors="ignore")[:4_000_000]
+        except OSError:
+            continue
+        for m in re.finditer(r"\b([\d.]+)(ms|s)\b", css_text):
+            try:
+                n = float(m.group(1))
+                ref_durations.add(int(n * 1000) if m.group(2) == "s" else int(n))
+            except ValueError:
+                continue
+        for m in re.finditer(
+            r"\b(linear|ease|ease-in|ease-out|ease-in-out|step-start|step-end|"
+            r"steps\([^)]*\)|cubic-bezier\([^)]*\))", css_text,
+        ):
+            ref_easings.add(norm_easing(m.group(1)))
+
 if not ref_durations and not ref_easings:
     out_p.write_text(json.dumps({
         "schemaVersion": 1,
@@ -198,6 +220,22 @@ impl_durations: set[int] = set()
 impl_easings: set[str] = set()
 impl_spring_uses = 0
 files_scanned = 0
+ignored_reference_mirror_files: list[str] = []
+
+
+def is_reference_mirror(path: Path) -> bool:
+    """Return True for captured reference CSS copied into the impl tree."""
+    try:
+        rel = path.relative_to(impl_p)
+    except ValueError:
+        rel = path
+    lower_parts = {part.lower() for part in rel.parts}
+    return (
+        bool(lower_parts & {"ref-css", "reference-css", "ref_css", "reference_css"})
+        or rel.name.lower() in {"reference.css", "ref.css"}
+    )
+
+
 for d in SCAN_DIRS:
     for path in d.rglob("*"):
         if path.is_dir():
@@ -205,6 +243,14 @@ for d in SCAN_DIRS:
         if path.suffix.lower() not in IMPL_EXT:
             continue
         if "node_modules" in path.parts or ".next" in path.parts or "dist" in path.parts:
+            continue
+        if is_reference_mirror(path):
+            try:
+                ignored_reference_mirror_files.append(
+                    str(path.relative_to(impl_p))
+                )
+            except ValueError:
+                ignored_reference_mirror_files.append(str(path))
             continue
         files_scanned += 1
         try:
@@ -296,6 +342,7 @@ payload = {
     "inventedEasings": sorted(invented_eas),
     "maxInvented": max_invented,
     "filesScanned": files_scanned,
+    "ignoredReferenceMirrorFiles": sorted(set(ignored_reference_mirror_files)),
     "reasons": reasons,
     "nextAction": (
         "Replace impl duration/easing values with ref-measured values from "

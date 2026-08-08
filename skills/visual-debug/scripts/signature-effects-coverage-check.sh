@@ -117,6 +117,16 @@ for path in Path(impl_src).rglob("*"):
             continue
 src = "\n".join(blob)
 
+# Basenames of every impl source file — used to enforce the per-effect
+# component contract (a declared signatureEffects[].component must actually
+# exist as a file, or its named component must be referenced in src).
+impl_basenames = {
+    p.name for p in Path(impl_src).rglob("*")
+    if p.is_file() and p.suffix.lower() in {
+        ".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte"
+    }
+}
+
 # Required runtime-primitive token groups per effect family. The impl must hit
 # at least one token from EACH applicable group. Token sets are generous so a
 # correct-but-idiomatically-different impl is not false-failed.
@@ -156,6 +166,27 @@ for eff in effects:
         gaps.append("per-character split (totalChars/SplitText/chars.map)")
     if needs_perword and not _has_per_word_wiring(src):
         gaps.append("per-word scroll highlight (ScrollWordHighlight, or useMotionValueEvent + word split)")
+    # Component contract: effects whose name/type does not trip the scroll/
+    # per-char/per-word keyword heuristics above (e.g. MarqueeStrip,
+    # PlaygroundCanvas, CardStackReveal, StickyGridScrubScene) previously
+    # required NOTHING and vacuously passed. For those, require the declared
+    # component to be materialized: its file exists under impl/src OR the named
+    # component is referenced in src. Only applied when no keyword requirement
+    # already covers the effect, so idiomatic inline primitive impls of
+    # keyword-detected effects are not false-failed.
+    if not (needs_scroll or needs_perword or needs_perchar):
+        comp = eff.get("component") or ""
+        comp_base = comp.rsplit("/", 1)[-1] if comp else ""
+        name = eff.get("name") or ""
+        materialized = (comp_base and comp_base in impl_basenames) or (
+            bool(name) and re.search(r"\b" + re.escape(name) + r"\b", src) is not None
+        )
+        if (comp or name) and not materialized:
+            gaps.append(
+                f"component not implemented: declared {comp or name!r} but no "
+                "matching file under impl/src and the named component is not "
+                "referenced (build components/ui/<Name>.tsx or wire it)"
+            )
     if gaps:
         missing.append({
             "name": eff.get("name"),

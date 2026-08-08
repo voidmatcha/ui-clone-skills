@@ -117,6 +117,50 @@ def gate_font_parity(self: Gate) -> list[CheckResult]:
                 )
             )
             return results
+        # The probe above samples ONE element's primary family. A page whose
+        # body text is one face and whose banner is another passes that probe
+        # while the second face silently renders as a system fallback, so also
+        # compare every declared @font-face when the artifact enumerates them.
+        def _faces(obj: object) -> dict[str, tuple[str, bool]]:
+            rows = obj.get("families") if isinstance(obj, dict) else None
+            out: dict[str, tuple[str, bool]] = {}
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    fam = row.get("family")
+                    if isinstance(fam, str) and fam.strip():
+                        out[fam.strip().lower()] = (
+                            fam.strip(),
+                            bool(row.get("loaded", True)),
+                        )
+            return out
+
+        ref_faces = _faces(ref_obj)
+        impl_faces = _faces(impl_obj)
+        dropped = [
+            display
+            for key, (display, loaded) in sorted(ref_faces.items())
+            if loaded and not impl_faces.get(key, ("", False))[1]
+        ]
+        if dropped:
+            results.append(
+                CheckResult(
+                    "declared face not loaded",
+                    "fail",
+                    f"Ref loads {', '.join(repr(d) for d in dropped)} but the impl "
+                    "does not — the primary family matches, so this renders as a "
+                    "silent system fallback wherever those faces are used. Common "
+                    "cause: the binary never reached impl/public, and a dev server "
+                    "answers the miss with index.html at HTTP 200, so no 404 shows.",
+                    fix=(
+                        "Re-run scripts/extract/transfer-fonts.sh and check "
+                        "font-transfer.json for skipped/missing entries, then confirm "
+                        "the served response is font/woff2 rather than text/html."
+                    ),
+                )
+            )
+            return results
         results.append(CheckResult("font-parity", "pass", "Ref and impl load the same primary font"))
         return results
 

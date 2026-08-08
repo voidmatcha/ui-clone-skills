@@ -68,19 +68,49 @@ VIDEO_COUNT=$(echo "$VIDEOS_JSON" | python3 -c "import json,sys; print(len(json.
 echo "  Found $VIDEO_COUNT videos"
 
 if [ "$VIDEO_COUNT" -gt 0 ]; then
-  echo "$VIDEOS_JSON" | python3 -c "
-import json, sys, subprocess, os
+  UI_CLONE_EXTRACT_ASSETS_VIDEOS_JSON="$VIDEOS_JSON" \
+  UI_CLONE_EXTRACT_ASSETS_PUBLIC="$PUBLIC" \
+  python3 <<'PY'
+import json
+import os
+import subprocess
+import sys
 
-videos = json.load(sys.stdin)
-public_dir = '$PUBLIC'
+
+def _timeout_env(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _remove_partial(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+try:
+    videos = json.loads(os.environ.get("UI_CLONE_EXTRACT_ASSETS_VIDEOS_JSON", "[]"))
+except json.JSONDecodeError as exc:
+    print(f"  ⚠️  video source JSON invalid; skipping video downloads: {exc}", file=sys.stderr)
+    videos = []
+
+public_dir = os.environ["UI_CLONE_EXTRACT_ASSETS_PUBLIC"]
+video_dir = os.path.join(public_dir, "videos")
+os.makedirs(video_dir, exist_ok=True)
+curl_max_time = os.environ.get("UI_CLONE_EXTRACT_ASSETS_VIDEO_CURL_MAX_TIME", "30")
+download_timeout = _timeout_env("UI_CLONE_EXTRACT_ASSETS_VIDEO_TIMEOUT", 35.0)
 
 for v in videos:
-    section = v['section']
+    section = v.get('section') or 'unknown'
     # Prefer mp4, fallback to webm
-    url = v['currentSrc']
-    for s in v['sources']:
-        if s['type'] == 'video/mp4':
-            url = s['src']
+    url = v.get('currentSrc') or ''
+    for s in v.get('sources') or []:
+        if s.get('type') == 'video/mp4':
+            url = s.get('src') or url
             break
 
     if not url:
@@ -88,22 +118,35 @@ for v in videos:
 
     ext = '.mp4' if 'mp4' in url else '.webm'
     filename = f'{section}-bg{ext}'
-    out_path = os.path.join(public_dir, 'videos', filename)
+    out_path = os.path.join(video_dir, filename)
 
     if os.path.exists(out_path):
         print(f'  ⏭️  {filename} (already exists)')
         continue
 
     print(f'  ⬇️  {filename} from {url[:80]}...')
-    result = subprocess.run(['curl', '-sL', '-o', out_path, '--max-time', '30', url],
-                           capture_output=True, timeout=35)
-    if result.returncode == 0 and os.path.getsize(out_path) > 1000:
+    try:
+        result = subprocess.run(
+            ['curl', '-sL', '-o', out_path, '--max-time', curl_max_time, url],
+            capture_output=True,
+            timeout=download_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(f'  ❌ {filename} TIMEOUT after {download_timeout:g}s', file=sys.stderr)
+        _remove_partial(out_path)
+        continue
+    except OSError as exc:
+        print(f'  ❌ {filename} ERROR: {exc}', file=sys.stderr)
+        _remove_partial(out_path)
+        continue
+
+    if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
         size_mb = os.path.getsize(out_path) / 1024 / 1024
         print(f'  ✅ {filename} ({size_mb:.1f} MB)')
     else:
         print(f'  ❌ {filename} FAILED')
-        os.remove(out_path) if os.path.exists(out_path) else None
-" 2>/dev/null
+        _remove_partial(out_path)
+PY
 fi
 
 # ── 2. Font files ──
@@ -153,11 +196,46 @@ FONT_JSON=$(agent-browser --session "$SESSION" eval "(() => {
 FONT_JSON=$(echo "$FONT_JSON" | sed 's/^"//;s/"$//' | sed 's/\\"/"/g')
 
 # Download fonts and generate @font-face CSS
-echo "$FONT_JSON" | python3 -c "
-import json, sys, subprocess, os, re
+UI_CLONE_EXTRACT_ASSETS_FONT_JSON="$FONT_JSON" \
+UI_CLONE_EXTRACT_ASSETS_PUBLIC="$PUBLIC" \
+UI_CLONE_EXTRACT_ASSETS_DIR="$DIR" \
+python3 <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
 
-entries = json.load(sys.stdin)
-public_dir = '$PUBLIC'
+
+def _timeout_env(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _remove_partial(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+try:
+    entries = json.loads(os.environ.get("UI_CLONE_EXTRACT_ASSETS_FONT_JSON", "[]"))
+except json.JSONDecodeError as exc:
+    print(f"  ⚠️  font source JSON invalid; skipping font downloads: {exc}", file=sys.stderr)
+    entries = []
+
+public_dir = os.environ["UI_CLONE_EXTRACT_ASSETS_PUBLIC"]
+ref_dir = os.environ["UI_CLONE_EXTRACT_ASSETS_DIR"]
+font_dir = os.path.join(public_dir, "fonts")
+assets_dir = os.path.join(ref_dir, "assets")
+os.makedirs(font_dir, exist_ok=True)
+os.makedirs(assets_dir, exist_ok=True)
+curl_max_time = os.environ.get("UI_CLONE_EXTRACT_ASSETS_FONT_CURL_MAX_TIME", "15")
+download_timeout = _timeout_env("UI_CLONE_EXTRACT_ASSETS_FONT_TIMEOUT", 20.0)
 font_faces = []
 
 for entry in entries:
@@ -181,17 +259,31 @@ for entry in entries:
     safe_family = re.sub(r'[^a-zA-Z0-9]', '-', family).strip('-')
     ext = '.woff2' if 'woff2' in url else '.woff' if 'woff' in url else '.ttf'
     filename = f'{safe_family}-{weight}{ext}'
-    out_path = os.path.join(public_dir, 'fonts', filename)
+    out_path = os.path.join(font_dir, filename)
 
     if os.path.exists(out_path):
         print(f'  ⏭️  {filename} ({family} w{weight})')
     else:
-        result = subprocess.run(['curl', '-sL', '-o', out_path, '--max-time', '15', url],
-                               capture_output=True, timeout=20)
+        try:
+            result = subprocess.run(
+                ['curl', '-sL', '-o', out_path, '--max-time', curl_max_time, url],
+                capture_output=True,
+                timeout=download_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            print(f'  ❌ {filename} TIMEOUT after {download_timeout:g}s', file=sys.stderr)
+            _remove_partial(out_path)
+            continue
+        except OSError as exc:
+            print(f'  ❌ {filename} ERROR: {exc}', file=sys.stderr)
+            _remove_partial(out_path)
+            continue
+
         if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 100:
             print(f'  ✅ {filename} ({family} w{weight})')
         else:
             print(f'  ❌ {filename} FAILED')
+            _remove_partial(out_path)
             continue
 
     font_faces.append(f'''@font-face {{
@@ -204,11 +296,11 @@ for entry in entries:
 
 # Write font-faces.css
 if font_faces:
-    css_path = os.path.join('$DIR', 'assets', 'font-faces.css')
+    css_path = os.path.join(assets_dir, 'font-faces.css')
     with open(css_path, 'w') as f:
         f.write('\n\n'.join(font_faces))
     print(f'\n  Generated: {css_path} ({len(font_faces)} @font-face rules)')
-" 2>/dev/null
+PY
 
 # ── 3. Extract first video frame as static fallback ──
 echo ""
@@ -223,11 +315,11 @@ for VIDEO_FILE in "$PUBLIC/videos/"*.mp4 "$PUBLIC/videos/"*.webm; do
     echo "  ⏭️  ${BASENAME}-frame.jpg (already exists)"
     continue
   fi
-  ffmpeg -y -i "$VIDEO_FILE" -vframes 1 -ss 2 "$POSTER" 2>/dev/null
-  if [ -f "$POSTER" ]; then
+  if ffmpeg -y -i "$VIDEO_FILE" -vframes 1 -ss 2 "$POSTER" 2>/dev/null && [ -f "$POSTER" ]; then
     echo "  ✅ ${BASENAME}-frame.jpg (frame at t=2s)"
   else
     echo "  ❌ ${BASENAME}-frame.jpg extraction failed"
+    rm -f "$POSTER"
   fi
 done
 

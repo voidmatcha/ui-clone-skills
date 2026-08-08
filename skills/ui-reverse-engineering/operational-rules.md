@@ -24,6 +24,13 @@ Niche execution rules and per-request scope adjustments. Read when your situatio
 | Extraction discipline (measurement vs assumption) | `no-judgment.md` |
 | Generation pitfalls + output validation | `component-generation.md`, `post-gen-verification.md` |
 
+## Recovering a stalled / frozen run
+
+- **Symptom:** the session has been quiet for >15 min, the UI shows "N shells still running", but `ps`/`pgrep`/`lsof` find no live processes for those shells.
+- **Root cause (runtime-level, not the pipeline):** a background-shell completion wake-up was lost — the completion event failed to re-invoke the agent and was not retried. No artifact is corrupted; the run simply has no live driver.
+- **Recovery:** send any message. The agent re-enters at the before-starting state inspection step and resumes losslessly from `pipeline-state.json`, `current_gate`, and the on-disk artifacts — re-run the same `python -m ui_clone.pipeline <url> <component> <session> <action>` and it continues where it stopped.
+- **Why exposure is bounded (batch-4 item 2):** verification invocations that would exceed ~8 min are split into <8-min, idempotent chunks with persisted intermediate state, so a lost wake-up loses at most one in-flight chunk. The video-motion scroll sweep is the primary case: each captured position is checkpointed to `<ref-dir>/transitions/.../scroll-chunk-manifest.json` and `UI_CLONE_VMC_SCROLL_CHUNK` bounds positions per invocation. A resumed run skips already-captured positions (frames on disk + manifest) and the dispatcher aggregates the chunked frames into a verdict identical to a monolithic run.
+
 ## Scope adjustments by request shape
 
 | Request | Scope | Adjustments |

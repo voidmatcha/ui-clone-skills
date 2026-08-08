@@ -74,26 +74,6 @@ out_path = Path(sys.argv[3]) if sys.argv[3] else None
 threshold_pct = int(sys.argv[4])
 
 
-# Build a flat tag-sequence from the scaffold tree (pre-order DFS, tag only).
-scaffold = json.loads(scaffold_path.read_text(encoding="utf-8"))
-ref_seq = []
-
-
-def walk(node, depth=0, max_depth=12):
-    if depth > max_depth or not isinstance(node, dict):
-        return
-    tag = node.get("tag", "")
-    if isinstance(tag, str) and tag.lower() in {"script", "style", "noscript", "template"}:
-        return
-    if tag:
-        ref_seq.append(tag.lower())
-    for c in node.get("children", []) or []:
-        walk(c, depth + 1, max_depth)
-
-
-walk(scaffold.get("tree", {}))
-
-
 # Extract the JSX tag sequence from impl components. Use a regex over open
 # tags `<TagName...` ignoring closing/self-closing fragments. Skip Fragment
 # and React.Fragment.
@@ -102,7 +82,16 @@ TAG_PATTERN = re.compile(r"<([a-zA-Z][a-zA-Z0-9]*)")
 
 # Filter to HTML element names — capitalize-leading is a React component, not
 # an HTML element, so skip (the component itself maps to an HTML tag via its
-# own render).
+# own render). This set is the SINGLE SOURCE OF TRUTH for the measurable tag
+# universe and is applied symmetrically to BOTH the ref scaffold walk (below)
+# and the impl JSX scan: a tag counts only if both sides could produce it.
+# Counting tags on the ref side that the impl extractor can never emit (e.g.
+# <head>-metadata meta/link/title/base, or hyphenated custom elements that
+# TAG_PATTERN can't match) guarantees false "dropped from impl" deltas and, on
+# any site with a populated <head> (meta x30+), an eviscerate hard-fail
+# regardless of clone quality. Keeping one allowlist for both sides makes the
+# gate compare the exact same tag universe and stays self-consistent if the
+# set is later widened or narrowed.
 HTML_TAGS = {
     "html","body","main","header","footer","nav","aside","section","article",
     "div","span","a","button","img","video","audio","picture","source",
@@ -112,8 +101,31 @@ HTML_TAGS = {
     "iframe","canvas","svg","path","g","circle","rect","line","polyline","polygon",
     "figure","figcaption","time","mark","strong","em","b","i","u","small","sup","sub",
     "blockquote","pre","code","kbd","samp","var","cite","q","abbr","address",
-    "br","hr","details","summary","dialog","template",
+    "br","hr","details","summary","dialog",
+    # NB: script/style/noscript/template are intentionally absent — they are
+    # RSC payload / polyfill / CSS-text containers that the impl JSX never
+    # reproduces, so excluding them from the allowlist strips them from both
+    # sides (previously template was counted on the impl side only).
 }
+
+
+# Build a flat tag-sequence from the scaffold tree (pre-order DFS, tag only).
+scaffold = json.loads(scaffold_path.read_text(encoding="utf-8"))
+ref_seq = []
+
+
+def walk(node, depth=0, max_depth=12):
+    if depth > max_depth or not isinstance(node, dict):
+        return
+    tag = node.get("tag", "")
+    # Symmetric filter: only count tags the impl-side scan can also produce.
+    if isinstance(tag, str) and tag.lower() in HTML_TAGS:
+        ref_seq.append(tag.lower())
+    for c in node.get("children", []) or []:
+        walk(c, depth + 1, max_depth)
+
+
+walk(scaffold.get("tree", {}))
 
 
 impl_seq = []

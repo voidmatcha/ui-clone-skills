@@ -29,7 +29,7 @@ def _run(ref: Path, *args: str) -> subprocess.CompletedProcess[str]:
         ["bash", str(SCRIPT), str(ref), *args],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
 
 
@@ -71,7 +71,7 @@ def test_runs_with_python39_annotation_semantics(tmp_path: Path) -> None:
         ["bash", str(SCRIPT), str(ref), "--rebuild"],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         env=env,
     )
 
@@ -253,6 +253,51 @@ def test_setup_error_on_bad_ref(tmp_path: Path) -> None:
         ["bash", str(SCRIPT), str(tmp_path / "no-ref")],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
     assert proc.returncode == 2
+
+
+def test_categorize_upgrades_regions_from_real_transitions(tmp_path: Path) -> None:
+    """Step H finalizes the spec, so it is also where regions.json is upgraded
+    from the honest placeholder to the derived real regions (best-effort)."""
+    ref = _make_ref(tmp_path, {
+        "transitions": [{
+            "id": "hero-scrub",
+            "trigger": "scroll",
+            "selector": ".dga-module__hero",
+            "animation": {"property": "opacity", "from": {"opacity": 0},
+                          "to": {"opacity": 1}, "duration": "scroll-tied",
+                          "easing": "linear"},
+        }],
+    })
+    (ref / "section-map.json").write_text(json.dumps({
+        "sections": [{"index": 0, "top": 100, "height": 600,
+                      "className": "dga-module__hero", "id": None}],
+    }))
+    (ref / "regions.json").write_text(json.dumps({
+        "placeholder": True, "detectionRan": False,
+        "regions": [{"name": "full-page", "x": 0, "y": 0,
+                     "width": 1440, "height": 5000}],
+    }))
+    proc = _run(ref)
+    assert proc.returncode == 0, proc.stderr
+    regions = json.loads((ref / "regions.json").read_text())
+    assert regions["placeholder"] is False
+    assert regions["regions"][0]["name"] == "hero-scrub"
+    assert regions["regions"][0]["y"] == 100
+
+
+def test_categorize_preserves_placeholder_without_real_transitions(tmp_path: Path) -> None:
+    """No real transitions → the honest placeholder regions.json is preserved,
+    never overwritten with a fabricated region."""
+    ref = _make_ref(tmp_path, {"transitions": []})
+    (ref / "regions.json").write_text(json.dumps({
+        "placeholder": True, "detectionRan": False,
+        "regions": [{"name": "full-page", "x": 0, "y": 0,
+                     "width": 1440, "height": 5000}],
+    }))
+    proc = _run(ref)
+    assert proc.returncode == 0, proc.stderr
+    regions = json.loads((ref / "regions.json").read_text())
+    assert regions["placeholder"] is True

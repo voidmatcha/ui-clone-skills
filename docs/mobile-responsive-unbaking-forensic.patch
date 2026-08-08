@@ -1,0 +1,577 @@
+diff --git a/skills/visual-debug/scripts/scaffold-to-jsx.sh b/skills/visual-debug/scripts/scaffold-to-jsx.sh
+index a5174c5..fa18f46 100755
+--- a/skills/visual-debug/scripts/scaffold-to-jsx.sh
++++ b/skills/visual-debug/scripts/scaffold-to-jsx.sh
+@@ -723,7 +723,13 @@ def _load_ref_css():
+             parts.append(f.read_text(encoding="utf-8", errors="ignore"))
+         except OSError:
+             continue
+-    _REF_CSS_TEXT = "\n".join(parts)
++    # Strip CSS comments up front. Besides being cleaner for the coarse rule
++    # parser and the substring coverage checks (a `.foo` mentioned in a comment
++    # is not a real selector), this removes the trailing `/*# sourceMappingURL=
++    # data:...base64... */` that minified bundles append — navercorp's is 1.7MB.
++    # Left in, that giant brace-free blob makes the `([^{}]+)\{` rule scan
++    # re-attempt from every offset (O(n²)) and hangs the media index build.
++    _REF_CSS_TEXT = re.sub(r"/\*.*?\*/", "", "\n".join(parts), flags=re.DOTALL)
+ 
+ 
+ def _forensic_classname_only():
+@@ -746,6 +752,264 @@ def _forensic_strip_boxmodel(styles):
+     return {k: v for k, v in styles.items() if k not in _FORENSIC_BOXMODEL_PROPS}
+ 
+ 
++# ── @media-aware refinement ────────────────────────────────────────────────
++# The naive strip above is @media-agnostic: it drops an inline box-model prop
++# whenever the class appears anywhere in the ref CSS — including classes whose
++# only coverage is a DESKTOP base rule. That regresses desktop (the inline value
++# was the desktop truth; the base rule may differ or be absent). Media-aware
++# mode only strips a prop when some @media block actually overrides it for one
++# of the node's classes, so the desktop base value stays inline and only the
++# mobile-overridden props yield to ref CSS. Gated by UI_CLONE_FORENSIC_MEDIA_AWARE=1.
++_MEDIA_RULE_PROPS = {}  # frozenset(subject compound classes) -> tracked box-model props set under @media
++_BASE_RULE_PROPS = {}   # frozenset(subject compound classes) -> tracked box-model props set by NON-@media (desktop) rules
++# Per-token buckets for O(node-classes) lookup instead of O(all-rules) per node
++# (a full-index subset scan per DOM node is O(nodes × rules) and pushed navercorp's
++# 2.6MB-CSS transpile past 10min). Each requirement is anchored under one class
++# token; a node satisfying it necessarily carries that token, so scanning only the
++# node's own class buckets finds every applicable rule.
++_MEDIA_BUCKETS = {}     # class token -> list[(req_frozenset, props_set)]
++_BASE_BUCKETS = {}      # class token -> list[(req_frozenset, props_set)]
++
++
++def _forensic_media_aware():
++    return (
++        _forensic_classname_only()
++        and os.environ.get("UI_CLONE_FORENSIC_MEDIA_AWARE") == "1"
++    )
++
++
++def _expand_boxmodel_prop(name):
++    name = name.strip().lower()
++    if name in _FORENSIC_BOXMODEL_PROPS:
++        return {name}
++    if name in ("width", "height"):
++        return {name}
++    if name == "padding":
++        return {"padding-left", "padding-right", "padding-top", "padding-bottom"}
++    if name == "padding-inline":
++        return {"padding-left", "padding-right"}
++    if name == "padding-block":
++        return {"padding-top", "padding-bottom"}
++    if name in ("margin", "margin-inline"):
++        return {"margin-left", "margin-right"}
++    # codex P2 — a side-specific LOGICAL prop maps to ONE physical side, not both;
++    # expanding `padding-inline-start` to left+right would strip the opposite
++    # side's desktop value that the rule never touches. Assume LTR (physical-left
++    # = inline-start), which holds for the sites this pipeline targets; flag-gated.
++    if name == "padding-inline-start":
++        return {"padding-left"}
++    if name == "padding-inline-end":
++        return {"padding-right"}
++    if name == "margin-inline-start":
++        return {"margin-left"}
++    if name == "margin-inline-end":
++        return {"margin-right"}
++    return set()
++
++
++def _subject_compounds(sel, cls_re):
++    """Class-requirement sets of a selector's SUBJECT (rightmost compound) — one
++    frozenset per comma selector. Splits the comma list, then for each takes the
++    segment after the last combinator (space/>/+/~) and returns ALL its class
++    tokens as one requirement: `.page .card` → [{card}]; `.a, .b>.c` → [{a},{c}];
++    a COMPOUND `.card.featured` → [{card, featured}] (a node must carry EVERY
++    class to match — keying tokens independently would strip a node that has only
++    `card`). Descendant/ancestor scope classes are excluded (codex P2).
++
++    Pseudo-classes/elements and attribute selectors are stripped from the subject
++    before class extraction: `.card:not(.featured)` → {card} (the `.featured` in
++    `:not()` is a NEGATIVE condition, not a required class — treating it as
++    required would wrongly keep a plain `.card`'s inline and never let the mobile
++    rule override it); `.card:hover`, `.card::before`, `.card[data-x]` → {card}."""
++    out = []
++    for one in sel.split(","):
++        one = one.strip()
++        if not one:
++            continue
++        subject = re.split(r"[\s>+~]+", one)[-1]
++        # drop attribute selectors and pseudo-class/element parts (incl. their
++        # parenthesised args like :not(.x)/:is(.a,.b)) so only real compound
++        # classes remain as requirements.
++        subject = re.sub(r"\[[^\]]*\]", "", subject)
++        subject = re.sub(r"::?[A-Za-z-]+(?:\([^)]*\))?", "", subject)
++        classes = frozenset(cls_re.findall(subject))
++        if classes:
++            out.append(classes)
++    return out
++
++
++_NONSCREEN_MEDIA_TYPES = frozenset({
++    "print", "speech", "tty", "tv", "projection", "handheld", "braille",
++    "embossed", "aural",
++})
++
++
++def _media_prelude_targets_screen(prelude):
++    """True if a `@media` prelude can apply on screen. Keep the block if ANY comma
++    query is screen-applicable. Handles the `only`/`not` modifiers: `not print`
++    applies to screen but `not screen`/`not all` do not; `only print` is
++    print-only. So `print`/`only print`/`not screen` → skip; `not print`,
++    `screen and ...`, `all`, bare feature `(max-width:600px)`, and
++    `print, (max-width:600px)` → keep (codex P2)."""
++    for q in prelude.split(","):
++        q = q.strip()
++        if not q:
++            continue
++        negated = q.startswith("not ")
++        if negated:
++            q = q[4:].strip()
++        elif q.startswith("only "):
++            q = q[5:].strip()
++        head = re.split(r"[\s(]", q, 1)[0]
++        is_nonscreen = head in _NONSCREEN_MEDIA_TYPES
++        if negated:
++            # `not <nonscreen>` (e.g. not print) DOES apply on screen; `not screen`
++            # / `not all` exclude screen — keep scanning the other queries.
++            if is_nonscreen:
++                return True
++            continue
++        if is_nonscreen:
++            continue  # a bare non-screen media type — not screen-applicable
++        return True  # screen / all / bare feature query → applies to screen
++    return False
++
++
++def _build_media_index():
++    """Map each class token to the tracked box-model props some @media rule sets
++    for it. Coarse CSS parse: locate @media block bodies (brace-balanced), then
++    the selector { decls } rules inside, collecting .class tokens x declared props."""
++    global _MEDIA_RULE_PROPS, _BASE_RULE_PROPS
++    _MEDIA_RULE_PROPS = {}
++    _BASE_RULE_PROPS = {}
++    css = _REF_CSS_TEXT
++    if not css:
++        return
++    n = len(css)
++    i = 0
++    rule_re = re.compile(r"([^{}]+)\{([^{}]*)\}")
++    cls_re = re.compile(r"\.([A-Za-z0-9_-]+)")
++    prop_re = re.compile(r"(^|;)\s*([A-Za-z-]+)\s*:")
++
++    def _index_rules(text, target):
++        for rm in rule_re.finditer(text):
++            sel, decls = rm.group(1), rm.group(2)
++            props = set()
++            for pm in prop_re.finditer(decls):
++                props |= _expand_boxmodel_prop(pm.group(2))
++            if not props:
++                continue
++            # codex P2 — key by the rule's SUBJECT compound (rightmost). A
++            # descendant selector `.page .card{padding-left:0}` targets `.card`,
++            # not `.page` (marking `.page` would strip a wrapper the rule never
++            # matches); a compound `.card.featured` requires BOTH classes, so a
++            # node with only `card` must not be stripped.
++            for req in _subject_compounds(sel, cls_re):
++                cur = target.get(req)
++                if cur is None:
++                    target[req] = set(props)
++                else:
++                    cur.update(props)
++
++    media_spans = []
++    while True:
++        m = css.find("@media", i)
++        if m < 0:
++            break
++        # find the opening brace of the @media block
++        brace = css.find("{", m)
++        if brace < 0:
++            break
++        # brace-balanced block end (record the span for base-index exclusion
++        # regardless of screen filtering, so an @media rule is never also counted
++        # as a base/desktop rule).
++        depth = 1
++        j = brace + 1
++        while j < n and depth > 0:
++            c = css[j]
++            if c == "{":
++                depth += 1
++            elif c == "}":
++                depth -= 1
++            j += 1
++        media_spans.append((m, j))
++        i = j
++        # codex P2 — only index SCREEN-applicable media queries. A print/speech-
++        # only block (`@media print{...}`) never applies during visual
++        # verification, so stripping the inline layout it overrides would corrupt
++        # the screen clone. `not print`, `print, (max-width)`, and bare feature
++        # queries stay (they can apply on screen).
++        prelude = css[m + 6:brace].lower()
++        if not _media_prelude_targets_screen(prelude):
++            continue
++        _index_rules(css[brace + 1:j - 1], _MEDIA_RULE_PROPS)
++
++    # loop-nv-1 remeasure fix — base (non-@media) rules provide the DESKTOP value.
++    # A prop is only safe to strip when the ref CSS carries BOTH a @media override
++    # AND a desktop base value; if the desktop value exists only in the inline
++    # capture (no base rule — e.g. navercorp news-masonry/tech-grid width),
++    # stripping regresses desktop. Build the base index from the CSS with every
++    # @media block blanked out.
++    if media_spans:
++        parts, prev = [], 0
++        for s, e in media_spans:
++            parts.append(css[prev:s])
++            prev = e
++        parts.append(css[prev:])
++        base_css = "".join(parts)
++    else:
++        base_css = css
++    _index_rules(base_css, _BASE_RULE_PROPS)
++
++    # Bucket each requirement under ONE anchor class token for fast per-node
++    # lookup (see _MEDIA_BUCKETS comment). A node satisfying `req` carries every
++    # class in req, including its anchor, so scanning only the node's own class
++    # buckets is complete.
++    global _MEDIA_BUCKETS, _BASE_BUCKETS
++    _MEDIA_BUCKETS = _build_token_buckets(_MEDIA_RULE_PROPS)
++    _BASE_BUCKETS = _build_token_buckets(_BASE_RULE_PROPS)
++
++
++def _build_token_buckets(rule_props):
++    buckets = {}
++    for req, props in rule_props.items():
++        if not req:
++            continue
++        anchor = min(req)  # any single deterministic token in the requirement
++        buckets.setdefault(anchor, []).append((req, props))
++    return buckets
++
++
++def _forensic_props_for_node(node, buckets):
++    node_cls = set(str(node.get("class") or "").split())
++    if not node_cls:
++        return set()
++    out = set()
++    # a prop applies only if the node satisfies the FULL subject compound of some
++    # rule (every class present). Each req is bucketed under one of its tokens, so
++    # scanning the node's own class buckets covers every rule it can satisfy.
++    for t in node_cls:
++        for req, props in buckets.get(t, ()):
++            if req <= node_cls:
++                out |= props
++    return out
++
++
++def _forensic_strip_boxmodel_media_aware(styles, node):
++    media = _forensic_props_for_node(node, _MEDIA_BUCKETS)
++    if not media:
++        return styles
++    base = _forensic_props_for_node(node, _BASE_BUCKETS)
++    # Strip a prop only when BOTH a @media rule overrides it AND a non-@media base
++    # rule provides its desktop value. If the desktop value exists only in the
++    # inline capture (no base rule), stripping it removes the desktop truth and
++    # reflows the element — loop-nv-1 remeasure proved this (news-masonry /
++    # tech-grid width was inline-only → desktop +0.08 dSSIM). Keep those inline.
++    drop = media & base & set(_FORENSIC_BOXMODEL_PROPS)
++    if not drop:
++        return styles
++    return {k: v for k, v in styles.items() if k not in drop}
++
++
+ def _init_forensic_mode():
+     global _FORENSIC_STRATEGY
+     try:
+@@ -759,6 +1023,8 @@ def _init_forensic_mode():
+         pass
+     if _forensic_classname_only():
+         _load_ref_css()
++        if _forensic_media_aware():
++            _build_media_index()
+ 
+ 
+ _init_forensic_mode()
+@@ -1840,7 +2106,9 @@ def render(node, indent=2, hover_rules=None):
+         # Responsive: re-resolve baked box-model px through the Step 4-C2 sweep,
+         # or (forensic className-only mode) drop inline box-model for nodes the
+         # mirrored ref CSS already sizes. Both are no-ops without their inputs.
+-        if _forensic_classname_only() and _node_covered_by_ref_css(node):
++        if _forensic_media_aware() and _node_covered_by_ref_css(node):
++            styles = _forensic_strip_boxmodel_media_aware(styles, node)
++        elif _forensic_classname_only() and _node_covered_by_ref_css(node):
+             styles = _forensic_strip_boxmodel(styles)
+         elif _SIZING_ACTIVE:
+             styles = _apply_sizing_expressions(node, styles)
+diff --git a/tests/test_scaffold_forensic_media_aware.py b/tests/test_scaffold_forensic_media_aware.py
+new file mode 100644
+index 0000000..f2ce32d
+--- /dev/null
++++ b/tests/test_scaffold_forensic_media_aware.py
+@@ -0,0 +1,267 @@
++"""@media-aware forensic box-model strip (UI_CLONE_FORENSIC_MEDIA_AWARE).
++
++The forensic className-only mode drops inline box-model props for ref-CSS-covered
++nodes so the ref CSS (incl @media) drives every viewport. The naive strip is
++@media-agnostic and collapses desktop (loop-nv-1 spike: docHeight -37%). The
++media-aware refinement (`UI_CLONE_FORENSIC_MEDIA_AWARE=1`, default off, gated
++under UI_CLONE_FORENSIC_CLASSNAME_ONLY) strips an inline prop ONLY when a real
++@media rule overrides it for the node's class — desktop base stays inline, only
++the mobile-overridden delta yields.
++
++These tests pin the two correctness edges codex flagged:
++ 1. selector SUBJECT only — a descendant rule `.page .card{}` must not mark the
++    ancestor `.page`, or root/scope wrappers lose their desktop inline layout;
++ 2. SCREEN media only — a print-only `@media print{}` rule must be ignored, since
++    it never applies during on-screen visual verification.
++Plus a positive control: a screen `@media (max-width)` rule DOES strip.
++"""
++from __future__ import annotations
++
++import json
++import os
++import re
++import subprocess
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++SCRIPT = ROOT / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
++
++_FORENSIC_ENV = {
++    "UI_CLONE_FORENSIC_CLASSNAME_ONLY": "1",
++    "UI_CLONE_FORENSIC_MEDIA_AWARE": "1",
++}
++
++
++def _run(tmp_path: Path, structure: dict, sections: list[str], css: str) -> Path:
++    ref, impl = tmp_path / "ref", tmp_path / "impl"
++    (impl / "src").mkdir(parents=True)
++    (ref / "css").mkdir(parents=True)
++    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
++    (ref / "section-map.json").write_text(json.dumps({"sections": [
++        {"index": i, "tag": "section", "cls": s} for i, s in enumerate(sections)]}),
++        encoding="utf-8")
++    (ref / "generation-plan.json").write_text(json.dumps(
++        {"forensicPreservation": {"required": True,
++                                   "strategy": "ref-derived-jsx-with-local-css"}}),
++        encoding="utf-8")
++    (ref / "css" / "main.css").write_text(css, encoding="utf-8")
++    (impl / "package.json").write_text('{"name":"i","dependencies":{}}', encoding="utf-8")
++    proc = subprocess.run(["bash", str(SCRIPT), str(ref), str(impl)],
++                          capture_output=True, text=True, timeout=30,
++                          env={**os.environ, **_FORENSIC_ENV})
++    assert proc.returncode == 0, proc.stdout + proc.stderr
++    return impl / "src"
++
++
++def _style_of(src_dir: Path, cls: str) -> str:
++    for tsx in src_dir.rglob("*.tsx"):
++        body = tsx.read_text(encoding="utf-8")
++        m = re.search(r'className="' + re.escape(cls) + r'"[^>]*?style=\{\{([^}]*)\}\}', body)
++        if m:
++            return m.group(1)
++        if f'className="{cls}"' in body:
++            return ""  # element present but no inline style block
++    raise AssertionError(f"no element with className={cls!r}")
++
++
++def _tree(child_styles: dict, parent_styles: dict) -> dict:
++    # body carries its OWN non-scope class so Fix 130 does not adopt `.parent`
++    # onto the App root div (which would give the root className="parent" and
++    # confuse an element-by-class match). `app-shell` scopes nothing in the css.
++    return {"tag": "body", "class": "app-shell", "styles": {"width": "1440px"},
++            "children": [
++        {"tag": "section", "class": "parent", "styles": parent_styles, "children": [
++            {"tag": "div", "class": "child", "text": "Title", "styles": child_styles},
++        ]},
++    ]}
++
++
++def test_descendant_rule_does_not_strip_ancestor_inline(tmp_path: Path) -> None:
++    # `.parent .child{padding-left:0}` targets .child; .parent must KEEP its
++    # baked padding-left (the desktop truth) — codex P2 subject-only.
++    src = _run(
++        tmp_path,
++        _tree(child_styles={"padding-left": "16px"},
++              parent_styles={"padding-left": "64px", "padding-right": "32px"}),
++        ["parent"],
++        ".child{padding-left:16px}"
++        "@media screen and (max-width:768px){.parent .child{padding-left:0}}",
++    )
++    assert "paddingLeft" in _style_of(src, "parent"), (
++        "ancestor .parent lost its desktop paddingLeft to a descendant-scoped "
++        "media rule that never matches it"
++    )
++    # the actual subject .child SHOULD yield its padding-left to the media rule
++    assert "paddingLeft" not in _style_of(src, "child"), (
++        ".child is the media rule subject; its inline paddingLeft must be stripped"
++    )
++
++
++def test_print_media_query_is_ignored(tmp_path: Path) -> None:
++    # print-only override must not strip the on-screen inline layout — codex P2.
++    src = _run(
++        tmp_path,
++        _tree(child_styles={"padding-left": "16px"}, parent_styles={}),
++        ["parent"],
++        ".child{padding-left:16px}@media print{.child{padding-left:0}}",
++    )
++    assert "paddingLeft" in _style_of(src, "child"), (
++        "a print-only @media override stripped the screen inline paddingLeft"
++    )
++
++
++def test_screen_viewport_rule_strips_subject(tmp_path: Path) -> None:
++    # positive control: a bare screen viewport rule targeting the element itself
++    # DOES strip, so the ref @media can drive mobile.
++    src = _run(
++        tmp_path,
++        _tree(child_styles={"padding-left": "16px"}, parent_styles={}),
++        ["parent"],
++        ".child{padding-left:16px}@media (max-width:768px){.child{padding-left:0}}",
++    )
++    assert "paddingLeft" not in _style_of(src, "child"), (
++        "screen viewport media rule must strip the subject's inline paddingLeft "
++        "so the ref @media drives it at mobile"
++    )
++
++
++def test_media_override_without_base_rule_keeps_inline(tmp_path: Path) -> None:
++    # loop-nv-1 remeasure guard: a prop overridden by @media but with NO desktop
++    # base rule (its desktop value lives ONLY in the inline capture, like
++    # navercorp news-masonry/tech-grid width) must be KEPT — stripping it would
++    # remove the desktop truth and reflow the element (desktop regression).
++    src = _run(
++        tmp_path,
++        _shell([{"tag": "div", "class": "child", "text": "A",
++                 "styles": {"width": "300px"}}]),
++        ["parent"],
++        "@media (max-width:768px){.child{width:100%}}",  # no base .child{width:...}
++    )
++    assert "width" in _style_of(src, "child"), (
++        "inline-only desktop width was stripped despite no ref base rule → "
++        "desktop reflow (the loop-nv-1 mid/tech regression)"
++    )
++
++
++def _shell(children: list[dict]) -> dict:
++    return {"tag": "body", "class": "app-shell", "styles": {"width": "1440px"},
++            "children": [{"tag": "section", "class": "parent", "styles": {},
++                          "children": children}]}
++
++
++def test_compound_subject_requires_all_classes(tmp_path: Path) -> None:
++    # `.card.featured{padding-left:0}` matches ONLY an element with BOTH classes;
++    # a node with just `card` must keep its inline paddingLeft — codex P2 compound.
++    src = _run(
++        tmp_path,
++        _shell([
++            {"tag": "div", "class": "card", "text": "A",
++             "styles": {"padding-left": "24px"}},
++            {"tag": "div", "class": "card featured", "text": "B",
++             "styles": {"padding-left": "24px"}},
++        ]),
++        ["parent"],
++        ".card.featured{padding-left:24px}"
++        "@media (max-width:768px){.card.featured{padding-left:0}}",
++    )
++    assert "paddingLeft" in _style_of(src, "card"), (
++        "node with only .card was stripped by a rule requiring .card.featured"
++    )
++    assert "paddingLeft" not in _style_of(src, "card featured"), (
++        "node matching the full .card.featured compound must be stripped"
++    )
++
++
++def test_logical_start_side_strips_one_physical_side(tmp_path: Path) -> None:
++    # `padding-inline-start` overrides ONE side (left in LTR); the opposite
++    # physical side's desktop inline must survive — codex P2 logical props.
++    src = _run(
++        tmp_path,
++        _shell([
++            {"tag": "div", "class": "child", "text": "A",
++             "styles": {"padding-left": "16px", "padding-right": "48px"}},
++        ]),
++        ["parent"],
++        ".child{padding-left:16px}"
++        "@media (max-width:768px){.child{padding-inline-start:0}}",
++    )
++    style = _style_of(src, "child")
++    assert "paddingLeft" not in style, (
++        "inline-start override must strip the left (start) physical side"
++    )
++    assert "paddingRight" in style, (
++        "inline-start override must NOT strip the right (end) side it never sets"
++    )
++
++
++def test_negated_and_mixed_print_queries_still_index(tmp_path: Path) -> None:
++    # `@media not print{...}` and `@media print,(max-width){...}` DO apply on
++    # screen; their subject overrides must still strip — codex P2 screen filter.
++    for idx, css in enumerate((
++        ".child{padding-left:16px}@media not print{.child{padding-left:0}}",
++        ".child{padding-left:16px}@media print,(max-width:768px){.child{padding-left:0}}",
++    )):
++        src = _run(
++            tmp_path / f"case{idx}",
++            _shell([{"tag": "div", "class": "child", "text": "A",
++                     "styles": {"padding-left": "16px"}}]),
++            ["parent"], css,
++        )
++        assert "paddingLeft" not in _style_of(src, "child"), (
++            f"screen-applicable media query was skipped: {css!r}"
++        )
++
++
++def test_not_pseudo_class_arg_is_not_a_required_class(tmp_path: Path) -> None:
++    # `.card:not(.featured)` matches a plain `.card`; the `.featured` inside
++    # :not() is negative, NOT a required class — a plain `.card` must strip so the
++    # mobile rule can override it (codex P2 pseudo-class args).
++    src = _run(
++        tmp_path,
++        _shell([{"tag": "div", "class": "card", "text": "A",
++                 "styles": {"padding-left": "16px"}}]),
++        ["parent"],
++        ".card{padding-left:16px}"
++        "@media (max-width:768px){.card:not(.featured){padding-left:0}}",
++    )
++    assert "paddingLeft" not in _style_of(src, "card"), (
++        ".card:not(.featured) must strip a plain .card; :not() arg is not required"
++    )
++
++
++def test_only_print_and_not_screen_are_skipped(tmp_path: Path) -> None:
++    # `@media only print` and `@media not screen` never apply on screen — their
++    # overrides must NOT strip the screen inline (codex P2 media modifiers).
++    for idx, css in enumerate((
++        ".child{padding-left:16px}@media only print{.child{padding-left:0}}",
++        ".child{padding-left:16px}@media not screen{.child{padding-left:0}}",
++    )):
++        src = _run(
++            tmp_path / f"m{idx}",
++            _shell([{"tag": "div", "class": "child", "text": "A",
++                     "styles": {"padding-left": "16px"}}]),
++            ["parent"], css,
++        )
++        assert "paddingLeft" in _style_of(src, "child"), (
++            f"a non-screen media query stripped the screen inline: {css!r}"
++        )
++
++
++def test_media_aware_flag_off_is_noop(tmp_path: Path) -> None:
++    # Without the flag, nothing is stripped (default runs untouched).
++    ref, impl = tmp_path / "ref", tmp_path / "impl"
++    (impl / "src").mkdir(parents=True)
++    (ref / "css").mkdir(parents=True)
++    (ref / "structure.json").write_text(json.dumps(
++        _tree(child_styles={"padding-left": "16px"}, parent_styles={})), encoding="utf-8")
++    (ref / "section-map.json").write_text(json.dumps(
++        {"sections": [{"index": 0, "tag": "section", "cls": "parent"}]}), encoding="utf-8")
++    (ref / "css" / "main.css").write_text(
++        "@media (max-width:768px){.child{padding-left:0}}", encoding="utf-8")
++    (impl / "package.json").write_text('{"name":"i","dependencies":{}}', encoding="utf-8")
++    proc = subprocess.run(["bash", str(SCRIPT), str(ref), str(impl)],
++                          capture_output=True, text=True, timeout=30)  # no forensic env
++    assert proc.returncode == 0, proc.stdout + proc.stderr
++    assert "paddingLeft" in _style_of(impl / "src", "child"), (
++        "flag off must leave inline box-model untouched"
++    )

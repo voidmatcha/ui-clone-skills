@@ -15,6 +15,7 @@ Environment variables:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import cast
@@ -22,10 +23,195 @@ from typing import cast
 from ui_clone.hooks._common import extract_tool_file_paths as _extract_tool_file_paths
 from ui_clone.hooks._common import find_project_root as _find_project_root
 from ui_clone.hooks._common import find_ref_dir as _find_ref_dir
+from ui_clone.hooks._common import has_external_browse as _has_external_browse
 from ui_clone.hooks._common import is_ad_hoc_ref_artifact as _is_ad_hoc_ref_artifact
 from ui_clone.hooks._common import is_component_file as _is_component_file
+from ui_clone.hooks._common import mark_clone_write
+from ui_clone.hooks._common import mark_ref_session as _mark_ref_session
 from ui_clone.hooks._common import run_gate as _run_gate_common
+from ui_clone.hooks._common import session_id_from_payload as _session_id_from_payload
 from ui_clone.state import PipelineState
+
+# Clone-shaped write detection for the widened off-pipeline guard: the file
+# classes a scratch clone produces. Repo-infrastructure segments are exempt
+# so ordinary plugin development never false-positives.
+_CLONE_WRITE_SUFFIXES = (".html", ".jsx", ".tsx", ".vue", ".svelte", ".css")
+_INFRA_SEGMENTS = (
+    "/skills/",
+    "/ui_clone/",
+    "/scripts/",
+    "/tests/",
+    "/hooks/",
+    "/docs/",
+    "/.claude",
+    "/node_modules/",
+)
+
+
+def _is_clone_shaped_write(path: str) -> bool:
+    p = str(path)
+    if not p.endswith(_CLONE_WRITE_SUFFIXES):
+        return False
+    normalized = "/" + p.replace("\\", "/").lstrip("/")
+    return not any(seg in normalized for seg in _INFRA_SEGMENTS)
+
+
+# ── N1 residual: closeout-provenance write-guard (Write/Edit route) ──
+#
+# bash_write.py's _ENFORCEMENT_STATE_RE blocks SHELL writes to pipeline-state.json
+# / verify-stamp.json, but the Write/Edit/MultiEdit tools route through THIS hook,
+# which did not guard them. So an agent could Edit pipeline-state.json to set
+# terminalState.writtenBy="pipeline" — a self-attested closeout-provenance forge on
+# a security boundary (N1 Part 1 makes that useless for a SUCCESS release, but it
+# still lets a non-success terminal skip the result.txt pin and forges provenance).
+#
+# verify-stamp.json has no legitimate hand-edit path → deny any tool write.
+# pipeline-state.json has ONE blessed hand-edit: setting closeoutPolicy
+# (canvas-replay-mode.md Step 3). Deny only writes whose payload text touches the
+# closeout-provenance keys (terminalState / writtenBy); allow the rest so the
+# documented closeoutPolicy edit keeps working. The match runs over BOTH the
+# added AND removed text so it catches both forging a terminal (new content) and
+# hand-clearing a hard-cap-fail terminal (removed content) — neither is a
+# documented Edit-tool flow (recovery is via `python -m ui_clone.state ... clear`).
+#
+# Canonical writers are the `python -m ui_clone.state|pipeline` CLIs, which run as
+# Bash (governed by pre_bash, not this hook), so they are unaffected.
+_VERIFY_STAMP_NAME = "verify-stamp.json"
+_PIPELINE_STATE_NAME = "pipeline-state.json"
+_CLOSEOUT_PROVENANCE_RE = re.compile(
+    r"terminalState|terminal_state|writtenBy|written_by"
+)
+# sections/result.txt(+.json) is the sha256-stamped section verdict the
+# post-implement gate trusts. It is written by section-compare (Bash, path built
+# from the ref-dir arg) and never hand-edited — a tool write is an attempt to
+# forge an all-PASS before verify stamps it. Path-qualified so a build/result.txt
+# (or transitions/result.txt, a different evidence file) is not over-matched.
+_SECTION_RESULT_RE = re.compile(r"(?:^|/)sections/result\.(?:txt|json)$", re.IGNORECASE)
+# gateSkipAck/deferredAck in verification-plan.json dissolve closeout blockers
+# (gate_skip_blocker / deferred_checks_blocker). An agent-set ack self-releases an
+# un-enforced/deferred run, so a tool write touching either key is denied; an
+# ack-free plan write (e.g. listing deferredChecks debt) stays allowed.
+_VERIFICATION_PLAN_NAME = "verification-plan.json"
+_VERIFICATION_PLAN_ACK_RE = re.compile(r"gateSkipAck|deferredAck")
+# Closeout/identity stamps with NO legitimate hand-edit path — produced by
+# check-converged.sh / check-canvas-replay.sh / register-driver-session.sh. An
+# agent hand-writing one forces convergence/closeout or forges a driver identity,
+# so any tool write is denied (mirrors verify-stamp.json). Case-folded basenames.
+_NO_HANDEDIT_CLOSEOUT_NAMES = frozenset({
+    "structural-convergence-stamp.json",
+    "canvas-replay-stamp.json",
+    ".driver-session.id",
+})
+
+
+def _tool_write_text(payload: dict[str, object] | None) -> str:
+    """Concatenate every write-content string a Write/Edit/MultiEdit/apply_patch
+    payload carries (content, new/old strings, per-edit strings, patch/diff body)
+    so the provenance scan sees both added and removed text. Reads Claude-shaped
+    (`tool_input`) and Codex-shaped (top-level) payloads."""
+    if not isinstance(payload, dict):
+        return ""
+    chunks: list[str] = []
+    containers: list[dict[str, object]] = [payload]
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, dict):
+        containers.insert(0, tool_input)
+    text_keys = (
+        "content",
+        "new_string",
+        "old_string",
+        "new_str",
+        "old_str",
+        "patch",
+        "input",
+        "diff",
+    )
+    for container in containers:
+        for key in text_keys:
+            value = container.get(key)
+            if isinstance(value, str):
+                chunks.append(value)
+        edits = container.get("edits")
+        if isinstance(edits, list):
+            for edit in edits:
+                if isinstance(edit, dict):
+                    for key in text_keys:
+                        value = edit.get(key)
+                        if isinstance(value, str):
+                            chunks.append(value)
+    return "\n".join(chunks)
+
+
+def _closeout_provenance_block_reason(
+    file_paths: list[str], payload: dict[str, object] | None
+) -> str | None:
+    """Return a deny reason if a tool write targets verify-stamp.json, or targets
+    pipeline-state.json while touching closeout-provenance keys; else None.
+
+    Matched by case-folded basename (the enforcement files live at
+    `tmp/ref/<component>/`, but we match anywhere to mirror the bash guard and
+    resist relative-path tricks). Case-folding is required: on case-insensitive
+    filesystems (macOS APFS, Windows NTFS) a write to `Pipeline-State.JSON`
+    lands on the real `pipeline-state.json`, so a case-sensitive compare would
+    let a one-character rename bypass the guard. It never over-blocks a real
+    flow — no legitimate flow writes any case-variant of these names.
+    pipeline-state.json fails TOWARD blocking: when the write content cannot be
+    read (empty/unparseable payload) it is denied, since the only blessed edit
+    (closeoutPolicy) always carries readable content."""
+    cli_hint = (
+        "Use the canonical CLI (`python -m ui_clone.state ...` / "
+        "`python -m ui_clone.pipeline ...`), which records provenance the Stop "
+        "gate trusts. Do NOT hand-write closeout state."
+    )
+    for path in file_paths:
+        name = Path(path).name.lower()
+        norm = str(path).replace("\\", "/")
+        if _SECTION_RESULT_RE.search(norm):
+            return (
+                "UI Reverse Engineering: sections/result.txt (and result.json) is "
+                "the sha256-stamped section verdict the post-implement gate trusts. "
+                "It is produced by section-compare, not hand-written — a tool write "
+                "here forges an all-PASS that the verify stamp would then bless. "
+                "Re-run section-compare (skills/visual-debug/scripts/section-compare.sh) "
+                "to regenerate it honestly."
+            )
+        if name == _VERIFY_STAMP_NAME:
+            return (
+                "UI Reverse Engineering: verify-stamp.json is closeout provenance "
+                "(the Stop gate trusts it as proof the gates ran) and has no "
+                f"hand-edit path. {cli_hint}"
+            )
+        if name in _NO_HANDEDIT_CLOSEOUT_NAMES:
+            return (
+                f"UI Reverse Engineering: {Path(path).name} is a closeout/identity "
+                "stamp produced by its verify/register script (check-converged.sh / "
+                "check-canvas-replay.sh / register-driver-session.sh) and has no "
+                "hand-edit path — a tool write forges convergence/closeout or a "
+                f"driver identity. {cli_hint}"
+            )
+        if name == _VERIFICATION_PLAN_NAME:
+            text = _tool_write_text(payload)
+            if _VERIFICATION_PLAN_ACK_RE.search(text):
+                return (
+                    "UI Reverse Engineering: this write to verification-plan.json "
+                    "sets an ack key (gateSkipAck/deferredAck) that dissolves a "
+                    "closeout blocker — a self-granted release of an un-enforced or "
+                    "deferred run. The ack is an explicit USER decision, not an "
+                    "agent edit. Re-run the gate / regenerate the plan instead; if "
+                    "the user genuinely accepts the un-enforced run they record the "
+                    "ack outside the agent."
+                )
+        if name == _PIPELINE_STATE_NAME:
+            text = _tool_write_text(payload)
+            if not text.strip() or _CLOSEOUT_PROVENANCE_RE.search(text):
+                return (
+                    "UI Reverse Engineering: this write to pipeline-state.json "
+                    "touches closeout-provenance (terminalState/writtenBy) — a "
+                    "self-attested terminal/provenance forge the Stop gate would "
+                    f"trust. {cli_hint} (Setting only `closeoutPolicy` per "
+                    "canvas-replay-mode.md is still allowed.)"
+                )
+    return None
 
 
 def _run_gate(ref_dir: Path) -> dict[str, object]:
@@ -59,12 +245,16 @@ def main() -> None:
     # Read tool input from stdin
     raw_input = sys.stdin.read() if not sys.stdin.isatty() else ""
     file_paths: list[str] = []
+    payload: dict[str, object] | None = None
     if raw_input.strip():
         try:
             data = json.loads(raw_input)
-            file_paths = _extract_tool_file_paths(data) if isinstance(data, dict) else []
+            if isinstance(data, dict):
+                payload = data
+                file_paths = _extract_tool_file_paths(data)
         except json.JSONDecodeError:
             pass
+    session_id = _session_id_from_payload(payload)
 
     # ── Ad-hoc ref-artifact denial ──
     # Block Write/Edit to non-canonical top-level *.json names under
@@ -98,6 +288,59 @@ def main() -> None:
             _emit_block(reason)
             sys.exit(0)
 
+    # ── Closeout-provenance write-guard (N1 residual) ──
+    # Deny Write/Edit/MultiEdit forging closeout provenance in pipeline-state.json
+    # / verify-stamp.json. These are canonical artifact names (so the ad-hoc check
+    # above intentionally exempts them), and they are not component files (so the
+    # component-only filter below would exit before any gate) — meaning without
+    # this guard a tool write to them sails through. Mirrors the bash write-guard.
+    provenance_reason = _closeout_provenance_block_reason(file_paths, payload)
+    if provenance_reason is not None:
+        _emit_block(provenance_reason)
+        sys.exit(0)
+
+    # Off-pipeline widened guard (omx postmortem follow-up): a scratch clone
+    # writes plain index.html + styles.css — NOT component paths — so the
+    # component-only filter below exited before the off-pipeline guard ever
+    # ran. When this session's external-browse breadcrumb exists, ANY
+    # markup/style write outside repo-infrastructure paths is clone-shaped.
+    if session_id and file_paths:
+        import os as _os
+
+        clone_shaped = [p for p in file_paths if _is_clone_shaped_write(p)]
+        if clone_shaped:
+            wide_root = _find_project_root()
+            ref_root = wide_root / "tmp" / "ref"
+            has_pipeline_ref = ref_root.is_dir() and any(
+                d.is_dir() for d in ref_root.iterdir()
+            )
+            if not has_pipeline_ref:
+                # Record the write evidence UNCONDITIONALLY (cheap, per
+                # session): the Stop gate and the declaration cascade key on
+                # the CORRELATED PAIR (browse crumb + clone-write crumb), and
+                # writes may precede the browse — gating the marker on the
+                # browse crumb would miss the write-first ordering.
+                mark_clone_write(wide_root, session_id, clone_shaped)
+            if (
+                not has_pipeline_ref
+                and _has_external_browse(wide_root, session_id)
+            ):
+                if _os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1":
+                    _emit_block(
+                        "UI Reverse Engineering: this session opened an external "
+                        "site via agent-browser and is now writing markup/style "
+                        f"files ({Path(clone_shaped[0]).name}) with NO "
+                        "tmp/ref/<component> evidence directory — clone-shaped "
+                        "work outside the pipeline ships unverified (omx "
+                        "postmortem: 1593px missing, completion declared on "
+                        "build/smoke checks). Enter the pipeline first: "
+                        "`python -m ui_clone.pipeline <url> <component> "
+                        "<session> run --phases 0A,1,2`. (Non-clone work: the "
+                        "off-pipeline escape hatch is documented for HUMANS in "
+                        "docs/agent-cli.md — ask the user.)"
+                    )
+                    sys.exit(0)
+
     # Only enforce on component/page files
     component_paths = [path for path in file_paths if _is_component_file(path)]
     file_path = component_paths[0] if component_paths else ""
@@ -130,6 +373,29 @@ def main() -> None:
     # carries the ui-reverse-engineering SKILL.md AND the file is in an
     # impl/src or impl/app dir.
     if ref_dir is None:
+        # Off-pipeline clone guard (omx postmortem): this session browsed an
+        # EXTERNAL site via agent-browser and is now writing component files
+        # with no ref dir anywhere — clone-shaped work outside the pipeline.
+        # Unlike the impl-path check below, this fires in ANY project (the
+        # omx run was on a machine where the SKILL.md co-location check never
+        # matched), and offers an explicit escape hatch for false positives.
+        import os as _os
+        if (
+            session_id
+            and _os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1"
+            and _has_external_browse(project_root, session_id)
+        ):
+            _emit_block(
+                "UI Reverse Engineering: this session opened an external site "
+                "via agent-browser and is now writing component files with NO "
+                "tmp/ref/<component> evidence directory — clone-shaped work "
+                "outside the pipeline ships unverified (no font-parity, no "
+                "section-compare, no motion checks). Enter the pipeline first: "
+                "`python -m ui_clone.pipeline <url> <new-component> <session> "
+                "run --phases 0A,1,2`. (Non-clone work: the escape hatch is "
+                "documented for HUMANS in the repo docs — ask the user.)"
+            )
+            sys.exit(0)
         fp_str = str(Path(file_path).resolve()) if file_path else ""
         ui_re_skill = (
             project_root
@@ -164,6 +430,30 @@ def main() -> None:
     # rest of the enforcement chain.
     marker = ref_dir / ".ui-re-active"
     state = PipelineState.load(ref_dir)
+
+    # Terminal-ref variant of the off-pipeline guard: the found ref is
+    # intentionally over (terminal), this session browsed an external site,
+    # and is writing component files — a NEW clone needs a NEW ref dir, not
+    # unverified edits riding under a closed run (the omx run did exactly
+    # this: old refs terminal, new clone hand-built, zero gates).
+    import os as _os
+    if (
+        state.terminal_state
+        and session_id
+        and _os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1"
+        and _has_external_browse(project_root, session_id)
+    ):
+        _emit_block(
+            f"UI Reverse Engineering: {ref_dir.name} is TERMINAL "
+            f"({state.terminal_state.get('status')}) but this session opened "
+            "an external site and is writing component files. A new clone "
+            "requires a NEW evidence directory: `python -m ui_clone.pipeline "
+            "<url> <new-component> <session> run --phases 0A,1,2`. Do not "
+            "build unverified work under a closed run. (Non-clone work: the "
+            "escape hatch is documented for HUMANS in the repo docs — ask "
+            "the user.)"
+        )
+        sys.exit(0)
 
     # Post-done invalidation only fires when there's an active session
     # (marker exists). Without the marker, no other hook is enforcing, and
@@ -220,6 +510,7 @@ def main() -> None:
     was_new = not marker.is_file()
     try:
         marker.touch()
+        _mark_ref_session(ref_dir, session_id, source="pre_generate")
         if was_new:
             print(
                 "⚑  UI-RE Stop gate ACTIVATED: section-compare must pass before finishing.",

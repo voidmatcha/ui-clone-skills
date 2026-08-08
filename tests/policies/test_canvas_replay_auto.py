@@ -184,3 +184,99 @@ def test_plan_declares_asset_substitution_entry() -> None:
     assert decl["kind"] == "canvas-replay-video"
     assert "recorded" in decl["reason"].lower()
     assert decl["replacementSrc"] == "public/canvas-replay/hero.webm"
+
+
+# ── interactive-physics behavioral-repro route (Wave 6) ────────────────────
+
+
+def _physics_detection(engine: str = "matter-js", live: dict | None = None) -> dict:
+    return {
+        "schemaVersion": 1,
+        "url": "https://brm.io/matter-js/",
+        "primaryRenderType": "canvas",
+        "renderKind": "interactive-physics",
+        "hasCanvas": True,
+        "hasWebGL": False,
+        "hasPhysics": True,
+        "physicsEngine": {
+            "name": engine,
+            "version": "0.20.0",
+            "source": "runtime-global",
+            "liveEngine": live,
+        },
+        "canvasCount": 1,
+    }
+
+
+def _plan(det: dict, *, impl: int = 0, blocked: bool = True) -> dict:
+    return cra.build_replay_plan(
+        url=det.get("url", "http://x"),
+        detection=det,
+        impl_canvas_count=impl,
+        reembed_blocked=blocked,
+        section="hero",
+        ref_canvas_selector="canvas",
+        region={},
+        replay_asset="public/canvas-replay/hero.webm",
+        poster="public/canvas-replay/hero-poster.png",
+    )
+
+
+def test_physics_canvas_routes_to_behavioral_repro() -> None:
+    plan = _plan(_physics_detection())
+    assert plan["decision"] == "behavioral-repro"
+    assert plan["reason"] == "interactive-physics"
+    assert plan["behavioralRepro"]["engine"] == "matter-js"
+    # No video-replay section is declared for physics.
+    assert plan["sections"] == []
+
+
+def test_behavioral_repro_denied_blank_hero_pass() -> None:
+    # A physics canvas must NOT get the blank-hero video relief: a blank impl
+    # means the physics never ran, which has to fail — even if a <video> is
+    # somehow advancing.
+    plan = _plan(_physics_detection())
+    assert cra.replay_satisfies_blank_hero(plan, video_advanced=9) is False
+
+
+def test_behavioral_repro_declares_no_replay_asset() -> None:
+    plan = _plan(_physics_detection())
+    assert cra.asset_substitution_entry(plan) is None
+
+
+def test_physics_repro_reads_runtime_gravity() -> None:
+    live = {"handle": "engine", "gravity": {"x": 0, "y": 1, "scale": 0.001}, "bodyCount": 42}
+    plan = _plan(_physics_detection(live=live))
+    repro = plan["behavioralRepro"]
+    assert repro["constantsSource"] == "runtime-engine"
+    assert repro["constants"]["gravity"]["y"] == 1
+    assert repro["constants"]["bodyCount"] == 42
+
+
+def test_physics_repro_none_without_engine_descriptor() -> None:
+    # hasPhysics true but no engine name → not a usable physics descriptor,
+    # falls through to the normal replay/none decision (no false behavioral).
+    det = _physics_detection()
+    det["physicsEngine"] = {"name": None}
+    assert cra.physics_repro(det) is None
+
+
+def test_shader_canvas_still_video_replays_not_bricked() -> None:
+    # BRICK GUARD: a decorative WebGL shader (no physics engine) keeps the
+    # existing video-replay route — behavioral-repro must not swallow it.
+    det = _webgl_detection(render="webgl")
+    det["hasPhysics"] = False
+    det["physicsEngine"] = None
+    plan = _plan(det, impl=0, blocked=True)
+    assert plan["decision"] == "canvas-replay"
+    assert plan["reason"] == "origin-lock"
+
+
+def test_physics_without_canvas_surface_not_routed() -> None:
+    # BRICK GUARD: hasPhysics set but no canvas surface (physics-lib bundled,
+    # DOM/SVG-driven) must NOT route to behavioral-repro.
+    det = _physics_detection()
+    det["hasCanvas"] = False
+    det["canvasCount"] = 0
+    det["primaryRenderType"] = "DOM"
+    assert cra.physics_repro(det) is None

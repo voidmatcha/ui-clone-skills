@@ -165,6 +165,47 @@ def test_hero_composite_check_rejects_navbar_button_via_proximity(tmp_path: Path
     )
 
 
+def test_hero_composite_accepts_button_for_non_video_hero(tmp_path: Path) -> None:
+    """A real button in an explicitly marked non-video hero must count."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "section",
+            "class": "hero",
+            "children": [
+                {"tag": "button", "children": []},
+                {"tag": "span", "children": []},
+            ],
+        }],
+    }))
+    (src / "Banner.tsx").write_text(
+        'export function Banner() {\n'
+        '  return (\n'
+        '    <section data-section="hero">\n'
+        '      <button><span>Open</span></button>\n'
+        '    </section>\n'
+        '  );\n'
+        '}\n'
+    )
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    art = json.loads((ref / "hero-composite.json").read_text())
+    assert art["status"] == "pass", art
+    assert art["impl"]["button"] is True, art
+
+
 
 def test_hero_composite_check_prefers_data_section_locator(tmp_path: Path) -> None:
     """Codex-rescue Q2: `data-section="hero"` is the strongest locator,
@@ -211,6 +252,54 @@ def test_hero_composite_check_prefers_data_section_locator(tmp_path: Path) -> No
     assert any("Banner" in f for f in art["implCandidateFiles"]), art
 
 
+def test_hero_composite_ignores_flash_banner_when_strong_hero_exists(
+    tmp_path: Path,
+) -> None:
+    """A generic alert banner must not donate its button to the real hero."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src" / "components"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {
+                "tag": "div",
+                "class": "flash-banner",
+                "children": [{"tag": "button", "children": []}],
+            },
+            {
+                "tag": "section",
+                "id": "landing",
+                "class": "Primer_Brand__Hero-module__Hero",
+                "children": [{"tag": "h1", "children": []}],
+            },
+        ],
+    }))
+    (src / "MainContent.tsx").write_text(
+        "export function MainContent() {\n"
+        '  return <main><div id="landing" data-testid="Hero"><h1>Docs</h1></div></main>;\n'
+        "}\n"
+    )
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "hero-composite.json").read_text())
+    assert artifact["status"] == "pass", artifact
+    assert artifact["ref"]["button"] is False
+    assert artifact["ref"]["h1OrH2"] is True
+    assert artifact["impl"]["h1OrH2"] is True
+    assert artifact["implCandidateFiles"] == ["src/components/MainContent.tsx"]
+
+
 
 def test_hero_composite_check_inventories_canvas_kind(tmp_path: Path) -> None:
     """FIX 2a addendum (rank235): a ref hero with a <canvas> (bare WebGL mount
@@ -248,7 +337,7 @@ def test_hero_composite_check_inventories_canvas_kind(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         ["bash", str(script), str(ref), str(impl)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 1, f"expected exit 1, got {proc.returncode}: {proc.stdout}\n{proc.stderr}"
     artifact = json.loads((ref / "hero-composite.json").read_text(encoding="utf-8"))

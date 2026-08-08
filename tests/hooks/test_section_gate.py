@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from ui_clone.hooks._common import mark_ref_session
+
 from ._helpers import (
     make_ref_dir,
     make_search_root,
@@ -34,6 +36,92 @@ class TestSectionGate:
             env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
         )
         assert result.returncode == 0
+
+    def test_markerless_probe_does_not_borrow_repo_root_impl(self, tmp_path: Path) -> None:
+        """A diagnostic ref without pipeline state must not inherit root impl/."""
+        search_root = make_search_root(tmp_path)
+        probe = make_ref_dir(search_root, "section-map-probe")
+        (probe / "section-map.json").write_text('{"sections": []}', encoding="utf-8")
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <main />}", encoding="utf-8"
+        )
+
+        result = run_hook(
+            self.MODULE,
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", result.stdout
+
+    def test_markerless_legacy_pipeline_state_can_borrow_repo_root_impl(
+        self, tmp_path: Path
+    ) -> None:
+        """A real legacy run without impl_root remains fail-closed."""
+        import datetime
+
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "legacy-run")
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps(
+                {
+                    "component": "legacy-run",
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "completed_steps": ["reference", "extraction"],
+                    "current_gate": "post-implement",
+                    "last_updated": datetime.datetime.now(datetime.UTC).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <main />}", encoding="utf-8"
+        )
+
+        result = run_hook(
+            self.MODULE,
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, "legacy markerless refs must remain fail-closed"
+        data = json.loads(out)
+        assert data.get("decision") == "block"
+        assert "verify-stamp.json" in data.get("reason", "")
+
+    def test_markerless_clone_structure_can_borrow_repo_root_impl(
+        self, tmp_path: Path
+    ) -> None:
+        """A no-state clone with captured DOM structure remains fail-closed."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "off-pipeline-clone")
+        (ref_dir / "structure.json").write_text(
+            '{"tag": "body", "children": []}', encoding="utf-8"
+        )
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <main />}", encoding="utf-8"
+        )
+
+        result = run_hook(
+            self.MODULE,
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, "clone-shaped markerless refs must remain fail-closed"
+        data = json.loads(out)
+        assert data.get("decision") == "block"
+        assert "verify-stamp.json" in data.get("reason", "")
 
     def test_wip_marker_no_result_txt_outputs_block(self, tmp_path: Path) -> None:
         """WIP marker present, no result.txt → block JSON."""
@@ -88,6 +176,48 @@ class TestSectionGate:
         assert result.returncode == 0
         data = json.loads(result.stdout.strip())
         assert data.get("decision") == "block"
+
+    def test_headless_driver_demotes_gate_block_to_advisory(self, tmp_path: Path) -> None:
+        """Under a headless driver the gate must advise on stderr and exit 0
+        instead of emitting a block on stdout.
+
+        The benchmark harness drives `claude --print`, where a Stop-hook block
+        costs a whole iteration: the blocked turn produces no printed answer,
+        and the reason only lands on the NEXT turn. The driver already re-runs
+        the Python gates between iterations, so the block buys nothing it does
+        not already have — but the reason still has to reach the driver log."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)  # would block (no result.txt)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"hook_event_name": "Stop", "stop_hook_active": False}),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_RE_HEADLESS_DRIVER": "1",
+            },
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", (
+            f"headless driver must not emit a block on stdout; got: {result.stdout!r}"
+        )
+        assert "UI-RE Gate" in result.stderr, (
+            f"advisory reason must still reach stderr; got: {result.stderr!r}"
+        )
+
+    def test_headless_driver_unset_still_blocks(self, tmp_path: Path) -> None:
+        """Sanity twin: without the headless flag the block is unchanged."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"hook_event_name": "Stop", "stop_hook_active": False}),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_HEADLESS_DRIVER": "0"},
+        )
+        assert json.loads(result.stdout.strip()).get("decision") == "block"
 
     def test_wip_marker_result_txt_no_failures_exits_0(self, tmp_path: Path) -> None:
         """WIP marker + pipeline-state at section-compare + result.txt with only ✅ → exit 0."""
@@ -305,6 +435,35 @@ class TestSectionGate:
 
         assert section_gate._fresh_active_dirs([ref_dir]) == []
 
+    def test_implicit_orphan_not_refreshened_by_hook_bookkeeping(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An orphan ref (no pipeline-state) must age out by its REAL artifacts,
+        NOT be perpetually re-freshened by the Stop hook's own bookkeeping writes
+        — the `.ui-re-sessions/` session crumb and `.ui-re-active`. Real
+        recurrence: unrelated sessions kept firing on months-old orphans because
+        every Stop scan wrote a fresh crumb whose mtime out-ranked the stale
+        artifacts, so `_active_ref_mtime` never saw the ref as old."""
+        from ui_clone.hooks import section_gate
+
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "orphan-bookkept")
+        art = ref_dir / "extracted.json"
+        art.write_text("{}", encoding="utf-8")
+        old_time = time.time() - (5 * 24 * 3600)
+        os.utime(art, (old_time, old_time))
+        os.utime(ref_dir, (old_time, old_time))
+        # The Stop hook's own bookkeeping, written THIS turn (fresh mtime).
+        mark_ref_session(ref_dir, "unrelated-session", source="stop-scan")
+        (ref_dir / ".ui-re-active").write_text("", encoding="utf-8")  # fresh
+        monkeypatch.delenv("UI_RE_STALE_DAYS", raising=False)
+
+        # NOTE: with a fresh .ui-re-active the marker path governs; remove it so
+        # this exercises the implicit fallback specifically (the marker-refresh
+        # case is a separate concern). The crumb alone must not re-freshen.
+        (ref_dir / ".ui-re-active").unlink()
+        assert section_gate._fresh_active_dirs([ref_dir]) == []
+
     def test_implicit_stale_by_pipeline_state_despite_fresh_fs_mtime(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -432,6 +591,123 @@ class TestSectionGate:
         data = json.loads(out)
         assert data.get("decision") == "block"
         assert "session-b" in data.get("reason", "")
+
+    def test_session_scoped_stop_skips_ref_not_touched_by_current_session(
+        self, tmp_path: Path
+    ) -> None:
+        """A Stop event from another agent tab must not force duplicate work for
+        a WIP ref it never touched."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "foreign-wip")
+        set_active_marker(ref_dir)
+        impl_dir = tmp_path / "scratch" / "foreign-wip" / "impl"
+        impl_dir.mkdir(parents=True)
+        (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"session_id": "current-session", "hook_event_name": "Stop"}),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    def test_session_scoped_stop_blocks_ref_touched_by_current_session(
+        self, tmp_path: Path
+    ) -> None:
+        """The owner session still gets the strict verify-stamp block."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "owned-wip")
+        set_active_marker(ref_dir)
+        impl_dir = tmp_path / "scratch" / "owned-wip" / "impl"
+        impl_dir.mkdir(parents=True)
+        (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+        mark_ref_session(ref_dir, "current-session", source="test")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"session_id": "current-session", "hook_event_name": "Stop"}),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout.strip())
+        assert data.get("decision") == "block"
+        assert "verify-stamp.json" in data.get("reason", "")
+
+    def test_session_scoped_stop_env_can_enforce_unowned_legacy_refs(
+        self, tmp_path: Path
+    ) -> None:
+        """Operators can opt back into legacy fail-closed enforcement for
+        unowned markers while migrating old WIP state."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "legacy-wip")
+        set_active_marker(ref_dir)
+        impl_dir = tmp_path / "scratch" / "legacy-wip" / "impl"
+        impl_dir.mkdir(parents=True)
+        (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"session_id": "current-session", "hook_event_name": "Stop"}),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_RE_ENFORCE_UNOWNED_ACTIVE": "1",
+            },
+        )
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout.strip())
+        assert data.get("decision") == "block"
+        assert "verify-stamp.json" in data.get("reason", "")
+
+    def test_no_sid_stop_skips_ref_owned_by_another_session(self, tmp_path: Path) -> None:
+        """Blank-payload (no session_id) Stop must NOT block on a ref whose
+        crumbs all belong to OTHER identifiable sessions. This is the recurrence
+        the earlier scoping fix missed: ownership scoping was gated behind
+        `if stop_scope_session_id:`, so the no-sid branch of
+        should_enforce_ref_for_session never ran and an unrelated tab was blocked
+        by another session's live clone."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "other-session-wip")
+        set_active_marker(ref_dir)
+        impl_dir = tmp_path / "scratch" / "other-session-wip" / "impl"
+        impl_dir.mkdir(parents=True)
+        (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+        mark_ref_session(ref_dir, "some-other-live-session", source="post_verify")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"hook_event_name": "Stop"}),  # NO session_id
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", f"expected no block, got: {result.stdout}"
+
+    def test_no_sid_stop_still_enforces_crumbless_own_clone(self, tmp_path: Path) -> None:
+        """Fail-closed preserved: a no-sid Stop on a crumb-LESS active clone (the
+        omx ship-short case — a fully un-instrumented session with no session id
+        anywhere, so mark_ref_session never wrote a crumb) must STILL block."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, "crumbless-own-wip")
+        set_active_marker(ref_dir)
+        impl_dir = tmp_path / "scratch" / "crumbless-own-wip" / "impl"
+        impl_dir.mkdir(parents=True)
+        (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+        # No mark_ref_session — the ref has no session crumbs at all.
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"hook_event_name": "Stop"}),  # NO session_id
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout.strip())
+        assert data.get("decision") == "block"
+        assert "verify-stamp.json" in data.get("reason", "")
 
 
 
@@ -614,11 +890,13 @@ class TestSectionGateFullEnforcement:
                 f"release Stop, got exit=0 output={output[:200]!r}"
             )
 
-    def test_unclonable_reasons_releases_stop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Loop-41 finding: pipeline-state.json unclonable_reasons must release
-        Stop, symmetric to `python -m ui_clone.goal --check-done` exit 2.
-        Without this short-circuit, Stop fires every turn while the goal harness
-        signals ABORT — external loops cannot terminate cleanly.
+    def test_legacy_unclonable_reasons_without_terminal_state_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """unclonable_reasons are evidence, not lifecycle state.
+
+        The Stop hook must not infer completion from legacy reason entries
+        alone; callers should record explicit terminalState instead.
         """
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         ref_dir.mkdir(parents=True)
@@ -641,7 +919,85 @@ class TestSectionGateFullEnforcement:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
         assert exit_code == 0
+        data = json.loads(output)
+        assert data.get("decision") == "block"
+        assert "terminalState" in data.get("reason", "")
+
+    def test_terminal_state_releases_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit failed/incomplete terminalState releases Stop without a
+        fake verify-stamp.json."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        (ref_dir / ".ui-re-active").touch()
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps(
+                {
+                    "component": "comp",
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "completed_steps": ["reference", "extraction"],
+                    "current_gate": "section-compare",
+                    "last_updated": "2026-01-01T01:00:00Z",
+                    "gate_fail_counts": {"section-compare": 10},
+                    "unclonable_reasons": [
+                        {"gate": "section-compare", "reason": "hard-cap reached"}
+                    ],
+                    "terminalState": {
+                        "status": "incomplete",
+                        "category": "hardening-probe-incomplete",
+                        "gate": "section-compare",
+                        "reason": "harvested failed hardening probe",
+                        "recorded_at": "2026-01-01T01:00:00Z",
+                    },
+                }
+            )
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        assert exit_code == 0
         assert "block" not in output.lower()
+
+    def test_terminal_state_blocks_when_impl_changed_after_recording(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        (ref_dir / ".ui-re-active").touch()
+        impl = tmp_path / "scratch" / "comp" / "impl" / "src"
+        impl.mkdir(parents=True)
+        changed = impl / "App.tsx"
+        changed.write_text("export default function App(){return null}", encoding="utf-8")
+        state_path = ref_dir / "pipeline-state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "component": "comp",
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "completed_steps": ["reference"],
+                    "current_gate": "post-implement",
+                    "last_updated": "2026-01-01T01:00:00Z",
+                    "terminalState": {
+                        "status": "failed",
+                        "category": "canonical-verify-failed",
+                        "gate": "post-implement",
+                        "reason": "verify failed",
+                        "recorded_at": "2026-01-01T01:00:00Z",
+                    },
+                }
+            )
+        )
+        old = time.time() - 60
+        new = time.time()
+        os.utime(state_path, (old, old))
+        os.utime(changed, (new, new))
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        assert exit_code == 0
+        data = json.loads(output)
+        assert data.get("decision") == "block"
+        assert "impl changed after terminal state" in data.get("reason", "")
 
     def test_section_compare_blocks_when_result_txt_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """current_gate=section-compare with no result.txt → block, even if diff PNGs exist."""
@@ -1136,10 +1492,8 @@ class TestDriverSessionBypass:
 
 class TestSectionGateStructuralCloseout:
     """Structural closeout policy (Task #11) — pipeline-state.closeoutPolicy=='structural'
-    routes the Stop hook to accept structural-convergence-stamp.json from
-    check-converged.sh instead of demanding verify-stamp.json from
-    pipeline.execute_verify. The canonical contract is untouched; this class
-    only exercises the new policy branch."""
+    requires structural-convergence-stamp.json from check-converged.sh in
+    addition to canonical verify-stamp.json from pipeline.execute_verify."""
 
     def _run_gate_hook(self, ref_dir: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int | str, str]:
         """Mirror TestSectionGateFullEnforcement._run_gate_hook so the new
@@ -1162,9 +1516,8 @@ class TestSectionGateStructuralCloseout:
 
     def _write_structural_state(self, ref_dir: Path) -> None:
         """A ref dir that opted into structural closeout. completed_steps
-        intentionally stops at section-compare via the convergence detector
-        rather than the full canonical chain — this is the whole point of
-        structural mode."""
+        stops at section-compare because closeout evidence is carried by the
+        structural and canonical stamps rather than this legacy list."""
         ref_dir.mkdir(parents=True, exist_ok=True)
         (ref_dir / ".ui-re-active").touch()
         (ref_dir / "pipeline-state.json").write_text(
@@ -1225,13 +1578,34 @@ class TestSectionGateStructuralCloseout:
         )
         return stamp
 
-    def test_structural_stamp_releases_stop_with_valid_state(
+    def _write_verify_stamp(self, ref_dir: Path) -> Path:
+        import datetime
+
+        stamp = ref_dir / "verify-stamp.json"
+        stamp.write_text(
+            json.dumps(
+                {
+                    "verifiedAt": datetime.datetime.now(datetime.UTC).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    "gatesPassed": [
+                        "spec",
+                        "post-implement",
+                        "boundary",
+                        "font-parity",
+                        "section-compare",
+                    ],
+                    "stampedBy": "pipeline.execute_verify",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return stamp
+
+    def test_structural_stamp_alone_blocks_without_canonical_verify(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """closeoutPolicy=structural + valid stamp + clean impl → Stop allowed.
-        Verifies the new policy branch lands without breaking the canonical
-        path (no verify-stamp.json present — that's the whole reason this
-        branch exists)."""
+        """Structural convergence cannot bypass the canonical verify suite."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         self._write_structural_state(ref_dir)
         result_file = self._write_converged_result(ref_dir)
@@ -1248,9 +1622,38 @@ class TestSectionGateStructuralCloseout:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "verify-stamp.json" in reason
+        assert "python -m ui_clone.pipeline" in reason
+
+    def test_structural_and_canonical_stamps_release_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both fresh evidence artifacts release structural closeout."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_structural_state(ref_dir)
+        result_file = self._write_converged_result(ref_dir)
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        app = src / "App.tsx"
+        app.write_text("export default function App(){return <main />}", encoding="utf-8")
+
+        structural_stamp = self._write_stamp(ref_dir, result_file)
+        verify_stamp = self._write_verify_stamp(ref_dir)
+        now = time.time()
+        os.utime(app, (now - 10, now - 10))
+        os.utime(structural_stamp, (now, now))
+        os.utime(verify_stamp, (now, now))
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
         assert exit_code == 0
         assert "block" not in output.lower(), (
-            f"structural stamp must release Stop; got: {output!r}"
+            f"both structural and canonical evidence must release Stop; got: {output!r}"
         )
 
     def test_structural_policy_blocks_when_stamp_missing(
@@ -1274,10 +1677,36 @@ class TestSectionGateStructuralCloseout:
         reason = data.get("reason", "")
         assert "structural-convergence-stamp.json" in reason
         assert "check-converged.sh" in reason
-        # Must NOT reference verify-stamp.json or pipeline.execute_verify — the
-        # plan opted out of canonical closeout.
+        # Structural evidence is checked first, so canonical guidance must not
+        # obscure the immediate missing-stamp repair.
         assert "verify-stamp.json" not in reason
         assert "pipeline.execute_verify" not in reason
+
+    def test_stale_structural_stamp_error_precedes_missing_canonical_verify(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repair structural evidence before reporting canonical evidence."""
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_structural_state(ref_dir)
+        result_file = self._write_converged_result(ref_dir)
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text("export default function App(){return null}", encoding="utf-8")
+
+        stamp = self._write_stamp(ref_dir, result_file)
+        stamp_data = json.loads(stamp.read_text(encoding="utf-8"))
+        stamp_data["verifiedAt"] = "2020-01-01T00:00:00Z"
+        stamp.write_text(json.dumps(stamp_data), encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "Structural-stamp gate: STALE" in reason
+        assert "Verify-stamp gate" not in reason
 
     def test_structural_stamp_blocks_when_impl_changed_after_stamp(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1666,3 +2095,321 @@ def test_coerce_stop_hook_active_handles_string_false() -> None:
     assert _coerce_stop_hook_active("") is False
     assert _coerce_stop_hook_active(None) is False
     assert _coerce_stop_hook_active(1) is True
+
+
+# ── Item 5: self-attested terminal-state must pin sections/result.txt evidence ──
+
+
+def _terminal_state(term: dict):  # type: ignore[no-untyped-def]
+    from ui_clone.state import PipelineState
+
+    s = PipelineState(component="comp", current_gate="post-implement")
+    s.terminal_state = term
+    return s
+
+
+def _block_reason(ref_dir: Path, term: dict):  # type: ignore[no-untyped-def]
+    from ui_clone.hooks.section_gate import _terminal_state_block_reason
+
+    return _terminal_state_block_reason(ref_dir, _terminal_state(term))
+
+
+def _with_result(ref_dir: Path) -> str:
+    """A SUCCESS-shaped result.txt (claims PASS, no FAIL)."""
+    import hashlib
+
+    (ref_dir / "sections").mkdir(parents=True)
+    (ref_dir / "sections" / "result.txt").write_text("**Result: 1 PASS**\n")
+    return hashlib.sha256(
+        (ref_dir / "sections" / "result.txt").read_bytes()
+    ).hexdigest()
+
+
+def _with_failing_result(ref_dir: Path) -> str:
+    """A NON-success result.txt (has a FAIL row) — a legitimate partial-progress
+    snapshot for a genuine incomplete/failed terminal end. Reaches the pin path,
+    not the N1 success-fraud block."""
+    import hashlib
+
+    (ref_dir / "sections").mkdir(parents=True)
+    (ref_dir / "sections" / "result.txt").write_text(
+        "| hero | 4000 | 9000 | major | ❌ |\n"
+        "**Result: 1 PASS, 1 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n"
+    )
+    return hashlib.sha256(
+        (ref_dir / "sections" / "result.txt").read_bytes()
+    ).hexdigest()
+
+
+def test_self_attested_terminal_without_pin_blocks(tmp_path: Path) -> None:
+    _with_failing_result(tmp_path)
+    reason = _block_reason(
+        tmp_path, {"status": "incomplete", "category": "x", "reason": "y", "writtenBy": "cli"}
+    )
+    assert reason is not None
+    assert "self-attested" in reason and "re-record" in reason
+
+
+def test_self_attested_success_result_blocks_even_with_matching_pin(tmp_path: Path) -> None:
+    # N1 (inverted): a SUCCESS-shaped result.txt can no longer self-attest a
+    # terminal release even with a byte-matching pin — the pin binds the bytes, not
+    # the gate execution, so a forged all-PASS result.txt + a self-pin used to
+    # release with zero gates run. Success must go through canonical verify.
+    sha = _with_result(tmp_path)
+    reason = _block_reason(
+        tmp_path,
+        {"status": "incomplete", "category": "x", "reason": "y",
+         "writtenBy": "cli", "sectionsResultSha256": sha},
+    )
+    assert reason is not None
+    assert "PASS" in reason and "canonical" in reason.lower()
+
+
+def test_self_attested_nonsuccess_result_with_matching_pin_releases(tmp_path: Path) -> None:
+    # The legitimate incomplete end: a genuine partial-progress result.txt (has a
+    # FAIL) bound to its exact bytes still releases — the run is honestly not
+    # claiming success, so the pin path governs and a matching pin is sufficient.
+    sha = _with_failing_result(tmp_path)
+    reason = _block_reason(
+        tmp_path,
+        {"status": "incomplete", "category": "x", "reason": "y",
+         "writtenBy": "cli", "sectionsResultSha256": sha},
+    )
+    assert reason is None
+
+
+def test_self_attested_terminal_pin_mismatch_blocks(tmp_path: Path) -> None:
+    _with_failing_result(tmp_path)
+    reason = _block_reason(
+        tmp_path,
+        {"status": "incomplete", "category": "x", "reason": "y",
+         "writtenBy": "cli", "sectionsResultSha256": "0" * 64},
+    )
+    assert reason is not None
+
+
+def test_cli_unclonable_and_failed_also_pinned(tmp_path: Path) -> None:
+    """Hole-1 regression: gating on writtenBy (not status) means CLI-written
+    unclonable/failed are bound too, not just incomplete/abandoned."""
+    for status in ("unclonable", "failed", "abandoned"):
+        ref = tmp_path / status
+        _with_failing_result(ref)
+        reason = _block_reason(
+            ref, {"status": status, "category": "x", "reason": "y", "writtenBy": "cli"}
+        )
+        assert reason is not None, status
+
+
+def test_pipeline_written_terminal_is_exempt(tmp_path: Path) -> None:
+    # A pipeline-written NON-success terminal (the legitimate case: verify failed)
+    # is exempt from the pin requirement.
+    for status in ("failed", "unclonable"):
+        ref = tmp_path / status
+        _with_failing_result(ref)
+        reason = _block_reason(
+            ref, {"status": status, "category": "x", "reason": "y", "writtenBy": "pipeline"}
+        )
+        assert reason is None, status
+
+
+def test_pipeline_written_terminal_with_success_result_still_blocks(tmp_path: Path) -> None:
+    # N1 CRITICAL (Edit-route forge): the success block must NOT exempt
+    # writtenBy=="pipeline" — that flag lives in agent-writable pipeline-state.json
+    # and can be minted via the Edit tool. A pipeline-claimed terminal over a
+    # success-shaped result.txt is the reconstituted forge and must BLOCK; a genuine
+    # success never ends via terminalState.
+    _with_result(tmp_path)
+    reason = _block_reason(
+        tmp_path, {"status": "incomplete", "category": "x", "reason": "y", "writtenBy": "pipeline"}
+    )
+    assert reason is not None
+    assert "PASS" in reason and "canonical" in reason.lower()
+
+
+def _write_failed_verify_report(ref_dir: Path, gate: str) -> None:
+    (ref_dir / "verify-report.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "generatedAt": "2026-08-05T04:11:28Z",
+                "verdict": "fail",
+                "failures": [gate],
+                "gates": [
+                    {
+                        "gate": gate,
+                        "passed": False,
+                        "pass_count": 0,
+                        "warn_count": 0,
+                        "fail_count": 1,
+                        "checks": [
+                            {
+                                "label": "required: impl-scope",
+                                "status": "fail",
+                                "message": "impl-scope failed",
+                                "fix": "rerun impl-scope-check.sh",
+                                "stale": False,
+                            }
+                        ],
+                        "exit_code": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _canonical_failure_terminal(gate: str) -> dict[str, object]:
+    return {
+        "status": "failed",
+        "category": "canonical-verify-failed",
+        "gate": gate,
+        "reason": f"canonical verify failed: {gate}",
+        "recorded_at": "2026-08-05T04:11:28Z",
+        "writtenBy": "pipeline",
+        "detail": {
+            "failed_gates": [gate],
+            "root_cause_gates": [gate],
+            "cascade_gates": [],
+            "gate_exit_codes": {gate: 1},
+            "verify_report": "verify-report.json",
+        },
+    }
+
+
+def test_canonical_nonsection_failure_with_success_section_result_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An all-PASS section report can coexist with another failed verify gate."""
+    from ui_clone.gates.base import CheckResult, Gate
+
+    _with_result(tmp_path)
+    _write_failed_verify_report(tmp_path, "post-implement")
+    monkeypatch.setattr(
+        Gate,
+        "_dispatch",
+        lambda _self, gate: [
+            CheckResult("required: impl-scope", "fail", f"{gate} still fails")
+        ],
+    )
+
+    reason = _block_reason(
+        tmp_path, _canonical_failure_terminal("post-implement")
+    )
+
+    assert reason is None
+
+
+def test_canonical_failure_report_cannot_release_when_live_gate_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writable report is not enough; the declared gate must still fail live."""
+    from ui_clone.gates.base import CheckResult, Gate
+
+    _with_result(tmp_path)
+    _write_failed_verify_report(tmp_path, "post-implement")
+    monkeypatch.setattr(
+        Gate,
+        "_dispatch",
+        lambda _self, gate: [CheckResult(gate, "pass", f"{gate} now passes")],
+    )
+
+    reason = _block_reason(
+        tmp_path, _canonical_failure_terminal("post-implement")
+    )
+
+    assert reason is not None
+    assert "canonical" in reason.lower()
+
+
+def test_canonical_section_compare_failure_with_success_result_still_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exception cannot excuse contradictory section-compare evidence."""
+    from ui_clone.gates.base import CheckResult, Gate
+
+    _with_result(tmp_path)
+    _write_failed_verify_report(tmp_path, "section-compare")
+    monkeypatch.setattr(
+        Gate,
+        "_dispatch",
+        lambda _self, gate: [CheckResult(gate, "fail", f"{gate} still fails")],
+    )
+
+    reason = _block_reason(
+        tmp_path, _canonical_failure_terminal("section-compare")
+    )
+
+    assert reason is not None
+    assert "PASS" in reason and "canonical" in reason.lower()
+
+
+def test_success_fraud_detector_is_failtoward_blocking(tmp_path: Path) -> None:
+    # HIGH: the detector must catch success phrasings a token blacklist would miss
+    # — a canonical all-PASS line, its lowercase clone, an all-✅ table, and a
+    # prose/emoji success claim all BLOCK a self-attested terminal release.
+    import hashlib
+
+    from ui_clone.hooks.section_gate import _result_txt_claims_success
+
+    success_bodies = (
+        "**Result: 5 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",  # canonical
+        "**result: 5 pass, 0 fail, 0 skip, 0 structural_only**\n",  # lowercase clone
+        "| hero | 100 | 200 | ok | ✅ |\n| nav | 80 | 90 | ok | ✅ |\n",  # all-✅ table
+        "VERDICT: SUCCESS — clone CONVERGED, all sections green 🟢\n",  # prose/emoji
+        "**Result: 1 PASS**\n",  # simplified fallback shape
+    )
+    for body in success_bodies:
+        ref = tmp_path / hashlib.sha256(body.encode()).hexdigest()[:12]
+        (ref / "sections").mkdir(parents=True)
+        (ref / "sections" / "result.txt").write_text(body, encoding="utf-8")
+        assert _result_txt_claims_success(ref) is True, body
+        sha = hashlib.sha256(
+            (ref / "sections" / "result.txt").read_bytes()
+        ).hexdigest()
+        reason = _block_reason(
+            ref,
+            {"status": "incomplete", "category": "x", "reason": "y",
+             "writtenBy": "cli", "sectionsResultSha256": sha},
+        )
+        assert reason is not None, body
+
+
+def test_success_fraud_detector_reads_last_result_line_not_decoy(tmp_path: Path) -> None:
+    # MEDIUM (decoy evasion): a planted `**Result: 0 PASS, 3 FAIL**` line ABOVE a
+    # real all-PASS line must NOT release — the detector reads the LAST line (what
+    # the harvester/human reads), so the success claim still BLOCKS. A free-floating
+    # "FAIL"/"MISSING" token in prose must not fake non-success either.
+    from ui_clone.hooks.section_gate import _result_txt_claims_success
+
+    decoy = (
+        "**Result: 0 PASS, 3 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n"
+        "note: an earlier pass had MISSING items, now resolved\n"
+        "**Result: 9 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n"
+    )
+    (tmp_path / "sections").mkdir(parents=True)
+    (tmp_path / "sections" / "result.txt").write_text(decoy, encoding="utf-8")
+    assert _result_txt_claims_success(tmp_path) is True
+    reason = _block_reason(
+        tmp_path, {"status": "incomplete", "category": "x", "reason": "y", "writtenBy": "cli"}
+    )
+    assert reason is not None
+
+
+def test_legacy_untagged_terminal_with_result_blocks(tmp_path: Path) -> None:
+    """Hole-3: a legacy record with no writtenBy defaults to the enforced (cli)
+    class — fail-toward-enforcement."""
+    _with_failing_result(tmp_path)
+    reason = _block_reason(
+        tmp_path, {"status": "incomplete", "category": "x", "reason": "y"}
+    )
+    assert reason is not None
+
+
+def test_self_attested_terminal_without_result_txt_releases(tmp_path: Path) -> None:
+    """Back-compat: an early run with no sections/result.txt has no evidence to
+    pin, so the sha branch is skipped and the run is not bricked."""
+    reason = _block_reason(
+        tmp_path, {"status": "incomplete", "category": "x", "reason": "y", "writtenBy": "cli"}
+    )
+    assert reason is None

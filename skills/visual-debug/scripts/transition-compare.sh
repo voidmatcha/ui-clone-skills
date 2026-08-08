@@ -15,10 +15,19 @@
 
 set -euo pipefail
 
+# W-4 (loop-ebpb-0): the reference follows prefers-color-scheme — a host
+# OS theme flip (macOS auto-dark in the evening) silently captured the ref
+# in dark mode and poisoned an entire compare cycle (footer dSSIM
+# 0.0000065 -> 0.687 reading as catastrophic regression). Pin light unless
+# the caller explicitly overrides.
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_COLOR_SCHEME
+
 # Source the timeout shim so macOS gets a working `timeout` cmd even when
 # coreutils isn't installed. See scripts/lib/timeout-shim.sh.
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _SHIM="$_SCRIPT_DIR/../../../scripts/lib/timeout-shim.sh"
+# shellcheck disable=SC1090  # runtime path is resolved from this script's directory
 [ -f "$_SHIM" ] && . "$_SHIM" || true
 
 VIEW_W="${VIEW_W:-1440}"
@@ -27,7 +36,18 @@ NO_IMAGES="${NO_IMAGES:-0}"
 WAIT_REF="${WAIT_REF:-8000}"
 WAIT_IMPL="${WAIT_IMPL:-6000}"
 TRANSITION_WAIT="${TRANSITION_WAIT:-500}"   # ms to wait after hover before screenshot
-MAX_TRANSITIONS="${MAX_TRANSITIONS:-30}"    # max elements to compare
+SWIPER_SETTLE_WAIT="${SWIPER_SETTLE_WAIT:-50}"  # ms after pinning logical slide 0
+MAX_TRANSITIONS="${MAX_TRANSITIONS:-30}"    # max semantic candidates to collect
+COMPARE_LIMIT="${COMPARE_LIMIT:-20}"        # max top-priority candidates to hard-compare
+# The ref list is the comparison shortlist. The impl list is a lookup pool, so
+# giving both sides the same cap creates false MISSING results whenever helper
+# classes or hydration change candidate ordering. Keep the impl pool bounded,
+# but deliberately wider than the ref shortlist.
+_DEFAULT_MAX_IMPL_TRANSITIONS=$((MAX_TRANSITIONS * 10))
+if [ "$_DEFAULT_MAX_IMPL_TRANSITIONS" -lt 300 ]; then
+  _DEFAULT_MAX_IMPL_TRANSITIONS=300
+fi
+MAX_IMPL_TRANSITIONS="${MAX_IMPL_TRANSITIONS:-$_DEFAULT_MAX_IMPL_TRANSITIONS}"
 # CSS selector(s) to exclude from ref detection (e.g. third-party SDK overlays not in the clone).
 # Default skips Finsweet Cookie Consent (`.fs-cc_*`) — the clone never replicates the consent SDK.
 EXCLUDE_SELECTORS="${EXCLUDE_SELECTORS:-[class*=fs-cc], [id*=cookie], [class*=cookie-banner], [class*=consent]}"
@@ -37,6 +57,22 @@ IMPL_URL="${2:?Usage: transition-compare.sh <orig-url> <impl-url> <session> [out
 SESSION="${3:?Usage: transition-compare.sh <orig-url> <impl-url> <session> [output-dir]}"
 DIR="${4:-tmp/ref/visual-debug}"
 
+# Fail fast on swapped arguments. A URL passed as <session> becomes an invalid
+# agent-browser session name whose daemon dies at startup with no stderr —
+# "Daemon process exited during startup with no error output" gives the caller
+# nothing to act on, so validate here instead.
+case "$ORIG_URL" in
+  http://*|https://*) ;;
+  *) echo "transition-compare: <orig-url> must be http(s)://… (got: $ORIG_URL). Arg order is <orig-url> <impl-url> <session> [output-dir]." >&2; exit 2 ;;
+esac
+case "$IMPL_URL" in
+  http://*|https://*) ;;
+  *) echo "transition-compare: <impl-url> must be http(s)://… (got: $IMPL_URL). Arg order is <orig-url> <impl-url> <session> [output-dir]." >&2; exit 2 ;;
+esac
+case "$SESSION" in
+  *[!A-Za-z0-9._-]*|"") echo "transition-compare: <session> must be a slug ([A-Za-z0-9._-]+, got: $SESSION). Arg order is <orig-url> <impl-url> <session> [output-dir]." >&2; exit 2 ;;
+esac
+
 # Convert relative path to absolute (Stop gate uses absolute paths, result.txt lookup breaks otherwise)
 if [[ "$DIR" != /* ]]; then
   DIR="$(pwd)/$DIR"
@@ -45,11 +81,9 @@ fi
 SESSION_REF="${SESSION}-tc-ref"
 SESSION_IMPL="${SESSION}-tc-impl"
 
-_TC_PY=""  # set later; declare here so cleanup_all can reference it
 cleanup_all() {
   agent-browser --session "$SESSION_REF" close 2>/dev/null || true
   agent-browser --session "$SESSION_IMPL" close 2>/dev/null || true
-  [ -n "$_TC_PY" ] && rm -f "$_TC_PY"
   return 0
 }
 trap cleanup_all EXIT
@@ -65,8 +99,22 @@ echo ""
 # `open` may report a navigation timeout on slow third-party sites even when the
 # page eventually loads. Tolerate that — the explicit `wait` below settles state.
 echo "▸ Opening both sites..."
-agent-browser --session "$SESSION_REF" open "$ORIG_URL" 2>&1 | head -1 || true
-agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 | head -1 || true
+ref_open_out="$(agent-browser --session "$SESSION_REF" open "$ORIG_URL" 2>&1 || true)"
+printf '%s\n' "$ref_open_out" | head -1
+impl_open_out="$(agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 || true)"
+printf '%s\n' "$impl_open_out" | head -1
+
+# Navigation timeouts are tolerated (wait below settles state), but a session
+# whose daemon never came up means every later eval silently no-ops — probe
+# liveness once and surface the captured open output instead of cascading.
+if ! agent-browser --session "$SESSION_REF" eval '(() => 1)()' > /dev/null 2>&1; then
+  echo "transition-compare: ref session '$SESSION_REF' failed to start: $ref_open_out" >&2
+  exit 1
+fi
+if ! agent-browser --session "$SESSION_IMPL" eval '(() => 1)()' > /dev/null 2>&1; then
+  echo "transition-compare: impl session '$SESSION_IMPL' failed to start: $impl_open_out" >&2
+  exit 1
+fi
 
 agent-browser --session "$SESSION_REF" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" set viewport "$VIEW_W" "$VIEW_H" > /dev/null 2>&1
@@ -84,8 +132,8 @@ DISMISS='(() => {
   document.documentElement.style.overflow = "";
   return "ok";
 })()'
-agent-browser --session "$SESSION_REF" eval "$DISMISS" 2>&1 > /dev/null
-agent-browser --session "$SESSION_IMPL" eval "$DISMISS" 2>&1 > /dev/null
+agent-browser --session "$SESSION_REF" eval "$DISMISS" > /dev/null 2>&1
+agent-browser --session "$SESSION_IMPL" eval "$DISMISS" > /dev/null 2>&1
 
 # Hide images to reduce AE noise from dynamic thumbnails
 HIDE_IMAGES_JS='(() => {
@@ -118,96 +166,58 @@ if [ "${NO_CANVAS:-0}" = "1" ]; then
   agent-browser --session "$SESSION_IMPL" eval "$HIDE_CANVAS_JS" 2>/dev/null || true
 fi
 
+# Stop every initialized Swiper and align both pages to the same logical slide
+# before transition candidates or idle styles are sampled. Carousel motion is
+# verified by the transition-fires/video gates; this static comparison must not
+# pair unrelated autoplay frames after its sequential ref/impl capture.
+PIN_SWIPERS_JS='(() => {
+  const seen = new Set();
+  let pinned = 0;
+  document.querySelectorAll("*").forEach(el => {
+    const swiper = el.swiper;
+    if (!swiper || seen.has(swiper)) return;
+    seen.add(swiper);
+    try {
+      if (swiper.autoplay && typeof swiper.autoplay.stop === "function") {
+        swiper.autoplay.stop();
+      }
+    } catch (_) {}
+    try {
+      if (typeof swiper.slideToLoop === "function") {
+        swiper.slideToLoop(0, 0, false);
+      } else if (typeof swiper.slideTo === "function") {
+        swiper.slideTo(0, 0, false);
+      }
+      pinned++;
+    } catch (_) {}
+  });
+  return pinned;
+})()'
+
+echo "▸ Pinning Swiper carousels..."
+agent-browser --session "$SESSION_REF" eval "$PIN_SWIPERS_JS" > /dev/null
+agent-browser --session "$SESSION_IMPL" eval "$PIN_SWIPERS_JS" > /dev/null
+agent-browser --session "$SESSION_REF" wait "$SWIPER_SETTLE_WAIT" > /dev/null 2>&1
+agent-browser --session "$SESSION_IMPL" wait "$SWIPER_SETTLE_WAIT" > /dev/null 2>&1
+
 # ── Step 1: Find elements with transitions on the original ──
 echo "▸ Detecting transition elements..."
 
-DETECT_TRANSITIONS='(() => {
-  const results = [];
-  const seen = new Set();
-  const allEls = document.querySelectorAll("a, button, [role=button], img, .product-card, [class*=card], [class*=link], [class*=hover], [class*=btn], nav a, footer a, h1, h2, h3");
-  const EXCLUDE = ${EXCLUDE_SELECTORS_JSON};
+DETECT_HELPER="$_SCRIPT_DIR/lib/transition-detect.js"
+DETECT_TRANSITIONS_TEMPLATE=$(< "$DETECT_HELPER")
 
-  allEls.forEach(el => {
-    if (EXCLUDE && el.closest(EXCLUDE)) return;
-    const cs = getComputedStyle(el);
-    const hasTrans = cs.transitionDuration !== "0s" && cs.transitionProperty !== "none";
-    const hasAnim = cs.animationName !== "none";
-
-    if (!hasTrans && !hasAnim) return;
-
-    const rect = el.getBoundingClientRect();
-    if (rect.width < 10 || rect.height < 10) return;
-    if (rect.top + window.scrollY > document.documentElement.scrollHeight) return;
-
-    // Build a unique selector
-    let selector = "";
-    if (el.id) {
-      selector = "#" + el.id;
-    } else if (el.className && typeof el.className === "string") {
-      const cls = el.className.split(" ").filter(c => c && !c.includes("hover") && c.length < 40)[0];
-      if (cls) selector = "." + cls;
-    }
-    if (!selector) {
-      selector = el.tagName.toLowerCase();
-      if (el.parentElement) {
-        const siblings = [...el.parentElement.children].filter(c => c.tagName === el.tagName);
-        if (siblings.length > 1) {
-          const idx = siblings.indexOf(el);
-          selector += `:nth-child(${idx + 1})`;
-        }
-      }
-    }
-
-    if (seen.has(selector)) return;
-    seen.add(selector);
-
-    // Get transition properties
-    const transProps = cs.transitionProperty.split(",").map(p => p.trim());
-    const transDurs = cs.transitionDuration.split(",").map(d => d.trim());
-    const transEase = cs.transitionTimingFunction.split(",").map(e => e.trim());
-
-    results.push({
-      selector,
-      tag: el.tagName.toLowerCase(),
-      text: (el.textContent || "").trim().substring(0, 40),
-      rect: {
-        top: Math.round(rect.top + window.scrollY),
-        left: Math.round(rect.left),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      },
-      transition: {
-        properties: transProps,
-        durations: transDurs,
-        easings: transEase,
-      },
-      idleStyle: {
-        opacity: cs.opacity,
-        transform: cs.transform,
-        backgroundColor: cs.backgroundColor,
-        color: cs.color,
-        scale: cs.scale || "none",
-        filter: cs.filter,
-        boxShadow: cs.boxShadow,
-      },
-    });
-  });
-
-  return results.slice(0, ${MAX_TRANSITIONS});
-})()'
-
-# Substitute ${MAX_TRANSITIONS} and ${EXCLUDE_SELECTORS_JSON} into the JS body
-# (single-quoted heredoc above blocks bash expansion).
+# Substitute runtime values into the standalone JS helper.
 # EXCLUDE_SELECTORS is JSON-encoded so it embeds as a JS string literal safely —
 # matches the v0.4.2 hardening discipline that JSON-encodes selectors before eval.
 EXCLUDE_SELECTORS_JSON=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$EXCLUDE_SELECTORS")
-DETECT_TRANSITIONS="${DETECT_TRANSITIONS/\$\{MAX_TRANSITIONS\}/$MAX_TRANSITIONS}"
-DETECT_TRANSITIONS="${DETECT_TRANSITIONS/\$\{EXCLUDE_SELECTORS_JSON\}/$EXCLUDE_SELECTORS_JSON}"
+DETECT_TRANSITIONS_TEMPLATE="${DETECT_TRANSITIONS_TEMPLATE/__EXCLUDE_SELECTORS_JSON__/$EXCLUDE_SELECTORS_JSON}"
+DETECT_TRANSITIONS_REF="${DETECT_TRANSITIONS_TEMPLATE/__MAX_TRANSITIONS__/$MAX_TRANSITIONS}"
+DETECT_TRANSITIONS_IMPL="${DETECT_TRANSITIONS_TEMPLATE/__MAX_TRANSITIONS__/$MAX_IMPL_TRANSITIONS}"
 
-agent-browser --session "$SESSION_REF" eval "$DETECT_TRANSITIONS" \
+agent-browser --session "$SESSION_REF" eval "$DETECT_TRANSITIONS_REF" \
   > "$DIR/transitions/ref-elements.json" \
   2> "$DIR/transitions/ref-elements.stderr.log"
-agent-browser --session "$SESSION_IMPL" eval "$DETECT_TRANSITIONS" \
+agent-browser --session "$SESSION_IMPL" eval "$DETECT_TRANSITIONS_IMPL" \
   > "$DIR/transitions/impl-elements.json" \
   2> "$DIR/transitions/impl-elements.stderr.log"
 
@@ -226,13 +236,11 @@ if [ "$REF_TRANS" -eq 0 ]; then
   echo "    3. Transitions only exist on hover (GSAP mouseenter), not in base CSS"
   echo "  If transitions exist, add custom selectors: bash transition-compare.sh ... then edit DETECT_TRANSITIONS"
   echo ""
-  cat > "$DIR/transitions/report.json" <<JSON
-[]
-JSON
-  cat > "$DIR/transitions/result.txt" <<TXT
-Transition compare: 0 PASS, 0 FAIL
-SKIP no transition elements detected on the original site.
-TXT
+  printf '%s\n' '[]' > "$DIR/transitions/report.json"
+  printf '%s\n' \
+    'Transition compare: 0 PASS, 0 FAIL' \
+    'SKIP no transition elements detected on the original site.' \
+    > "$DIR/transitions/result.txt"
   echo "═══ Transition Compare Complete ═══"
   echo "  0 elements — skipped"
   echo "  Summary: $DIR/transitions/result.txt"
@@ -242,346 +250,22 @@ fi
 # ── Step 2: For each ref transition element, capture idle + hover states ──
 echo "▸ Capturing idle + hover states..."
 
-# Write hover capture script to a tmpfile — avoids bash quoting issues when
-# embedding Python code with single-quotes inside a double-quoted -c argument.
-# Trailing X's only — BSD/macOS mktemp does not substitute X's that precede a
-# suffix (e.g. `-XXXXXX.py`); it would create a literal `tc-hover-XXXXXX.py`
-# and then fail with "File exists" on every later run. python3 runs the file
-# regardless of extension, so the `.py` suffix is unnecessary.
-_TC_PY=$(mktemp /tmp/tc-hover-XXXXXX)
-
-cat > "$_TC_PY" << 'PYEOF'
-import json, re, subprocess, sys, time, os
-from pathlib import Path
-
-SESSION_REF     = os.environ["_TC_SESSION_REF"]
-SESSION_IMPL    = os.environ["_TC_SESSION_IMPL"]
-DIR             = os.environ["_TC_DIR"]
-TRANSITION_WAIT = float(os.environ.get("TRANSITION_WAIT", "500")) / 1000  # ms → seconds
-SCROLL_WAIT     = float(os.environ.get("_TC_SCROLL_WAIT", "300")) / 1000
-
-# Strip every char outside [A-Za-z0-9._-] so selector-derived filenames cannot
-# escape into surrounding shell or path components. Also collapse to ≤30 chars.
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-def _safe_name(selector: str) -> str:
-    s = selector.replace("#", "id-").replace(".", "cls-")
-    s = _SAFE_NAME_RE.sub("_", s)
-    return s[:30] or "el"
-
-
-def _ab_eval(session: str, js: str) -> subprocess.CompletedProcess:
-    """Run agent-browser eval with argv (shell=False) — safe against selector injection."""
-    return subprocess.run(
-        ["agent-browser", "--session", session, "eval", js],
-        capture_output=True,
-        text=True,
-    )
-
-
-def capture_hover_state(session, elements_file, side, out_dir):
-    elements = json.loads(Path(elements_file).read_text())
-    results = []
-
-    for el in elements[:20]:  # Cap at 20 elements
-        selector = el["selector"]
-        safe_name = _safe_name(selector)
-        # JSON-encode the selector so it embeds safely as a JS string literal —
-        # quotes, backslashes, and unicode all survive without breaking the JS.
-        sel_lit = json.dumps(selector)
-
-        # Scroll to element
-        _ab_eval(session, (
-            "(() => {"
-            f"const el = document.querySelector({sel_lit});"
-            "if (!el) return 'not found';"
-            "el.scrollIntoView({ block: 'center' });"
-            "return 'scrolled';"
-            "})()"
-        ))
-        time.sleep(SCROLL_WAIT)
-
-        idle_path = Path(out_dir) / f"{safe_name}-idle.png"
-        subprocess.run(
-            ["agent-browser", "--session", session, "screenshot", str(idle_path)],
-            capture_output=True,
-        )
-
-        _ab_eval(session, (
-            "(() => {"
-            f"const el = document.querySelector({sel_lit});"
-            "if (!el) return 'not found';"
-            "el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));"
-            "el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));"
-            "el.focus?.();"
-            "return 'hovered';"
-            "})()"
-        ))
-        time.sleep(TRANSITION_WAIT)  # Wait for transition (TRANSITION_WAIT env var)
-
-        hover_path = Path(out_dir) / f"{safe_name}-hover.png"
-        subprocess.run(
-            ["agent-browser", "--session", session, "screenshot", str(hover_path)],
-            capture_output=True,
-        )
-
-        result = _ab_eval(session, (
-            "(() => {"
-            f"const el = document.querySelector({sel_lit});"
-            "if (!el) return JSON.stringify({ error: 'not found' });"
-            "const cs = getComputedStyle(el);"
-            "return JSON.stringify({"
-            "opacity: cs.opacity,"
-            "transform: cs.transform,"
-            "backgroundColor: cs.backgroundColor,"
-            "color: cs.color,"
-            "scale: cs.scale || 'none',"
-            "filter: cs.filter,"
-            "boxShadow: cs.boxShadow,"
-            "borderColor: cs.borderColor,"
-            "});"
-            "})()"
-        ))
-        hover_style = result.stdout.strip().strip('"')
-
-        _ab_eval(session, (
-            "(() => {"
-            f"const el = document.querySelector({sel_lit});"
-            "if (!el) return 'not found';"
-            "el.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));"
-            "el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));"
-            "el.blur?.();"
-            "return 'left';"
-            "})()"
-        ))
-        time.sleep(SCROLL_WAIT)
-
-        try:
-            hs = json.loads(hover_style.replace("\\\\", "\\\\\\\\")) if hover_style else {}
-        except json.JSONDecodeError:
-            hs = {}
-
-        results.append({
-            "selector": selector,
-            "name": safe_name,
-            "hoverStyle": hs,
-        })
-
-        sys.stdout.write(f"  ✓ {side}/{safe_name}\n")
-        sys.stdout.flush()
-
-    return results
-
-ref_results  = capture_hover_state(SESSION_REF,  f"{DIR}/transitions/ref-elements.json",  "ref",  f"{DIR}/transitions/ref")
-impl_results = capture_hover_state(SESSION_IMPL, f"{DIR}/transitions/impl-elements.json", "impl", f"{DIR}/transitions/impl")
-
-with open(f"{DIR}/transitions/hover-states.json", "w") as f:
-    json.dump({"ref": ref_results, "impl": impl_results}, f, indent=2)
-PYEOF
-
 _TC_SESSION_REF="$SESSION_REF" _TC_SESSION_IMPL="$SESSION_IMPL" _TC_DIR="$DIR" \
-  TRANSITION_WAIT="$TRANSITION_WAIT" \
-  python3 "$_TC_PY" 2>&1
+  TRANSITION_WAIT="$TRANSITION_WAIT" COMPARE_LIMIT="$COMPARE_LIMIT" \
+  python3 "$_SCRIPT_DIR/transition_capture_hover.py" 2>&1
 
 # ── Step 3: Diff transitions ──
 echo ""
 echo "▸ Comparing transitions..."
 
-python3 -c "
-import json
-
-ref_els = json.loads(open('$DIR/transitions/ref-elements.json').read())
-impl_els = json.loads(open('$DIR/transitions/impl-elements.json').read())
-hover_states = json.loads(open('$DIR/transitions/hover-states.json').read())
-
-# Match by selector similarity
-def find_impl_match(ref_el, impl_list):
-    ref_sel = ref_el['selector']
-    # Exact match
-    for im in impl_list:
-        if im['selector'] == ref_sel:
-            return im
-    # Partial match (same class name)
-    ref_cls = ref_sel.replace('.', '').replace('#', '')
-    for im in impl_list:
-        im_cls = im['selector'].replace('.', '').replace('#', '')
-        if ref_cls and im_cls and (ref_cls in im_cls or im_cls in ref_cls):
-            return im
-    ref_text = (ref_el.get('text') or '').strip()
-    if ref_text and len(ref_text) >= 6:
-        for im in impl_list:
-            im_text = (im.get('text') or '').strip()
-            if im_text and (ref_text == im_text or ref_text in im_text or im_text in ref_text):
-                return im
-    # CSS-module hash strip: prefix_hero__AjMaf -> prefix_hero
-    # Only strip if the suffix looks like a hash (__ + 6+ alnum chars).
-    import re as _re
-    ref_root = _re.sub(r'__[A-Za-z0-9]{6,}$', '', ref_cls or '')
-    if ref_root and ref_root != ref_cls:
-        for im in impl_list:
-            im_cls = im['selector'].replace('.', '').replace('#', '')
-            im_root = _re.sub(r'__[A-Za-z0-9]{6,}$', '', im_cls or '')
-            if im_root and (ref_root == im_root or ref_root in im_root or im_root in ref_root):
-                return im
-    return None
-
-report = []
-pass_count = 0
-fail_count = 0
-
-for ref_el in ref_els:
-    impl_el = find_impl_match(ref_el, impl_els)
-
-    entry = {
-        'selector': ref_el['selector'],
-        'text': ref_el.get('text', ''),
-        'issues': [],
-    }
-
-    if not impl_el:
-        entry['issues'].append('MISSING: no matching element in impl')
-        entry['status'] = 'FAIL'
-        fail_count += 1
-        report.append(entry)
-        continue
-
-    # Compare transition timing PER PROPERTY (not whole-list equality).
-    # getComputedStyle returns transition-property / -duration /
-    # -timing-function as comma-joined parallel lists, but cubic-bezier()/
-    # steps() carry internal commas, so the timing-function list is over-split
-    # — regroup by paren balance before zipping. Then match each property the
-    # REF actually animates against the impl's value for that same property,
-    # ignoring extra inert properties the ref does not animate (an added
-    # 'transform', a reordered list, or 'transition: all'). A wrong duration/
-    # easing on an animated property, or a property the ref animates but the
-    # impl omits, still FAILs — this is a tightening-compatible correction.
-    def regroup_paren(tokens):
-        out, buf, depth = [], '', 0
-        for tok in tokens:
-            buf = tok if not buf else buf + ', ' + tok
-            depth += tok.count('(') - tok.count(')')
-            if depth <= 0:
-                out.append(buf)
-                buf, depth = '', 0
-        if buf:
-            out.append(buf)
-        return out
-
-    def prop_timing_map(trans):
-        props = [p.strip() for p in (trans.get('properties') or [])]
-        durs = trans.get('durations') or []
-        eases = regroup_paren(trans.get('easings') or [])
-        m = {}
-        for i, prop in enumerate(props):
-            if not prop or prop == 'none':
-                continue
-            dur = durs[i % len(durs)] if durs else ''
-            eas = eases[i % len(eases)] if eases else ''
-            m[prop] = (dur, eas)  # last declaration wins, matching CSS cascade
-        return m
-
-    ref_map = prop_timing_map(ref_el['transition'])
-    impl_map = prop_timing_map(impl_el['transition'])
-
-    def lookup_timing(prop, m):
-        if prop in m:
-            return m[prop]
-        if 'all' in m:  # impl 'transition: all <t>' covers any property
-            return m['all']
-        return None
-
-    for prop, (ref_dur, ref_eas) in ref_map.items():
-        impl_timing = lookup_timing(prop, impl_map)
-        if impl_timing is None:
-            entry['issues'].append(
-                f'MISSING_TRANSITION: ref animates {prop} '
-                f'(dur={ref_dur}, ease={ref_eas}), impl has no matching transition'
-            )
-            continue
-        impl_dur, impl_eas = impl_timing
-        if ref_dur != impl_dur:
-            entry['issues'].append(
-                f'DURATION_MISMATCH: prop={prop} ref={ref_dur} impl={impl_dur}'
-            )
-        if ref_eas != impl_eas:
-            entry['issues'].append(
-                f'EASING_MISMATCH: prop={prop} ref={ref_eas} impl={impl_eas}'
-            )
-
-    # Compare idle styles
-    def normalize_transform(v):
-        # matrix(1, 0, 0, 1, 0, 0) is the identity transform — semantically equivalent to "none"
-        if v.replace(' ', '') == 'matrix(1,0,0,1,0,0)':
-            return 'none'
-        return v
-
-    for prop in ['opacity', 'transform', 'backgroundColor', 'color']:
-        ref_val = ref_el['idleStyle'].get(prop, '')
-        impl_val = impl_el['idleStyle'].get(prop, '')
-        if prop == 'transform':
-            ref_val = normalize_transform(ref_val)
-            impl_val = normalize_transform(impl_val)
-        if ref_val != impl_val and ref_val and impl_val:
-            # Allow minor color differences
-            if prop in ['backgroundColor', 'color']:
-                if ref_val.replace(' ', '') == impl_val.replace(' ', ''):
-                    continue
-            entry['issues'].append(f'IDLE_{prop.upper()}_MISMATCH: ref={ref_val}, impl={impl_val}')
-
-    # Compare hover styles from captured states
-    ref_hover = next((r for r in hover_states.get('ref', []) if r['selector'] == ref_el['selector']), None)
-    impl_hover = next((r for r in hover_states.get('impl', []) if r['selector'] == (impl_el or {}).get('selector', '')), None)
-
-    if ref_hover and impl_hover and ref_hover.get('hoverStyle') and impl_hover.get('hoverStyle'):
-        for prop in ['opacity', 'transform', 'scale', 'backgroundColor', 'color']:
-            ref_hv = ref_hover['hoverStyle'].get(prop, '')
-            impl_hv = impl_hover['hoverStyle'].get(prop, '')
-            ref_idle = ref_el['idleStyle'].get(prop, '')
-
-            # Check if property changes on hover in ref but not in impl
-            if ref_hv and ref_idle and ref_hv != ref_idle:
-                if impl_hv == impl_el['idleStyle'].get(prop, ''):
-                    entry['issues'].append(f'HOVER_{prop.upper()}_NOT_APPLIED: ref changes {prop} on hover ({ref_idle} -> {ref_hv}), impl stays same')
-
-    if entry['issues']:
-        entry['status'] = 'FAIL'
-        fail_count += 1
-    else:
-        entry['status'] = 'PASS'
-        pass_count += 1
-
-    report.append(entry)
-
-json.dump(report, open('$DIR/transitions/report.json', 'w'), indent=2)
-
-# Common failure pattern: gates expect transitions/result.txt but
-# transition-compare only emits report.json. Emit a flat result.txt
-# alongside so dispatcher + gate.py post-implement enforcement can
-# read a stable text artifact for FAIL counting.
-with open('$DIR/transitions/result.txt', 'w') as fh:
-    fh.write(f'Transition compare: {pass_count} PASS, {fail_count} FAIL\n')
-    for r in report:
-        marker = '✅ PASS' if r['status'] == 'PASS' else '❌ FAIL'
-        sel = r.get('selector', '?')[:60]
-        fh.write(f'{marker}  {sel}\n')
-        for iss in (r.get('issues') or [])[:3]:
-            fh.write(f'    - {iss[:120]}\n')
-
-# Print summary
-print('')
-print('| Element | Status | Issues |')
-print('|---------|--------|--------|')
-for r in report:
-    issues = '; '.join(r['issues'][:2]) if r['issues'] else '—'
-    print(f'| {r[\"selector\"][:30]} | {r[\"status\"]} | {issues[:60]} |')
-
-print(f'')
-print(f'**Result: {pass_count} PASS, {fail_count} FAIL**')
-" 2>&1
+python3 "$_SCRIPT_DIR/transition_compare_report.py" "$DIR" "$COMPARE_LIMIT" 2>&1
 
 echo ""
 echo "═══ Transition Compare Complete ═══"
 echo "  Report:  $DIR/transitions/report.json"
 echo "  Summary: $DIR/transitions/result.txt"
 echo "  States:  $DIR/transitions/{ref,impl}/"
+
+if grep -Eq '([1-9][0-9]*) FAIL|❌ FAIL' "$DIR/transitions/result.txt"; then
+  exit 1
+fi

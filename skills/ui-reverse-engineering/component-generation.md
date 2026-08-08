@@ -2,11 +2,11 @@
 
 > 🚨 **Hard requirements before you write a single line of JSX:**
 >
-> 1. **Asset transfer is NOT optional.** Run `bash scripts/extract/asset-download.sh <ref-dir> <impl>/public` for `visible-images.json` images and `bash scripts/extract/extract-assets.sh <session> <ref-dir> <impl>/public` for videos, posters, fonts, and other captured assets. Then `bash skills/visual-debug/scripts/asset-transfer-check.sh <ref-dir> <impl>/public` and `bash skills/visual-debug/scripts/asset-utilization-check.sh <ref-dir> <impl>/src` should PASS. Skipping this step produces a clone where `<img>` tags are broken or replaced with colored blocks while section ids/build still pass.
+> 1. **Asset transfer is NOT optional.** Run `bash scripts/extract/asset-download.sh <ref-dir> <impl>/public` for `visible-images.json` images and `bash scripts/extract/extract-assets.sh <session> <ref-dir> <impl>/public` for videos, posters, fonts, and other captured assets. **Custom fonts also need `bash scripts/extract/transfer-fonts.sh <ref-dir> <impl>` — it copies every root-relative `url()` font binary the ref CSS references (from `<ref-dir>/resources/`) into `impl/public` at the exact URL path (`/font/X.woff → public/font/X.woff`), so the mirrored `@font-face` rules resolve instead of 404-ing to system fallbacks. Then run `bash scripts/extract/emit-preflight-neutralize.sh <ref-dir> <impl>` so Tailwind Preflight's `@tailwind base` reset does not collapse UA-default heading weights (e.g. an `<h1>` that relied on the browser's default 700).** Font transfer/neutralization report gaps in `font-transfer.json` (`missing[]` = referenced but never downloaded — re-run the extractor) and `preflight-neutralize.json`. Then `bash skills/visual-debug/scripts/asset-transfer-check.sh <ref-dir> <impl>/public` and `bash skills/visual-debug/scripts/asset-utilization-check.sh <ref-dir> <impl>/src` should PASS. Skipping this step produces a clone where `<img>` tags are broken or replaced with colored blocks while section ids/build still pass.
 >
 > 2. **Visible text fidelity is NOT optional.** `dom-scaffold.json` text fields are source evidence. Scratch clone outputs must preserve the user-provided site's visible text, brand/service/site names, alt/title/aria labels, and other user-visible identity strings verbatim. Do not replace them with generic brand names, sanitized copy, or placeholder labels. `text-fidelity-check.sh` fails both fabricated text and omitted scaffold text.
 >
-> 3. **Lottie/bodymovin must stay Lottie/bodymovin.** If ref artifacts mention `lottie`, `bodymovin`, `dotlottie`, `<lottie-player>`, or an animation JSON URL, download the JSON and use `lottie-web`, `lottie-react`, or an equivalent Lottie runtime in the impl. Do not approximate it with GSAP/CSS marker motion. `lottie-runtime-check.sh` fails when the runtime package, source usage, or local animation JSON is missing.
+> 3. **Lottie/bodymovin must stay Lottie/bodymovin.** If ref artifacts mention `lottie`, `bodymovin`, `dotlottie`, `<lottie-player>`, or an animation JSON URL, download the JSON and use `lottie-web`, `lottie-react`, or an equivalent Lottie runtime in the impl. Do not approximate it with GSAP/CSS marker motion. `lottie-runtime-check.sh` fails when the runtime package, source usage, or local animation JSON is missing. **Do not hand-author the mount bindings.** `transition-spec.json` already holds the exact slot→asset map (container, path/mobilePath, loop, autoplay, trigger); run `scripts/extract/emit-lottie-mounts.sh <ref-dir> <impl-dir>` to emit `impl/src/generated/lottie-mounts.ts` deterministically and only wire the triggers (event `play()`, scroll progress) it exposes. `lottie-slot-identity-check.sh` fails per slot on a missing mount, wrong container, wrong asset, or inverted loop/autoplay — inventing a splash or flipping autoplay does not pass it.
 >
 > 4. **One component per section — DO NOT write a 300-line monolith `page.tsx`.** Read `component-map.json`; each entry in `sections[]` becomes its own file under `src/projects/<name>/components/sections/<SectionName>.tsx`. The top-level `page.tsx` should be ~40-60 lines of imports + an `<main>` with section components composed in order (plus shared scroll/intro wrappers from `bundle-map.json`). Inlining everything into `page.tsx` creates a large fidelity and maintainability risk: section-scoped evidence becomes harder to map, while successful clones split sections into focused component files.
 >
@@ -52,6 +52,7 @@ The scaffold contains:
    It emits one component per section with **every** scaffold text leaf verbatim, tag-preserving JSX, and inline styles, and writes `scaffold-base-stamp.json`. Hand-translating the tree is the documented root cause of dropping 70–80% of body text (`text-fidelity-check` then fails for many iterations). After the transpiler runs, your job is to **refine on top** — copy ref CSS for forensicPreservation, convert inline styles to the project's styling system, add controllers/state/animation triggers — **never to re-type or delete the transpiled text.** If a section emits `data-scaffold-warn="subtree-not-found-..."`, fix the section→subtree resolution (re-run `dom-scaffold.sh`), do not leave the placeholder. Steps 1–N below describe what that emitted base must look like (and how to refine it).
 1. **The scaffold tree maps 1:1 to JSX.** Same tag hierarchy. Same nesting depth. Same `text` content **verbatim** (the transpiler does this for you in step 0; preserve it). You do NOT decide what to render — the scaffold decides.
    - When `generation-plan.json.forensicPreservation.required=true`, keep every CSS-module / hashed `class` token from the scaffold in `className`. Those tokens are part of the selector contract, not decoration. Rename only classes you can prove are generated by your own impl.
+   - **Preserve every CSS container-query ancestor 1:1.** If `container-context.json` lists a `container-type` element (or the scaffold node carries a `@container`/`@md:`/`@lg:` class), that element establishes a query context for its subtree — do NOT drop it, wrap it, or collapse it into a parent. `@container` utilities resolve against the nearest `container-type` ancestor's **width**, so a dropped container makes its descendants query the wrong element and a mis-sized container (e.g. a product grid that reflows 4 columns → 2, doubling each cell) snaps every descendant to a larger breakpoint — the silent root cause of "recognizable but ~15% too tall" clones. `container-context-check.sh` diffs the impl's live container inventory against `container-context.json` and fails on dropped containers or width divergence > 25% on a repeated module.
 2. **Measure-then-lookup, not feel.** For each `styles` block, pick the closest *exact* Tailwind utility for each property:
    - `bg: "rgb(26,14,8)"` → `bg-[#1a0e08]`
    - `color: "rgb(245,234,210)"` → `text-[#f5ead2]`
@@ -231,16 +232,36 @@ Use this mode when `required=true`:
    from CSS capture or bundle extraction, rerun `generation-plan.sh`, and
    only continue once `cssArtifactStatus="present"`.
 
-1. Copy every `tmp/ref/<component>/css/*.css` file to `impl/src/ref-css/`.
+1. Copy every `tmp/ref/<component>/css/*.css` file to `impl/src/ref-css/`
+   through the sanitizer, not raw `cp`:
+   ```bash
+   bash "$PLUGIN_ROOT/scripts/extract/sanitize-ref-css.sh" \
+     "$(pwd)/tmp/ref/<component>" "<impl-root>"
+   ```
+   This preserves filenames/provenance while repairing browser-tolerated
+   bundle tokens that Vite rejects (for example `background-image: var("/img/x.png")`).
 2. Import the copied local CSS chunks before local overrides:
    ```tsx
    import './ref-css/<hash>.css';
    import './overrides.css';
    ```
+   If `generation-plan.json.forensicPreservation.requiresRuntimeUnlock=true`
+   or `tmp/ref/<component>/ref-css-sanitize-report.json.requiresRuntimeUnlock=true`,
+   the copied CSS hides `html`, `body`, or the app root at first paint
+   (`opacity:0`, `visibility:hidden`, or `display:none`). Reproduce the
+   reference site's local ready/unlock behavior before visual verification:
+   remove the loading class, add the ready class, or set the affected
+   `body`/root opacity/visibility back to visible after the intro/loader
+   completes. Do not leave a plain `body{opacity:0}` scaffold and assume
+   later section gates will catch it.
 3. Before the first visual/debug iteration, verify the copy/import actually
    happened:
    - `find impl/src/ref-css -maxdepth 1 -name '*.css' | wc -l` must be at
      least the number of `cssFiles[]` entries in `generation-plan.json`.
+   - `tmp/ref/<component>/ref-css-sanitize-report.json` must exist.
+   - If either report says `requiresRuntimeUnlock=true`, run the impl and
+     confirm `getComputedStyle(document.body).opacity !== "0"` and the app
+     root is visible before continuing.
    - Source imports must reference `./ref-css/...` before local overrides.
    - A run with `required=true` and zero files under `copyCssTo` is
      `INCOMPLETE` even when JSX contains many preserved CSS-module tokens.
@@ -339,13 +360,14 @@ agent-browser --session cake-impl screenshot tmp/ref/<c>/verify-impl-scroll200.p
 4. **Never round extracted values.** `15.84px` is a computed value from the site's token system, not a mistake. Rounding breaks typographic scale.
 5. **Recover responsive expressions from `sizing-expressions.json` (MANDATORY).** `getComputedStyle` returns pixel values for the current viewport only. Step 4-C2 compares elements at 3 viewports and produces `sizing-expressions.json` with recovered CSS expressions.
    - ⛔ **HARD BLOCK**: If `sizing-expressions.json` exists, you MUST use it for width/height/padding/font-size. Look up each element's selector → use the `value` field directly.
+   - Transpiler-baked px from `scaffold-to-jsx.sh` falls under the same obligation — see `generation-pitfalls.md` → "Transpiler-baked px values" for the baked-value classes (root heights, margin dups, scrubbed-track widths, natural-height imgs) and the re-resolution rules.
    - `fixed-px` → safe to hardcode the px value
    - `calc` → use the `calc()` expression (e.g., `w-[calc(100vw-64px)]`)
    - `vw` → use viewport units (e.g., `w-[83.3vw]`)
    - `linear` → use the generated `calc()` expression
    - `breakpoint-jump` → use Tailwind responsive prefixes (e.g., `w-full md:w-[704px] lg:w-[1376px]`)
    - When in doubt, download the original CSS stylesheet and grep for the selector to find the raw expression (see `js-animation-extraction.md` Step 5)
-6. **Never recreate SVGs from visual appearance.** Use `outerHTML` from `inline-svgs.json` verbatim; convert HTML attributes to JSX (`stroke-width` → `strokeWidth`, `class` → `className`, `fill-rule` → `fillRule`).
+6. **Never recreate SVGs from visual appearance.** Use `outerHTML` from `inline-svgs.json` verbatim; convert HTML attributes to JSX (`stroke-width` → `strokeWidth`, `class` → `className`, `fill-rule` → `fillRule`). Fabricating text/labels inside SVGs or assets is an anti-cheat violation enforced by `svg-provenance` — see `generation-pitfalls.md` → "Asset/SVG text forgery is PROHIBITED".
 
    **Never fake a gate signal with a named placeholder element (anti-cheat).**
    Do NOT emit empty/decorative elements named or classed after a verification
@@ -467,7 +489,7 @@ diff /tmp/ref-children.txt /tmp/impl-children.txt   # must be identical
    - `scroll-progress reveal`: when `generation-plan.json` → `scrollDriven.required` is true, the site maps section scroll progress onto opacity/transform via `useScroll` + `useTransform` (`scrollYProgress`). Fastest path: `bash skills/visual-debug/scripts/emit-scroll-helpers.sh <ref-dir> <impl-dir>` deterministically emits `src/lib/ScrollReveal.tsx` (render-verified `useScroll`/`useTransform` pattern); wrap reveal sections in `<ScrollReveal>`. Implement these as real scroll-progress reveals — NOT plain load/intersection fades. Do NOT downgrade a continuous scroll-scrub reveal to a one-shot `IntersectionObserver` fade (it fires once and never tracks scroll back/forth, so the motion never matches). Drive progress from the smooth-scroll source per `scrollDriven.note` (ReactLenis root or RAF + `getBoundingClientRect`), never a raw `window` `scroll` listener.
    - `scroll-scrub` (background scale/zoom + scrubbed transforms): when `generation-plan.json` → `scrollScrub.required` is true, the site scrubs a section's `scrollYProgress` onto a motion property via `useScroll` + `useTransform` — most importantly a **`scale` band straddling 1.0** (the scroll-driven background zoom), often smoothed with `useSpring`. These exact `offset` windows and input/output bands are extracted deterministically from the bundle. Fastest path: `bash skills/visual-debug/scripts/emit-scroll-helpers.sh <ref-dir> <impl-dir>` emits `src/lib/ScrollScrub.tsx` (reusable `useScroll`/`useTransform`/`useSpring` primitive) plus `src/lib/scrollScrubSites.ts` (the ref's real bands). **The transpiler now AUTO-WRAPS the scroll-zoom section in `<ScrollScrub scale={…}>` deterministically** (scaffold-to-jsx detects the element captured frozen at a sub-unity scale, stamps it `data-scroll-scrub-target`, and emits the wrapper in the page entry with the real band). So for the background scale/zoom you normally do NOT need to do anything — and you MUST NOT wrap it again (double-wrapping breaks it). When you refine the scaffold, KEEP the `<ScrollScrub …>` wrapper and the `data-scroll-scrub-target` stamp the transpiler emitted. Only hand-wire `<ScrollScrub {...scrollScrubSites[i]}>` for an ADDITIONAL scrubbed element the auto-wrap did not cover (e.g. a second target, or an opacity/y-only scrub). A `scale` band that ends up unwired FAILS the `signature-effects-coverage` gate (post-implement). Drive progress from the smooth-scroll source (Lenis), never a raw `window` `scroll` listener.
    - `per-word scroll highlight` (scroll-progress text colour change): when `generation-plan.json` → `signatureEffects` declares a `per-word-scroll-highlight` effect, the site advances an active word index from `scrollYProgress` and toggles each word/line between a **highlighted** and a **dimmed** colour (`line_highlighted`/`line_dimmed` class pair over a `split(" ")`). This is a per-WORD colour change — distinct from the per-character disintegration (which keeps `color: inherit`). Fastest path: `bash skills/visual-debug/scripts/emit-scroll-helpers.sh <ref-dir> <impl-dir>` emits `src/lib/ScrollWordHighlight.tsx` (splits text, maps `scrollYProgress` → active word count via `useMotionValueEvent`). Wrap the target heading/paragraph: `<ScrollWordHighlight text="…" highlightColor="…" dimColor="…" />`, passing the ref's real highlight/dim colours (or the preserved CSS-module class names via `highlightClassName`/`dimClassName`). Declaring it then shipping static-colour text FAILS the `signature-effects-coverage` gate.
-   - `hover`: `:hover`, `group-hover`, `whileHover`, `onMouseEnter`, or `onPointerEnter` on the actual selector.
+   - `hover`: `:hover`, `group-hover`, `whileHover`, `onMouseEnter`, or `onPointerEnter` on the actual selector **only when `states/hover/manifest.json` / `transition-spec.json` names that selector and measured delta**. Do not invent generic hover transforms (`rotate`, `scale`, `opacity:0`, etc.) to make the page feel animated; a static ref hover must stay static, and extra impl hover motion is a verification failure.
    - `click` / accordion: `onClick` or click listener plus `useState` / `aria-expanded` / `open` state.
 
 > **Binding mandate (runtime-enforced).** Every `transition-spec.json` entry MUST be implemented with its declared trigger + easing + duration. This is enforced at runtime by the transition-fires gate (post-implement): a component that imports an animation library but creates no trigger, or whose target does not measurably move at its trigger, FAILS. See `transition-implementation.md` → "Binding mandate (enforced at runtime)" for the per-trigger pattern.

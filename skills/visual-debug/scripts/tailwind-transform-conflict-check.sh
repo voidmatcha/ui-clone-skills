@@ -67,10 +67,15 @@ sleep $((WAIT_MS / 1000))
 # `rotate:` / `scale:`. Both being set is the structural signature of the
 # v3↔v4 conflict — the v4 properties compose ON TOP of whatever the v3
 # shorthand produced.
-RAW=$(agent-browser --session "$SESSION" eval "(() => {
+SCOPE_JSON=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$SCOPE") || {
+  echo "ERROR: failed to JSON-encode scope selector: $SCOPE" >&2
+  exit 2
+}
+PROBE_JS=$(cat <<'JS'
+(() => {
   const out = [];
   const SKIP_TAGS = new Set(['SCRIPT','STYLE','META','LINK','HEAD','TITLE','NOSCRIPT','NEXT-ROUTE-ANNOUNCER']);
-  const root = document.querySelector(${SCOPE@Q}) || document.documentElement;
+  const root = document.querySelector(__SCOPE_JSON__) || document.documentElement;
   const all = root.querySelectorAll('*');
   for (const el of all) {
     if (SKIP_TAGS.has(el.tagName)) continue;
@@ -95,12 +100,30 @@ RAW=$(agent-browser --session "$SESSION" eval "(() => {
     });
   }
   return JSON.stringify(out);
-})()" 2>/dev/null)
+})()
+JS
+)
+PROBE_JS="${PROBE_JS/__SCOPE_JSON__/$SCOPE_JSON}"
+EVAL_ERR=$(mktemp "${TMPDIR:-/tmp}/tailwind-conflict-eval.XXXXXX")
+RAW=$(agent-browser --session "$SESSION" eval "$PROBE_JS" 2>"$EVAL_ERR")
+EVAL_STATUS=$?
+if [ "$EVAL_STATUS" -ne 0 ]; then
+  echo "ERROR: tailwind transform conflict probe failed during browser eval." >&2
+  cat "$EVAL_ERR" >&2
+  rm -f "$EVAL_ERR"
+  exit 2
+fi
+rm -f "$EVAL_ERR"
 
 # Unwrap agent-browser quoting.
 DATA=$(echo "$RAW" | sed 's/^\"//;s/\"$//' | sed 's/\\\"/\"/g')
 
-if [ -z "$DATA" ] || [ "$DATA" = "[]" ] || [ "$DATA" = "null" ]; then
+if [ -z "$DATA" ]; then
+  echo "ERROR: tailwind transform conflict probe returned no data." >&2
+  exit 2
+fi
+
+if [ "$DATA" = "[]" ] || [ "$DATA" = "null" ]; then
   echo "✅ No Tailwind v3↔v4 transform conflicts found."
   if [ -n "$REF_DIR" ] && [ -d "$REF_DIR" ]; then
     SCOPE_JSON=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$SCOPE")

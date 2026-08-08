@@ -203,6 +203,19 @@ def _check_unclonable_preflight(self: Gate) -> CheckResult | None:
 
 def gate_extraction(self: Gate) -> list[CheckResult]:
     results = []
+    try:
+        from ui_clone.extraction_artifacts import finalize_extraction_artifacts
+
+        finalize_extraction_artifacts(self.ref_dir)
+    except Exception as exc:  # pragma: no cover - defensive gate hardening
+        results.append(
+            CheckResult(
+                "extraction-artifact-finalizer",
+                "warn",
+                f"extraction artifact finalizer skipped: {exc}",
+            )
+        )
+
     for filename, label in [
         ("structure.json", "structure.json (DOM hierarchy)"),
         ("head.json", "head.json (metadata)"),
@@ -213,7 +226,13 @@ def gate_extraction(self: Gate) -> list[CheckResult]:
         ("body-state.json", "body-state.json"),
         ("design-bundles.json", "design-bundles.json"),
     ]:
-        results.append(self.check_file(self.ref_dir / filename, label))
+        results.append(
+            self.check_file(
+                self.ref_dir / filename,
+                label,
+                allow_empty_array=filename == "inline-svgs.json",
+            )
+        )
 
     results.append(
         self.check_file(
@@ -242,4 +261,3 @@ def gate_extraction(self: Gate) -> list[CheckResult]:
         results.append(preflight)
 
     return results
-

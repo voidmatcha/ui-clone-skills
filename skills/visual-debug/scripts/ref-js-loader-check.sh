@@ -58,7 +58,8 @@ trap cleanup EXIT
 # Optional runtime probe
 if [ -n "$IMPL_URL" ] && command -v agent-browser >/dev/null 2>&1; then
   RUNTIME_RAW=$(mktemp -t ref-js-runtime.XXXX.json)
-  agent-browser --session "$RUNTIME_SESSION" open "$IMPL_URL" --wait 2000 >/dev/null 2>&1 || true
+  agent-browser --session "$RUNTIME_SESSION" open "$IMPL_URL" >/dev/null 2>&1 || true
+  sleep 2  # open --wait is not a supported flag; settle explicitly
   agent-browser --session "$RUNTIME_SESSION" eval '
 (() => {
   const hosts = new Set();
@@ -82,6 +83,7 @@ python3 - "$REF_DIR" "$IMPL_ROOT" "$OUT" "${RUNTIME_RAW:-}" "$IMPL_URL" <<'PY'
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -230,6 +232,48 @@ if not ref_hosts:
     print(json.dumps({"status": "skip", "out": str(out_p)}))
     sys.exit(0)
 
+# ── Sanitized ref-CSS provenance ──────────────────────────────────────
+# `sanitize-ref-css.sh` copies captured CSS into impl/src/ref-css and records
+# destination hashes. Those files are generated reference evidence, not
+# implementation-authored runtime outsourcing. Exempt only exact hash matches
+# from the static source scan; a moved/edited file is scanned normally.
+sanitized_ref_css_hashes: dict[str, str] = {}
+sanitize_report_p = ref_dir_p / "ref-css-sanitize-report.json"
+if sanitize_report_p.is_file():
+    try:
+        report = json.loads(sanitize_report_p.read_text(encoding="utf-8"))
+        for item in report.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            destination = item.get("destination")
+            digest = item.get("destinationSha256")
+            if isinstance(destination, str) and isinstance(digest, str):
+                rel = destination.replace("\\", "/").lstrip("./")
+                if rel and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                    sanitized_ref_css_hashes[rel] = digest.lower()
+    except (json.JSONDecodeError, OSError):
+        sanitized_ref_css_hashes = {}
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def is_sanitized_ref_css_file(path: Path) -> bool:
+    try:
+        rel = str(path.relative_to(impl_root_p)).replace("\\", "/")
+    except ValueError:
+        return False
+    expected = sanitized_ref_css_hashes.get(rel)
+    if not expected:
+        return False
+    try:
+        return sha256_file(path) == expected
+    except OSError:
+        return False
+
 # ── Scan impl source tree ─────────────────────────────────────────────
 SCAN_DIRS = [impl_root_p / d for d in ("src", "app", "public", "pages", "components")]
 SCAN_DIRS = [d for d in SCAN_DIRS if d.exists()]
@@ -277,11 +321,14 @@ def classify_line(snippet: str) -> tuple[bool, str]:
         return False, "asset markup tag — allowed"
     if any(d in s for d in DENY_MARKERS):
         return True, "script/stylesheet/iframe/import marker found"
+    if re.search(r"<\s*a\b[^>]*\bhref\s*=", s):
+        return False, "navigational anchor href — allowed"
     # Ambiguous: bare URL with no marker. Conservative: flag as cheat.
     return True, "ambiguous bare URL — treated as cheat"
 
 violations: list[dict] = []
 files_scanned = 0
+sanitized_ref_css_skipped: list[str] = []
 
 for d in SCAN_DIRS:
     for path in d.rglob("*"):
@@ -290,6 +337,9 @@ for d in SCAN_DIRS:
         if path.suffix.lower() not in SOURCE_EXT:
             continue
         if "node_modules" in path.parts or ".next" in path.parts:
+            continue
+        if path.suffix.lower() in {".css", ".scss"} and is_sanitized_ref_css_file(path):
+            sanitized_ref_css_skipped.append(str(path.relative_to(impl_root_p)))
             continue
         files_scanned += 1
         try:
@@ -400,6 +450,7 @@ payload = {
     "status": status,
     "refHosts": sorted(ref_hosts),
     "filesScanned": files_scanned,
+    "sanitizedRefCssSkipped": sorted(sanitized_ref_css_skipped),
     "violations": violations[:50],   # cap to keep artifact small
     "runtimeViolations": runtime_violations[:50],
     "runtimeProbeRan": bool(runtime_raw),

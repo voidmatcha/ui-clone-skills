@@ -3,8 +3,7 @@ Gate validation for ui-clone pipeline.
 
 Usage:
     python -m ui_clone.gate <ref-dir> <gate> [--json]
-    gate: reference | extraction | bundle | spec | pre-generate |
-          post-implement | section-compare | all
+    gate: any name from `ui_clone.state.GATE_ORDER`, or `all`
 Exit: 0=PASS, 1=BLOCKED, 2=usage error
 
 This module is a thin shim re-exporting from `ui_clone.gates`. The Gate

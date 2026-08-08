@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>transform-displaced scroll-revealed JS hover fixture (batch-12 ITEM 2)</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; }
+    /* tall spacer: the targets live below the fold at scroll-top 0 */
+    .spacer { height: 180vh; background: #f5efe4; }
+    .row { display: flex; gap: 40px; padding: 80px; background: #101018; }
+    /* JS-hover card DISPLACED off the x-axis by a transform — exactly the class
+       loop-12 hit on the e2e-12 ResourcesDeck cards (a large scroll-tied
+       translate that puts the card outside the viewport). scrollIntoView only
+       adjusts the VERTICAL scroll, so it cannot bring a translateX(-3000px) card
+       on-screen; the old probe's isOnScreen gate (x-axis branch, not relaxed by
+       belowFoldOk) rejects it -> findVisible null -> found:false -> the false
+       "hover behavior does not exist" FAIL. There is NO CSS :hover rule, so only
+       a real event dispatch on the (off-screen but laid-out) node fires it. */
+    .js-hover-card {
+      width: 160px; height: 120px; background: #2244cc; color: #fff;
+      display: grid; place-items: center;
+      transform: translateX(-3000px); transition: transform 120ms ease;
+    }
+    /* genuinely-missing hover: laid out + on-screen, no handler, no :hover rule
+       -> must still FAIL (the relaxed resolution must not mint coverage). */
+    .no-hover-el {
+      width: 160px; height: 120px; background: #888; color: #000;
+      display: grid; place-items: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="spacer">scroll down</div>
+  <div class="row">
+    <div class="js-hover-card">JS hover</div>
+    <div class="no-hover-el">no hover</div>
+  </div>
+  <script>
+    // Framer-style JS whileHover: scale up on pointer/mouse enter, reset on
+    // leave, composed into the SAME transform that displaces the card (mirrors
+    // ResourcesDeck.writePose). NO CSS :hover rule for this element.
+    var card = document.querySelector(".js-hover-card");
+    function enter() { card.style.transform = "translateX(-3000px) scale(1.25)"; }
+    function leave() { card.style.transform = "translateX(-3000px) scale(1)"; }
+    card.addEventListener("pointerenter", enter);
+    card.addEventListener("mouseenter", enter);
+    card.addEventListener("pointerleave", leave);
+    card.addEventListener("mouseleave", leave);
+  </script>
+</body>
+</html>

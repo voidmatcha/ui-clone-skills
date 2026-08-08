@@ -80,7 +80,7 @@ Optionally also write `tmp/ref/<component>/brief/source-forensics-<slug>.md` for
 
 ## Non-goals
 
-- Do not replace `bundle-analyzer`; use that worker for animation-library construction-site extraction and `bundle-extraction.json`.
+- Do not replace `bundle-analyzer`. `bundle-extraction.json` is produced deterministically by the Phase-2 driver (`scripts/extract/bundle-extraction.sh`); dispatch that worker only for the gaps the parser flags in `bundle-extraction.json` `unresolved[]` (Swiper/Splide/Lottie, multi-file state machines, symbolic transforms), merging into the artifact rather than re-deriving the deterministic extractions.
 - Do not replace `generation-planner`; use that worker when the source facts need to update `generation-plan.json` semantics.
 - Do not replace `visual-debug-iterator`; use that worker for scoped implementation edits after source facts are already compact.
 - Do not copy source JS/CSS wholesale into the implementation. Preserve behavior and visible values, not bundled code structure.

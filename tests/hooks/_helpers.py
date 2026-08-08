@@ -20,6 +20,9 @@ def run_hook(
 ) -> subprocess.CompletedProcess:
     """Run a hook module as a subprocess, returning CompletedProcess."""
     merged_env = {**os.environ, **(env or {})}
+    for key in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID"):
+        if env is None or key not in env:
+            merged_env.pop(key, None)
     return subprocess.run(
         [sys.executable, "-m", module],
         input=stdin_data,
@@ -98,6 +101,25 @@ def _populate_pre_generate_artifacts(ref_dir: Path) -> None:
     (ref_dir / "element-roles.json").write_text(json.dumps({"roles": []}))
     (ref_dir / "element-groups.json").write_text(json.dumps({"groups": []}))
     (ref_dir / "layout-decisions.json").write_text(json.dumps({"decisions": []}))
+    (ref_dir / "runtime-media.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "url": "https://example.com",
+        "videos": [],
+        "totals": {"video": 0},
+        "sources": {"extractor": "runtime-media.sh", "scrollSamples": 5},
+    }))
+    (ref_dir / "required-media.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "videos": [],
+        "lottie": [],
+        "totals": {"video": 0, "lottie": 0},
+        "sources": {
+            "extractor": "required-media.sh",
+            "htmlSectionsScanned": 0,
+            "runtimeMediaScanned": True,
+            "bundlesScanned": 0,
+        },
+    }))
     responsive = ref_dir / "responsive"
     responsive.mkdir(exist_ok=True)
     (responsive / "sizing-expressions.json").write_text(json.dumps({"expressions": []}))
@@ -107,7 +129,7 @@ def _populate_pre_generate_artifacts(ref_dir: Path) -> None:
         "structure.json", "styles.json", "section-map.json", "component-map.json",
         "interactions-detected.json", "hover-css-rules.json", "transition-spec.json",
         "bundle-map.json", "animation-init-styles.json", "svg-text-elements.json",
-        "transition-coverage.json",
+        "transition-coverage.json", "runtime-media.json", "required-media.json",
     ]:
         p = ref_dir / name
         if p.exists():
@@ -118,12 +140,6 @@ def _populate_pre_generate_artifacts(ref_dir: Path) -> None:
         json.dumps({"sections": [], "url": "https://example.com"})
     )
     os.utime(ref_dir / "extracted.json", (extracted_time, extracted_time))
-
-    # generation-plan.json — required by gate_pre_generate (research1 fix)
-    (ref_dir / "generation-plan.json").write_text(
-        json.dumps({"schemaVersion": 1, "componentList": [], "guidance": {}})
-    )
-    os.utime(ref_dir / "generation-plan.json", (extracted_time, extracted_time))
 
     provenance_artifacts = [
         "extracted.json",
@@ -147,6 +163,31 @@ def _populate_pre_generate_artifacts(ref_dir: Path) -> None:
             for artifact in provenance_artifacts
         ],
     }))
+
+    from ui_clone import dag as _dag
+
+    generation_plan = {
+        "schemaVersion": 2,
+        "componentList": [],
+        "dsComponentsRequired": [],
+        "tokens": {
+            "colors": {},
+            "spacing": {},
+            "typography": {},
+            "radius": {},
+            "shadows": {},
+        },
+        "guidance": {},
+        "provenance": {
+            "source": "generation-planner",
+            "generatedAt": "2026-05-14T00:00:00Z",
+            "hashAlgorithm": "sha256",
+            "sourceHashes": _dag.generation_plan_source_hashes(ref_dir),
+        },
+    }
+    (ref_dir / "generation-plan.json").write_text(json.dumps(generation_plan))
+    plan_time = time.time() + 1.0
+    os.utime(ref_dir / "generation-plan.json", (plan_time, plan_time))
 
 
 
