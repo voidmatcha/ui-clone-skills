@@ -1068,7 +1068,9 @@ SVG_ATTR_RENAMES = {
     "stdDeviation": "stdDeviation",
 }
 # SVG geometry/styling attrs (no rename needed but pass through to JSX).
-SVG_PASSTHROUGH_ATTRS = {
+# Keep this ordered: the sequence becomes the insertion order of emitted JSX
+# attributes, so a set would make identical inputs vary with Python's hash seed.
+SVG_PASSTHROUGH_ATTRS = (
     "id",
     "xmlns",
     "fill",
@@ -1103,7 +1105,7 @@ SVG_PASSTHROUGH_ATTRS = {
     "type",
     "orient",
     "overflow",
-}
+)
 SVG_STYLE_ONLY_ATTRS = {"transform-origin"}
 
 
