@@ -351,6 +351,121 @@ def test_boolean_state_reveal_ignores_ancestor_attr_selector(tmp_path: Path) -> 
     ), blob
 
 
+def test_disclosure_control_boolean_state_attr_is_not_viewport_deferred(
+    tmp_path: Path,
+) -> None:
+    """G disclosure-state forcing (realfood-v4 faqs).
+
+    gen-M4 defers a boolean data-* to the StateRevealDriver, which sets the
+    ref-CSS TERMINAL value on viewport entry — correct for an
+    IntersectionObserver-owned reveal, wrong for a CLICK-owned disclosure. The
+    FAQ accordion's ref CSS declares `.faqs button[data-open=true]` (the open
+    pill highlight) as the only button-subject candidate, so every one of the 9
+    captured-closed items opened on scroll: all answers expanded and every pill
+    painted the open-state `--highlight` lime. `aria-expanded` marks the node as
+    a user-toggled control, so its captured state is emitted verbatim.
+    """
+    ref = _ref(tmp_path, [{
+        "tag": "button", "class": "faq_btn",
+        "aria-expanded": "false",
+        "data-open": "false",
+        "children": [{
+            "tag": "div", "class": "faq_item",
+            "children": [{"tag": "p", "class": "", "text": "answer body"}],
+        }],
+    }])
+    css_dir = ref / "css"
+    css_dir.mkdir()
+    (css_dir / "ref.css").write_text(
+        ".faqs button[data-open=true]{background-color:#e8f77f}\n"
+        ".faqs button[data-open=true] .faq_item p{grid-template-rows:1fr}\n"
+        ".faqs button[data-open=false] .faq_item p{grid-template-rows:0fr}\n",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _blob(impl)
+    assert 'data-open="false"' in blob, blob
+    assert "data-ui-clone-state-reveal" not in blob, blob
+
+
+def test_disclosure_control_only_exempts_click_owned_boolean_attr(tmp_path: Path) -> None:
+    """A disclosure button can still carry independent viewport reveal state."""
+    ref = _ref(tmp_path, [{
+        "tag": "button", "class": "faq_btn",
+        "aria-expanded": "false",
+        "data-open": "false",
+        "data-in-view": "false",
+        "children": [{"tag": "span", "class": "", "text": "Question"}],
+    }])
+    css_dir = ref / "css"
+    css_dir.mkdir()
+    (css_dir / "ref.css").write_text(
+        ".faq_btn[data-open=true]{background-color:#e8f77f}\n"
+        ".faq_btn[data-in-view=true]{opacity:1;transform:none}\n"
+        ".faq_btn[data-in-view=false]{opacity:0;transform:translateY(24px)}\n",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _blob(impl)
+    assert 'data-open="false"' in blob, blob
+    assert 'data-in-view="false"' not in blob, blob
+    assert 'data-ui-clone-state-reveal="data-in-view=true"' in blob, blob
+
+
+def test_split_text_word_gap_span_renders_its_space(tmp_path: Path) -> None:
+    """H word-gap collapse (realfood-v4 solution-solvable / container).
+
+    Split-text libraries emit a dedicated childless whitespace element per word
+    gap. Once capture preserves it (extract-dom records U+00A0 for a whitespace
+    -only leaf that measures non-zero), the emitter must paint it: the gap span
+    is a flex item, and JSX whitespace BETWEEN flex items is not rendered, so
+    only the element's own text can restore the gap.
+
+    Emitting the character LITERALLY is not enough. SWC — the JSX transform
+    Next.js uses — trims a whitespace-only JSX text child using Rust's
+    `char::is_whitespace`, which follows Unicode White_Space and therefore eats
+    U+00A0 too. Measured on the realfood-v4 impl: `<span> </span>` compiled to a
+    span with textContent "" and width 0, and the heading rendered
+    "RealFoodcan". The gap must therefore be an escaped string EXPRESSION,
+    which no JSX transform touches, plus `white-space: pre` so a block box does
+    not collapse a plain space back to zero advance width.
+    """
+    blob = _emit(tmp_path, {
+        "tag": "div", "class": "line",
+        "styles": {"display": "flex"},
+        "children": [
+            {"tag": "span", "class": "word", "text": "Real", "children": []},
+            {"tag": "span", "class": "", "text": " ", "wsAfter": True,
+             "children": []},
+            {"tag": "span", "class": "word", "text": "Food", "children": []},
+        ],
+    })
+    assert '{"\\u00a0"}' in blob, blob
+    assert "\u00a0</span>" not in blob, (
+        "a bare whitespace text child is trimmed away by the JSX transform")
+    assert "whiteSpace" in blob, blob
+    # The gap is carried ONCE, by the span's own text — wsAfter must not
+    # also append {' '} or inline-flow parents render a double word gap.
+    assert "{' '}" not in blob, blob
+
+
+def test_extract_dom_preserves_measured_whitespace_only_leaf() -> None:
+    # Capture-side lockstep for H: the emitter can only paint the word gap if
+    # extract-dom stops trimming the whitespace-only text node away. directText
+    # ends in .trim(), so `<span> </span>` used to survive as an empty element
+    # and the clone rendered "RealFoodcan". The non-zero computed width is the
+    # guard — whitespace the ref itself collapses must stay empty.
+    body = (ROOT / "skills" / "visual-debug" / "scripts" / "lib" / "extract-dom.js").read_text(
+        encoding="utf-8")
+    assert "/^\\s+$/.test(el.textContent || '')" in body
+    assert "parseFloat(s.width) > 0" in body
+    assert "out.text = '\\u00a0';" in body
+
+
 def test_extract_dom_captures_allow_and_generic_data_attrs() -> None:
     # Capture-side lockstep: the emitter fixes above are dead code unless
     # extract-dom actually records the attributes. ATTR_KEYS must carry
@@ -364,6 +479,8 @@ def test_extract_dom_captures_allow_and_generic_data_attrs() -> None:
     assert "'allowfullscreen'" in attr_keys_line
     assert "'aria-haspopup'" in attr_keys_line
     assert "'aria-expanded'" in attr_keys_line
+    assert "'width'" in attr_keys_line
+    assert "'height'" in attr_keys_line
     assert "nm.startsWith('data-')" in body
 
 
@@ -379,3 +496,46 @@ def test_structural_keys_never_emitted_as_attrs(tmp_path: Path) -> None:
     assert 'display="' not in blob
     assert 'position="' not in blob
     assert "wsAfter" not in blob
+
+
+def test_img_intrinsic_attrs_preserved_from_markup_attrs(tmp_path: Path) -> None:
+    """F intrinsic-size drop (realfood-v4 broken_system_image).
+
+    extract-dom records the literal width/height attributes. The generator must
+    preserve that direct markup evidence instead of inferring attrs from CSS.
+    """
+    blob = _emit(tmp_path, {
+        "tag": "img", "class": "shot", "src": "/images/a.webp",
+        "width": "440", "height": "340",
+        "display": "block", "position": "static",
+        "styles": {"aspect-ratio": "auto 440 / 340", "max-width": "100%"},
+        "children": [],
+    })
+    assert 'width="440"' in blob
+    assert 'height="340"' in blob
+
+
+def test_img_without_intrinsic_attrs_stays_unsized(tmp_path: Path) -> None:
+    """A bare `aspect-ratio: auto` carries no markup size — invent nothing."""
+    blob = _emit(tmp_path, {
+        "tag": "img", "class": "shot", "src": "/images/a.webp",
+        "display": "block", "position": "static",
+        "styles": {"aspect-ratio": "auto"},
+        "children": [],
+    })
+    assert 'width="' not in blob
+    assert 'height="' not in blob
+
+
+def test_img_css_authored_auto_aspect_ratio_does_not_invent_attrs(tmp_path: Path) -> None:
+    """CSS can author `aspect-ratio:auto W/H`; without markup attrs it is not evidence."""
+    blob = _emit(tmp_path, {
+        "tag": "img", "class": "shot", "src": "/images/a.webp",
+        "display": "block", "position": "static",
+        "styles": {"aspect-ratio": "auto 16 / 9", "max-width": "100%"},
+        "children": [],
+    })
+    assert 'width="16"' not in blob
+    assert 'height="9"' not in blob
+    assert 'width="' not in blob
+    assert 'height="' not in blob

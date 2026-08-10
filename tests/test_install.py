@@ -1183,7 +1183,7 @@ def test_claude_install_refreshes_recognized_known_marketplace_source(
     remove = "claude plugin marketplace remove voidmatcha"
     add = (
         "claude plugin marketplace add "
-        f"{home / '.local' / 'share' / 'ui-clone-skills' / 'claude-src'}"
+        f"{home / '.local' / 'share' / 'ui-clone-skills-claude-src'}"
     )
     assert remove in commands
     assert add in commands
@@ -1497,8 +1497,15 @@ def test_claude_marketplace_source_is_self_contained_real_files(tmp_path: Path) 
     symlinks. A symlinked source therefore caches as an empty shell: no
     hooks.json, no skills, so every session whose cwd is outside the checkout
     loads nothing. Measured on the live machine before this test existed: the
-    0.7.24 cache dir held 0 files, and `claude -p` in a scratch directory
-    reported no ui-clone skill available at all.
+    0.7.24 cache directory held 0 files and one empty skills/ dir, while
+    `claude plugin list` reported the plugin installed and enabled.
+
+    Do NOT try to verify this by asking a `claude -p` session to name its
+    available skills. That reports none even when the plugin loads correctly,
+    so it cannot distinguish the two states — it was tried, and it agreed with
+    itself both before and after the fix. The observables that do work are the
+    cached file count and a hook side effect on disk (a `pre_bash` browse crumb
+    from an out-of-repo session).
     """
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -1755,3 +1762,240 @@ def test_install_runs_an_installed_hook_from_the_host_cache(tmp_path: Path) -> N
     assert str(cache) in invocations, (
         f"probe must run the hook from the host cache, not the checkout; got:\n{invocations}"
     )
+
+
+def test_install_refuses_a_claude_source_that_resolves_inside_the_checkout(
+    tmp_path: Path,
+) -> None:
+    """Staging must never land inside the repo, even via a symlinked parent.
+
+    Observed live: `~/.local/share/ui-clone-skills` was a symlink to the
+    checkout, left by an earlier curl-pipe install whose INSTALL_DIR defaults
+    there. The staging path resolved to <repo>/claude-src, so the installer
+    copied 5860 files into the working tree — untracked and not gitignored —
+    and aimed its `rm -rf` at a path inside the repo. Refusing only the repo
+    ROOT is not enough; any descendant is equally wrong.
+    """
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_executable(
+        fake_bin / "claude",
+        '#!/usr/bin/env bash\nprintf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n',
+    )
+    env = _claude_probe_env(tmp_path, home, fake_bin, log)
+    # A symlinked parent is how this happens in the wild; point straight at a
+    # descendant of the checkout to assert the property directly.
+    env["UI_CLONE_CLAUDE_SRC_DIR"] = str(checkout / "claude-src")
+
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0, (
+        "staging inside the checkout must fail the install\n"
+        f"stdout:\n{result.stdout[-1500:]}"
+    )
+    assert not (checkout / "claude-src").exists(), (
+        "the installer must not leave a staged copy inside the working tree"
+    )
+
+
+def test_install_prunes_superseded_cache_versions(tmp_path: Path) -> None:
+    """A verified install reclaims cache directories nothing points at.
+
+    The host caches the plugin per version under
+    ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>, and the hook
+    probe materialises a ~220MB uv venv inside the live one. Nothing reclaims
+    superseded versions, so a few releases reach multiple GB. Only versions
+    absent from installed_plugins.json are removed — the live installPath is
+    read from the host's own record rather than guessed.
+    """
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_claude(fake_bin / "claude", populate=True)
+    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+
+    cache = home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills"
+    stale = cache / "0.7.1"
+    stale.mkdir(parents=True)
+    (stale / "filler.txt").write_text("superseded\n", encoding="utf-8")
+    # An unrelated plugin's cache must never be touched.
+    other = home / ".claude" / "plugins" / "cache" / "someone-else" / "other-plugin" / "1.0.0"
+    other.mkdir(parents=True)
+    (other / "keep.txt").write_text("not ours\n", encoding="utf-8")
+
+    version = json.loads(
+        (checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    installed = home / ".claude" / "plugins" / "installed_plugins.json"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "ui-clone-skills@voidmatcha": [
+                        {
+                            "scope": "user",
+                            "version": version,
+                            "installPath": str(cache / version),
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path,
+        env=_claude_probe_env(tmp_path, home, fake_bin, log),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert not stale.exists(), "superseded cache version must be reclaimed"
+    assert (cache / version).is_dir(), "the installed version must survive"
+    assert other.is_dir(), "another plugin's cache must never be touched"
+
+
+def test_install_never_reclaims_the_version_it_just_verified(tmp_path: Path) -> None:
+    """The prune reads the live set from installed_plugins.json alone, so a host
+    record that still names only the PREVIOUS version authorises deleting the
+    directory the delivery probe just ran a hook out of. `claude plugin update`
+    is warn-and-continue, so a half-applied update — new version copied into
+    cache, record not yet rewritten — reaches the prune with exactly that
+    shape, and the installer then reports both "delivery probe passed" and
+    "reclaimed 1 superseded version" about the same directory. The manifest
+    version is verified evidence and must survive regardless of the record."""
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_claude(fake_bin / "claude", populate=True)
+    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+
+    cache = home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills"
+    version = json.loads(
+        (checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    # The host record lags: it still names only the previous version.
+    previous = cache / "0.7.1"
+    previous.mkdir(parents=True)
+    (previous / "filler.txt").write_text("previous\n", encoding="utf-8")
+    installed = home / ".claude" / "plugins" / "installed_plugins.json"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "ui-clone-skills@voidmatcha": [
+                        {
+                            "scope": "user",
+                            "version": "0.7.1",
+                            "installPath": str(previous),
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path,
+        env=_claude_probe_env(tmp_path, home, fake_bin, log),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert (cache / version).is_dir(), (
+        "the manifest version the probe just verified was reclaimed as superseded"
+    )
+
+
+def test_install_keeps_cache_versions_when_the_host_record_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    """Without the host's own record of what is installed, removing anything
+    is a guess. Fail safe: keep every version."""
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_claude(fake_bin / "claude", populate=True)
+    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+
+    cache = home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills"
+    stale = cache / "0.7.1"
+    stale.mkdir(parents=True)
+    installed = home / ".claude" / "plugins" / "installed_plugins.json"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_text("{ this is not json", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path,
+        env=_claude_probe_env(tmp_path, home, fake_bin, log),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert stale.exists(), "an unreadable host record must not authorise deletion"
+
+
+def test_install_warns_when_the_plugin_is_installed_but_not_enabled(
+    tmp_path: Path,
+) -> None:
+    """Installed and enabled are different states, and only one of them runs.
+
+    Observed live: after a `plugin marketplace remove` + reinstall recovery,
+    installed_plugins.json listed the plugin while settings.json enabledPlugins
+    no longer did. Hooks silently stopped firing in every session, and the
+    delivery probe still passed — it runs the hook straight from the cache, so
+    it proves DELIVERY, never ACTIVATION. The installer must say so; it must
+    not silently enable, because a deliberate user disable has to be respected.
+    """
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_claude(fake_bin / "claude", populate=True)
+    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"enabledPlugins": {}}), encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path,
+        env=_claude_probe_env(tmp_path, home, fake_bin, log),
+        capture_output=True,
+        text=True,
+    )
+
+    combined = result.stdout + result.stderr
+    assert "not enabled" in combined.lower(), combined[-1500:]
+    assert "plugin enable" in combined, "must name the exact recovery command"

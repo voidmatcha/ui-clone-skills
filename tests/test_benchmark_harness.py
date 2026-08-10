@@ -7,6 +7,7 @@ building, stop-condition checking, and outcome reporting.
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -348,8 +349,11 @@ def test_loop_hits_max_iter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     """When iters reach --max-iter without done, outcome=INCOMPLETE_MAX_ITER."""
     ref, impl = _make_ref_dir(tmp_path)
     _write_state(ref, "reference")  # never reaches done
+    first_session_id = "52fdfc07-7303-4735-bd0b-b8d0f62d9d1b"
+    captured_session_ids: list[str] = []
 
     def fake_invoke(prompt: str, session_id: str, plugin_dir: Path, cwd: Path, iter_count: int) -> dict:
+        captured_session_ids.append(session_id)
         return _mock_claude_response(tokens=1000)
 
     monkeypatch.setattr(benchmark_harness, "invoke_claude", fake_invoke)
@@ -362,7 +366,7 @@ def test_loop_hits_max_iter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         max_iter=3,
         token_budget=100_000,
         wall_budget_s=60,
-        session_id=None,
+        session_id=first_session_id,
         # mock.Mock auto-creates attributes, so getattr(args, ..., None) in
         # run_loop never falls back — declare the LAND item A flags explicitly.
         run_dir=None,
@@ -370,6 +374,10 @@ def test_loop_hits_max_iter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     )
     outcome = benchmark_harness.run_loop(args)
     assert outcome == "INCOMPLETE_MAX_ITER"
+    assert captured_session_ids[0] == first_session_id
+    assert len(captured_session_ids) == 3
+    assert len(set(captured_session_ids)) == 3
+    assert all(uuid.UUID(value).version == 4 for value in captured_session_ids)
 
 
 def test_strict_done_requires_the_canonical_verify_stamp(tmp_path: Path) -> None:

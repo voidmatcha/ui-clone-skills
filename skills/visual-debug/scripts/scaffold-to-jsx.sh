@@ -58,10 +58,20 @@ fi
 
 python3 "$SCRIPT_DIR/lib/scaffold_to_jsx.py" "$STRUCT" "$SECMAP" "$OUT_DIR"
 
-# Emit deterministic scroll helpers when generation-plan.json requires them.
-if [[ -f "$REF_DIR/generation-plan.json" ]]; then
-  bash "$SCRIPT_DIR/emit-scroll-helpers.sh" "$REF_DIR" "$IMPL_DIR"
-fi
+# Emit deterministic scroll helpers. Runs unconditionally: the emitter also
+# writes helpers the scaffold above already committed to MOUNTING (derived from
+# transition-spec), which a ref with no generation-plan.json still produces.
+# Gating this on the plan's existence is what left those mounts unresolvable.
+bash "$SCRIPT_DIR/emit-scroll-helpers.sh" "$REF_DIR" "$IMPL_DIR"
+
+# Re-gate emitted imports against what was ACTUALLY written. Must run here:
+# after helper emission, so file existence is ground truth rather than a
+# prediction. Each driver is decided by two independent predicates (scaffold
+# imports it / emitter writes it) and a disagreement produces a tree that
+# cannot build — which is how a 35/35-PASS reference shipped an unresolvable
+# ./lib/ScrollLatchDriver with nothing in the pipeline noticing. Fails the run
+# on any unresolved import that is not a known unwritten driver.
+python3 "$SCRIPT_DIR/lib/regate_unresolved_imports.py" "$IMPL_DIR"
 
 # Download referenced assets into impl/public when a manifest is available.
 _REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." 2>/dev/null && pwd || true)"

@@ -242,6 +242,10 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     # library detection changes.
     "library-usage": _ci(JS + PKG, REF_BUNDLE),
     # ── JS / behavior (style-independent) ──
+    # Reads only the emitted JS/TSX import graph — whether every relative or
+    # aliased specifier has a file behind it. No ref artifact participates, so
+    # its verdict goes stale purely on impl source change.
+    "unresolved-imports": _ci(JS),
     "hydration-check": _ci(JS + PKG),
     "scaffold-residue": _ci(JS),
     "scaffold-warn": _ci(JS),

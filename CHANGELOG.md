@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Each benchmark-harness iteration now uses a fresh Claude session UUID. Claude
+  Code rejects a second `--print` process that reuses an already-consumed
+  `--session-id`; the old run-level reuse made iteration 2 fail before model
+  execution and abort after three zero-token driver failures.
 - Claude installs delivered an empty plugin. `claude plugin install` copies the
   marketplace source into its own per-version cache without following symlinks,
   and the registered source was the symlink projection — so the cache held zero

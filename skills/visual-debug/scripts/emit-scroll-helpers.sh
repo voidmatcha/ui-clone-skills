@@ -19,9 +19,14 @@ REF_DIR="${1:?Usage: emit-scroll-helpers.sh <ref-dir> <impl-dir>}"
 IMPL_DIR="${2:?Usage: emit-scroll-helpers.sh <ref-dir> <impl-dir>}"
 
 PLAN="$REF_DIR/generation-plan.json"
+# Deliberately NOT skipping when the plan is absent. A ref can carry a
+# transition-spec and no generation-plan; the scaffold still mounts drivers it
+# derives from the spec, and skipping here left those mounts with no file
+# behind them — the generated tree could not build and nothing reported it.
+# The emitter treats a missing plan as empty and emits only what the already-
+# emitted tree references.
 if [ ! -f "$PLAN" ]; then
-  echo "▸ emit-scroll-helpers: SKIP — no generation-plan.json in $REF_DIR"
-  exit 0
+  echo "▸ emit-scroll-helpers: no generation-plan.json in $REF_DIR — emitting only scaffold-referenced helpers"
 fi
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -85,8 +85,16 @@ trap 'rm -f "$REF_TMP" "$IMPL_TMP"' EXIT
 
 ANALYSIS_JS='(() => {
   const root = document.body || document.documentElement;
-  const allNodes = root.querySelectorAll("*");
   const skipText = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "META", "LINK"]);
+  // Node-count parity measures RENDERED structure. Non-rendering plumbing
+  // (chunk <script>s, injected <style>s, preload <link>s) is a function of
+  // the bundler, not the clone: a Next.js prod build emits one <script> per
+  // route chunk in <body>, so a faithful clone can carry 280+ body scripts
+  // against a ref that ships 9 — inflating the ratio past tolerance while
+  // every rendered element matches. Count only rendering elements.
+  const allNodes = [...root.querySelectorAll("*")].filter(
+    (el) => !skipText.has(el.tagName)
+  );
   const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(n) {
       const t = (n.nodeValue || "").trim();

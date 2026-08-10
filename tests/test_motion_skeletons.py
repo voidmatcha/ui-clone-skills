@@ -72,7 +72,7 @@ def test_emitter_transcribes_scrub_state_swiper(tmp_path: Path) -> None:
 
     # scroll-scrub: EXACT property list + input range, offset from bundle_branch,
     # and crucially NOT approximated as scale
-    assert "const input = [0, 0.5, 1] as const;" in module
+    assert "const input = [0, 0.5, 1];" in module
     assert "const width = useTransform(scrollYProgress, input," in module
     assert "const height = useTransform(scrollYProgress, input," in module
     assert "const borderRadius = useTransform(scrollYProgress, input," in module
@@ -99,6 +99,82 @@ def test_emitter_transcribes_scrub_state_swiper(tmp_path: Path) -> None:
     vid = next(e for e in report["emitted"] if e["id"] == "video-expand")
     assert vid["properties"] == ["width", "height", "borderRadius"]
     assert vid["input"] == [0, 0.5, 1] and vid["inputExact"] is True
+
+
+def test_scroll_scrub_pixel_domain_input_falls_back_to_progress_range(
+    tmp_path: Path,
+) -> None:
+    """The emitted hook reads ``scrollYProgress``, so a raw scrollY pixel input
+    range from the spec must not be transcribed into motion-skeletons.ts."""
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir()
+    impl.mkdir()
+    _spec(ref, [{
+        "id": "nav-pixel-domain",
+        "trigger": "scroll",
+        "target": "nav",
+        "animation": {
+            "type": "scroll-scrub",
+            "property": "y",
+            "input": "[0,100]",
+            "from": 56,
+            "to": 20,
+            "driver": "framer-motion useScroll + useTransform",
+        },
+    }])
+
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    module = (impl / "src" / "generated" / "motion-skeletons.ts").read_text()
+    assert "const input = [0, 1];" in module
+    assert "as const" not in module
+    assert "[0, 100]" not in module
+    assert "const y = useTransform(scrollYProgress, input," in module
+
+    report = json.loads((ref / "motion-skeletons-emitted.json").read_text())
+    nav = next(e for e in report["emitted"] if e["id"] == "nav-pixel-domain")
+    assert nav["input"] == [0, 1]
+    assert nav["inputExact"] is False
+
+
+def test_scroll_skeletons_prefer_animation_offset_without_bundle_offset(
+    tmp_path: Path,
+) -> None:
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir()
+    impl.mkdir()
+    _spec(ref, [
+        {
+            "id": "hero-scrub",
+            "trigger": "scroll",
+            "target": ".hero",
+            "bundle_branch": "useScroll({ target: ref });",
+            "animation": {
+                "type": "scroll-scrub",
+                "property": "opacity",
+                "input": [0, 1],
+                "offset": ["center bottom", "center top"],
+            },
+        },
+        {
+            "id": "hero-state",
+            "trigger": "scroll",
+            "target": ".hero-state",
+            "bundle_branch": "useScroll({ target: ref });",
+            "animation": {
+                "type": "scroll state machine",
+                "states": ["initial", "pinned", "settled"],
+                "offset": ["start 80%", "end 20%"],
+            },
+        },
+    ])
+
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    module = (impl / "src" / "generated" / "motion-skeletons.ts").read_text()
+    assert 'offset: ["center bottom", "center top"]' in module
+    assert 'offset: ["start 80%", "end 20%"]' in module
+    assert "TODO: confirm useScroll offset from ref" not in module
 
 
 def test_swiper_without_mobile_is_single_config(tmp_path: Path) -> None:

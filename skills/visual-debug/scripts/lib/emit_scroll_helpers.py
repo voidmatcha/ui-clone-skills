@@ -9,11 +9,20 @@ from typing import Any, cast
 plan_path = Path(sys.argv[1])
 impl_dir = Path(sys.argv[2])
 
-try:
-    plan = json.loads(plan_path.read_text())
-except (OSError, json.JSONDecodeError) as e:
-    print(f"ERROR: cannot read {plan_path}: {e}", file=sys.stderr)
-    sys.exit(2)
+if not plan_path.exists():
+    # A ref can carry a transition-spec and no generation-plan. The scaffold
+    # still mounts drivers it derives from the spec, so skipping outright left
+    # those mounts with no file behind them — a tree that cannot build. Proceed
+    # with an empty plan so the emitted-ground-truth branches below can still
+    # write what the scaffold already committed to mounting.
+    plan: Any = {}
+else:
+    try:
+        plan = json.loads(plan_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        # An unreadable or malformed plan is a real fault, not an absent one.
+        print(f"ERROR: cannot read {plan_path}: {e}", file=sys.stderr)
+        sys.exit(2)
 
 if not isinstance(plan, dict):
     print("▸ emit-scroll-helpers: malformed plan — nothing emitted")
@@ -34,6 +43,32 @@ def _emit(filename: str, body: str) -> None:
     lib.mkdir(parents=True, exist_ok=True)
     (lib / filename).write_text(body, encoding="utf-8")
     emitted.append(filename)
+
+
+def _scaffold_references(name: str) -> bool:
+    """Does the ALREADY-EMITTED tree reference this helper?
+
+    Mount implies emit. The scaffold decides some drivers from transition-spec
+    while this emitter decides them from generation-plan, and when those two
+    signals disagree the scaffold emits `<ScrollReveal>` / `<ScrollStateDriver>`
+    with no file behind it — a tree that cannot build, which nothing noticed.
+    This emitter runs AFTER the scaffold, so instead of mirroring the other
+    predicate (which has to be re-synced forever, and silently reopens on the
+    next driver) it asks the emitted output directly. A referenced helper is
+    needed by definition: the scaffold already committed to mounting it.
+    """
+    src = impl_dir / "src"
+    if not src.is_dir():
+        return False
+    needle_tag = f"<{name}"
+    needle_import = f"/{name}"
+    for path in src.rglob("*"):
+        if path.suffix not in (".tsx", ".ts", ".jsx", ".js") or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if needle_tag in text or needle_import in text:
+            return True
+    return False
 
 
 # ── SmoothScroll.tsx (Lenis, from smoothScroll.config — Fix 28) ──────────────
@@ -198,10 +233,10 @@ export default function ScrollReveal({{
   );
 }}
 """)
-elif isinstance(sd, dict) and sd.get("required"):
+elif (isinstance(sd, dict) and sd.get("required")) or _scaffold_references("ScrollReveal"):
     _emit("ScrollReveal.tsx", """'use client';
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, useScroll, useTransform } from "framer-motion";
 
 /**
@@ -211,6 +246,15 @@ import { motion, useScroll, useTransform } from "framer-motion";
  * + translateY. Wrap reveal sections in <ScrollReveal>. Tracks Lenis-driven
  * scroll automatically (Lenis updates document scrollTop, which useScroll
  * observes). Do not hand-edit — re-run the emitter to refresh.
+ *
+ * Above-the-fold latch: a section already inside the first viewport at load
+ * never receives the scroll delta that would settle it, so the scrub pins it at
+ * the from-state (opacity 0, y 60) forever — every capture of that section then
+ * renders blank and section-compare reports a catastrophic AE that has nothing
+ * to do with the section's markup. The reference settles those sections at
+ * load, so latch them to the to-state once they have been inside the viewport.
+ * The latch is one-way (a reveal never un-reveals) and is driven by the same
+ * scroll listener as the scrub, NOT by a per-element IntersectionObserver.
  */
 export default function ScrollReveal({
   children,
@@ -220,14 +264,44 @@ export default function ScrollReveal({
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [settled, setSettled] = useState(false);
   const { scrollYProgress } = useScroll({
     target: ref,
     offset: ["start end", "start center"],
   });
   const opacity = useTransform(scrollYProgress, [0, 1], [0, 1]);
   const y = useTransform(scrollYProgress, [0, 1], [60, 0]);
+  useEffect(() => {
+    if (settled) return;
+    const el = ref.current;
+    if (!el) return;
+    const capture = Boolean(
+      (window as unknown as { __UI_CLONE_CAPTURE__?: boolean }).__UI_CLONE_CAPTURE__,
+    );
+    if (capture) {
+      setSettled(true);
+      return;
+    }
+    const check = () => {
+      const r = el.getBoundingClientRect();
+      if (r.top < window.innerHeight * 0.5) setSettled(true);
+    };
+    check();
+    window.addEventListener("scroll", check, { passive: true });
+    window.addEventListener("resize", check, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", check);
+      window.removeEventListener("resize", check);
+    };
+  }, [settled]);
   return (
-    <motion.div ref={ref} className={className} data-scroll-reveal="1" style={{ opacity, y }}>
+    <motion.div
+      ref={ref}
+      className={className}
+      data-scroll-reveal="1"
+      data-reveal-settled={settled ? "1" : undefined}
+      style={settled ? { opacity: 1, y: 0 } : { opacity, y }}
+    >
       {children}
     </motion.div>
   );
@@ -387,7 +461,7 @@ if _stroke is not None:
       }}
     }});
     strokeFor.forEach((_list, target) => strokeIo.observe(target));"""
-if _state is not None or _stroke is not None:
+if _state is not None or _stroke is not None or _scaffold_references("ScrollStateDriver"):
     _fade_from = _state["from_opacity"] if _state is not None else 0.5
     _fade_to = _state["to_opacity"] if _state is not None else 1
     _fade_ms = _state["ms"] if _state is not None else 800
@@ -648,6 +722,14 @@ def _parse_scrub_range(s: Any) -> list[float] | None:
     return out if len(out) >= 2 else None
 
 
+def _normalized_scrub_input(values: list[float]) -> bool:
+    """Scrub emitters consume scroll progress, so input domains must be [0, 1]."""
+    return (
+        all(0 <= value <= 1 for value in values)
+        and all(left <= right for left, right in zip(values, values[1:]))
+    )
+
+
 def _scrub_band_plausible(prop: str, output: list[float]) -> bool:
     """Guard against the bundle resolver mis-binding a property: an opacity band
     must stay in [0, 1.5] and a scale band in [0, 8]. Implausible ranges (e.g.
@@ -692,6 +774,8 @@ if isinstance(_ss, dict) and _ss.get("required"):
             _inp = _parse_scrub_range(_t.get("input"))
             _outp = _parse_scrub_range(_t.get("output"))
             if not _inp or not _outp or len(_inp) != len(_outp):
+                continue
+            if not _normalized_scrub_input(_inp):
                 continue
             if not _scrub_band_plausible(_prop, _outp):
                 continue
@@ -739,13 +823,14 @@ if isinstance(_ss, dict) and _ss.get("required"):
     if _linked_sites:
         _emit("scrollLinkedStyleSites.ts", (
             "/** Runtime-measured scroll-linked style curves. */\n"
+            'import type { UseScrollOptions } from "framer-motion";\n'
             "export type LinkedBand = [number[], number[]];\n"
             "export interface ScrollLinkedStyleSite {\n"
             "  selector: string;\n"
             "  selectorIndex: number;\n"
             "  scope?: string;\n"
             '  progressSource: "document-progress" | "target-offset";\n'
-            "  offset?: [string, string];\n"
+            "  offset?: UseScrollOptions[\"offset\"];\n"
             "  bands: Record<string, LinkedBand>;\n"
             "  units?: Record<string, string>;\n"
             "}\n\n"
@@ -930,6 +1015,8 @@ export default function ScrollLinkedStyleDriver() {
             _outp = _parse_scrub_range(_t.get("output"))
             if not _inp or not _outp or len(_inp) != len(_outp):
                 continue
+            if not _normalized_scrub_input(_inp):
+                continue
             if not _scrub_band_plausible(_prop, _outp):
                 continue
             _bands[_prop] = [_inp, _outp]
@@ -979,6 +1066,7 @@ export default function ScrollLinkedStyleDriver() {
             " *   <ScrollScrub {...scrollScrubSites[0]}>...</ScrollScrub>\n"
             " * Do not hand-edit — re-run the emitter to refresh.\n"
             " */\n"
+            'import type { UseScrollOptions } from "framer-motion";\n'
             "export type ScrubBand = [number[], number[]];\n"
             "export interface SpringConfig {\n"
             "  stiffness?: number;\n"
@@ -987,7 +1075,7 @@ export default function ScrollLinkedStyleDriver() {
             "  restDelta?: number;\n"
             "}\n"
             "export interface ScrubSite {\n"
-            "  offset?: [string, string];\n"
+            "  offset?: UseScrollOptions[\"offset\"];\n"
             "  scale?: ScrubBand;\n"
             "  scaleX?: ScrubBand;\n"
             "  scaleY?: ScrubBand;\n"
@@ -1010,6 +1098,7 @@ export default function ScrollLinkedStyleDriver() {
 import { useRef } from "react";
 import type { ReactNode } from "react";
 import { motion, useScroll, useTransform, useSpring } from "framer-motion";
+import type { UseScrollOptions } from "framer-motion";
 import type { ScrubBand, SpringConfig } from "./scrollScrubSites";
 
 /**
@@ -1024,7 +1113,7 @@ import type { ScrubBand, SpringConfig } from "./scrollScrubSites";
 interface ScrollScrubProps {
   children: ReactNode;
   className?: string;
-  offset?: [string, string];
+  offset?: UseScrollOptions["offset"];
   scale?: ScrubBand;
   scaleX?: ScrubBand;
   scaleY?: ScrubBand;
@@ -1133,6 +1222,7 @@ if _has_per_word:
 import { useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useScroll, useMotionValueEvent } from "framer-motion";
+import type { UseScrollOptions } from "framer-motion";
 
 /**
  * Deterministically emitted by skills/visual-debug/scripts/emit-scroll-helpers.sh
@@ -1150,7 +1240,7 @@ interface ScrollWordHighlightProps {
   dimClassName?: string;
   highlightColor?: string;
   dimColor?: string;
-  offset?: [string, string];
+  offset?: UseScrollOptions["offset"];
 }
 
 export default function ScrollWordHighlight({
@@ -1189,6 +1279,200 @@ export default function ScrollWordHighlight({
     </span>
   );
 }
+''')
+
+
+# ── WordRevealDriver.tsx (Fix 128) ──────────────────────────────────────────
+# ScrollWordHighlight above re-splits a plain string, so it can only be used on
+# text the agent re-authors. When the reference itself ships the split — every
+# word already its own span carrying the dim class — scaffold-to-jsx transpiles
+# those spans verbatim and there is nothing left to wrap. The result is a page
+# whose word spans are all permanently dim because no code ever advances the
+# reading head.
+#
+# This driver adopts the transpiled spans in place. It only toggles the two
+# class names the reference stylesheet already defines (dim ↔ highlight), so
+# every colour and transition value stays owned by the imported ref CSS.
+def _css_blob() -> str:
+    roots = [plan_path.parent, impl_dir / "src"]
+    chunks: list[str] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.css"):
+            if path.is_file():
+                chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(chunks)
+
+
+def _css_defines_class(css: str, class_name: str) -> bool:
+    # Look for a real selector token, not a substring inside another CSS-module class.
+    return bool(_re.search(r"(?<![\\\w-])\." + _re.escape(class_name) + r"(?![\w-])", css))
+
+
+def _explicit_highlight_class(effect: dict[str, Any]) -> str | None:
+    for key in (
+        "highlightClass",
+        "highlightClassName",
+        "activeClass",
+        "activeClassName",
+        "revealedClass",
+        "revealedClassName",
+    ):
+        value = effect.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lstrip(".")
+    selector = effect.get("highlightSelector")
+    if isinstance(selector, str):
+        selector = selector.strip()
+        if selector.startswith(".") and not any(c in selector[1:] for c in " >+~,.#[]():*"):
+            return selector[1:]
+    return None
+
+
+def _word_class_pair(effects: Any) -> tuple[str, str] | None:
+    """Resolve (dimClass, highlightClass) from a per-word signatureEffect."""
+    css = _css_blob()
+    for effect in effects if isinstance(effects, list) else []:
+        if not isinstance(effect, dict):
+            continue
+        if "per-word" not in str(effect.get("effectType") or "").lower():
+            continue
+        selector = str(effect.get("wordSelector") or "").strip()
+        # Only a bare single-class selector is safe to toggle blindly: anything
+        # with a combinator, a second class, or a pseudo needs a real matcher.
+        if not selector.startswith("."):
+            continue
+        dim = selector[1:]
+        if not dim or any(c in dim for c in " >+~,.#[]():*"):
+            continue
+        explicit = _explicit_highlight_class(effect)
+        if explicit:
+            return dim, explicit
+        for needle, replacement in (
+            ("dimmed", "highlighted"),
+            ("dim", "highlight"),
+            ("inactive", "active"),
+        ):
+            if needle in dim:
+                highlight = dim.replace(needle, replacement)
+                if _css_defines_class(css, highlight):
+                    return dim, highlight
+    return None
+
+
+_word_classes = _word_class_pair(_effects)
+if _word_classes:
+    _dim_class, _highlight_class = _word_classes
+    _emit("WordRevealDriver.tsx", f'''"use client";
+
+import {{ useEffect }} from "react";
+
+/**
+ * Deterministically emitted by skills/visual-debug/scripts/emit-scroll-helpers.sh
+ * from generation-plan.signatureEffects (per-word-split). The reference ships
+ * the text pre-split — one span per word, each carrying the dim class — and
+ * advances a scroll "reading head" that swaps each word to the highlight class
+ * as it passes. Both class names live in the imported reference stylesheet, so
+ * this driver never owns a colour, an opacity, or a transition; it only decides
+ * how many words are past the head. Mount it once from the layout (page.tsx is
+ * regenerated verbatim by scaffold-to-jsx.sh). Do not hand-edit — re-run the
+ * emitter.
+ */
+const DIM_CLASS = {json.dumps(_dim_class)};
+const HIGHLIGHT_CLASS = {json.dumps(_highlight_class)};
+
+interface WordGroup {{
+  words: HTMLElement[];
+  track: HTMLElement;
+  pinned: boolean;
+}}
+
+function collectGroups(): WordGroup[] {{
+  // Stamp the spans that were transpiled without an id: once a word is revealed
+  // it no longer carries DIM_CLASS, so data-word-id is the only stable handle.
+  document.querySelectorAll<HTMLElement>(`.${{DIM_CLASS}}:not([data-word-id])`).forEach((word, i) => {{
+    word.dataset.wordId = `driver-word-${{i}}`;
+  }});
+
+  // The transpiler wraps every word in its own anonymous span, so parentElement
+  // is not a usable group key — climb to the owning paragraph instead.
+  const byParent = new Map<HTMLElement, HTMLElement[]>();
+  document.querySelectorAll<HTMLElement>("[data-word-id]").forEach((word) => {{
+    const parent = word.closest("p") ?? word.parentElement;
+    if (!parent) return;
+    const bucket = byParent.get(parent);
+    if (bucket) bucket.push(word);
+    else byParent.set(parent, [word]);
+  }});
+
+  const groups: WordGroup[] = [];
+  byParent.forEach((words, parent) => {{
+    let sticky: HTMLElement | null = null;
+    for (let node: HTMLElement | null = parent; node; node = node.parentElement) {{
+      if (window.getComputedStyle(node).position === "sticky") {{
+        sticky = node;
+        break;
+      }}
+    }}
+    groups.push({{
+      words,
+      track: sticky?.parentElement ?? parent,
+      pinned: Boolean(sticky?.parentElement),
+    }});
+  }});
+  return groups;
+}}
+
+function progressFor(group: WordGroup, viewportHeight: number): number {{
+  const rect = group.track.getBoundingClientRect();
+  // A pinned block scrubs across its wrapper's spare scroll distance; a static
+  // block scrubs across its own viewport travel, starting as it enters the
+  // lower band and finishing once it has cleared the top.
+  const raw = group.pinned
+    ? -rect.top / Math.max(1, rect.height - viewportHeight)
+    : (viewportHeight * 0.85 - rect.top) / Math.max(1, rect.height + viewportHeight * 0.35);
+  return Math.min(1, Math.max(0, raw));
+}}
+
+export default function WordRevealDriver() {{
+  useEffect(() => {{
+    let groups = collectGroups();
+    if (!groups.length) return;
+
+    let frame = 0;
+    const apply = () => {{
+      frame = 0;
+      const viewportHeight = window.innerHeight;
+      for (const group of groups) {{
+        const active = Math.round(progressFor(group, viewportHeight) * group.words.length);
+        group.words.forEach((word, index) => {{
+          const on = index < active;
+          word.classList.toggle(HIGHLIGHT_CLASS, on);
+          word.classList.toggle(DIM_CLASS, !on);
+        }});
+      }}
+    }};
+    const schedule = () => {{
+      if (!frame) frame = window.requestAnimationFrame(apply);
+    }};
+    const remeasure = () => {{
+      groups = collectGroups();
+      schedule();
+    }};
+
+    apply();
+    window.addEventListener("scroll", schedule, {{ passive: true }});
+    window.addEventListener("resize", remeasure);
+    return () => {{
+      window.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", remeasure);
+      if (frame) window.cancelAnimationFrame(frame);
+    }};
+  }}, []);
+
+  return null;
+}}
 ''')
 
 

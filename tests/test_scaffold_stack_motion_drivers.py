@@ -11,6 +11,7 @@ even though it reuses section_jsx (which contains <ScrollReveal>/<ScrollScrub>)
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -68,6 +69,38 @@ def _run(tmp_path: Path, deps: dict, config_file: str | None) -> subprocess.Comp
     _seed_impl(impl, deps, config_file)
     return subprocess.run(["bash", str(SCRIPT), str(ref), str(impl)],
                           capture_output=True, text=True, timeout=60)
+
+
+def _seed_word_reveal_ref(ref: Path, *, include_highlight_css: bool = True) -> None:
+    ref.mkdir(parents=True, exist_ok=True)
+    ref.joinpath("structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "p",
+            "class": "mod__text_line",
+            "children": [
+                {"tag": "span", "class": "mod__line_dimmed", "text": "Real"},
+                {"tag": "span", "class": "mod__line_dimmed", "text": "Food"},
+            ],
+        }],
+    }), encoding="utf-8")
+    ref.joinpath("section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "p", "cls": "mod__text_line"},
+    ]}), encoding="utf-8")
+    ref.joinpath("generation-plan.json").write_text(json.dumps({
+        "signatureEffects": [{
+            "name": "WordRevealText",
+            "effectType": "per-word-split",
+            "selector": ".mod__text_line, .mod__line_dimmed",
+            "wordSelector": ".mod__line_dimmed",
+        }],
+    }), encoding="utf-8")
+    css_dir = ref / "css"
+    css_dir.mkdir()
+    css = ".mod__line_dimmed{opacity:.35;color:#777}\n"
+    if include_highlight_css:
+        css += ".mod__line_highlighted{opacity:1;color:#111}\n"
+    css_dir.joinpath("ref.css").write_text(css, encoding="utf-8")
 
 
 def test_next_mounts_smoothscroll(tmp_path: Path) -> None:
@@ -227,6 +260,57 @@ def test_vite_mounts_spec_class_toggle_and_runtime_scroll_style_drivers(
     assert "<ScrollScrub" not in app
     assert (impl / "src" / "lib" / "ScrollClassToggleDriver.tsx").is_file()
     assert (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").is_file()
+
+
+def test_invalid_scrub_autowrap_ranges_do_not_mount_scrollscrub(tmp_path: Path) -> None:
+    """Section-level auto-wrap only accepts normalized monotonic progress input."""
+    for name, input_range in {
+        "percent": "[0, 100]",
+        "negative": "[-0.1, 1]",
+        "over_one": "[0, 1.2]",
+        "non_monotonic": "[0, 0.8, 0.7, 1]",
+    }.items():
+        ref, impl = tmp_path / name / "ref", tmp_path / name / "impl"
+        ref.mkdir(parents=True)
+        ref.joinpath("structure.json").write_text(json.dumps({
+            "tag": "body",
+            "children": [{
+                "tag": "section",
+                "class": "zoom",
+                "styles": {"transform": "scale(0.9)"},
+                "children": [{"tag": "p", "text": "zoom"}],
+            }],
+        }), encoding="utf-8")
+        ref.joinpath("section-map.json").write_text(json.dumps({"sections": [
+            {"index": 0, "tag": "section", "cls": "zoom"},
+        ]}), encoding="utf-8")
+        ref.joinpath("generation-plan.json").write_text(json.dumps({
+            "scrollScrub": {
+                "required": True,
+                "sites": [{
+                    "selector": ".zoom",
+                    "offset": '["start end", "end start"]',
+                    "transforms": [{
+                        "property": "scale",
+                        "input": input_range,
+                        "output": "[0.9, 1]",
+                    }],
+                }],
+            },
+        }), encoding="utf-8")
+        _seed_impl(impl, {"vite": "5", "react": "18"}, "vite.config.js")
+
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(impl)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+        assert "<ScrollScrub" not in app, f"{input_range} should not auto-wrap"
+        assert "import ScrollScrub" not in app
 
 
 def test_non_numeric_scrolltrigger_state_does_not_import_missing_driver(
@@ -456,3 +540,211 @@ def test_vite_mounts_scroll_latch_driver(tmp_path: Path) -> None:
     app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
     assert "import ScrollLatchDriver" in app
     assert "<ScrollLatchDriver />" in app
+
+
+def test_vite_mounts_word_reveal_driver(tmp_path: Path) -> None:
+    """The ref ships the text pre-split, so there is nothing for the scaffold to
+    wrap — without a mounted driver every transpiled word span keeps the dim
+    class forever and the reveal renders as a uniformly dim paragraph."""
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    _seed_word_reveal_ref(ref)
+    _seed_impl(impl, {"vite": "5", "react": "18"}, "vite.config.js")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # The mount predicate and the emitter predicate must agree: a mount without
+    # the file is an unresolvable import, a file without the mount is dead code.
+    assert (impl / "src" / "lib" / "WordRevealDriver.tsx").is_file()
+    app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "import WordRevealDriver" in app
+    assert "<WordRevealDriver />" in app
+
+
+def test_remix_mounts_word_reveal_driver(tmp_path: Path) -> None:
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    _seed_word_reveal_ref(ref)
+    _seed_impl(impl, {"@remix-run/react": "2", "react": "18"}, None)
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (impl / "src" / "lib" / "WordRevealDriver.tsx").is_file()
+    page = (impl / "app" / "_index.tsx").read_text(encoding="utf-8")
+    assert "import WordRevealDriver" in page
+    assert "<WordRevealDriver />" in page
+
+
+def test_island_stack_warning_mentions_word_reveal_when_required(tmp_path: Path) -> None:
+    for stack, deps in {
+        "astro": {"astro": "4", "react": "18"},
+        "sveltekit": {"@sveltejs/kit": "2", "react": "18"},
+    }.items():
+        ref, impl = tmp_path / stack / "ref", tmp_path / stack / "impl"
+        _seed_word_reveal_ref(ref)
+        _seed_impl(impl, deps, None)
+
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(impl)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "motion NOT mounted" in proc.stderr
+        assert "word-reveal" in proc.stderr
+
+
+def test_word_reveal_does_not_mount_when_derived_highlight_class_is_absent(
+    tmp_path: Path,
+) -> None:
+    """A dim class alone is not enough evidence to invent a highlight toggle."""
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    _seed_word_reveal_ref(ref, include_highlight_css=False)
+    _seed_impl(impl, {"vite": "5", "react": "18"}, "vite.config.js")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "WordRevealDriver" not in app
+
+
+def test_latch_sites_that_all_fail_validation_emit_no_dangling_import(
+    tmp_path: Path,
+) -> None:
+    """App.tsx must never import a driver the emitter did not write.
+
+    The scaffold gates the import on `scrollLatch.sites` being a non-empty
+    list; the emitter additionally validates each site, requiring a selector,
+    a non-empty endState and a numeric progress. A plan can satisfy the first
+    and none of the second — realfood-v2 ships `required: true, count: 3`
+    where all three sites are IntersectionObserver descriptions with no
+    endState or progress. Every site is dropped, ScrollLatchDriver.tsx is
+    never written, and the emitted App.tsx imports it anyway: the generated
+    project does not build ("Could not resolve ./lib/ScrollLatchDriver").
+    """
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir(parents=True)
+    ref.joinpath("structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "nav",
+            "class": "site_nav",
+            "children": [{"tag": "span", "class": "label", "text": "Overview"}],
+        }],
+    }), encoding="utf-8")
+    ref.joinpath("section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "nav", "cls": "site_nav"},
+    ]}), encoding="utf-8")
+    ref.joinpath("generation-plan.json").write_text(json.dumps({
+        "scrollLatch": {
+            "required": True,
+            "count": 2,
+            "sites": [
+                # Observer-gated description: no endState, no progress.
+                {
+                    "id": "rfw-checkmark-draw",
+                    "selector": ".rfw_item",
+                    "observer": "new IntersectionObserver(...)",
+                },
+                # Has a selector and progress but an empty endState.
+                {"selector": ".other", "progress": 0.4, "endState": {}},
+            ],
+        },
+    }), encoding="utf-8")
+    _seed_impl(impl, {"vite": "5", "react": "18"}, "vite.config.js")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+    driver = impl / "src" / "lib" / "ScrollLatchDriver.tsx"
+    if "import ScrollLatchDriver" in app:
+        assert driver.is_file(), (
+            "App.tsx imports ScrollLatchDriver but the emitter wrote no such "
+            "file — the generated project cannot build"
+        )
+    assert "<ScrollLatchDriver />" not in app or driver.is_file()
+
+
+def test_app_imports_no_lib_module_the_emitter_did_not_write(tmp_path: Path) -> None:
+    """Generic build-integrity invariant across ALL emitted drivers.
+
+    Each driver has two independent predicates: one in scaffold_to_jsx.py
+    deciding whether App.tsx imports it, one in emit_scroll_helpers.py deciding
+    whether the file is written. Whenever those disagree the generated project
+    does not compile. Rather than audit every gate pair, assert the property
+    they must jointly satisfy — every `./lib/X` App.tsx imports exists on disk.
+    The plan below deliberately mixes well-formed and malformed feature blocks.
+    """
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir(parents=True)
+    ref.joinpath("structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "nav",
+            "class": "site_nav",
+            "children": [{"tag": "span", "class": "label", "text": "Overview"}],
+        }],
+    }), encoding="utf-8")
+    ref.joinpath("section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "nav", "cls": "site_nav"},
+    ]}), encoding="utf-8")
+    ref.joinpath("generation-plan.json").write_text(json.dumps({
+        # required/count asserted, every site unusable (realfood-v2's shape)
+        "scrollLatch": {
+            "required": True,
+            "count": 2,
+            "sites": [
+                {"id": "a", "selector": ".x", "observer": "new IntersectionObserver(...)"},
+                {"selector": ".y", "progress": 0.5, "endState": {}},
+            ],
+        },
+        # required asserted with no usable site payload at all
+        "scrollScrub": {"required": True, "sites": []},
+        "scrollLinkedStyle": {"required": True, "sites": [{"selector": ".z"}]},
+        "smoothScroll": {"required": True},
+    }), encoding="utf-8")
+    _seed_impl(impl, {"vite": "5", "react": "18"}, "vite.config.js")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+    referenced = set(re.findall(r"""from\s+['"](?:\./|@/)lib/([A-Za-z0-9_]+)['"]""", app))
+    missing = sorted(
+        name for name in referenced
+        if not (impl / "src" / "lib" / f"{name}.tsx").is_file()
+        and not (impl / "src" / "lib" / f"{name}.ts").is_file()
+    )
+    assert not missing, (
+        "App.tsx imports lib modules the emitter never wrote, so the generated "
+        f"project cannot build: {missing}"
+    )

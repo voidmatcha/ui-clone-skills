@@ -113,7 +113,8 @@ fi
 # 6. Criteria evaluation + report ------------------------------------------
 echo
 echo "[5/5] report"
-TS_DIR="$HOME/.claude/projects/-Users-yongjae-Documents-ui-skills-scratch-loop-${N}"
+CLAUDE_PROJECT_KEY="${LOOPDIR//[!a-zA-Z0-9]/-}"
+TS_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$CLAUDE_PROJECT_KEY"
 TRANSCRIPT="$(ls -t "$TS_DIR"/*.jsonl 2>/dev/null | head -1 || true)"
 
 python3 - "$N" "$REF_URL" "$IMPL_URL" "$SNAPDIR" "$SPLASH_JSON" \

@@ -3814,3 +3814,25 @@ def test_runtime_text_sequence_eval_failure_is_infrastructure_error(
         and " batch --json --bail" in line
     ]
     assert len(impl_batches) == 1
+
+
+def test_runtime_dom_parity_node_count_excludes_non_rendering_tags() -> None:
+    """Node-count parity must measure rendered structure only. A Next.js
+    production build emits one <script> per route chunk INSIDE <body>
+    (286 observed on realfood-v4-harness vs 9 on the ref), which pushed the
+    ratio to 1.335 and failed the ±30% tolerance even though every rendered
+    element matched. The in-page analysis JS must filter SCRIPT/STYLE/
+    NOSCRIPT/TEMPLATE/META/LINK out of the counted set.
+    """
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts"
+        / "runtime-dom-parity-check.sh"
+    )
+    src = script.read_text(encoding="utf-8")
+    assert 'const allNodes = root.querySelectorAll("*");' not in src, (
+        "nodeCount must not count every body descendant — bundler chunk "
+        "<script> tags are not rendered structure"
+    )
+    assert "skipText.has(el.tagName)" in src, (
+        "nodeCount filter must reuse the non-rendering tag set (skipText)"
+    )

@@ -1,6 +1,6 @@
 [project]
 name = "ui-clone-skills"
-version = "0.7.25"
+version = "0.7.26"
 description = "Clone any live website URL into React + Tailwind code — Claude Code and Codex plugin with extraction-first verification (real CSS, real animation params from JS bundles, AE/SSIM pixel diff)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -56,6 +56,7 @@ dev = [
     "ruff==0.9.10",
     "mypy==1.15.0",
     "pytest-cov==7.1.0",
+    "pytest-xdist==3.8.0",
 ]
 # Step D — AST-based JS bundle parsing, opt-in. Extractors prefer
 # esprima when available and fall back to regex when not installed,

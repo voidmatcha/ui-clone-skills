@@ -117,12 +117,24 @@ def _parse_input(anim: dict):
             vals = None
     else:
         vals = None
-    if isinstance(vals, list) and vals and all(isinstance(v, (int, float)) for v in vals):
+    if (
+        isinstance(vals, list)
+        and vals
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals)
+        and all(0 <= v <= 1 for v in vals)
+        and all(left <= right for left, right in zip(vals, vals[1:]))
+    ):
         return vals, True
     return [0, 1], False
 
 
 def _offset_from_branch(entry: dict):
+    anim = entry.get("animation") if isinstance(entry.get("animation"), dict) else {}
+    raw_offset = anim.get("offset")
+    if isinstance(raw_offset, list) and all(isinstance(v, str) for v in raw_offset):
+        return json.dumps(raw_offset)
+    if isinstance(raw_offset, str) and raw_offset.strip().startswith("[") and raw_offset.strip().endswith("]"):
+        return raw_offset.strip()
     bb = str(entry.get("bundle_branch") or "")
     m = re.search(r"offset\s*=\s*(\[[^\]]*\])", bb)
     return m.group(1) if m else None
@@ -234,7 +246,9 @@ for e in scrubs:
         L.append("// TODO: input range not in spec — confirm the progress stops from the ref")
     L.append(f"export function use{pas}(targetRef: RefObject<HTMLElement>) {{")
     L.append(f"  const {{ scrollYProgress }} = useScroll({{ target: targetRef, offset: {offset} }});{offset_todo}")
-    L.append(f"  const input = {input_lit} as const;")
+    # Framer Motion's InputRange is a mutable number array. ``as const`` makes
+    # this a readonly tuple and causes generated Next trees to fail typecheck.
+    L.append(f"  const input = {input_lit};")
     returns = []
     for raw in props:
         key, tok = _prop_key(raw)

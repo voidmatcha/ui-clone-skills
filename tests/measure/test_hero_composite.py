@@ -344,3 +344,135 @@ def test_hero_composite_check_inventories_canvas_kind(tmp_path: Path) -> None:
     assert artifact["ref"]["canvas"] is True
     assert artifact["impl"]["canvas"] is False
     assert "canvas" in artifact["missingInImpl"]
+
+
+def test_hero_composite_counts_button_across_inline_style_bloat(
+    tmp_path: Path,
+) -> None:
+    """Transpiler-generated hero components (scaffold-to-jsx) carry
+    multi-hundred-character inline `style={{ ... }}` objects on every
+    element. A `<button>` that is a *structural* sibling/descendant of the
+    hero `<video>` ends up >500 raw characters away purely because of that
+    style bloat, so the raw-character proximity rule reported the overlay
+    button as missing. Proximity must be measured on attribute-normalized
+    text so style payloads do not push structurally adjacent nodes apart.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src" / "components"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "div", "class": "mod__hero_video",
+            "children": [
+                {"tag": "video", "children": []},
+                {"tag": "button", "children": [
+                    {"tag": "span", "text": "Play", "children": []},
+                ]},
+            ],
+        }],
+    }))
+    fat_style = (
+        'style={{ display: "flex", position: "relative", boxSizing: '
+        '"border-box", border: "0px solid lab(90.952 0 -0.0000119209)", '
+        'backgroundPosition: "0% 0%", color: "rgb(17, 0, 0)", fontFamily: '
+        '"\\"Die Grotesk A\\", system-ui, -apple-system, \\"Segoe UI\\", '
+        'Arial, sans-serif", fontSize: "16px", fontWeight: "400", '
+        'verticalAlign: "baseline", flex: "0 1 auto" }}'
+    )
+    assert len(fat_style) > 300
+    (src / "HeroVideo.tsx").write_text(
+        'export default function HeroVideo() {\n'
+        '  return (\n'
+        f'    <div className="mod__hero_video" {fat_style}>\n'
+        f'      <video src="/videos/bgv.mp4" {fat_style}></video>\n'
+        f'      <div className="mod__playOverlay" {fat_style}>\n'
+        f'        <button type="button" {fat_style}>\n'
+        f'          <span {fat_style}>Play</span>\n'
+        '        </button>\n'
+        '      </div>\n'
+        '    </div>\n'
+        '  );\n'
+        '}\n'
+    )
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    art = json.loads((ref / "hero-composite.json").read_text())
+    assert art["impl"]["button"] is True, (
+        f"overlay button structurally adjacent to the hero video must count "
+        f"even when inline styles put it >500 raw chars away; got: {art}"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_hero_composite_accepts_css_module_hero_class_marker(
+    tmp_path: Path,
+) -> None:
+    """CSS-module class names hash the hero token as `prefix__hero`, which
+    has no word boundary before `hero`. The hero-region marker must still
+    recognize it, otherwise the headline-carrying hero section file is
+    skipped (its file name has no 'hero' and it holds no <video>) and the
+    gate reports h1OrH2 missing even though the impl renders it.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src" / "components"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [
+            {"tag": "section", "class": "dga-module__LrmiHG__hero",
+             "children": [{"tag": "h1", "text": "Real Food Wins",
+                           "children": []}]},
+            {"tag": "div", "class": "dga-module__LrmiHG__hero_video",
+             "children": [
+                 {"tag": "video", "children": []},
+                 {"tag": "button", "children": [
+                     {"tag": "span", "text": "Watch", "children": []},
+                 ]},
+             ]},
+        ],
+    }))
+    # Headline lives in a file with neither 'hero' in its path nor a <video>.
+    (src / "DgaModule.tsx").write_text(
+        'export default function DgaModule() {\n'
+        '  return (\n'
+        '    <section className="dga-module__LrmiHG__hero">\n'
+        '      <h1>Real Food Wins</h1>\n'
+        '    </section>\n'
+        '  );\n'
+        '}\n'
+    )
+    (src / "HeroVideo.tsx").write_text(
+        'export default function HeroVideo() {\n'
+        '  return (\n'
+        '    <div className="dga-module__LrmiHG__hero_video">\n'
+        '      <video src="/videos/bgv.mp4"></video>\n'
+        '      <button type="button"><span>Watch</span></button>\n'
+        '    </div>\n'
+        '  );\n'
+        '}\n'
+    )
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    art = json.loads((ref / "hero-composite.json").read_text())
+    assert art["impl"]["h1OrH2"] is True, (
+        f"CSS-module hero class must qualify the section file as a hero "
+        f"region candidate; got: {art}"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr

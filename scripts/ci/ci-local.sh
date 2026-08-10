@@ -96,11 +96,23 @@ if [ -z "${BASH_COMPAT:-}" ] \
 fi
 
 # 1. Tests
+# Parallelised with xdist. `--dist loadfile` keeps every test in a file on ONE
+# worker, which removes intra-file ordering and shared-fixture races without
+# anyone having to enumerate which files those are. NOTHING is subset or
+# skipped: the same 4251 tests run, only on more cores. Equivalence was proved
+# per-test, not inferred from a summary — serial and parallel junit outcome sets
+# were diffed both ways (0 missing, 0 extra) and wall time went 17:09 -> 3:51.
+# The drift smoke test (step 6, test-parity.sh) is a separate shell step that
+# xdist never sees, so it is unaffected by worker count.
+# Override with UI_CLONE_PYTEST_WORKERS=1 to bisect a suspected isolation bug.
+PYTEST_WORKERS="${UI_CLONE_PYTEST_WORKERS:-auto}"
 step "Tests"
 if [ "$QUIET" = "1" ]; then
-  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q >/dev/null 2>&1 || fail "tests"
+  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q \
+    -n "$PYTEST_WORKERS" --dist loadfile >/dev/null 2>&1 || fail "tests"
 else
-  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q || fail "tests"
+  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q \
+    -n "$PYTEST_WORKERS" --dist loadfile || fail "tests"
 fi
 
 # 2. Type check (mypy)

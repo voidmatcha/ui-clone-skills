@@ -2095,7 +2095,10 @@ def test_split_text_preserved_when_signature_effect_targets_node(tmp_path: Path)
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     comp = (impl / "src" / "components" / "Plain.tsx").read_text()
-    assert comp.count("<span>") >= len(chars)
+    # One span per captured character. The whitespace gap spans carry a
+    # `white-space: pre` style (Fix 131) so they are not bare `<span>`.
+    assert comp.count("<span") >= len(chars)
+    assert comp.count("<span>") >= len([c for c in chars if c.strip()])
     assert "Real Food now" not in comp
 
 
@@ -3429,6 +3432,62 @@ def test_unreferenced_handwritten_module_atticized(tmp_path: Path) -> None:
     assert (impl / "src" / "main.tsx").exists(), "entry files are never touched"
 
 
+def test_next_router_entry_files_are_never_atticized(tmp_path: Path) -> None:
+    """Next.js App Router files are resolved by the file-system router, never by
+    an import, so the "is anyone importing this?" orphan test can never see them.
+    Atticizing src/app/layout.tsx removes the root layout the framework needs to
+    boot, and the next build fails outright — the regen must leave every router
+    entry file in place while still atticizing a genuine orphan beside it."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    app = impl / "src" / "app"
+    lib = impl / "src" / "lib"
+    app.mkdir(parents=True)
+    lib.mkdir(parents=True)
+    ref.mkdir()
+    (impl / "package.json").write_text(
+        json.dumps({"dependencies": {"next": "15.5.23"}}), encoding="utf-8"
+    )
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{"tag": "section", "class": "hero", "children": [
+            {"tag": "h1", "text": "Hello"}]}],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "hero"}]}), encoding="utf-8"
+    )
+    router_entries = {
+        "layout.tsx": "export default function RootLayout({children}: {children: React.ReactNode})"
+                      "{return <html><body>{children}</body></html>;}\n",
+        "template.tsx": "export default function Template(){return <div/>;}\n",
+        "not-found.tsx": "export default function NotFound(){return <div/>;}\n",
+        "error.tsx": "'use client';\nexport default function ErrorBoundary(){return <div/>;}\n",
+        "loading.tsx": "export default function Loading(){return <div/>;}\n",
+    }
+    for name, body in router_entries.items():
+        (app / name).write_text(body, encoding="utf-8")
+    (lib / "Orphan.tsx").write_text(
+        "export function OrphanThing(){return <div/>;}\n", encoding="utf-8"
+    )
+    (lib / "Page.tsx").write_text(
+        "export function Page(){return <div/>;}\n", encoding="utf-8"
+    )
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    for name in router_entries:
+        assert (app / name).exists(), f"router entry {name} must never be atticized"
+        assert not (impl / "attic" / "app" / name).exists(), f"{name} must not land in attic/"
+    # The orphan control still moves, so the fix narrows the rule instead of
+    # disabling it.
+    assert (impl / "attic" / "lib" / "Orphan.tsx").exists(), "genuine orphan must still be atticized"
+    assert (impl / "attic" / "lib" / "Page.tsx").exists(), (
+        "a router-like basename outside a router directory is still an orphan"
+    )
+
+
 def test_html_id_attribute_emitted(tmp_path: Path) -> None:
     """Section anchors: the ref names sections by HTML id (#problem,
     #solution-solvable, ...) and the canonical section-compare locates impl
@@ -4163,6 +4222,8 @@ def test_scrub_scale_section_auto_wrapped(tmp_path: Path) -> None:
     assert "import ScrollScrub" in blob, "entry must import ScrollScrub"
     assert _re.search(r"<ScrollScrub scale=\{\[\[[^\]]*\],\s*\[[^\]]*\]\]\}", blob), (
         "the scrub-scale section must be auto-wrapped in <ScrollScrub scale={band}>")
+    assert not _re.search(r"<ScrollScrub[^>]*\sspring(?:\s|>)", blob), (
+        "plain scrub-scale evidence must not invent spring physics")
     assert 'data-scroll-scrub-target="1"' in blob, "stamp preserved for the gate"
     assert "matrix(0.9, 0, 0, 0.9, 0, 0)" not in blob, "frozen inline scale stripped"
     # Fix 115 (#4): a PURE frozen-scrub-scale section (no other reveal signal) is
@@ -4170,6 +4231,45 @@ def test_scrub_scale_section_auto_wrapped(tmp_path: Path) -> None:
     # <ScrollReveal> (double-wrap — the reveal's transform fights the scrub scale).
     assert "ScrollReveal" not in blob, (
         "pure scrub-scale section must not be double-wrapped in ScrollReveal")
+
+
+def test_scrub_scale_section_wrap_uses_earned_spring_config(tmp_path: Path) -> None:
+    """A scrub site may enable spring only when generation-plan carries the
+    bundle-derived spring params. The wrapper must pass those params through so
+    ScrollScrub replays the observed physics instead of invented defaults."""
+    import json as _json
+    import re as _re
+    import subprocess as _sp
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "structure.json").write_text(_json.dumps({
+        "tag": "body", "class": "antialiased", "styles": {},
+        "children": [
+            {"tag": "section", "class": "zoombg", "styles": {
+                "transform": "matrix(0.9, 0, 0, 0.9, 0, 0)"},
+             "children": [{"tag": "div", "text": "bg"}]},
+        ],
+    }), encoding="utf-8")
+    (ref / "section-map.json").write_text(_json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "zoombg"},
+    ]}), encoding="utf-8")
+    (ref / "generation-plan.json").write_text(_json.dumps({
+        "scrollScrub": {"required": True, "sites": [{
+            "offset": '["start end","end start"]',
+            "spring": {"stiffness": 900, "damping": 60},
+            "transforms": [{"input": "[0,0.05,0.75,0.9]",
+                            "output": "[0.9,1,1,1]", "property": "scale"}],
+        }]},
+    }), encoding="utf-8")
+    proc = _sp.run(["bash", str(SCRIPT), str(ref), str(impl)],
+                   capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _src_blob(impl)
+    assert _re.search(r"<ScrollScrub[^>]*\sspring(?:\s|>)", blob), (
+        "bundle-derived spring params must authorize the spring prop")
+    assert 'springConfig={{"stiffness": 900, "damping": 60}}' in blob
 
 
 def test_absolute_frozen_scrub_scale_not_auto_wrapped(tmp_path: Path) -> None:

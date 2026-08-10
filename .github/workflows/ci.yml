@@ -15,6 +15,13 @@ jobs:
           version: "latest"
 
       - name: Local CI mirror
+        # Pinned rather than left at `-n auto`. The suite carries ~700
+        # subprocess timeouts in the 5-20s range and the parallel/serial
+        # equivalence was proven on a 10-core machine; standard runners have 4
+        # cores and slower I/O, so `auto` here is untested headroom rather than
+        # a measured configuration. Raise it only with a green run to point at.
+        env:
+          UI_CLONE_PYTEST_WORKERS: "4"
         run: bash scripts/ci/ci-local.sh --quiet
 
   security:

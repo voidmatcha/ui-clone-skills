@@ -737,6 +737,21 @@ add_check "blank-viewport" \
 # Tier=quick: hydration-check launches a single agent-browser session and
 # greps the console for known errors; runs in seconds and catches the most
 # common "page didn't boot" regression class. Cheap enough to keep at quick.
+# Universal — the generated tree must be able to resolve its own imports.
+# Nothing in the pipeline checked this, which is how a 35/35-PASS reference
+# shipped a scaffold that could not build (unresolvable ./lib/ScrollLatchDriver
+# from a driver whose two gate predicates disagreed). Static and cheap: pure
+# Python over src/**/*.tsx, no node_modules and no build required, so it belongs
+# at the quick tier where the inner loop actually runs it.
+add_check "unresolved-imports" \
+          "skills/visual-debug/scripts/lib/regate_unresolved_imports.py" \
+          "unresolved-imports.json" \
+          "Universal — an emitted import with no file behind it cannot build" \
+          "block" \
+          "quick" \
+          "" \
+          "{impl_root} --check --report {ref_dir}/unresolved-imports.json"
+
 add_check "hydration-check" \
           "skills/visual-debug/scripts/hydration-check.sh" \
           "hydration-check.json" \

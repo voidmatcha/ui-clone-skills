@@ -3318,7 +3318,12 @@ def test_delta_builder_uses_requested_blur_without_pipefail_sigpipe(
         },
         capture_output=True,
         text=True,
-        timeout=60,
+        # 2000 fake-magick invocations: this bound exists to catch a hang, not to
+        # assert speed (the assertions below are about blur ARGS). Under
+        # `pytest -n` the same work competes with other workers and a 60s
+        # ceiling turns into a load-sensitive failure — it was the only one of
+        # ~700 subprocess timeouts in the suite to breach at 10 workers.
+        timeout=300,
         check=False,
     )
 

@@ -281,7 +281,11 @@ DATA_SECTION_HERO_RE = re.compile(
 HERO_REGION_MARKER_RE = re.compile(
     r"""(?:data-testid\s*=\s*[\"']hero[\"']|"""
     r"""id\s*=\s*[\"']landing[\"']|"""
-    r"""class(?:Name)?\s*=\s*[\"'][^\"']*\bhero\b)""",
+    # Plain class token (`class="hero"`, `class="page hero-inner"`) OR a
+    # CSS-module hashed token (`dga-module__LrmiHG__hero`,
+    # `mod__hero_video`) — the module form has no word boundary before
+    # `hero`, so `\bhero\b` alone skips the real hero section file.
+    r"""class(?:Name)?\s*=\s*[\"'][^\"']*(?:\bhero\b|[-_]hero(?![A-Za-z0-9])))""",
     re.IGNORECASE,
 )
 
@@ -347,11 +351,29 @@ SPAN_RE = re.compile(r"<\s*span\b", re.IGNORECASE)
 CANVAS_RE = re.compile(r"<\s*canvas\b", re.IGNORECASE)
 BUTTON_VIDEO_PROXIMITY = 500  # chars
 
+# Transpiler-generated components (scaffold-to-jsx) carry 300-900 char
+# inline `style={{ ... }}` objects on EVERY element, so a structurally
+# adjacent overlay button lands thousands of raw characters from the hero
+# video. Collapse style/class payloads before measuring distance: the rule
+# is meant to express structural proximity, not attribute verbosity.
+STYLE_ATTR_RE = re.compile(r"style\s*=\s*\{\{.*?\}\}", re.DOTALL)
+CLASS_ATTR_RE = re.compile(
+    r"""class(?:Name)?\s*=\s*[\"'][^\"']*[\"']""", re.IGNORECASE
+)
+
+
+def normalize_for_proximity(text: str) -> str:
+    """Strip inline-style and class payloads so proximity measures structure."""
+    text = STYLE_ATTR_RE.sub("style={{}}", text)
+    return CLASS_ATTR_RE.sub('className=""', text)
+
 
 def has_button_near_video(text: str) -> bool:
     """True when a `<button` occurrence has a `<video` within
-    BUTTON_VIDEO_PROXIMITY characters in either direction.
+    BUTTON_VIDEO_PROXIMITY characters in either direction, measured on
+    attribute-normalized text.
     """
+    text = normalize_for_proximity(text)
     video_positions = [m.start() for m in VIDEO_RE.finditer(text)]
     if not video_positions:
         return False

@@ -479,6 +479,13 @@ except Exception:
   for _kv in $env_vars; do
     case "$_kv" in ROW_TIMEOUT_SEC=*) row_timeout="${_kv#ROW_TIMEOUT_SEC=}" ;; esac
   done
+  # Pick the interpreter from the row's script extension. Hardcoding `bash`
+  # here meant every .py-backed row (unresolved-imports) died on a shell
+  # syntax error and could never emit its artifact.
+  case "$script_path" in
+    *.py) _row_interp="$PYTHON_BIN" ;;
+    *) _row_interp="bash" ;;
+  esac
   # shellcheck disable=SC2086 # intentional word-split on positional
   if [ -n "$env_vars" ]; then
     # shellcheck disable=SC2086 # intentional word-split on env_vars
@@ -486,12 +493,12 @@ except Exception:
       # Put the dispatcher-owned assignment last so a plan row cannot silently
       # defeat the containment; use UI_CLONE_DISPATCH_BASH_COMPAT to override.
       # shellcheck disable=SC2086 # intentional word-split on env_vars/positional
-      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
         rc=0
       else
         rc=$?
       fi
-    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "$_row_interp" "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
@@ -499,12 +506,12 @@ except Exception:
   else
     if [ -n "$_DISPATCH_CHILD_BASH_COMPAT" ]; then
       # shellcheck disable=SC2086 # intentional word-split on positional
-      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
         rc=0
       else
         rc=$?
       fi
-    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" bash "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" "$_row_interp" "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?

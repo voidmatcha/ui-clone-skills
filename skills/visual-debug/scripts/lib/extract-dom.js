@@ -430,6 +430,22 @@
     if (elIsSvg) out.svg = true;
     if (text) {
       out.text = text;
+    } else if (
+      !elIsSvg &&
+      !el.children.length &&
+      /^\s+$/.test(el.textContent || '') &&
+      parseFloat(s.width) > 0
+    ) {
+      // Split-text libraries emit a DEDICATED whitespace element per word gap
+      // (realfood's disintegrating headline: a childless <span> </span> between
+      // the word spans, measured 17.28px wide at font-size 96px). directText
+      // trims that lone whitespace text node away, so the element survived as
+      // an empty <span> and the clone rendered "RealFoodcan" — the inter-word
+      // gap the ref paints was gone. A non-breaking space reproduces the
+      // measured gap under any white-space rule (a plain space collapses to
+      // zero inside a block-level flex item). The non-zero computed width is
+      // the guard: whitespace elements the ref itself collapses stay empty.
+      out.text = '\u00a0';
     } else if (!elIsSvg && el.children.length && !kids.length) {
       // At the hard depth boundary a text-bearing child can be pruned while
       // its parent still survives. Preserve the rendered aggregate on that
@@ -495,7 +511,7 @@
     // A-family: allow/allowfullscreen must survive capture — without iframe
     // allow, the Chrome permissions policy blocks autoplay in cross-origin
     // embeds (ebpb loop-1: all 3 Vimeo players stuck on poster+Play).
-    const ATTR_KEYS = ['id','src','href','alt','poster','srcset','sizes','media','type','target','rel','aria-label','aria-haspopup','aria-expanded','title','role','allow','allowfullscreen','data-src','data-poster','data-srcset','data-lazy-src','data-original','data-lazy'];
+    const ATTR_KEYS = ['id','src','href','alt','poster','srcset','sizes','media','type','target','rel','aria-label','aria-haspopup','aria-expanded','title','role','allow','allowfullscreen','width','height','data-src','data-poster','data-srcset','data-lazy-src','data-original','data-lazy'];
     const keys = elIsSvg ? ATTR_KEYS.concat(SVG_ATTR_KEYS) : ATTR_KEYS;
     for (const k of keys) {
       const v = el.getAttribute ? el.getAttribute(k) : null;

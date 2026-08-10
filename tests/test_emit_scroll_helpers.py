@@ -249,6 +249,45 @@ def test_emits_scrollscrub_with_grounded_bands(tmp_path: Path) -> None:
     assert sites[1]["offset"] == ["start end", "end start"]
 
 
+def test_scrollscrub_drops_pixel_domain_input_bands(tmp_path: Path) -> None:
+    """ScrollScrub consumes target scrollYProgress, so serialized input bands must
+    already be normalized progress fractions. Pixel-domain ranges like the nav
+    ``useTransform(scrollY, [0, 100], ...)`` shape must not survive into the data
+    file where they would be replayed against scrollYProgress."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": False, "config": {}},
+        "scrollScrub": {
+            "required": True,
+            "library": "framer-motion",
+            "count": 1,
+            "sites": [
+                {
+                    "offset": '["start end","end start"]',
+                    "transforms": [
+                        {"input": "[37,464]", "output": "[0,1]", "property": "opacity"},
+                        {"input": "[0,1]", "output": "[0.9,1]", "property": "scale"},
+                    ],
+                },
+            ],
+        },
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    dt = (impl / "src" / "lib" / "scrollScrubSites.ts").read_text(encoding="utf-8")
+    sites = json.loads(dt.split("scrollScrubSites: ScrubSite[] = ", 1)[1].rsplit(";", 1)[0])
+    assert "opacity" not in sites[0], "pixel-domain input range must be dropped"
+    assert sites[0]["scale"] == [[0.0, 1.0], [0.9, 1.0]]
+
+
 def test_scrub_site_spring_params_override_invented_constants(tmp_path: Path) -> None:
     """`spring` was inferred from "the site has a scale band" and its stiffness/
     damping were invented constants baked into the driver. When the plan carries
@@ -360,6 +399,93 @@ def test_emits_scrollwordhighlight_when_declared(tmp_path: Path) -> None:
     assert 'data-scroll-word-highlight="1"' in t
 
 
+def test_emits_wordrevealdriver_for_pre_split_word_spans(tmp_path: Path) -> None:
+    """A per-word-split effect whose wordSelector is a bare dim class emits
+    WordRevealDriver.tsx, which adopts the transpiled spans in place and only
+    toggles the ref stylesheet's own dim/highlight class pair."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "styles.css").write_text(
+        ".mod__line_dimmed{color:#999}.mod__line_highlighted{color:#111}",
+        encoding="utf-8",
+    )
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": False, "config": {}},
+        "signatureEffects": [{
+            "name": "WordRevealText",
+            "effectType": "per-word-split",
+            "selector": ".mod__text_line, .mod__line_dimmed",
+            "wordSelector": ".mod__line_dimmed",
+        }],
+    }), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    f = impl / "src" / "lib" / "WordRevealDriver.tsx"
+    assert f.exists()
+    t = f.read_text(encoding="utf-8")
+    # Both class names come from the ref stylesheet — the driver owns neither
+    # a colour nor an opacity, so the reveal cannot drift from the reference.
+    assert 'DIM_CLASS = "mod__line_dimmed"' in t
+    assert 'HIGHLIGHT_CLASS = "mod__line_highlighted"' in t
+    assert "color" not in t.split("const DIM_CLASS")[1].lower()
+    # Grouping must climb to the paragraph: the transpiler gives every word its
+    # own anonymous wrapper span, so parentElement alone yields one word groups.
+    assert 'closest("p")' in t
+
+
+def test_no_wordrevealdriver_when_highlight_class_lacks_css_evidence(tmp_path: Path) -> None:
+    """The dimmed -> highlighted name pair is only safe when the reference CSS
+    actually defines the highlighted class. Do not invent ``*_highlighted`` from
+    a captured dim class alone."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "styles.css").write_text(".foo_dimmed{color:#999}", encoding="utf-8")
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": False, "config": {}},
+        "signatureEffects": [{
+            "name": "WordRevealText",
+            "effectType": "per-word-split",
+            "selector": ".foo_text, .foo_dimmed",
+            "wordSelector": ".foo_dimmed",
+        }],
+    }), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (impl / "src" / "lib" / "WordRevealDriver.tsx").exists()
+
+
+def test_no_wordrevealdriver_for_compound_word_selector(tmp_path: Path) -> None:
+    """A wordSelector that is not a bare single class has no derivable highlight
+    counterpart, so no driver is emitted rather than one toggling a guess."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": False, "config": {}},
+        "signatureEffects": [{
+            "effectType": "per-word-split",
+            "wordSelector": ".wrap > span.faded",
+        }],
+    }), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (impl / "src" / "lib" / "WordRevealDriver.tsx").exists()
+
+
 def test_no_scrollwordhighlight_when_not_declared(tmp_path: Path) -> None:
     """No per-word effect declared → ScrollWordHighlight.tsx not emitted."""
     ref = tmp_path / "ref"
@@ -427,6 +553,42 @@ def test_emits_scrollreveal_when_scroll_driven_required(tmp_path: Path) -> None:
     assert "offset:" in t, "must use a target-relative offset window"
     assert "motion.div" in t
     assert "ref={ref}" in t
+    assert "UseScrollOptions" not in t, "ScrollReveal must not emit an unused type import"
+
+
+def test_scrollreveal_scrub_latches_above_the_fold(tmp_path: Path) -> None:
+    """A reveal already inside the first viewport at load never receives the
+    scroll delta that would settle it, so the scrub pins it at the from-state
+    (opacity 0) forever and every capture of that section renders blank. The
+    scrub variant must latch such sections — and every section under the capture
+    harness flag — to the to-state."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "smoothScroll": {"required": False, "config": {}},
+        "scrollDriven": {
+            "required": True,
+            "library": "framer-motion",
+            "hooks": ["useScroll", "useTransform", "scrollYProgress"],
+        },
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    t = (impl / "src" / "lib" / "ScrollReveal.tsx").read_text(encoding="utf-8")
+    assert "__UI_CLONE_CAPTURE__" in t, "capture harness must force the settled state"
+    assert "getBoundingClientRect()" in t, "latch must test the live viewport position"
+    assert "window.innerHeight" in t
+    assert 'data-reveal-settled' in t, "latched state must be observable from a probe"
+    assert "settled ? { opacity: 1, y: 0 }" in t, "latch must pin the to-state"
+    assert "new IntersectionObserver" not in t, (
+        "latch is scroll-driven — a per-element IO froze reveals on earlier runs"
+    )
 
 
 def test_scrollreveal_parametrized_from_transition_spec(tmp_path: Path) -> None:
@@ -767,6 +929,53 @@ def test_emits_document_progress_driver_for_runtime_sampled_sites(
     assert '"selectorIndex": 1' in payload
 
 
+def test_document_progress_driver_drops_pixel_domain_input_bands(
+    tmp_path: Path,
+) -> None:
+    """The selector-scoped linked driver also consumes normalized progress, not
+    raw scrollY pixels. A pixel-domain input band must be filtered before it can
+    reach scrollLinkedStyleSites.ts."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(json.dumps({
+        "scrollDriven": {"required": True, "library": "framer-motion"},
+        "scrollScrub": {
+            "required": True,
+            "sites": [
+                {
+                    "selector": "nav",
+                    "selectorIndex": 0,
+                    "progressSource": "document",
+                    "transforms": [
+                        {"property": "y", "input": "[0,100]", "output": "[56,20]"},
+                        {"property": "opacity", "input": "[0,1]", "output": "[0,1]"},
+                    ],
+                },
+            ],
+        },
+    }), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    sites = json.loads(
+        payload.split("scrollLinkedStyleSites: ScrollLinkedStyleSite[] = ", 1)[1]
+        .rsplit(";", 1)[0]
+    )
+    assert "y" not in sites[0]["bands"], "pixel-domain input range must be dropped"
+    assert sites[0]["bands"]["opacity"] == [[0.0, 1.0], [0.0, 1.0]]
+
+
 def test_emits_target_offset_progress_for_runtime_sampled_sites(
     tmp_path: Path,
 ) -> None:
@@ -995,3 +1204,26 @@ def test_scroll_linked_driver_writes_bands_with_important_priority(
     assert '"important"' in source, "band writes must outrank a stylesheet pin"
     assert "style.width =" not in source, "plain inline write loses to !important"
     assert "style.opacity =" not in source
+
+
+def test_emitted_offset_props_are_typed_from_framer_motion() -> None:
+    """framer-motion types useScroll's `offset` as ScrollOffset — an array of
+    Edge / Intersection / ProgressIntersection template-literal unions. Restating
+    it as `[string, string]` is not assignable, so every emitted helper that
+    forwards an `offset` prop into useScroll broke `tsc --noEmit` (and therefore
+    `next build`) on a real Next.js impl. Derive the type from the library."""
+    helper = HELPER.read_text(encoding="utf-8")
+    assert "offset?: [string, string]" not in helper, (
+        "emitted offset props must not restate framer-motion's ScrollOffset type"
+    )
+    # Two templates are plain text, two are nested inside Python string literals
+    # where the quotes are backslash-escaped — count both spellings.
+    typed = helper.count('UseScrollOptions["offset"]') + helper.count(
+        'UseScrollOptions[\\"offset\\"]'
+    )
+    assert typed >= 4, (
+        f"every emitted offset prop should be typed as UseScrollOptions['offset'] (found {typed})"
+    )
+    # Each emitted module that names the type must also import it, or the
+    # generated file fails to compile on its own.
+    assert helper.count('import type { UseScrollOptions } from "framer-motion";') >= 4

@@ -187,6 +187,7 @@ SCROLL_CLASS_TOGGLE_REQUIRED = False
 HOVER_CLASS_TOGGLE_REQUIRED = False
 SCROLL_LINKED_STYLE_REQUIRED = False
 SCROLL_LATCH_REQUIRED = False
+WORD_REVEAL_REQUIRED = False
 IO_CLASS_REVEAL_RAW: list[dict[str, object]] = []
 IO_CLASS_REVEAL_TARGETS: dict[tuple[str, tuple[str, ...]], str] = {}
 IO_CLASS_REVEAL_STAMPED = [0]
@@ -252,6 +253,73 @@ def _match_scrub_selector(node: dict, selector: str) -> bool:
     return False
 
 
+_PLAN_REF_CSS_TEXT = None
+
+
+def _plan_ref_css_text() -> str:
+    global _PLAN_REF_CSS_TEXT
+    if _PLAN_REF_CSS_TEXT is not None:
+        return _PLAN_REF_CSS_TEXT
+    css_dir = Path(sys.argv[1]).parent / "css"
+    parts = []
+    if css_dir.is_dir():
+        for f in sorted(css_dir.glob("*.css")):
+            try:
+                parts.append(f.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+    _PLAN_REF_CSS_TEXT = "\n".join(parts)
+    return _PLAN_REF_CSS_TEXT
+
+
+def _css_has_class_selector(class_name: str) -> bool:
+    if not class_name:
+        return False
+    css = re.sub(r"/\*.*?\*/", "", _plan_ref_css_text(), flags=re.S)
+    if not css:
+        return False
+    return bool(re.search(rf"(?<![-_a-zA-Z0-9])\.{re.escape(class_name)}(?![-_a-zA-Z0-9])", css))
+
+
+def _explicit_word_highlight_class(effect: dict) -> str:
+    for key in (
+        "highlightClass",
+        "highlightClassName",
+        "activeClass",
+        "activeClassName",
+        "toClass",
+    ):
+        value = effect.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lstrip(".")
+    selector = effect.get("highlightSelector") or effect.get("activeSelector")
+    if isinstance(selector, str) and selector.startswith("."):
+        cls = selector[1:].strip()
+        if cls and not any(c in cls for c in " >+~,.#[]():*"):
+            return cls
+    return ""
+
+
+def _word_reveal_has_highlight_evidence(effect: dict, dim_class: str) -> bool:
+    explicit = _explicit_word_highlight_class(effect)
+    if explicit:
+        return True
+    for needle, replacement in (
+        ("dimmed", "highlighted"),
+        ("dim", "highlight"),
+        ("inactive", "active"),
+    ):
+        if needle in dim_class:
+            return _css_has_class_selector(dim_class.replace(needle, replacement))
+    return False
+
+
+def _valid_normalized_scrub_input(values: list[float]) -> bool:
+    return bool(values) and all(0 <= v <= 1 for v in values) and all(
+        b >= a for a, b in zip(values, values[1:])
+    )
+
+
 try:
     _plan_p = Path(sys.argv[1]).parent / "generation-plan.json"
     if _plan_p.exists():
@@ -297,12 +365,59 @@ try:
                     for _alt in _selector.split(","):
                         if _alt.strip():
                             SIGNATURE_SPLIT_PRESERVE_SELECTORS.append(_alt.strip())
+                # Preserving the split is only half the effect: the ref also
+                # ADVANCES it. Without a driver the transpiled spans keep the
+                # dim class forever, so a faithfully-split block still renders
+                # as a uniformly dim paragraph. Mirror emit_scroll_helpers.py's
+                # predicate — a bare single-class wordSelector whose name yields
+                # a highlight counterpart — so the mount agrees with what the
+                # emitter writes. regate_unresolved_imports.py is the backstop.
+                if "per-word" in _effect_text:
+                    _word_sel = str(_effect.get("wordSelector") or "").strip()
+                    _word_cls = _word_sel[1:] if _word_sel.startswith(".") else ""
+                    if _word_cls and not any(
+                        _c in _word_cls for _c in " >+~,.#[]():*"
+                    ) and any(
+                        _needle in _word_cls
+                        for _needle in ("dimmed", "dim", "inactive")
+                    ) and _word_reveal_has_highlight_evidence(_effect, _word_cls):
+                        WORD_REVEAL_REQUIRED = True
         _fp = _plan.get("forensicPreservation") if isinstance(_plan, dict) else None
         RUNTIME_UNLOCK_REQUIRED = bool(isinstance(_fp, dict) and _fp.get("requiresRuntimeUnlock"))
         _latch = _plan.get("scrollLatch") if isinstance(_plan, dict) else None
         if isinstance(_latch, dict) and _latch.get("sites"):
-            # Emitted helpers are behaviour only once the app mounts them.
-            SCROLL_LATCH_REQUIRED = True
+            # Emitted helpers are behaviour only once the app mounts them —
+            # but the mount must agree with what the emitter actually WRITES.
+            # emit_scroll_helpers.py validates each site (selector + non-empty
+            # endState + numeric progress) and writes ScrollLatchDriver.tsx
+            # only if at least one survives. Gating this on "sites is a
+            # non-empty list" imports a file that may never exist: realfood-v2
+            # declares required/count 3 with three IntersectionObserver
+            # descriptions carrying no endState or progress, so every site is
+            # dropped and the emitted App.tsx fails to build. Mirror the
+            # emitter's predicate; the end-to-end test locks the two together.
+            def _latch_site_emits(_site):
+                if not isinstance(_site, dict):
+                    return False
+                _sel = _site.get("selector")
+                if not isinstance(_sel, str) or not _sel.strip():
+                    return False
+                _end = _site.get("endState")
+                if not isinstance(_end, dict) or not _end:
+                    return False
+                if not isinstance(_site.get("progress"), (int, float)) or isinstance(
+                    _site.get("progress"), bool
+                ):
+                    return False
+                # The emitter drops None-valued declarations and skips a site
+                # whose endState empties out as a result.
+                return any(_v is not None for _v in _end.values())
+
+            _latch_sites_raw = _latch.get("sites")
+            if isinstance(_latch_sites_raw, list) and any(
+                _latch_site_emits(_s) for _s in _latch_sites_raw
+            ):
+                SCROLL_LATCH_REQUIRED = True
         _scrub = _plan.get("scrollScrub") if isinstance(_plan, dict) else None
         if isinstance(_scrub, dict) and _scrub.get("required"):
 
@@ -354,6 +469,8 @@ try:
                 _outp = _scrub_range(_st.get("output"))
                 if not _inp or not _outp or len(_inp) != len(_outp):
                     continue
+                if not _valid_normalized_scrub_input(_inp):
+                    continue
                 if (_st.get("property") or "").startswith("scale") and not all(
                     0 <= v <= 8 for v in _outp
                 ):
@@ -369,7 +486,19 @@ try:
                 _a = f"{(_st.get('property') or 'scale')}={{{json.dumps([_inp, _outp])}}}"
                 if _off is not None:
                     _a += f" offset={{{json.dumps(_off)}}}"
-                SCRUB_WRAP_ATTRS = _a + " spring"
+                _spring_cfg = {}
+                _site_spring = _site.get("spring")
+                if isinstance(_site_spring, dict):
+                    _spring_cfg = {
+                        _k: _v
+                        for _k, _v in _site_spring.items()
+                        if _k in ("stiffness", "damping", "mass", "restDelta")
+                        and isinstance(_v, (int, float))
+                        and not isinstance(_v, bool)
+                    }
+                if _spring_cfg:
+                    _a += f" spring springConfig={{{json.dumps(_spring_cfg)}}}"
+                SCRUB_WRAP_ATTRS = _a
                 break
 except (OSError, json.JSONDecodeError):
     SMOOTH_SCROLL_REQUIRED = False
@@ -1337,8 +1466,18 @@ def _forensic_classname_only():
     )
 
 
-def _forensic_strip_boxmodel(node, styles):
-    inline_guard = set(node.get("inlineProps") or [])
+def _forensic_strip_boxmodel(node, styles, synth_props=()):
+    """Hand the box model back to the mirrored ref CSS.
+
+    `inlineProps` records props the REF declared in its own inline style attr:
+    the ref's inline beat its own CSS, so the CSS value is NOT what rendered and
+    the bake must stay. That premise only holds while the value is still the
+    ref's. `synth_props` names props a synthesis pass has since overwritten
+    (P5's width→`max-width` + `width:100%` reflow pair); guarding those keeps a
+    value the ref never had, and — because only the guarded half survives — can
+    drop the `max-width` cap that made the pair equal the captured width.
+    """
+    inline_guard = set(node.get("inlineProps") or []) - set(synth_props)
     return {
         k: v
         for k, v in styles.items()
@@ -1446,6 +1585,10 @@ _UNBAKE_EXACT: dict = {}
 # so the descendant match is a complete emission proof (every node is under the
 # root). This reaches the class-less responsive `<h1>` the bare-class path can't.
 _UNBAKE_DESC: dict = {}
+# Emitted-ancestor descendant credit: (ancestorClassToken, subjectClassToken) ->
+# props declared by an exact `.ancTok .subjTok{...}` rule.
+_UNBAKE_DESC_CLASS: dict = {}
+_UNBAKE_FONT_SIZE_OWN_RISK: list[tuple[str, str, tuple[str, ...], tuple[str, ...], bool]] = []
 _UNBAKE_THEME_BASE: dict = {}
 _UNBAKE_THEME_EXACT: dict = {}
 _STATEFUL_CSS_BASE: dict = {}
@@ -1957,6 +2100,132 @@ def _io_selector_mentions_reveal_subject(selector):
     return False
 
 
+def _font_size_own_risk_subject(selector):
+    selector = str(selector or "").strip()
+    if not selector:
+        return ("unsupported", "", (), (), False)
+    parts = [part for part in re.split(r"\s+|[>+~]", selector) if part]
+    if not parts:
+        return ("unsupported", "", (), (), False)
+    subject = parts[-1].strip()
+    ancestor_classes, ancestor_unknown = _selector_ancestor_requirements(parts[:-1])
+    if subject == "*":
+        return ("wildcard", "", (), ancestor_classes, ancestor_unknown)
+    positive_subject = _positive_simple_subject_prefix(subject)
+    if not positive_subject:
+        return ("unsupported", "", (), ancestor_classes, ancestor_unknown)
+    parsed_tag, parsed_classes = _rightmost_subject_tag_classes(positive_subject)
+    if positive_subject != subject:
+        return ("unsupported", parsed_tag, parsed_classes, ancestor_classes, ancestor_unknown)
+    match = re.fullmatch(
+        r"(?:(?P<tag>[a-z][a-z0-9-]*))?(?P<classes>(?:\.(?:\\.|[A-Za-z0-9_-]+))+)?",
+        positive_subject,
+        flags=re.I,
+    )
+    if not match:
+        return ("unsupported", parsed_tag, parsed_classes, ancestor_classes, ancestor_unknown)
+    tag = (match.group("tag") or "").lower()
+    classes = tuple(_css_unescape_identifier(cls) for cls in _selector_class_tokens(positive_subject))
+    if tag and classes:
+        return ("tag-class", tag, classes, ancestor_classes, ancestor_unknown)
+    if tag:
+        return ("tag", tag, (), ancestor_classes, ancestor_unknown)
+    if classes:
+        return ("class", "", classes, ancestor_classes, ancestor_unknown)
+    return ("unsupported", "", (), ancestor_classes, ancestor_unknown)
+
+
+def _selector_ancestor_requirements(parts):
+    classes = []
+    unknown = False
+    for part in parts:
+        positive = _positive_simple_subject_prefix(part)
+        if not positive:
+            if part not in ("*",):
+                unknown = True
+            continue
+        classes.extend(_css_unescape_identifier(cls) for cls in _selector_class_tokens(positive))
+        if positive != part and not classes:
+            unknown = True
+    return tuple(classes), unknown
+
+
+def _positive_simple_subject_prefix(subject):
+    subject = str(subject or "").strip()
+    out = []
+    escaped = False
+    for char in subject:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            out.append(char)
+            escaped = True
+            continue
+        if char in "#[:*":
+            break
+        out.append(char)
+    return "".join(out).strip()
+
+
+def _selector_class_tokens(subject):
+    return re.findall(r"\.((?:\\.|[A-Za-z0-9_-])+)", str(subject or ""))
+
+
+def _css_unescape_identifier(value):
+    value = str(value or "")
+
+    def repl(match):
+        escaped = match.group(1)
+        if re.fullmatch(r"[0-9a-fA-F]{1,6}\s?", escaped):
+            return chr(int(escaped.strip(), 16))
+        return escaped
+
+    return re.sub(r"\\([0-9a-fA-F]{1,6}\s?|.)", repl, value)
+
+
+def _rightmost_subject_tag_classes(subject):
+    subject = str(subject or "")
+    tag_match = re.match(r"^[a-z][a-z0-9-]*", subject, flags=re.I)
+    tag = tag_match.group(0).lower() if tag_match else ""
+    classes = tuple(_css_unescape_identifier(cls) for cls in _selector_class_tokens(subject))
+    return tag, classes
+
+
+def _font_size_own_selector_risk(node_tag, token_set, emitted_ancestor_stack=()):
+    # App-root classes live outside each section/component render call, so they
+    # are absent from the per-component stack. Include them only in this
+    # conservative own-rule veto; descendant credit remains separately gated.
+    ancestor_token_set = set(_unbake_root_tokens())
+    if emitted_ancestor_stack:
+        ancestor_token_set.update(set().union(*emitted_ancestor_stack))
+    for kind, tag, classes, ancestor_classes, ancestor_unknown in _UNBAKE_FONT_SIZE_OWN_RISK:
+        if ancestor_unknown:
+            ancestor_matches = True
+        else:
+            ancestor_matches = not ancestor_classes or set(ancestor_classes).issubset(
+                ancestor_token_set
+            )
+        if not ancestor_matches:
+            continue
+        if kind == "wildcard":
+            return True
+        if kind == "unsupported":
+            if tag and tag != node_tag:
+                continue
+            if classes and not set(classes).issubset(token_set):
+                continue
+            return True
+        if kind == "tag" and tag == node_tag:
+            return True
+        if kind == "class" and set(classes).issubset(token_set):
+            return True
+        if kind == "tag-class" and tag == node_tag and set(classes).issubset(token_set):
+            return True
+    return False
+
+
 def _build_unbake_index():
     if not _REF_CSS_TEXT:
         return
@@ -2075,6 +2344,8 @@ def _build_unbake_index():
             selector = sel_part.strip()
             if not selector:
                 continue
+            if "font-size" in props:
+                _UNBAKE_FONT_SIZE_OWN_RISK.append(_font_size_own_risk_subject(selector))
             stateful_subject = _stateful_selector_subject(selector)
             if stateful_subject is not None and stateful_props:
                 subject_key, is_dynamic, ancestor_classes = stateful_subject
@@ -2129,6 +2400,17 @@ def _build_unbake_index():
             dm = re.fullmatch(r"\s*\.([A-Za-z0-9_-]+)\s+([a-z][a-z0-9]*)\s*", sel_part)
             if dm and props:
                 _UNBAKE_DESC.setdefault((dm.group(1), dm.group(2)), set()).update(props)
+                continue
+            # Emitted-ancestor descendant subject: EXACTLY `.ancTok .subjTok`.
+            # This deliberately rejects child/sibling combinators, multi-hop
+            # chains, compound class selectors, tag-qualified subjects, pseudos,
+            # ids, attrs, and universal subjects.
+            dcm = re.fullmatch(
+                r"\s*\.([A-Za-z0-9_-]+)\s+\.([A-Za-z0-9_-]+)\s*",
+                sel_part,
+            )
+            if dcm and props:
+                _UNBAKE_DESC_CLASS.setdefault((dcm.group(1), dcm.group(2)), set()).update(props)
     for subject, base_claims in _STATEFUL_CSS_BASE.items():
         dynamic_claims = _STATEFUL_CSS_DYNAMIC.get(subject, {})
         for base_ancestors, base_props in base_claims.items():
@@ -2168,33 +2450,65 @@ def _unbake_mirrored_line_height(node, styles):
     return out
 
 
+def _root_emission_class_state():
+    root_tag = (structure.get("tag") or "main").lower()
+    root_cls = safe_class_name(structure.get("class") or "")
+    if not root_cls and root_tag in ("body", "html"):
+        root_cls = _root_scope_class(structure)
+    io_active_class = _io_class_reveal_match({"tag": root_tag, "class": root_cls})
+    emitted_cls = root_cls
+    if io_active_class:
+        emitted_cls = " ".join(token for token in root_cls.split() if token != io_active_class)
+    return root_tag, root_cls, emitted_cls, io_active_class
+
+
 def _unbake_root_tokens():
     """Class tokens on the emitted App root, computed from the `structure`
-    global via the SAME path the emitter uses for root_cls (:4549/:4558), so
-    descendant credit compares against tokens actually emitted. `structure` is
-    loaded (:3690) before any render() call, so it is available here at call
-    time even though this function is defined earlier."""
+    global via the SAME path the emitter uses for root_cls, including IO active
+    class removal, so descendant credit compares against tokens actually
+    emitted."""
     global _UNBAKE_ROOT_TOKENS
     if _UNBAKE_ROOT_TOKENS is not None:
         return _UNBAKE_ROOT_TOKENS
-    rc = ""
     try:
-        rc = safe_class_name(structure.get("class") or "")
-        if not rc and (structure.get("tag") or "").lower() in ("body", "html"):
-            rc = _root_scope_class(structure)
+        _root_tag, _raw_root_cls, rc, _active = _root_emission_class_state()
     except Exception:
         rc = ""
     _UNBAKE_ROOT_TOKENS = set(rc.split()) if rc else set()
     return _UNBAKE_ROOT_TOKENS
 
 
-def _unbake_ref_covered(node, styles):
-    toks = [t for t in str(node.get("class") or "").split() if t]
+def _emitted_class_tokens(raw_class):
+    cls = safe_class_name(raw_class)
+    if cls and "swiper" in cls:
+        cls = _strip_swiper_runtime_classes(cls)
+    cls = _strip_lifecycle_state_classes(cls)
+    return frozenset(t for t in str(cls or "").split() if t)
+
+
+def _unbake_ref_covered(
+    node,
+    styles,
+    emitted_ancestor_stack=(),
+    allow_root_descendant_credit=True,
+    inherited_font_size_proof=None,
+    emitted_subject_tokens=None,
+):
+    toks = sorted(
+        emitted_subject_tokens
+        if emitted_subject_tokens is not None
+        else _emitted_class_tokens(node.get("class") or "")
+    )
     node_tag = (node.get("tag") or "").lower()
     # Root-anchored descendant credit reaches class-less nodes (the `if not toks`
     # early-return previously made them unreachable). Only attempt it when the
     # descendant index has entries for this tag under a root token.
-    root_toks = _unbake_root_tokens() if (_UNBAKE_DESC and node_tag) else set()
+    root_toks = (
+        _unbake_root_tokens()
+        if allow_root_descendant_credit
+        and ((_UNBAKE_DESC and node_tag) or _UNBAKE_DESC_CLASS)
+        else set()
+    )
     inline_guard = set(node.get("inlineProps") or [])
     token_set = set(toks)
     out = _unbake_mirrored_line_height(node, styles)
@@ -2220,7 +2534,13 @@ def _unbake_ref_covered(node, styles):
             continue
         credit_props = _unbake_credit_props(prop)
         credited_by, declared_credit = _matching_unbake_credit(
-            toks, node_tag, token_set, root_toks, credit_props
+            toks,
+            node_tag,
+            token_set,
+            root_toks,
+            emitted_ancestor_stack,
+            credit_props,
+            allow_root_descendant_credit,
         )
         if credited_by is not None:
             if prop == "padding":
@@ -2234,11 +2554,45 @@ def _unbake_ref_covered(node, styles):
             # (companion below), else the hero stays ~3x tall at mobile.
             if prop == "font-size":
                 node["_unbakeFontCredited"] = True
+            continue
+        if prop == "font-size" and _inherited_font_size_can_release(
+            v,
+            inherited_font_size_proof,
+            node_tag,
+            token_set,
+            emitted_ancestor_stack,
+        ):
+            del out[prop]
+            _UNBAKE_STATS[0] += 1
+            _UNBAKE_STATS[1].add(("inherited parent font-size", prop))
+            node["_unbakeFontCredited"] = True
     out = _unbake_ref_owned_theme_props(node, out)
     return _unbake_ref_owned_state_props(node, out)
 
 
-def _matching_unbake_credit(toks, node_tag, token_set, root_toks, credit_props):
+def _inherited_font_size_can_release(
+    value,
+    inherited_font_size_proof,
+    node_tag,
+    token_set,
+    emitted_ancestor_stack,
+):
+    if not inherited_font_size_proof:
+        return False
+    if str(value).strip() != str(inherited_font_size_proof).strip():
+        return False
+    return not _font_size_own_selector_risk(node_tag, token_set, emitted_ancestor_stack)
+
+
+def _matching_unbake_credit(
+    toks,
+    node_tag,
+    token_set,
+    root_toks,
+    emitted_ancestor_stack,
+    credit_props,
+    allow_root_descendant_credit,
+):
     credited_by = None
     declared_credit = set()
     # Bare-class subject (`.tok{...}`) — the node's own class tokens.
@@ -2260,6 +2614,32 @@ def _matching_unbake_credit(toks, node_tag, token_set, root_toks, credit_props):
         if overlap:
             credited_by = credited_by or f"{root_token} {node_tag}"
             declared_credit.update(overlap)
+        for subject_token in sorted(token_set):
+            overlap = credit_props.intersection(
+                _UNBAKE_DESC_CLASS.get((root_token, subject_token), ())
+            )
+            if overlap:
+                credited_by = credited_by or f"{root_token} {subject_token}"
+                declared_credit.update(overlap)
+    # Emitted-ancestor descendant subjects. The stack excludes the current node,
+    # so a node cannot credit itself as its ancestor.
+    if emitted_ancestor_stack:
+        for ancestor_tokens in emitted_ancestor_stack:
+            for ancestor_token in sorted(ancestor_tokens):
+                if node_tag:
+                    overlap = credit_props.intersection(
+                        _UNBAKE_DESC.get((ancestor_token, node_tag), ())
+                    )
+                    if overlap:
+                        credited_by = credited_by or f"{ancestor_token} {node_tag}"
+                        declared_credit.update(overlap)
+                for subject_token in sorted(token_set):
+                    overlap = credit_props.intersection(
+                        _UNBAKE_DESC_CLASS.get((ancestor_token, subject_token), ())
+                    )
+                    if overlap:
+                        credited_by = credited_by or f"{ancestor_token} {subject_token}"
+                        declared_credit.update(overlap)
     return credited_by, declared_credit
 
 
@@ -2645,6 +3025,18 @@ def _text_jsx(t):
     ref) into real <br /> elements so multi-line copy is not run together."""
     if not t or _is_capture_text_sentinel(t):
         return ""
+    if not t.strip():
+        # Whitespace-only text node — the inter-word gap of a per-character /
+        # per-word split heading. JSX trims a whitespace-only text child at the
+        # line boundary, so the literal character vanishes and the split words
+        # run together ("RealFoodcan"). SWC (Next.js) trims U+00A0 too, since
+        # Rust's `char::is_whitespace` follows Unicode White_Space — so even a
+        # captured nbsp gap is lost. Emit the exact characters as an escaped
+        # JS string expression, which no JSX transform touches. (The companion
+        # `white-space: pre` bake at the style site stops a block box from
+        # collapsing a plain space to 0px advance width.)
+        escaped = "".join(f"\\u{ord(ch):04x}" for ch in t)
+        return '{"' + escaped + '"}'
     return "<br />".join(escape_jsx_text(p) for p in t.split("\n"))
 
 
@@ -2807,6 +3199,39 @@ _RESERVED_STATE_DATA_PREFIXES = (
     "data-swiper",
     "data-ui-clone",
 )
+
+_DISCLOSURE_STATE_DATA_ATTRS = frozenset({
+    "data-open",
+    "data-expanded",
+    "data-state",
+})
+
+
+def _is_disclosure_control(node):
+    """True when a boolean data-* on this node is CLICK state, not viewport state.
+
+    gen-M4 defers boolean data-* attrs to the StateRevealDriver, which sets the
+    ref-CSS terminal value on viewport entry. That models an
+    IntersectionObserver-owned reveal; a disclosure widget (accordion / dropdown
+    / details) is toggled by the USER, and its ref CSS almost always declares
+    only the OPEN variant as a subject-matching rule (realfood's FAQ list:
+    `.faqs button[data-open=true]{background:var(--highlight)}`). Deferring it
+    resolved every captured-closed item to `data-open="true"`, so all 9 answers
+    expanded on scroll and every pill painted the open-state lime. `aria-expanded`
+    / `aria-controls` / `<summary>` mark the control; its captured state is the
+    ref's real resting state and is emitted verbatim.
+    """
+    if str(node.get("tag") or "").lower() == "summary":
+        return True
+    return bool(node.get("aria-expanded") or node.get("aria-controls"))
+
+
+def _is_disclosure_control_attr(node, attr):
+    if not _is_disclosure_control(node):
+        return False
+    return attr in _DISCLOSURE_STATE_DATA_ATTRS or attr.endswith("-open")
+
+
 # Max autoplay delay the transition-fires probe can observe within its per-probe
 # wait budget. The clone never emits a delay above this (would read as dead); the
 # probe's carousel wait (transition-fires-check.sh) is kept strictly above it.
@@ -3861,6 +4286,40 @@ def _release_fixed_viewport_complements(node, styles, captured_styles):
     return out
 
 
+_INTRINSIC_RATIO_RE = re.compile(r"^auto\s+(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)$")
+
+
+def _img_intrinsic_attrs(node, styles):
+    """Return the ("W", "H") an <img>'s width/height ATTRIBUTES imply, else None.
+
+    Modern extract-dom records width/height directly. This legacy path is kept
+    only for older captures that also carry explicit markup-attr evidence; CSS
+    can author `aspect-ratio:auto W/H`, so the computed ratio alone is not a
+    sufficient signal.
+    """
+    if not isinstance(node, dict):
+        return None
+    if str(node.get("tag") or "").strip().lower() != "img":
+        return None
+    if str(node.get("width") or "").strip() or str(node.get("height") or "").strip():
+        return None
+    captured_attr_keys = node.get("capturedAttrKeys") or node.get("attrKeys") or ()
+    if not (
+        isinstance(captured_attr_keys, (list, tuple, set))
+        and {"width", "height"}.issubset(set(captured_attr_keys))
+    ):
+        return None
+    st = styles if isinstance(styles, dict) else {}
+    m = _INTRINSIC_RATIO_RE.match(str(st.get("aspect-ratio") or "").strip())
+    if not m:
+        return None
+    w, h = m.group(1), m.group(2)
+    if float(w) <= 0 or float(h) <= 0:
+        return None
+    return (w.rstrip("0").rstrip(".") if "." in w else w,
+            h.rstrip("0").rstrip(".") if "." in h else h)
+
+
 def _is_utility_iframe(node, styles):
     """Fix 123 — a dimensionless / pixel-sized cross-frame utility iframe.
 
@@ -3937,7 +4396,13 @@ def _animation_state_targets(styles):
     return out
 
 
-def render(node, indent=2, hover_rules=None):
+def render(
+    node,
+    indent=2,
+    hover_rules=None,
+    emitted_ancestor_stack=(),
+    inherited_font_size_proof=None,
+):
     """Render a node (and its subtree) to JSX. Returns the string.
 
     Fix 19 — when hover_rules is a mutable list, any node with hover_styles
@@ -3974,6 +4439,11 @@ def render(node, indent=2, hover_rules=None):
             "loop": True,
             "muted": True,
         }
+    # Proof is computed during this render only. The structure may be rendered
+    # more than once (or contain stale internal metadata from a prior run), so
+    # never let a previous pass release this node's height floor or seed child
+    # inheritance.
+    node.pop("_unbakeFontCredited", None)
     tag = _normalize_tag(node.get("tag") or "div")
     if tag in SKIP_TAGS:
         return ""
@@ -3988,6 +4458,13 @@ def render(node, indent=2, hover_rules=None):
     if cls and "swiper" in cls:
         cls = _strip_swiper_runtime_classes(cls)
     cls = _strip_lifecycle_state_classes(cls)
+    _io_active_class_for_unbake = _io_class_reveal_match(node)
+    unbake_cls = (
+        " ".join(token for token in cls.split() if token != _io_active_class_for_unbake)
+        if _io_active_class_for_unbake
+        else cls
+    )
+    emitted_subject_tokens = frozenset(t for t in unbake_cls.split() if t)
     styles = dict(node.get("styles") or {})
     if tag in SVG_TAGS or node.get("svg"):
         for _style_key in SVG_STYLE_ONLY_ATTRS:
@@ -4009,7 +4486,13 @@ def render(node, indent=2, hover_rules=None):
     # every synthesis pass (Fix 20/21, Fix 127/128, P5) so it can only drop
     # captured bakes, never fix-synthesized values (fable condition 1).
     if styles and _unbake_active():
-        styles = _unbake_ref_covered(node, styles)
+        styles = _unbake_ref_covered(
+            node,
+            styles,
+            emitted_ancestor_stack,
+            inherited_font_size_proof=inherited_font_size_proof,
+            emitted_subject_tokens=emitted_subject_tokens,
+        )
     if styles:
         styles = _release_fixed_viewport_complements(node, styles, captured_styles)
     # Fix 110 — set when this element carried a frozen scroll-scrub scale (Fix 108);
@@ -4023,6 +4506,11 @@ def render(node, indent=2, hover_rules=None):
         if _match_scrub_selector(node, _sel):
             _scrub_target_prop = _norm_scrub_selector_prop(_prop)
             break
+    # Box-model props written by a synthesis pass below rather than captured from
+    # the ref. Tracked so the forensic strip can tell "the ref inlined this" from
+    # "we computed this". Defined at render scope: the strip runs from a later
+    # `if styles:` block than the synthesis passes that populate it.
+    _synth_boxmodel_props: set[str] = set()
     if styles:
         if _height_should_unfreeze(node, styles):
             # S1 — convert a frozen px `height` to a `min-height` FLOOR (so content
@@ -4176,6 +4664,11 @@ def render(node, indent=2, hover_rules=None):
                 styles = {k: v for k, v in styles.items() if k != "width"}
                 styles["max-width"] = _w
                 styles["width"] = "100%"
+                # `width:100%` is now OURS, not the ref's captured value. The
+                # forensic inline guard below must not treat it as a ref-inlined
+                # value, or it keeps the synthesized half while stripping the
+                # `max-width` cap that made the pair equal the capture width.
+                _synth_boxmodel_props.update(("width", "max-width"))
     children = node.get("children") or []
     # Fix 27 — if this node's subtree is a split-text animation (per-character
     # spans), collapse it to clean visible text so words aren't run together
@@ -4255,7 +4748,7 @@ def render(node, indent=2, hover_rules=None):
         # or (forensic className-only mode) let mirrored CSS / natural layout
         # own every node, including classless structural wrappers.
         if _forensic_classname_only():
-            styles = _forensic_strip_boxmodel(node, styles)
+            styles = _forensic_strip_boxmodel(node, styles, _synth_boxmodel_props)
         elif _SIZING_ACTIVE:
             styles = _apply_sizing_expressions(node, styles, captured_styles)
     # Fix 124 — honor a node the live page kept HIDDEN. getComputedStyle recorded
@@ -4315,6 +4808,15 @@ def render(node, indent=2, hover_rules=None):
             "border": "0",
             "background-color": "rgb(21, 21, 21)",
         }
+    # Fix 131 — a whitespace-only leaf is the inter-word gap span of a split
+    # heading. `_text_jsx` restores the character as `{" "}`, but a lone
+    # leading/trailing space inside a `display:block` (or any non-`pre`) box
+    # still collapses to zero advance width, so the words stay glued. Bake
+    # `white-space: pre` on the gap span itself — scoped to whitespace-only
+    # leaves, so no real copy loses its normal wrapping.
+    if text and not text.strip() and not children:
+        styles = dict(styles or {})
+        styles["white-space"] = "pre"
     if styles:
         style_attr = f" style={style_to_jsx(styles)}"
 
@@ -4345,6 +4847,8 @@ def render(node, indent=2, hover_rules=None):
         # embed (poster+Play symptom on all 3 players).
         "allow": "allow",
         "allowfullscreen": "allowFullScreen",
+        "width": "width",
+        "height": "height",
     }
     # U1 — data-src/data-srcset/data-poster are capture-time lazy artifacts the
     # clone never re-runs; their real URLs are promoted onto src/srcset/poster
@@ -4366,6 +4870,15 @@ def render(node, indent=2, hover_rules=None):
         elif src_key == "srcset":
             v = rewrite_srcset(v)
         attr_emit[jsx_key] = v
+
+    # F-family (realfood-v4 broken_system_image): older captures missed img
+    # width/height attributes. Recover from computed ratio only when the capture
+    # includes an independent markup-attr witness; otherwise CSS-authored
+    # aspect-ratio:auto W/H would invent HTML attrs.
+    _intrinsic = _img_intrinsic_attrs(node, captured_styles)
+    if _intrinsic:
+        attr_emit["width"] = _intrinsic[0]
+        attr_emit["height"] = _intrinsic[1]
 
     # B-family: generic data-* pass through verbatim (valid JSX as-is) —
     # realfood word-reveal spans keyed on data-word-id lost their animation
@@ -4394,6 +4907,13 @@ def render(node, indent=2, hover_rules=None):
             # would double-drive.
             if any(src_key.startswith(p) for p in _RESERVED_STATE_DATA_PREFIXES):
                 continue
+            # G disclosure-state forcing: a click-owned control's state is not a
+            # viewport reveal. Emit the captured resting state verbatim instead
+            # of resolving a terminal value the StateRevealDriver would force on
+            # every instance at once.
+            if _is_disclosure_control_attr(node, src_key):
+                attr_emit[src_key] = v
+                continue
             # gen-M4: don't just drop the REST — a [data-in-view=true]-gated
             # reveal then renders the PRE-state forever (content stuck hidden, no
             # controller sets the attr on entry). Record the attr+captured value
@@ -4414,7 +4934,7 @@ def render(node, indent=2, hover_rules=None):
         attr_emit["data-ui-clone-state-reveal"] = " ".join(_state_reveals)
         STATE_ATTR_STAMPED[0] = 1
 
-    _io_active_class = _io_class_reveal_match(node)
+    _io_active_class = _io_active_class_for_unbake
     if _io_active_class:
         cls = " ".join(token for token in cls.split() if token != _io_active_class)
         attr_emit["data-io-class-reveal"] = _io_active_class
@@ -4722,6 +5242,11 @@ def render(node, indent=2, hover_rules=None):
     if tag in VOID_TAGS:
         return f"{pad}<{tag}{cls_attr}{style_attr} />"
 
+    emitted_class_frame = frozenset(t for t in cls.split() if t)
+    child_inherited_font_size_proof = (
+        captured_styles.get("font-size") if node.get("_unbakeFontCredited") else None
+    )
+
     # Render children/text/pseudos in DOM-equivalent order. CSS ::before
     # participates before the element text; emitting the synthetic span after
     # text makes absolute pseudos with auto inset use the text's static
@@ -4759,7 +5284,18 @@ def render(node, indent=2, hover_rules=None):
             # are phantom duplicate slides).
             if _is_swiper_loop_clone(c):
                 continue
-            r = render(c, indent + 1, hover_rules)
+            child_emitted_ancestor_stack = (
+                (*emitted_ancestor_stack, emitted_class_frame)
+                if emitted_class_frame
+                else emitted_ancestor_stack
+            )
+            r = render(
+                c,
+                indent + 1,
+                hover_rules,
+                child_emitted_ancestor_stack,
+                child_inherited_font_size_proof,
+            )
             if not r:
                 continue
             # Fix 22 — restore the whitespace text node that sat between this
@@ -4768,7 +5304,16 @@ def render(node, indent=2, hover_rules=None):
             # explicit {' '} or the words run together ("Forthe" / "Forthefirst").
             # In seq mode the inter-element whitespace is carried by the seq's
             # own fragments — appending wsAfter too would double the space.
-            if seq is None and isinstance(c, dict) and c.get("wsAfter"):
+            # H word-gap collapse: a preserved whitespace-only leaf already
+            # CARRIES the gap as its own U+00A0 text. Appending wsAfter's space
+            # too would double the gap wherever the parent is not a flex row
+            # (flex drops a whitespace-only anonymous item; inline flow does not).
+            if (
+                seq is None
+                and isinstance(c, dict)
+                and c.get("wsAfter")
+                and c.get("text") != "\u00a0"
+            ):
                 r = r + "{' '}"
             rendered_children.append(r)
             rendered_by_idx[ci] = r
@@ -7014,23 +7559,11 @@ def _detect_stack() -> str:
 stack = _detect_stack()
 
 # Root element from structure.json (typically <main> or <body>).
-root_tag = (structure.get("tag") or "main").lower()
+root_tag, _root_scope_cls, root_cls, _root_io_active_class = _root_emission_class_state()
 _full_bleed_document_root = root_tag in ("body", "html")
-root_cls = safe_class_name(structure.get("class") or "")
-if not root_cls and root_tag in ("body", "html"):
-    # Fix 130 — a class-less body/html capture root drops the page-root scoping
-    # wrapper class, nullifying every `.<root> `-scoped ref rule; adopt the
-    # principal content wrapper's class so scoped ref CSS matches. Gated to
-    # body/html: only there is the real scope wrapper a *child* of the capture
-    # root. A class-less <main>/<section> capture root IS the content root, so
-    # hoisting a descendant's class onto it would wrongly apply that class's own
-    # rules to the whole page.
-    root_cls = _root_scope_class(structure)
-_warn_unmatched_scope(root_cls)
+_warn_unmatched_scope(_root_scope_cls)
 root_extra_attrs = ""
-_root_io_active_class = _io_class_reveal_match({"tag": root_tag, "class": root_cls})
 if _root_io_active_class:
-    root_cls = " ".join(token for token in root_cls.split() if token != _root_io_active_class)
     root_extra_attrs = f' data-io-class-reveal="{_root_io_active_class}"'
     IO_CLASS_REVEAL_STAMPED[0] += 1
 root_styles = dict(structure.get("styles") or {})
@@ -7038,7 +7571,11 @@ root_styles = dict(structure.get("styles") or {})
 # that App actually emits (including a recovered page-root scoping class).
 _root_unbake_node = dict(structure)
 _root_unbake_node["class"] = root_cls
-root_styles = _unbake_ref_covered(_root_unbake_node, root_styles)
+root_styles = _unbake_ref_covered(
+    _root_unbake_node,
+    root_styles,
+    allow_root_descendant_credit=False,
+)
 # The root also bypasses render()'s explicit forensic strip.
 if _forensic_classname_only():
     root_styles = _forensic_strip_boxmodel(structure, root_styles)
@@ -7515,6 +8052,9 @@ def _emit_next_page() -> Path:
     if SCROLL_LINKED_STYLE_REQUIRED:
         imports += '\nimport ScrollLinkedStyleDriver from "@/lib/ScrollLinkedStyleDriver";'
         driver_line += "      <ScrollLinkedStyleDriver />\n"
+    if WORD_REVEAL_REQUIRED:
+        imports += '\nimport WordRevealDriver from "@/lib/WordRevealDriver";'
+        driver_line += "      <WordRevealDriver />\n"
     if SWIPER_STAMPED[0]:
         # Mount the Swiper activator singleton so stamped carousels animate.
         imports += '\nimport SwiperActivator from "@/lib/SwiperActivator";'
@@ -7587,6 +8127,9 @@ def _emit_vite_entry() -> Path:
     if SCROLL_LINKED_STYLE_REQUIRED:
         imports += "\nimport ScrollLinkedStyleDriver from './lib/ScrollLinkedStyleDriver';"
         driver_line += "      <ScrollLinkedStyleDriver />\n"
+    if WORD_REVEAL_REQUIRED:
+        imports += "\nimport WordRevealDriver from './lib/WordRevealDriver';"
+        driver_line += "      <WordRevealDriver />\n"
     if SWIPER_STAMPED[0]:
         imports += "\nimport SwiperActivator from './lib/SwiperActivator';"
         driver_line += "      <SwiperActivator />\n"
@@ -7663,6 +8206,9 @@ def _emit_remix_root() -> Path:
     if SCROLL_LINKED_STYLE_REQUIRED:
         imports += f"\nimport ScrollLinkedStyleDriver from '{_lib}/ScrollLinkedStyleDriver';"
         driver_line += "      <ScrollLinkedStyleDriver />\n"
+    if WORD_REVEAL_REQUIRED:
+        imports += f"\nimport WordRevealDriver from '{_lib}/WordRevealDriver';"
+        driver_line += "      <WordRevealDriver />\n"
     if SWIPER_STAMPED[0]:
         imports += f"\nimport SwiperActivator from '{_lib}/SwiperActivator';"
         driver_line += "      <SwiperActivator />\n"
@@ -7785,6 +8331,8 @@ if stack in ("astro", "sveltekit"):
         _motion_flags.append("hover-class-toggle")
     if SCROLL_LINKED_STYLE_REQUIRED:
         _motion_flags.append("scroll-linked-style")
+    if WORD_REVEAL_REQUIRED:
+        _motion_flags.append("word-reveal")
     if SWIPER_STAMPED[0]:
         _motion_flags.append("swiper")
     if IO_CLASS_REVEAL_STAMPED[0]:
@@ -7899,8 +8447,34 @@ for _p in list(_src_root.rglob("*.tsx")) + list(_src_root.rglob("*.jsx")):
         _blobs[_p] = _p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         _blobs[_p] = ""
+# Next.js router files are resolved by their path, never by an import, so the
+# orphan scan cannot see them. Keep the historical generic entry exemptions,
+# then add only the path-scoped Next router contracts; a src/lib/Page.tsx is
+# still an ordinary orphan despite its router-like basename.
+_ENTRY_STEMS = frozenset({"main", "app", "index"})
+_NEXT_APP_ROUTER_STEMS = frozenset(
+    {
+        "layout",
+        "template",
+        "page",
+        "route",
+        "loading",
+        "error",
+        "global-error",
+        "not-found",
+        "default",
+    }
+)
+_next_app_root = _src_root / "app"
+_next_pages_root = _src_root / "pages"
 for _p, _txt in list(_blobs.items()):
-    if _p.stem.lower() in ("main", "app", "index"):
+    _stem = _p.stem.lower()
+    if _stem in _ENTRY_STEMS:
+        continue
+    if stack == "next" and (
+        (_next_app_root in _p.parents and _stem in _NEXT_APP_ROUTER_STEMS)
+        or _next_pages_root in _p.parents
+    ):
         continue
     # Fix 51 contract: hand-written files under the component out_dir are never
     # touched by the regen — only helper modules outside it (src/lib etc.) are

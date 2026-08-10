@@ -84,7 +84,12 @@ CODEX_PLUGIN_PROJECTION_KEEP="$CODEX_PLUGIN_PROJECTION_ITEMS skills"
 # copies the source into ~/.claude/plugins/cache WITHOUT following symlinks, so
 # the same directory caches as an empty shell. Claude gets its own real-file
 # staging dir; the symlink projection stays for Codex and the local bin.
-CLAUDE_PLUGIN_SRC="${UI_CLONE_CLAUDE_SRC_DIR:-$HOME/.local/share/$PLUGIN_NAME/claude-src}"
+# NOT under $HOME/.local/share/$PLUGIN_NAME: that is INSTALL_DIR's default, and
+# a curl-pipe install leaves it as a SYMLINK to the checkout — under which this
+# path resolves to <repo>/claude-src, copying the repo into itself and aiming
+# the staging rm -rf inside the working tree. Sibling path, plus the
+# inside-the-checkout assertion in prepare_claude_plugin_source.
+CLAUDE_PLUGIN_SRC="${UI_CLONE_CLAUDE_SRC_DIR:-$HOME/.local/share/$PLUGIN_NAME-claude-src}"
 # Build residue that must never reach a published plugin source.
 CLAUDE_PLUGIN_SRC_PRUNE="__pycache__ .pytest_cache .mypy_cache .ruff_cache node_modules .venv venv .DS_Store"
 # Secondary tripwire. The clean set measures ~6.4MiB; the repo root is ~50GB of
@@ -545,6 +550,122 @@ verify_claude_plugin_delivery() {
     return 1
   fi
   ok "hook delivery probe: section_gate ran from the host cache"
+  warn_if_plugin_disabled
+  prune_superseded_cache_versions
+}
+
+warn_if_plugin_disabled() {
+  # Installed and ENABLED are different states, and only one of them runs.
+  # Observed live: after a `plugin marketplace remove` + reinstall recovery,
+  # installed_plugins.json listed the plugin while settings.json enabledPlugins
+  # no longer did — hooks stopped firing in every session and nothing said so.
+  # The delivery probe above cannot catch this: it runs the hook straight from
+  # the cache, so it proves DELIVERY, never ACTIVATION.
+  #
+  # This warns rather than enabling: a deliberate user disable must be
+  # respected, and silently re-enabling would be its own surprise.
+  have python3 || return 0
+  local state
+  state="$(
+    SETTINGS="$HOME/.claude/settings.json" PLUGIN_KEY="$PLUGIN_NAME@$MARKETPLACE_NAME" \
+      python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+try:
+    data = json.loads(Path(os.environ["SETTINGS"]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)  # no readable settings -> nothing to assert
+enabled = data.get("enabledPlugins")
+if not isinstance(enabled, dict):
+    raise SystemExit(0)
+print("enabled" if enabled.get(os.environ["PLUGIN_KEY"]) else "disabled")
+PY
+  )" || return 0
+
+  if [ "$state" = "disabled" ]; then
+    warn "Plugin $PLUGIN_NAME@$MARKETPLACE_NAME is installed but NOT ENABLED — its hooks and skills will not load in any session."
+    warn "  Enable it with:  claude plugin enable $PLUGIN_NAME@$MARKETPLACE_NAME"
+    warn "  (left as-is on purpose: a deliberate disable is yours to keep)"
+  fi
+}
+
+prune_superseded_cache_versions() {
+  # The host caches per version and never reclaims old ones. Each live version
+  # also carries a ~220MB uv venv (materialised by the delivery probe above and
+  # by the first real hook fire), so a few releases reach multiple GB.
+  # `claude plugin prune` does not cover this — it removes auto-installed
+  # dependencies, not superseded versions of a directory-marketplace plugin.
+  #
+  # Only versions the host itself does not reference are removed, and the live
+  # set is READ from installed_plugins.json rather than assumed to be the
+  # manifest version: an install that half-failed can leave the host pointing
+  # at an older directory, and deleting that would break a working install.
+  local cache_root="$HOME/.claude/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME"
+  [ -d "$cache_root" ] || return 0
+  have python3 || return 0
+
+  local removed
+  removed="$(
+    CACHE_ROOT="$cache_root" \
+    INSTALLED_JSON="$HOME/.claude/plugins/installed_plugins.json" \
+    VERIFIED_VERSION="$(plugin_manifest_version || true)" \
+    PLUGIN_KEY="$PLUGIN_NAME@$MARKETPLACE_NAME" python3 - <<'PY'
+import json
+import os
+import shutil
+from pathlib import Path
+
+cache_root = Path(os.environ["CACHE_ROOT"])
+installed_json = Path(os.environ["INSTALLED_JSON"])
+key = os.environ["PLUGIN_KEY"]
+
+try:
+    data = json.loads(installed_json.read_text(encoding="utf-8"))
+    entries = data["plugins"][key]
+except (OSError, json.JSONDecodeError, KeyError, TypeError):
+    # No readable record of what is installed -> removing anything is a guess.
+    raise SystemExit(0)
+
+live = set()
+# The version just delivered and probed green is evidence, not a guess, and it
+# is protected even when the host record has not caught up. `claude plugin
+# update` is warn-and-continue, so a half-applied update reaches here with the
+# new directory in cache and the record still naming the previous version —
+# reading the live set from the record alone would delete what was just verified.
+verified = os.environ.get("VERIFIED_VERSION", "").strip()
+if verified:
+    live.add(verified)
+for entry in entries if isinstance(entries, list) else []:
+    if not isinstance(entry, dict):
+        continue
+    path = entry.get("installPath")
+    if isinstance(path, str) and path:
+        live.add(Path(path).name)
+    version = entry.get("version")
+    if isinstance(version, str) and version:
+        live.add(version)
+
+if not live:
+    raise SystemExit(0)
+
+for child in sorted(cache_root.iterdir()):
+    if not child.is_dir() or child.is_symlink() or child.name in live:
+        continue
+    try:
+        shutil.rmtree(child)
+        print(child.name)
+    except OSError:
+        pass
+PY
+  )" || return 0
+
+  if [ -n "$removed" ]; then
+    local count
+    count="$(printf '%s\n' "$removed" | grep -c .)"
+    ok "reclaimed $count superseded plugin cache version(s): $(printf '%s' "$removed" | tr '\n' ' ')"
+  fi
 }
 
 prepare_plugin_projection() {
@@ -628,17 +749,33 @@ prepare_claude_plugin_source() {
   if [ -L "$dst" ]; then
     rm -f "$dst"
   fi
-  if [ -d "$dst" ]; then
-    local resolved_dst
-    resolved_dst="$(cd "$dst" && pwd -P)"
-    if [ "$resolved_dst" = "$resolved_repo" ]; then
-      err "Refusing to stage the Claude plugin source at the repo root: $dst"
-      return 1
-    fi
-  elif [ -e "$dst" ]; then
+  if [ -e "$dst" ] && [ ! -d "$dst" ]; then
     err "Claude plugin source path exists but is not a directory: $dst"
     return 1
   fi
+
+  # Resolve the PARENT: $dst itself may not exist yet, and the collision that
+  # matters comes from a symlinked ancestor, not from $dst's own name.
+  local resolved_parent resolved_dst
+  mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+  resolved_parent="$(cd "$(dirname "$dst")" 2>/dev/null && pwd -P)" || {
+    err "Cannot resolve the Claude plugin source parent directory: $(dirname "$dst")"
+    return 1
+  }
+  resolved_dst="$resolved_parent/$(basename "$dst")"
+  # Equal to the repo, or anywhere beneath it. A staged copy inside the working
+  # tree pollutes the checkout and points this function's rm -rf at the repo.
+  case "$resolved_dst" in
+    "$resolved_repo" | "$resolved_repo"/*)
+      err "Refusing to stage the Claude plugin source inside the checkout: $dst"
+      err "  resolves to: $resolved_dst"
+      err "  repo:        $resolved_repo"
+      err "  A symlinked ancestor is the usual cause (INSTALL_DIR defaults to a path"
+      err "  that a curl-pipe install may leave symlinked at the checkout)."
+      err "  Set UI_CLONE_CLAUDE_SRC_DIR to a directory outside the repo."
+      return 1
+      ;;
+  esac
 
   # Rebuild from scratch: a stale file left by a previous item list would ship
   # forever otherwise, and the whole point of this directory is that its

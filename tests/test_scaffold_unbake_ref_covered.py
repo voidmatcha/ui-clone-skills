@@ -1366,3 +1366,855 @@ def test_desc_unbake_kill_switch(tmp_path: Path) -> None:
     proc = _run(ref, impl, {"UI_CLONE_UNBAKE_REF_COVERED": "0"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert 'fontSize: "164px"' in _blob(impl), "kill-switch must keep every bake"
+
+
+# A SIBLING is load-bearing. With a single-child chain from <body>, the root
+# scope class resolves down to the module class itself, which lands it in
+# `_unbake_root_tokens()` and credits the descendant rule for the wrong reason
+# — the fixture then passes while the real ref still fails. Keeping a sibling
+# makes the module class a non-root ancestor, as it is in realfood-v2.
+_MODULE_H2 = {
+    "tag": "div",
+    "class": "page_wrapper",
+    "styles": {},
+    "children": [
+        {
+            "tag": "div",
+            "class": "solvable_problem",
+            "styles": {},
+            "children": [
+                {"tag": "h2", "class": None, "styles": {"font-size": "96px"}, "children": []},
+            ],
+        },
+        {"tag": "div", "class": "other_block", "styles": {}, "children": []},
+    ],
+}
+
+
+def _emit_under_root(tmp_path: Path, node: dict, css: str) -> tuple[str, str]:
+    """Emit with an explicit App-root class, so module classes are NON-root.
+
+    `_unbake_root_tokens()` reads the classes of the structure root. When the
+    root is a class-less <body>, the root scope class is synthesized by walking
+    down, and in a shallow fixture it resolves onto the very module class under
+    test — crediting the descendant rule for the wrong reason and turning these
+    tests green while realfood-v2 still fails. Naming the root pins it.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "tag": "body",
+        "class": "app_root",
+        "styles": {},
+        "children": [
+            {"tag": "section", "class": "sec", "styles": {}, "children": [node]},
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "sec"}]}),
+        encoding="utf-8",
+    )
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(css, encoding="utf-8")
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return _blob(impl), proc.stderr
+
+
+def test_non_root_ancestor_descendant_tag_credit_drops_the_bake(tmp_path: Path) -> None:
+    """`.moduleClass h2` must credit an h2 proven to sit under .moduleClass.
+
+    realfood-v2 sizes its headings from a :root custom property that steps
+    96px -> 52px (<=1120) -> 32px (<=580). The consuming rules are
+    `.solvable_problem h2` and friends. `_UNBAKE_DESC` indexes that shape but
+    only credits it when the ancestor is a structure-ROOT token, and these
+    module-level section classes are not. Measured on a clean scaffold: the
+    heading keeps inline font-size 96px at 1440/1100/900/600 while the ref
+    reflows to 52px — ~2.9x too tall below the breakpoint.
+    """
+    blob, err = _emit_under_root(
+        tmp_path,
+        json.loads(json.dumps(_MODULE_H2)),
+        ".solvable_problem h2 { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' not in blob, blob
+    assert "un-baked" in err, err
+
+
+def test_non_root_ancestor_descendant_class_credit_drops_the_bake(tmp_path: Path) -> None:
+    """`.moduleClass .childClass` is not represented by ANY index shape today.
+
+    `_UNBAKE_BASE` requires the selector to be exactly one bare class,
+    `_UNBAKE_EXACT` requires tag+classes with no combinator, and
+    `_UNBAKE_DESC` requires a bare TAG subject. A two-class descendant matches
+    none of them, so `.solvable_problem .disintegrating_text` credits nothing
+    and its 96px bake survives at every width.
+    """
+    node = {
+        "tag": "div",
+        "class": "solvable_problem",
+        "styles": {},
+        "children": [
+            {
+                "tag": "div",
+                "class": "disintegrating_text",
+                "styles": {"font-size": "96px"},
+                "children": [],
+            },
+        ],
+    }
+    blob, err = _emit_under_root(
+        tmp_path,
+        node,
+        ".solvable_problem .disintegrating_text { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' not in blob, blob
+    assert "un-baked" in err, err
+
+
+def test_non_root_ancestor_descendant_class_does_not_self_credit(tmp_path: Path) -> None:
+    node = {
+        "tag": "div",
+        "class": "solvable_problem",
+        "styles": {"font-size": "96px"},
+        "children": [],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".solvable_problem .solvable_problem { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' in blob, "current node must not satisfy its own ancestor selector"
+
+
+def test_non_root_ancestor_descendant_stripped_subject_token_keeps_bake(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "solvable_problem",
+        "styles": {},
+        "children": [
+            {
+                "tag": "div",
+                "class": "swiper-slide-active disintegrating_text",
+                "styles": {"font-size": "96px"},
+                "children": [],
+            },
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".solvable_problem .swiper-slide-active { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' in blob, "stripped runtime subject class must not credit"
+
+
+def test_descendant_class_credit_uses_final_io_stripped_ancestor_class(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "tag": "body",
+        "class": "app_root",
+        "styles": {},
+        "children": [
+            {
+                "tag": "section",
+                "class": "sec",
+                "styles": {},
+                "children": [
+                    {
+                        "tag": "div",
+                        "class": "module active",
+                        "styles": {},
+                        "children": [
+                            {
+                                "tag": "div",
+                                "class": "child",
+                                "styles": {"font-size": "96px"},
+                                "children": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "sec"}]}),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "selector": ".module.active",
+                        "trigger": "IntersectionObserver viewport reveal",
+                        "animation": {
+                            "type": "class-toggle",
+                            "property": "className",
+                            "from": {"className": "module"},
+                            "to": {"className": "module active"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(
+        ".active .child { font-size: var(--h-text-size); }",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _blob(impl)
+    module_line = next(line for line in blob.splitlines() if 'className="module' in line)
+    assert 'className="module active"' not in module_line
+    assert 'data-io-class-reveal="active"' in module_line
+    assert '"96px"' in blob, "children must not credit an ancestor class absent in JSX"
+
+
+def test_root_ancestor_descendant_class_credit_drops_the_bake(tmp_path: Path) -> None:
+    node = {
+        "tag": "div",
+        "class": "child",
+        "styles": {"font-size": "96px"},
+        "children": [],
+    }
+    blob, err = _emit_under_root(
+        tmp_path,
+        node,
+        ".app_root .child { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' not in blob, blob
+    assert "un-baked" in err, err
+
+
+def test_root_ancestor_descendant_class_does_not_self_credit_app_root(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "tag": "body",
+        "class": "app_root child",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "section", "class": "sec", "styles": {}, "children": []},
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "sec"}]}),
+        encoding="utf-8",
+    )
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(
+        ".app_root .child { font-size: var(--h-text-size); }",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert '"96px"' in _blob(impl), "App root must not credit itself as its own ancestor"
+
+
+def test_io_stripped_root_token_does_not_credit_descendant_tag(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "tag": "body",
+        "class": "app_root active",
+        "styles": {},
+        "children": [
+            {
+                "tag": "section",
+                "class": "sec",
+                "styles": {},
+                "children": [
+                    {"tag": "h2", "class": "", "styles": {"font-size": "96px"}, "children": []}
+                ],
+            },
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "sec"}]}),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "selector": ".app_root.active",
+                        "trigger": "IntersectionObserver viewport reveal",
+                        "animation": {
+                            "type": "class-toggle",
+                            "property": "className",
+                            "from": {"className": "app_root"},
+                            "to": {"className": "app_root active"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(
+        ".active h2 { font-size: var(--h-text-size); }",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _blob(impl)
+    root_line = next(line for line in blob.splitlines() if 'className="app_root' in line)
+    assert 'className="app_root active"' not in root_line
+    assert 'data-io-class-reveal="active"' in root_line
+    assert '"96px"' in blob, "stripped root active class must not credit h2 descendants"
+
+
+def test_io_stripped_root_token_does_not_credit_descendant_class(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "tag": "body",
+        "class": "app_root active",
+        "styles": {},
+        "children": [
+            {
+                "tag": "section",
+                "class": "sec",
+                "styles": {},
+                "children": [
+                    {
+                        "tag": "div",
+                        "class": "child",
+                        "styles": {"font-size": "96px"},
+                        "children": [],
+                    }
+                ],
+            },
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "sec"}]}),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "selector": ".app_root.active",
+                        "trigger": "IntersectionObserver viewport reveal",
+                        "animation": {
+                            "type": "class-toggle",
+                            "property": "className",
+                            "from": {"className": "app_root"},
+                            "to": {"className": "app_root active"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(
+        ".active .child { font-size: var(--h-text-size); }",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _blob(impl)
+    root_line = next(line for line in blob.splitlines() if 'className="app_root' in line)
+    assert 'className="app_root active"' not in root_line
+    assert 'data-io-class-reveal="active"' in root_line
+    assert '"96px"' in blob, "stripped root active class must not credit child descendants"
+
+
+def test_io_stripped_default_main_root_token_does_not_credit_descendant_tag(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "class": "app_root active",
+        "styles": {},
+        "children": [
+            {
+                "tag": "section",
+                "class": "sec",
+                "styles": {},
+                "children": [
+                    {"tag": "h2", "class": "", "styles": {"font-size": "96px"}, "children": []}
+                ],
+            },
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "sec"}]}),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "selector": "main.app_root.active",
+                        "trigger": "IntersectionObserver viewport reveal",
+                        "animation": {
+                            "type": "class-toggle",
+                            "property": "className",
+                            "from": {"className": "app_root"},
+                            "to": {"className": "app_root active"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(
+        ".active h2 { font-size: var(--h-text-size); }",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _blob(impl)
+    root_line = next(line for line in blob.splitlines() if 'className="app_root' in line)
+    assert 'className="app_root active"' not in root_line
+    assert 'data-io-class-reveal="active"' in root_line
+    assert '"96px"' in blob, "default main root semantics must drive root token stripping"
+
+
+def test_root_ancestor_descendant_tag_does_not_self_credit_app_root(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "tag": "body",
+        "class": "app_root",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "section", "class": "sec", "styles": {}, "children": []},
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "sec"}]}),
+        encoding="utf-8",
+    )
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(
+        ".app_root body { font-size: var(--h-text-size); }",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert '"96px"' in _blob(impl), "App root must not tag-credit itself as descendant"
+
+
+def test_inherited_font_size_char_span_drops_the_bake(tmp_path: Path) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "96px"}, "children": []},
+        ],
+    }
+    blob, err = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' not in blob, blob
+    assert "un-baked" in err, err
+
+
+def test_inherited_font_size_multi_level_word_spans_drop_the_bake(tmp_path: Path) -> None:
+    node = {
+        "tag": "p",
+        "class": "copy",
+        "styles": {"font-size": "42px"},
+        "children": [
+            {
+                "tag": "span",
+                "class": "word",
+                "styles": {"font-size": "42px"},
+                "children": [
+                    {
+                        "tag": "span",
+                        "class": "char",
+                        "styles": {"font-size": "42px"},
+                        "children": [],
+                    }
+                ],
+            }
+        ],
+    }
+    blob, err = _emit_under_root(
+        tmp_path,
+        node,
+        ".copy { font-size: var(--body-size); }",
+    )
+    assert '"42px"' not in blob, blob
+    assert "un-baked" in err, err
+
+
+def test_inherited_font_size_inline_props_keeps_child_bake(tmp_path: Path) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {
+                "tag": "span",
+                "class": "char",
+                "styles": {"font-size": "96px"},
+                "inlineProps": ["font-size"],
+                "children": [],
+            },
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' in blob, "inline font-size child must keep its bake"
+
+
+def test_inherited_font_size_unequal_child_value_keeps_bake(tmp_path: Path) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "72px"}, "children": []},
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); }",
+    )
+    assert '"72px"' in blob, "different child font-size is not inherited proof"
+
+
+def test_inherited_font_size_uncredited_parent_keeps_child_bake(tmp_path: Path) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "96px"}, "children": []},
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".other { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' in blob, "uncredited parent cannot prove inherited child font-size"
+
+
+def test_stale_font_credit_marker_cannot_release_height_floor(tmp_path: Path) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "text": "Captured title",
+        "_unbakeFontCredited": True,
+        "styles": {"font-size": "96px", "height": "144px"},
+        "children": [],
+    }
+    blob, _ = _emit_under_root(tmp_path, node, ".other { font-size: 52px; }")
+    assert 'minHeight: "144px"' in blob, "render-local proof must not persist in input data"
+
+
+def test_inherited_font_size_bare_tag_own_css_risk_keeps_child_bake(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "96px"}, "children": []},
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); } span { font-size: 12px; }",
+    )
+    assert '"96px"' in blob, "unhandled own bare-tag font-size CSS must block inheritance"
+
+
+def test_inherited_font_size_unrelated_escaped_css_risk_does_not_block(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {
+                "tag": "span",
+                "class": "disintegrating_char",
+                "styles": {"font-size": "96px"},
+                "children": [],
+            },
+        ],
+    }
+    blob, err = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); } "
+        ".md\\:text-sm { font-size: 14px; } "
+        ".file\\:text-sm::file-selector-button { font-size: 14px; }",
+    )
+    assert '"96px"' not in blob, blob
+    assert "un-baked" in err, err
+
+
+def test_inherited_font_size_not_class_own_css_risk_keeps_child_bake(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "96px"}, "children": []},
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); } .char:not(.ready) { font-size: 12px; }",
+    )
+    assert '"96px"' in blob, "unsupported :not() on the child class must block inheritance"
+
+
+def test_inherited_font_size_root_scoped_pseudo_risk_keeps_child_bake(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "96px"}, "children": []},
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); } "
+        ".app_root .char:not(.ready) { font-size: 12px; }",
+    )
+    assert '"96px"' in blob, "unsupported root-scoped own CSS must block inheritance"
+
+
+def test_inherited_font_size_not_tag_own_css_risk_keeps_child_bake(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "96px"}, "children": []},
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); } span:not(.ready) { font-size: 12px; }",
+    )
+    assert '"96px"' in blob, "unsupported :not() on the child tag must block inheritance"
+
+
+def test_inherited_font_size_unrelated_ancestor_tag_risk_does_not_block(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "96px"}, "children": []},
+        ],
+    }
+    blob, err = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); } .doc_title span { font-size: 12px; }",
+    )
+    assert '"96px"' not in blob, blob
+    assert "un-baked" in err, err
+
+
+def test_inherited_font_size_child_combinator_own_css_risk_keeps_child_bake(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "headline",
+        "styles": {"font-size": "96px"},
+        "children": [
+            {"tag": "span", "class": "char", "styles": {"font-size": "96px"}, "children": []},
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".headline { font-size: var(--h-text-size); } .headline > span { font-size: 12px; }",
+    )
+    assert '"96px"' in blob, "unhandled child-combinator font-size CSS must block inheritance"
+
+
+def test_inherited_font_size_io_stripped_parent_keeps_child_bake(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    structure = {
+        "tag": "body",
+        "class": "app_root",
+        "styles": {},
+        "children": [
+            {
+                "tag": "section",
+                "class": "sec",
+                "styles": {},
+                "children": [
+                    {
+                        "tag": "div",
+                        "class": "headline active",
+                        "styles": {"font-size": "96px"},
+                        "children": [
+                            {
+                                "tag": "span",
+                                "class": "char",
+                                "styles": {"font-size": "96px"},
+                                "children": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    (ref / "structure.json").write_text(json.dumps(structure), encoding="utf-8")
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"index": 0, "tag": "section", "cls": "sec"}]}),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "selector": ".headline.active",
+                        "trigger": "IntersectionObserver viewport reveal",
+                        "animation": {
+                            "type": "class-toggle",
+                            "property": "className",
+                            "from": {"className": "headline"},
+                            "to": {"className": "headline active"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "css").mkdir()
+    (ref / "css" / "main.css").write_text(
+        ".active { font-size: var(--h-text-size); }",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl"
+    proc = _run(ref, impl)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    blob = _blob(impl)
+    parent_line = next(line for line in blob.splitlines() if 'className="headline' in line)
+    assert 'className="headline active"' not in parent_line
+    assert 'data-io-class-reveal="active"' in parent_line
+    assert '"96px"' in blob, "IO-stripped parent class must not create inherited proof"
+
+
+def test_inherited_font_size_line_in_the_sand_child_rule_keeps_child_bake(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "tag": "div",
+        "class": "lineInTheSand",
+        "styles": {},
+        "children": [
+            {
+                "tag": "div",
+                "class": "container",
+                "styles": {"font-size": "96px"},
+                "children": [
+                    {"tag": "p", "class": "", "styles": {"font-size": "96px"}, "children": []}
+                ],
+            }
+        ],
+    }
+    blob, _ = _emit_under_root(
+        tmp_path,
+        node,
+        ".container { font-size: var(--h-text-size); } "
+        ".lineInTheSand > .container p { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' in blob, "excluded lineInTheSand descendant rule must not be inherited away"
+
+
+def test_child_combinator_descendant_keeps_the_bake(tmp_path: Path) -> None:
+    """`>` is not a descendant proof — the emitted tree may nest a wrapper
+    between them, so the rule would not apply and nothing takes over."""
+    blob, _ = _emit_under_root(
+        tmp_path,
+        json.loads(json.dumps(_MODULE_H2)),
+        ".solvable_problem > h2 { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' in blob, blob
+
+
+def test_descendant_credit_requires_the_ancestor_on_this_nodes_chain(
+    tmp_path: Path,
+) -> None:
+    """A rule anchored on a DIFFERENT ancestor must not credit this node.
+
+    Without an ancestry check, indexing `.other_module h2` would drop the bake
+    on every h2 in the document, including ones no rule sizes — computing auto
+    at capture width (the forensic-ghost regression).
+    """
+    blob, _ = _emit_under_root(
+        tmp_path,
+        json.loads(json.dumps(_MODULE_H2)),
+        ".other_module h2 { font-size: var(--h-text-size); }",
+    )
+    assert '"96px"' in blob, blob

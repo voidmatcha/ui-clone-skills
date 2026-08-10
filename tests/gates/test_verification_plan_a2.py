@@ -242,7 +242,7 @@ def test_verification_plan_default_tier_is_comprehensive(tmp_path: Path) -> None
 def test_verification_plan_quick_tier_filters_to_static_checks(tmp_path: Path) -> None:
     """tier=quick must emit only the static / JSON-comparison checks.
 
-    Static-only set (with all signals firing): hydration-check,
+    Static-only set (with all signals firing): unresolved-imports, hydration-check,
     tailwind-transform-conflict, transition-spec-coverage, runtime-spec-coverage,
     plus the static mirror-detection gates (text-fidelity-check, dom-mirror-check)
     and proxy-mirror-check, which blocks original-runtime proxy/cache mirrors;
@@ -258,6 +258,10 @@ def test_verification_plan_quick_tier_filters_to_static_checks(tmp_path: Path) -
     assert plan["tier"] == "quick"
     ids = {c["id"] for c in plan["requiredChecks"]}
     assert ids == {
+        # Pure static import-graph scan over src/**/*.tsx — no browser, no
+        # node_modules, no build. Belongs at quick because a tree that cannot
+        # resolve its own imports must fail in the inner loop, not after one.
+        "unresolved-imports",
         "hydration-check",
         "tailwind-transform-conflict",
         "transition-spec-coverage",

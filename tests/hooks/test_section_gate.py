@@ -123,6 +123,33 @@ class TestSectionGate:
         assert data.get("decision") == "block"
         assert "verify-stamp.json" in data.get("reason", "")
 
+    def test_markerless_clone_does_not_borrow_foreign_repo_root_impl(
+        self, tmp_path: Path
+    ) -> None:
+        """A root impl owned by another ref must not block a fresh clone."""
+        search_root = make_search_root(tmp_path)
+        stale_ref = make_ref_dir(search_root, "stale-run")
+        fresh_ref = make_ref_dir(search_root, "fresh-run")
+        (fresh_ref / "structure.json").write_text(
+            '{"tag": "body", "children": []}', encoding="utf-8"
+        )
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <main />}", encoding="utf-8"
+        )
+        (tmp_path / "impl" / ".ref-dir").write_text(
+            str(stale_ref) + "\n", encoding="utf-8"
+        )
+
+        result = run_hook(
+            self.MODULE,
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", result.stdout
+
     def test_wip_marker_no_result_txt_outputs_block(self, tmp_path: Path) -> None:
         """WIP marker present, no result.txt → block JSON."""
         search_root = make_search_root(tmp_path)

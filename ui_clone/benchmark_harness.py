@@ -1,7 +1,8 @@
 """ui_clone.benchmark_harness — headless Python-driven benchmark loop.
 
 Drives Claude in headless `claude --print` mode with PER-ITER FOCUSED
-PROMPTS for unattended automation paths (cron, CI, batch runs). NOT
+PROMPTS and a fresh Claude session per iteration for unattended automation
+paths (cron, CI, batch runs). NOT
 the canonical user-facing benchmark — that's the `benchmark` skill,
 which is LLM-driven and matches real skill-use semantics. This module
 exists for headless drivers that need a deterministic Python loop +
@@ -492,7 +493,7 @@ def run_loop(args: argparse.Namespace) -> str:
     impl_dir = Path(args.impl_dir).resolve() if args.impl_dir else ref_dir.parent / "impl"
     reuse_frozen_ref = getattr(args, "reuse_frozen_ref", None)
     plugin_dir = Path(__file__).resolve().parents[1]
-    session_id = args.session_id or str(uuid.uuid4())
+    first_session_id = args.session_id or str(uuid.uuid4())
 
     started = time.time()
     iter_count = 0
@@ -511,7 +512,8 @@ def run_loop(args: argparse.Namespace) -> str:
         "event": "start",
         "ref_dir": str(ref_dir),
         "impl_dir": str(impl_dir),
-        "session_id": session_id,
+        "session_id": first_session_id,
+        "session_scope": "per-iteration",
         "max_iter": args.max_iter,
         "token_budget": args.token_budget,
         "wall_budget_s": args.wall_budget_s,
@@ -583,6 +585,9 @@ def run_loop(args: argparse.Namespace) -> str:
 
         # Build prompt + invoke
         iter_count += 1
+        iteration_session_id = (
+            first_session_id if iter_count == 1 else str(uuid.uuid4())
+        )
         budget_remaining = max(0, args.token_budget - total_tokens)
         prompt = build_iter_prompt(
             ref_dir, impl_dir, args.orig_url, args.impl_url,
@@ -596,10 +601,17 @@ def run_loop(args: argparse.Namespace) -> str:
             "unmet_count": len(unmet),
             "unmet_first_3": unmet[:3],
             "prompt_chars": len(prompt),
+            "session_id": iteration_session_id,
         })
 
         t0 = time.time()
-        result = invoke_claude(prompt, session_id, plugin_dir, cwd=plugin_dir, iter_count=iter_count)
+        result = invoke_claude(
+            prompt,
+            iteration_session_id,
+            plugin_dir,
+            cwd=plugin_dir,
+            iter_count=iter_count,
+        )
         elapsed = time.time() - t0
         iter_tokens = _extract_tokens(result)
         total_tokens += iter_tokens
@@ -693,7 +705,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--token-budget", type=int, default=500_000, help="cumulative input+output tokens budget")
     p.add_argument("--wall-budget-s", type=int, default=14400, help="wall-clock budget in seconds (default 4h)")
-    p.add_argument("--session-id", default=None, help="reuse a Claude session-id across iters (auto-generated if absent)")
+    p.add_argument(
+        "--session-id",
+        default=None,
+        help=(
+            "Claude session ID for the first iteration; later iterations "
+            "always use fresh UUIDs"
+        ),
+    )
     return p
 
 

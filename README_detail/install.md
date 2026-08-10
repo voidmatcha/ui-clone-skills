@@ -21,11 +21,11 @@ The installer is idempotent: it bootstraps shared dependencies, registers the lo
 ## Use a development checkout as the plugin source
 
 When you want Claude Code and/or Codex to use a specific local checkout (for
-example `~/Documents/ui-skills`) instead of the curl-installed checkout under
+example `/path/to/your/ui-clone-skills-checkout`) instead of the curl-installed checkout under
 `~/.local/share/ui-clone-skills`, run the installer from that checkout:
 
 ```bash
-cd ~/Documents/ui-skills
+cd /path/to/your/ui-clone-skills-checkout
 ./install.sh --no-deps
 ```
 
@@ -34,13 +34,13 @@ source of truth, then recreates the shared plugin projection at
 `~/plugins/ui-clone-skills` with symlinks back to the checkout:
 
 ```text
-~/plugins/ui-clone-skills/.claude-plugin -> ~/Documents/ui-skills/.claude-plugin
-~/plugins/ui-clone-skills/.codex-plugin -> ~/Documents/ui-skills/.codex-plugin
-~/plugins/ui-clone-skills/hooks         -> ~/Documents/ui-skills/hooks
-~/plugins/ui-clone-skills/ui_clone      -> ~/Documents/ui-skills/ui_clone
-~/plugins/ui-clone-skills/scripts       -> ~/Documents/ui-skills/scripts
+~/plugins/ui-clone-skills/.claude-plugin -> /path/to/your/ui-clone-skills-checkout/.claude-plugin
+~/plugins/ui-clone-skills/.codex-plugin -> /path/to/your/ui-clone-skills-checkout/.codex-plugin
+~/plugins/ui-clone-skills/hooks         -> /path/to/your/ui-clone-skills-checkout/hooks
+~/plugins/ui-clone-skills/ui_clone      -> /path/to/your/ui-clone-skills-checkout/ui_clone
+~/plugins/ui-clone-skills/scripts       -> /path/to/your/ui-clone-skills-checkout/scripts
 ~/plugins/ui-clone-skills/skills/<public-skill>
-    -> ~/Documents/ui-skills/skills/<public-skill>
+    -> /path/to/your/ui-clone-skills-checkout/skills/<public-skill>
 ```
 
 Codex still lists the plugin as `ui-clone-skills@local` with path

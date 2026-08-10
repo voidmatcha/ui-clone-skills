@@ -146,6 +146,30 @@ def _is_cross_scratch_impl(ref_dir: Path, impl_dir: Path) -> bool:
     )
 
 
+def _impl_backlink_mismatch(ref_dir: Path, impl_dir: Path) -> bool:
+    """Return True when an impl tree explicitly belongs to another ref.
+
+    Convention candidates without a backlink remain valid for legacy runs.
+    A present, non-empty `.ref-dir` is an ownership claim, though, and the Stop
+    hook must not borrow that tree for a different ref. This mirrors the
+    handshake enforced by the pipeline and shell impl-root resolvers.
+    """
+    backlink = impl_dir / ".ref-dir"
+    if not backlink.is_file():
+        return False
+    try:
+        lines = backlink.read_text(encoding="utf-8").strip().splitlines()
+        recorded = lines[0].strip() if lines else ""
+    except OSError:
+        return False
+    if not recorded:
+        return False
+    try:
+        return Path(recorded).expanduser().resolve() != ref_dir.resolve()
+    except OSError:
+        return False
+
+
 def _resolve_impl_dir(
     ref_dir: Path,
     fallback_root: Path | None = None,
@@ -231,7 +255,11 @@ def _resolve_impl_dir(
     except (IndexError, OSError):
         pass
     for cand in candidates:
-        if cand.is_dir() and not _is_cross_scratch_impl(ref_dir, cand):
+        if (
+            cand.is_dir()
+            and not _is_cross_scratch_impl(ref_dir, cand)
+            and not _impl_backlink_mismatch(ref_dir, cand)
+        ):
             return cand
     return None
 
