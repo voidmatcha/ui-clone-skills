@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import re
 import sys
@@ -709,9 +710,156 @@ def _progress_domain(_v):
 def _numeric_scrub_range(_v):
     if not isinstance(_v, list) or len(_v) < 2:
         return None
-    if not all(isinstance(_t, (int, float)) and not isinstance(_t, bool) for _t in _v):
+    if not all(
+        isinstance(_t, (int, float)) and not isinstance(_t, bool) and math.isfinite(_t)
+        for _t in _v
+    ):
         return None
     return _v
+
+
+def _ascending_numeric_range(_v):
+    _nums = _numeric_scrub_range(_v)
+    if _nums is None:
+        return None
+    _ascending = all(_nums[_i] <= _nums[_i + 1] for _i in range(len(_nums) - 1))
+    return _nums if _ascending else None
+
+
+def _scroll_state_machine_transform(_input, _output, _unit):
+    _inp = _ascending_numeric_range(_input)
+    _out = _numeric_scrub_range(_output)
+    if _inp is None or _out is None or len(_inp) != len(_out) or _unit != "px":
+        return None
+    return {
+        "property": "top",
+        "input": json.dumps(_inp),
+        "output": json.dumps(_out),
+        "unit": "px",
+    }
+
+
+_SCROLL_Y_TOP_RE = re.compile(
+    r"^\s*transform\(\s*scrollY\s*,\s*"
+    r"\[(?P<input>[^\]]+)\]\s*,\s*"
+    r"\[(?P<output>(?:\s*['\"]-?\d+(?:\.\d+)?px['\"]\s*,?)+)\]\s*\)"
+    r"(?:\s+clamped(?:\s+(?:—|-)\s+measured\s+"
+    r"-?\d+(?:\.\d+)?px@-?\d+(?:\.\d+)?"
+    r"(?:,\s*-?\d+(?:\.\d+)?px@-?\d+(?:\.\d+)?)*"
+    r"\s+and\s+flat\s+-?\d+(?:\.\d+)?px\s+for\s+every\s+stop\s+>=\s+"
+    r"-?\d+(?:\.\d+)?)?)?\s*$"
+)
+
+
+def _parse_number_list(_raw):
+    _parts = [p.strip() for p in _raw.split(",")]
+    if not _parts or any(not p for p in _parts):
+        return None
+    try:
+        return [float(p) for p in _parts]
+    except ValueError:
+        return None
+
+
+def _parse_px_list(_raw):
+    _vals = re.findall(r"['\"]\s*(-?\d+(?:\.\d+)?)px\s*['\"]", _raw)
+    if not _vals:
+        return None
+    return [float(v) for v in _vals]
+
+
+def _scroll_state_machine_from_legacy_top(_value):
+    if not isinstance(_value, str):
+        return None
+    _match = _SCROLL_Y_TOP_RE.fullmatch(_value)
+    if not _match:
+        return None
+    return _scroll_state_machine_transform(
+        _parse_number_list(_match.group("input")),
+        _parse_px_list(_match.group("output")),
+        "px",
+    )
+
+
+def _add_scroll_state_machine_site(_sites, _claimed, _site):
+    if not _site:
+        return
+    _transforms = [
+        _xf
+        for _xf in (_site.get("transforms") or [])
+        if isinstance(_xf, dict) and _xf.get("property") == "top"
+    ]
+    if not _transforms:
+        return
+    _key = (_site.get("selector"), "top")
+    if not _key[0] or _key in _claimed:
+        return
+    _site["transforms"] = [_transforms[0]]
+    _claimed.add(_key)
+    _sites.append(_site)
+
+
+_scroll_state_machine_sites = []
+_scroll_state_machine_claims = set()
+for _t in ((transition_spec.get("transitions") if isinstance(transition_spec, dict) else []) or []):
+    if not isinstance(_t, dict):
+        continue
+    _anim = _t.get("animation")
+    if not isinstance(_anim, dict):
+        continue
+    if _t.get("type") != "scroll-state-machine" and _anim.get("type") != "scroll-state-machine":
+        continue
+    _selector = _t.get("selector") or _t.get("target")
+    if not isinstance(_selector, str) or not _selector:
+        continue
+    _spec_id = _t.get("id") if isinstance(_t.get("id"), str) else ""
+    _channels = _anim.get("channels")
+    if isinstance(_channels, list):
+        for _ch in _channels:
+            if not isinstance(_ch, dict):
+                continue
+            if _ch.get("property") != "top" or _ch.get("inputDomain") != "scroll-y-px":
+                continue
+            _xf = _scroll_state_machine_transform(
+                _ch.get("inputRange"),
+                _ch.get("outputRange"),
+                _ch.get("unit"),
+            )
+            _add_scroll_state_machine_site(
+                _scroll_state_machine_sites,
+                _scroll_state_machine_claims,
+                {
+                    "specId": _spec_id,
+                    "selector": _selector,
+                    "inputDomain": "scroll-y-px",
+                    "transforms": [_xf] if _xf else [],
+                    "source": f"transition-spec.animation.channels:{_spec_id}",
+                },
+            )
+    _xf = _scroll_state_machine_from_legacy_top(_anim.get("top"))
+    _add_scroll_state_machine_site(
+        _scroll_state_machine_sites,
+        _scroll_state_machine_claims,
+        {
+            "specId": _spec_id,
+            "selector": _selector,
+            "inputDomain": "scroll-y-px",
+            "transforms": [_xf] if _xf else [],
+            "source": "transition-spec.animation.top",
+        },
+    )
+
+scroll_state_machine_plan = {
+    "required": bool(_scroll_state_machine_sites),
+    "count": len(_scroll_state_machine_sites),
+    "sites": _scroll_state_machine_sites,
+    "note": (
+        "Raw bundle-literal scrollY pixels are document-height independent and "
+        "selector-scoped. Drive these state machines from window scrollY pixels "
+        "and apply only the declared selector/property channel."
+    ) if _scroll_state_machine_sites else "",
+}
+
 for _cs in (bundle_extraction.get("constructionSites", []) if isinstance(bundle_extraction, dict) else []):
     if not isinstance(_cs, dict) or _cs.get("trigger") != "scroll-scrub":
         continue
@@ -1513,6 +1661,7 @@ plan = {
     "smoothScroll": smooth_scroll_plan,
     "scrollListener": scroll_listener_plan,
     "scrollDriven": scroll_driven_plan,
+    "scrollStateMachine": scroll_state_machine_plan,
     "scrollScrub": scroll_scrub_plan,
     "scrollLatch": scroll_latch_plan,
     "introAnimation": intro_plan,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re as _re
 import sys
 from pathlib import Path
@@ -699,6 +700,7 @@ _SCRUB_PROP_KEYS = (
     "scale", "scaleX", "scaleY", "opacity", "x", "y", "rotate",
     "width", "height", "borderRadius",
 )
+_STATE_MACHINE_PIXEL_PROP_UNITS = {"top": "px"}
 
 
 def _parse_scrub_range(s: Any) -> list[float] | None:
@@ -730,6 +732,16 @@ def _normalized_scrub_input(values: list[float]) -> bool:
     )
 
 
+def _finite_ascending_input(values: list[float]) -> bool:
+    return all(math.isfinite(value) for value in values) and all(
+        left <= right for left, right in zip(values, values[1:])
+    )
+
+
+def _finite_values(values: list[float]) -> bool:
+    return all(math.isfinite(value) for value in values)
+
+
 def _scrub_band_plausible(prop: str, output: list[float]) -> bool:
     """Guard against the bundle resolver mis-binding a property: an opacity band
     must stay in [0, 1.5] and a scale band in [0, 8]. Implausible ranges (e.g.
@@ -746,12 +758,12 @@ def _scrub_band_plausible(prop: str, output: list[float]) -> bool:
 
 
 _ss = plan.get("scrollScrub")
+_linked_sites: list[dict[str, Any]] = []
 if isinstance(_ss, dict) and _ss.get("required"):
     # Runtime sampling is keyed to document scroll progress and can contain
     # several descendant selectors (including duplicate selectors with distinct
     # curves). A section-level <ScrollScrub> wrapper targets the wrong element;
     # emit a selector-scoped singleton for these sites instead.
-    _linked_sites: list[dict[str, Any]] = []
     for _site in _ss.get("sites", []) or []:
         if not isinstance(_site, dict):
             continue
@@ -794,6 +806,7 @@ if isinstance(_ss, dict) and _ss.get("required"):
         _linked = {
             "selector": _selector.strip(),
             "selectorIndex": _selector_index,
+            "inputDomain": "progress",
             "progressSource": (
                 "target-offset"
                 if _progress_source == "target-offset"
@@ -820,29 +833,72 @@ if isinstance(_ss, dict) and _ss.get("required"):
             _linked["offset"] = _offset
         _linked_sites.append(_linked)
 
-    if _linked_sites:
-        _emit("scrollLinkedStyleSites.ts", (
-            "/** Runtime-measured scroll-linked style curves. */\n"
-            'import type { UseScrollOptions } from "framer-motion";\n'
-            "export type LinkedBand = [number[], number[]];\n"
-            "export interface ScrollLinkedStyleSite {\n"
-            "  selector: string;\n"
-            "  selectorIndex: number;\n"
-            "  scope?: string;\n"
-            '  progressSource: "document-progress" | "target-offset";\n'
-            "  offset?: UseScrollOptions[\"offset\"];\n"
-            "  bands: Record<string, LinkedBand>;\n"
-            "  units?: Record<string, string>;\n"
-            "}\n\n"
-            "export const scrollLinkedStyleSites: ScrollLinkedStyleSite[] = "
-            + json.dumps(_linked_sites, ensure_ascii=False)
-            + ";\n"
-        ))
-        _emit("ScrollLinkedStyleDriver.tsx", '''"use client";
+_sm = plan.get("scrollStateMachine")
+if isinstance(_sm, dict) and _sm.get("required"):
+    for _site in _sm.get("sites", []) or []:
+        if not isinstance(_site, dict):
+            continue
+        if _site.get("inputDomain") != "scroll-y-px":
+            continue
+        _selector = _site.get("selector")
+        if not isinstance(_selector, str) or not _selector.strip():
+            continue
+        _bands: dict[str, Any] = {}
+        _units: dict[str, str] = {}
+        for _t in _site.get("transforms", []) or []:
+            if not isinstance(_t, dict):
+                continue
+            _prop = _t.get("property")
+            if _prop not in _STATE_MACHINE_PIXEL_PROP_UNITS or _prop in _bands:
+                continue
+            _unit = _t.get("unit")
+            if _unit != _STATE_MACHINE_PIXEL_PROP_UNITS[_prop]:
+                continue
+            _inp = _parse_scrub_range(_t.get("input"))
+            _outp = _parse_scrub_range(_t.get("output"))
+            if not _inp or not _outp or len(_inp) != len(_outp):
+                continue
+            if not _finite_ascending_input(_inp) or not _finite_values(_outp):
+                continue
+            _bands[_prop] = [_inp, _outp]
+            _units[_prop] = _unit
+        if not _bands:
+            continue
+        _selector_index = _site.get("selectorIndex")
+        if not isinstance(_selector_index, int) or _selector_index < 0:
+            _selector_index = 0
+        _linked_sites.append({
+            "selector": _selector.strip(),
+            "selectorIndex": _selector_index,
+            "inputDomain": "scroll-y-px",
+            "bands": _bands,
+            "units": _units,
+        })
+
+if _linked_sites:
+    _emit("scrollLinkedStyleSites.ts", (
+        "/** Runtime-measured scroll-linked style curves. */\n"
+        'import type { UseScrollOptions } from "framer-motion";\n'
+        "export type LinkedBand = [number[], number[]];\n"
+        "export interface ScrollLinkedStyleSite {\n"
+        "  selector: string;\n"
+        "  selectorIndex: number;\n"
+        "  scope?: string;\n"
+        '  inputDomain: "progress" | "scroll-y-px";\n'
+        '  progressSource?: "document-progress" | "target-offset";\n'
+        "  offset?: UseScrollOptions[\"offset\"];\n"
+        "  bands: Record<string, LinkedBand>;\n"
+        "  units?: Record<string, string>;\n"
+        "}\n\n"
+        "export const scrollLinkedStyleSites: ScrollLinkedStyleSite[] = "
+        + json.dumps(_linked_sites, ensure_ascii=False)
+        + ";\n"
+    ))
+    _emit("ScrollLinkedStyleDriver.tsx", '''"use client";
 
 import { useEffect } from "react";
 import { scrollLinkedStyleSites } from "./scrollLinkedStyleSites";
-import type { LinkedBand } from "./scrollLinkedStyleSites";
+import type { LinkedBand, ScrollLinkedStyleSite } from "./scrollLinkedStyleSites";
 
 function interpolate(progress: number, band: LinkedBand): number {
   const [input, output] = band;
@@ -876,6 +932,7 @@ function applyBandStyles(
   if (bands.width) set("width", length("width"));
   if (bands.height) set("height", length("height"));
   if (bands.borderRadius) set("border-radius", length("borderRadius"));
+  if (bands.top) set("top", length("top"));
 
   const transforms: string[] = [];
   if (bands.x) transforms.push(`translateX(${value("x")}px)`);
@@ -941,14 +998,35 @@ function targetOffsetProgress(
 }
 
 function siteProgress(
+  inputDomain: "progress" | "scroll-y-px",
   progressSource: "document-progress" | "target-offset",
-  offset: [string, string] | undefined,
+  offset: ScrollLinkedStyleSite["offset"],
   root: ParentNode,
 ): number {
-  if (progressSource !== "target-offset" || !offset || !(root instanceof Element)) {
-    return documentProgress();
+  switch (inputDomain) {
+    case "scroll-y-px":
+      return Number.isFinite(window.scrollY) ? Math.max(0, window.scrollY) : 0;
+    default: {
+      const hasOffsetPair = Array.isArray(offset) && offset.length >= 2;
+      if (
+        progressSource !== "target-offset" ||
+        !hasOffsetPair ||
+        !(root instanceof Element)
+      ) {
+        return documentProgress();
+      }
+      const startOffset = offset[0];
+      const endOffset = offset[1];
+      if (
+        typeof startOffset !== "string" ||
+        typeof endOffset !== "string"
+      ) {
+        return documentProgress();
+      }
+      const targetOffset: [string, string] = [startOffset, endOffset];
+      return targetOffsetProgress(root, targetOffset) ?? documentProgress();
+    }
   }
-  return targetOffsetProgress(root, offset) ?? documentProgress();
 }
 
 /** Replays target-specific curves captured in animation-runtime-dump.json. */
@@ -966,7 +1044,12 @@ export default function ScrollLinkedStyleDriver() {
             : undefined;
           if (target instanceof HTMLElement || target instanceof SVGElement) {
             const progress = root
-              ? siteProgress(site.progressSource, site.offset, root)
+              ? siteProgress(
+                  site.inputDomain,
+                  site.progressSource ?? "document-progress",
+                  site.offset,
+                  root,
+                )
               : documentProgress();
             applyBandStyles(target.style, progress, site.bands, site.units);
           }
@@ -995,6 +1078,7 @@ export default function ScrollLinkedStyleDriver() {
 }
 ''')
 
+if isinstance(_ss, dict) and _ss.get("required"):
     _sites_out: list[dict[str, Any]] = []
     for _site in _ss.get("sites", []) or []:
         if not isinstance(_site, dict):

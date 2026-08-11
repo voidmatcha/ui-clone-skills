@@ -47,6 +47,36 @@ One entry per distinct transition. Each entry is **self-contained**:
 
 **`dynamic` field (optional, default `false`):** set to `true` for entries whose visual cannot settle to the same frame across fresh loads — auto-timer canvases, looping shaders, `<video>` autoplay, Lottie loops, and randomized initialization such as `Math.random()`, `gsap.utils.random()`, or `randomScaleRange`. `EXCLUDE_DYNAMIC=1 bash section-compare.sh ...` reads `transition-spec.json` and auto-augments its mask list with each `"dynamic": true` entry's narrow `target` selector, hiding those regions from AE diff on both ref and impl. Per-frame pixel parity for these is unmatchable; masked-region static and runtime checks remain the verification bar. Leave `false` (or omit) for entries with a deterministic end state and deterministic initialization (page-load reveal, scroll trigger, hover settle).
 
+**`scroll-state-machine` pixel channel:** use this structured shape when the
+bundle declares raw `scrollY` pixel thresholds for a fixed/sticky element:
+
+```json
+{
+  "type": "scroll-state-machine",
+  "target": ".fixed-nav",
+  "animation": {
+    "channels": [
+      {
+        "property": "top",
+        "inputDomain": "scroll-y-px",
+        "inputRange": [0, 100],
+        "outputRange": [56, 20],
+        "unit": "px"
+      }
+    ]
+  }
+}
+```
+
+These bundle-literal `scrollY` pixels are document-height independent. Never
+normalize them by the capture session's `maxScroll`, and never merge them into
+`scroll-scrub` or other `scrollYProgress`/progress channels. Generate
+selector-scoped direct style updates for the real target element
+(`ScrollLinkedStyleDriver`), not a wrapper `ScrollScrub`. If the reference uses
+distinct desktop and mobile nav elements, record separate breakpoint-specific
+targets/channels. Do not fabricate this channel when no source evidence or spec
+entry exists.
+
 ## 3. Rules
 
 1. **One entry per distinct visual transition.** Don't merge different triggers.

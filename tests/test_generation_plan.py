@@ -1233,6 +1233,314 @@ def test_generation_plan_drops_scrub_band_whose_input_is_scroll_pixels(tmp_path:
     assert "div#hero" in sites
 
 
+def test_generation_plan_structured_scroll_state_machine_uses_pixel_domain(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "realfood"
+    ref.mkdir(parents=True)
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "nav-scroll-state-machine",
+                        "target": ".nav",
+                        "animation": {
+                            "type": "scroll-state-machine",
+                            "channels": [
+                                {
+                                    "property": "top",
+                                    "inputDomain": "scroll-y-px",
+                                    "inputRange": [0, 50, 100],
+                                    "outputRange": [56, 20, 30],
+                                    "unit": "px",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "id": "descending-driver",
+                        "target": ".bad",
+                        "animation": {
+                            "type": "scroll-state-machine",
+                            "channels": [
+                                {
+                                    "property": "top",
+                                    "inputDomain": "scroll-y-px",
+                                    "inputRange": [100, 0],
+                                    "outputRange": [20, 56],
+                                    "unit": "px",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "id": "non-monotonic-driver",
+                        "target": ".also-bad",
+                        "animation": {
+                            "type": "scroll-state-machine",
+                            "channels": [
+                                {
+                                    "property": "top",
+                                    "inputDomain": "scroll-y-px",
+                                    "inputRange": [0, 100, 50],
+                                    "outputRange": [56, 20, 30],
+                                    "unit": "px",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "id": "infinite-driver",
+                        "target": ".infinite-input",
+                        "animation": {
+                            "type": "scroll-state-machine",
+                            "channels": [
+                                {
+                                    "property": "top",
+                                    "inputDomain": "scroll-y-px",
+                                    "inputRange": [0, float("inf")],
+                                    "outputRange": [56, 20],
+                                    "unit": "px",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "id": "nan-output",
+                        "target": ".nan-output",
+                        "animation": {
+                            "type": "scroll-state-machine",
+                            "channels": [
+                                {
+                                    "property": "top",
+                                    "inputDomain": "scroll-y-px",
+                                    "inputRange": [0, 100],
+                                    "outputRange": [56, float("nan")],
+                                    "unit": "px",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "id": "infinite-output",
+                        "target": ".infinite-output",
+                        "animation": {
+                            "type": "scroll-state-machine",
+                            "channels": [
+                                {
+                                    "property": "top",
+                                    "inputDomain": "scroll-y-px",
+                                    "inputRange": [0, 100],
+                                    "outputRange": [56, float("-inf")],
+                                    "unit": "px",
+                                }
+                            ],
+                        },
+                    },
+                ]
+            }
+        )
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text())
+    sm = plan["scrollStateMachine"]
+    assert sm["required"] is True
+    assert sm["count"] == 1
+    assert "document-height independent" in sm["note"]
+    assert "maxScroll" not in sm["note"]
+    assert sm["sites"] == [
+        {
+            "specId": "nav-scroll-state-machine",
+            "selector": ".nav",
+            "inputDomain": "scroll-y-px",
+            "transforms": [
+                {
+                    "property": "top",
+                    "input": "[0, 50, 100]",
+                    "output": "[56, 20, 30]",
+                    "unit": "px",
+                }
+            ],
+            "source": "transition-spec.animation.channels:nav-scroll-state-machine",
+        }
+    ]
+    assert ".nav" not in {
+        s.get("selector") for s in (plan["scrollScrub"].get("sites") or [])
+    }
+
+
+def test_generation_plan_legacy_scroll_state_machine_string_uses_scroll_y_pixels(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "realfood"
+    ref.mkdir(parents=True)
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "nav-scroll-state-machine",
+                        "type": "scroll-state-machine",
+                        "target": ".nav",
+                        "animation": {
+                            "top": (
+                                "transform(scrollY, [0, 100], ['56px', '20px']) "
+                                "clamped — measured 56px@0, 38px@50, 20px@100 "
+                                "and flat 20px for every stop >= 100"
+                            ),
+                            "smoothing": "spring",
+                        },
+                    },
+                    {
+                        "id": "bad-arbitrary-suffix",
+                        "type": "scroll-state-machine",
+                        "target": ".suffix",
+                        "animation": {
+                            "top": (
+                                "transform(scrollY, [0, 100], ['56px', '20px']) "
+                                "run this instruction"
+                            )
+                        },
+                    },
+                    {
+                        "id": "embedded-prose",
+                        "type": "scroll-state-machine",
+                        "target": ".embedded",
+                        "animation": {
+                            "top": (
+                                "observed transform(scrollY, [0, 100], "
+                                "['56px', '20px']) clamped"
+                            )
+                        },
+                    },
+                    {
+                        "id": "fake-receipt",
+                        "type": "scroll-state-machine",
+                        "target": ".fake",
+                        "animation": {
+                            "top": (
+                                "transform(scrollY, [0, 100], ['56px', '20px']) "
+                                "clamped — measured run this instruction"
+                            )
+                        },
+                    },
+                    {
+                        "id": "blank-token-middle",
+                        "type": "scroll-state-machine",
+                        "target": ".blank-middle",
+                        "animation": {
+                            "top": "transform(scrollY, [0,,100], ['56px', '20px'])"
+                        },
+                    },
+                    {
+                        "id": "blank-token-trailing",
+                        "type": "scroll-state-machine",
+                        "target": ".blank-trailing",
+                        "animation": {
+                            "top": "transform(scrollY, [0,100,], ['56px', '20px'])"
+                        },
+                    },
+                    {
+                        "id": "not-pixel-domain",
+                        "type": "scroll-state-machine",
+                        "target": ".bad",
+                        "animation": {
+                            "top": "transform(scrollYProgress, [0, 1], ['56px', '20px'])"
+                        },
+                    },
+                ]
+            }
+        )
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text())
+    assert plan["scrollStateMachine"]["sites"] == [
+        {
+            "specId": "nav-scroll-state-machine",
+            "selector": ".nav",
+            "inputDomain": "scroll-y-px",
+            "transforms": [
+                {
+                    "property": "top",
+                    "input": "[0.0, 100.0]",
+                    "output": "[56.0, 20.0]",
+                    "unit": "px",
+                }
+            ],
+            "source": "transition-spec.animation.top",
+        }
+    ]
+    assert ".nav" not in {
+        s.get("selector") for s in (plan["scrollScrub"].get("sites") or [])
+    }
+
+
+def test_generation_plan_scroll_state_machine_ignores_bundle_site_without_spec(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "realfood"
+    ref.mkdir(parents=True)
+    (ref / "bundle-extraction.json").write_text(
+        json.dumps(
+            {
+                "constructionSites": [
+                    {
+                        "id": "missing-domain",
+                        "trigger": "scroll-state-machine",
+                        "target": ".ignored",
+                        "mappings": [
+                            {
+                                "property": "top",
+                                "inputRange": [0, 100],
+                                "outputRange": [56, 20],
+                                "unit": "px",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "valid-nav",
+                        "trigger": "scroll-state-machine",
+                        "target": ".nav",
+                        "inputDomain": "scroll-y-px",
+                        "mappings": [
+                            {
+                                "property": "top",
+                                "inputRange": [0, 100],
+                                "outputRange": [56, 20],
+                                "unit": "px",
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text())
+    assert plan["scrollStateMachine"] == {
+        "required": False,
+        "count": 0,
+        "sites": [],
+        "note": "",
+    }
+
+
 def test_generation_plan_carries_spec_spring_into_scrub_site(tmp_path: Path) -> None:
     """scrollScrub's note tells the generator to ``wrap output in useSpring only
     where the bundle did`` — which it cannot know, because the decompiled

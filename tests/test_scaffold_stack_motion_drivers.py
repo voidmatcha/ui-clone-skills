@@ -262,6 +262,113 @@ def test_vite_mounts_spec_class_toggle_and_runtime_scroll_style_drivers(
     assert (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").is_file()
 
 
+def test_vite_mounts_state_machine_pixel_style_driver_without_scrollscrub(
+    tmp_path: Path,
+) -> None:
+    """A pixel-domain state machine emits the linked style driver by itself."""
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir(parents=True)
+    ref.joinpath("structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "header",
+            "class": "nav",
+            "styles": {"position": "fixed", "top": "80px"},
+            "children": [{"tag": "span", "text": "Navigation"}],
+        }],
+    }), encoding="utf-8")
+    ref.joinpath("section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "header", "cls": "nav"},
+    ]}), encoding="utf-8")
+    ref.joinpath("generation-plan.json").write_text(json.dumps({
+        "scrollStateMachine": {
+            "required": True,
+            "sites": [{
+                "selector": "header.nav",
+                "selectorIndex": 0,
+                "inputDomain": "scroll-y-px",
+                "transforms": [{
+                    "property": "top",
+                    "input": "[0, 260]",
+                    "output": "[80, 0]",
+                    "unit": "px",
+                }],
+            }],
+        },
+    }), encoding="utf-8")
+    _seed_impl(impl, {"vite": "5", "react": "18"}, "vite.config.js")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "import ScrollLinkedStyleDriver" in app
+    assert "<ScrollLinkedStyleDriver />" in app
+    assert "import ScrollScrub" not in app
+    assert "<ScrollScrub" not in app
+    for helper in re.findall(r"import\s+\w+\s+from\s+['\"]\./lib/([^'\"]+)['\"]", app):
+        assert (impl / "src" / "lib" / f"{helper}.tsx").is_file(), (
+            f"{helper} imported but not emitted"
+        )
+
+
+def test_state_machine_required_false_does_not_mount_or_emit_style_driver(
+    tmp_path: Path,
+) -> None:
+    """A valid-looking disabled state machine must not rely on re-gate cleanup."""
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir(parents=True)
+    ref.joinpath("structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "header",
+            "class": "nav",
+            "styles": {"position": "fixed", "top": "80px"},
+            "children": [{"tag": "span", "text": "Navigation"}],
+        }],
+    }), encoding="utf-8")
+    ref.joinpath("section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "header", "cls": "nav"},
+    ]}), encoding="utf-8")
+    ref.joinpath("generation-plan.json").write_text(json.dumps({
+        "scrollStateMachine": {
+            "required": False,
+            "sites": [{
+                "selector": "header.nav",
+                "selectorIndex": 0,
+                "inputDomain": "scroll-y-px",
+                "transforms": [{
+                    "property": "top",
+                    "input": "[0, 260]",
+                    "output": "[80, 0]",
+                    "unit": "px",
+                }],
+            }],
+        },
+    }), encoding="utf-8")
+    _seed_impl(impl, {"vite": "5", "react": "18"}, "vite.config.js")
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    app = (impl / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "import ScrollLinkedStyleDriver" not in app
+    assert "<ScrollLinkedStyleDriver" not in app
+    assert not (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").exists()
+    assert "re-gate removed unwritten driver mount" not in proc.stderr
+    assert "ScrollLinkedStyleDriver" not in proc.stderr
+
+
 def test_invalid_scrub_autowrap_ranges_do_not_mount_scrollscrub(tmp_path: Path) -> None:
     """Section-level auto-wrap only accepts normalized monotonic progress input."""
     for name, input_range in {

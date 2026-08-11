@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Bundle-literal `scrollY` pixel ranges now remain an explicit
+  `scroll-state-machine` input domain through extraction and generation. The
+  selector-scoped runtime writes `top` directly to the fixed target instead of
+  treating pixel thresholds as page progress or inserting a motion wrapper,
+  and runtime parity probes now observe computed `top` changes on navigation
+  roots.
 - Stop-hook impl pairing now honors `impl/.ref-dir` ownership for explicit
   pipeline-state and `.impl-root` bindings, so a fresh ref cannot inherit the
   verification block for a stale root-level impl owned by another ref. Phase

@@ -4,6 +4,7 @@
 """Deterministically transpile captured structure JSON into JSX components."""
 
 import json
+import math
 import os
 import re
 import sys
@@ -419,24 +420,59 @@ try:
             ):
                 SCROLL_LATCH_REQUIRED = True
         _scrub = _plan.get("scrollScrub") if isinstance(_plan, dict) else None
-        if isinstance(_scrub, dict) and _scrub.get("required"):
 
-            def _scrub_range(s):
-                if not isinstance(s, str):
+        def _scrub_range(s):
+            if not isinstance(s, str):
+                return None
+            mm = re.search(r"\[([^\[\]]*)\]", s)  # ternary -> first bracket
+            if not mm:
+                return None
+            out = []
+            for tok in mm.group(1).split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                try:
+                    out.append(float(tok))
+                except ValueError:
                     return None
-                mm = re.search(r"\[([^\[\]]*)\]", s)  # ternary -> first bracket
-                if not mm:
-                    return None
-                out = []
-                for tok in mm.group(1).split(","):
-                    tok = tok.strip()
-                    if not tok:
+            return out if len(out) >= 2 else None
+
+        def _finite_values(values):
+            return bool(values) and all(math.isfinite(v) for v in values)
+
+        def _finite_ascending_input(values):
+            return _finite_values(values) and all(
+                values[i] <= values[i + 1] for i in range(len(values) - 1)
+            )
+
+        _sm = _plan.get("scrollStateMachine") if isinstance(_plan, dict) else None
+        if isinstance(_sm, dict) and _sm.get("required"):
+            for _site in _sm.get("sites", []) or []:
+                if not isinstance(_site, dict):
+                    continue
+                if _site.get("inputDomain") != "scroll-y-px":
+                    continue
+                _selector = _site.get("selector")
+                if not isinstance(_selector, str) or not _selector.strip():
+                    continue
+                for _tr in _site.get("transforms", []) or []:
+                    if not isinstance(_tr, dict):
                         continue
-                    try:
-                        out.append(float(tok))
-                    except ValueError:
-                        return None
-                return out if len(out) >= 2 else None
+                    if _tr.get("property") != "top" or _tr.get("unit") != "px":
+                        continue
+                    _inp = _scrub_range(_tr.get("input"))
+                    _outp = _scrub_range(_tr.get("output"))
+                    if not _inp or not _outp or len(_inp) != len(_outp):
+                        continue
+                    if not _finite_ascending_input(_inp) or not _finite_values(_outp):
+                        continue
+                    SCROLL_LINKED_STYLE_REQUIRED = True
+                    break
+                if SCROLL_LINKED_STYLE_REQUIRED:
+                    break
+
+        if isinstance(_scrub, dict) and _scrub.get("required"):
 
             for _site in _scrub.get("sites", []) or []:
                 if not isinstance(_site, dict):

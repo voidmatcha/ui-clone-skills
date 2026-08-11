@@ -166,15 +166,29 @@ probe_url() {
     if (typeof cls === 'string') return cls;
     return cls && typeof cls.baseVal === 'string' ? cls.baseVal : '';
   };
+  const chromeRole = (el) => (el.getAttribute('role') || '').toLowerCase();
+  const hiddenChromeDescendantName = (el) => {
+    const name = String((el.id || '') + ' ' + stableClassName(el)).toLowerCase();
+    return /(?:^|[-_\s])(?:footer|subnav|submenu|item|link|button|toggle|icon|child|descendant)(?:$|[-_\s])/.test(name);
+  };
+  const isChromeRoot = (el) => {
+    const tag = el.tagName.toLowerCase();
+    const role = chromeRole(el);
+    return tag === 'header' || tag === 'nav' || role === 'banner' || role === 'navigation';
+  };
+  const isFixedOrStickyChromeRoot = (el) => {
+    const position = getComputedStyle(el).position;
+    return (position === 'fixed' || position === 'sticky') && !hiddenChromeDescendantName(el) && isChromeRoot(el);
+  };
   const headerCandidates = () => {
     let nodes = [];
     try {
-      nodes = Array.from(document.querySelectorAll('header,[role="banner"],[class*="header" i],[id*="header" i],[class*="nav" i],[id*="nav" i]'));
+      nodes = Array.from(document.querySelectorAll('header,nav,[role="banner"],[role="navigation"],[class*="header" i],[id*="header" i],[class*="nav" i],[id*="nav" i]'));
     } catch {
-      nodes = Array.from(document.querySelectorAll('header,[role="banner"]'));
+      nodes = Array.from(document.querySelectorAll('header,nav,[role="banner"],[role="navigation"]'));
     }
     return nodes
-      .filter(visible)
+      .filter((el) => visible(el) || isFixedOrStickyChromeRoot(el))
       .map((el) => {
         const r = el.getBoundingClientRect();
         const cs = getComputedStyle(el);
@@ -185,6 +199,7 @@ probe_url() {
           width: Math.round(r.width),
           height: Math.round(r.height),
           position: cs.position,
+          top: cs.top,
           transform: cs.transform,
           opacity: cs.opacity,
           backgroundColor: cs.backgroundColor,

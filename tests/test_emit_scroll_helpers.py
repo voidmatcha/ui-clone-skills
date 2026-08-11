@@ -974,6 +974,184 @@ def test_document_progress_driver_drops_pixel_domain_input_bands(
     )
     assert "y" not in sites[0]["bands"], "pixel-domain input range must be dropped"
     assert sites[0]["bands"]["opacity"] == [[0.0, 1.0], [0.0, 1.0]]
+    helper = HELPER.read_text(encoding="utf-8")
+    scrub_keys = helper.split("_SCRUB_PROP_KEYS = (", 1)[1].split(")", 1)[0]
+    assert '"top"' not in scrub_keys
+
+
+def test_emits_raw_pixel_scroll_state_machine_driver(tmp_path: Path) -> None:
+    """scrollStateMachine sites are real-target raw scrollY style bands.
+
+    They are not progress-domain ScrollScrub wrapper sites, so a state-only plan
+    should emit the selector-scoped linked driver and data without emitting the
+    wrapper primitive or scrollScrub data.
+    """
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollStateMachine": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "specId": "header.compact.top",
+                            "selector": "header.site-nav",
+                            "inputDomain": "scroll-y-px",
+                            "transforms": [
+                                {
+                                    "property": "top",
+                                    "input": "[0, 100]",
+                                    "output": "[56, 20]",
+                                    "unit": "px",
+                                }
+                            ],
+                            "source": "runtime-style-diff",
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    driver = impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx"
+    data = impl / "src" / "lib" / "scrollLinkedStyleSites.ts"
+    assert driver.is_file() and data.is_file()
+    emitted_helpers = {path.name for path in (impl / "src" / "lib").iterdir()}
+    assert emitted_helpers == {
+        "ScrollLinkedStyleDriver.tsx",
+        "scrollLinkedStyleSites.ts",
+    }
+
+    payload = data.read_text(encoding="utf-8")
+    assert 'inputDomain: "progress" | "scroll-y-px";' in payload
+    assert 'progressSource?: "document-progress" | "target-offset";' in payload
+    sites = json.loads(
+        payload.split("scrollLinkedStyleSites: ScrollLinkedStyleSite[] = ", 1)[1]
+        .rsplit(";", 1)[0]
+    )
+    assert sites == [
+        {
+            "selector": "header.site-nav",
+            "selectorIndex": 0,
+            "inputDomain": "scroll-y-px",
+            "bands": {"top": [[0.0, 100.0], [56.0, 20.0]]},
+            "units": {"top": "px"},
+        }
+    ]
+
+    source = driver.read_text(encoding="utf-8")
+    assert 'set("top", length("top"))' in source
+    assert 'style.setProperty(property, next, "important")' in source
+    assert 'case "scroll-y-px":' in source
+    assert "Math.max(0, window.scrollY)" in source
+    scroll_y_case = source.split('case "scroll-y-px":', 1)[1].split("default:", 1)[0]
+    assert "scrollHeight" not in scroll_y_case
+    assert "targetOffsetProgress" not in scroll_y_case
+    assert "documentProgress" not in scroll_y_case
+
+
+def test_invalid_raw_pixel_scroll_state_machine_sites_do_not_emit_linked_driver(
+    tmp_path: Path,
+) -> None:
+    """Only top/px finite ascending raw scrollY sites are replayable."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollStateMachine": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": "header",
+                            "transforms": [{
+                                "property": "top",
+                                "input": "[0, 100]",
+                                "output": "[56, 20]",
+                                "unit": "px",
+                            }],
+                        },
+                        {
+                            "selector": "header",
+                            "inputDomain": "progress",
+                            "transforms": [{
+                                "property": "top",
+                                "input": "[0, 100]",
+                                "output": "[56, 20]",
+                                "unit": "px",
+                            }],
+                        },
+                        {
+                            "selector": "header",
+                            "inputDomain": "scroll-y-px",
+                            "transforms": [{
+                                "property": "y",
+                                "input": "[0, 100]",
+                                "output": "[56, 20]",
+                                "unit": "px",
+                            }],
+                        },
+                        {
+                            "selector": "header",
+                            "inputDomain": "scroll-y-px",
+                            "transforms": [{
+                                "property": "top",
+                                "input": "[0, 100]",
+                                "output": "[56, 20]",
+                                "unit": "%",
+                            }],
+                        },
+                        {
+                            "selector": "header",
+                            "inputDomain": "scroll-y-px",
+                            "transforms": [{
+                                "property": "top",
+                                "input": "[100, 0]",
+                                "output": "[56, 20]",
+                                "unit": "px",
+                            }],
+                        },
+                        {
+                            "selector": "header",
+                            "inputDomain": "scroll-y-px",
+                            "transforms": [{
+                                "property": "top",
+                                "input": "[0, 100]",
+                                "output": "[56, Infinity]",
+                                "unit": "px",
+                            }],
+                        },
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").exists()
+    assert not (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").exists()
 
 
 def test_emits_target_offset_progress_for_runtime_sampled_sites(
@@ -1031,6 +1209,20 @@ def test_emits_target_offset_progress_for_runtime_sampled_sites(
     assert "function targetOffsetProgress" in source
     assert "getBoundingClientRect" in source
     assert "site.offset" in source
+    assert (
+        'import type { LinkedBand, ScrollLinkedStyleSite } from "./scrollLinkedStyleSites";'
+        in source
+    )
+    assert 'offset: ScrollLinkedStyleSite["offset"]' in source
+    assert "Array.isArray(offset)" in source
+    assert "offset.length >= 2" in source
+    assert "const startOffset = offset[0];" in source
+    assert "const endOffset = offset[1];" in source
+    assert 'typeof startOffset !== "string"' in source
+    assert 'typeof endOffset !== "string"' in source
+    assert "const targetOffset: [string, string] = [startOffset, endOffset];" in source
+    assert "targetOffsetProgress(root, targetOffset)" in source
+    assert "as [string, string]" not in source
     assert '"progressSource": "target-offset"' in payload
     assert '"offset": ["start start", "end end"]' in payload
     assert '"units": {"width": "%"}' in payload
