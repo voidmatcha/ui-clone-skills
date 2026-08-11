@@ -150,6 +150,67 @@ class TestSectionGate:
         assert result.returncode == 0
         assert result.stdout.strip() == "", result.stdout
 
+    @pytest.mark.parametrize("binding_source", ["marker", "state"])
+    @pytest.mark.parametrize(
+        ("target_name", "expect_block"),
+        [("ref-b", False), ("ref-a", True)],
+    )
+    def test_explicit_impl_binding_only_blocks_owning_ref(
+        self,
+        tmp_path: Path,
+        binding_source: str,
+        target_name: str,
+        expect_block: bool,
+    ) -> None:
+        """An explicit impl binding must follow the impl's ref ownership."""
+        project_root = tmp_path / f"{binding_source}-{target_name}"
+        search_root = make_search_root(project_root)
+        owner_ref = make_ref_dir(search_root, "ref-a")
+        target_ref = make_ref_dir(search_root, target_name)
+        (target_ref / "structure.json").write_text(
+            '{"tag": "body", "children": []}', encoding="utf-8"
+        )
+
+        impl_dir = project_root / "impl"
+        src = impl_dir / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return <main />}", encoding="utf-8"
+        )
+        (impl_dir / ".ref-dir").write_text(
+            str(owner_ref.resolve()) + "\n", encoding="utf-8"
+        )
+
+        if binding_source == "marker":
+            (target_ref / ".impl-root").write_text(
+                str(impl_dir.resolve()) + "\n", encoding="utf-8"
+            )
+        else:
+            (target_ref / "pipeline-state.json").write_text(
+                json.dumps(
+                    {
+                        "component": target_ref.name,
+                        "current_gate": "post-implement",
+                        "implRoot": str(impl_dir.resolve()),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        result = run_hook(
+            self.MODULE,
+            env={"CLAUDE_PROJECT_DIR": str(project_root)},
+        )
+
+        assert result.returncode == 0
+        if not expect_block:
+            assert result.stdout.strip() == "", result.stdout
+            return
+        data = json.loads(result.stdout.strip())
+        assert data.get("decision") == "block"
+        assert str(owner_ref) in data.get("reason", "")
+        assert "verify-stamp.json" in data.get("reason", "")
+
     def test_wip_marker_no_result_txt_outputs_block(self, tmp_path: Path) -> None:
         """WIP marker present, no result.txt → block JSON."""
         search_root = make_search_root(tmp_path)

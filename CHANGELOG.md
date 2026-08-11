@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Stop-hook impl pairing now honors `impl/.ref-dir` ownership for explicit
+  pipeline-state and `.impl-root` bindings, so a fresh ref cannot inherit the
+  verification block for a stale root-level impl owned by another ref. Phase
+  execution also refreshes the reciprocal marker after late impl creation and
+  refuses to overwrite a foreign ownership claim from stale state.
 - Each benchmark-harness iteration now uses a fresh Claude session UUID. Claude
   Code rejects a second `--print` process that reuses an already-consumed
   `--session-id`; the old run-level reuse made iteration 2 fail before model

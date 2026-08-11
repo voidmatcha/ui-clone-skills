@@ -212,7 +212,11 @@ def _resolve_impl_dir(
         state = PipelineState.load(ref_dir)
         if state.impl_root:
             p = Path(state.impl_root)
-            if p.is_dir() and not _is_cross_scratch_impl(ref_dir, p):
+            if (
+                p.is_dir()
+                and not _is_cross_scratch_impl(ref_dir, p)
+                and not _impl_backlink_mismatch(ref_dir, p)
+            ):
                 return p
     except OSError:
         pass
@@ -223,7 +227,11 @@ def _resolve_impl_dir(
             marker_value = marker.read_text(encoding="utf-8").strip()
             if marker_value:
                 p = Path(marker_value)
-                if p.is_dir() and not _is_cross_scratch_impl(ref_dir, p):
+                if (
+                    p.is_dir()
+                    and not _is_cross_scratch_impl(ref_dir, p)
+                    and not _impl_backlink_mismatch(ref_dir, p)
+                ):
                     return p
         except OSError:
             pass

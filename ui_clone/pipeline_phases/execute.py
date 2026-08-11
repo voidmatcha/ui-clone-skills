@@ -106,8 +106,10 @@ def _resolve_impl_root(
         except OSError:
             return False
 
-    if existing_state_root and _is_cross_scratch_impl(Path(existing_state_root)):
-        existing_state_root = ""
+    if existing_state_root:
+        existing = Path(existing_state_root)
+        if _is_cross_scratch_impl(existing) or _backlink_mismatch(existing):
+            existing_state_root = ""
     if existing_state_root:
         return existing_state_root
     cwd = Path(cwd)
@@ -173,26 +175,30 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
         _state.impl_root or "",
         pipeline.ref_dir,
     )
-    if _state.impl_root != impl_root_resolved:
-        _state.impl_root = impl_root_resolved
-        try:
+    try:
+        if _state.impl_root != impl_root_resolved:
+            _state.impl_root = impl_root_resolved
             _state.save(pipeline.ref_dir)
-            # Also write the bare marker file the resolver checks.
-            (pipeline.ref_dir / ".impl-root").write_text(
-                impl_root_resolved + "\n", encoding="utf-8",
-            )
-            # Mutual handshake: the impl dir vouches for this ref dir so
-            # find-impl-root.sh trusts the marker even when the impl lives
-            # under scratch/ with an unrelated slot name. Stale markers
-            # (copied ref dirs) fail the handshake because the old impl's
-            # backlink points at its own ref dir.
-            _impl_p = Path(impl_root_resolved)
-            if _impl_p.is_dir():
-                (_impl_p / ".ref-dir").write_text(
-                    str(pipeline.ref_dir.resolve()) + "\n", encoding="utf-8",
-                )
-        except OSError:
-            pass
+        # Refresh the marker pair even when state already names this root. The
+        # impl may have been created after an earlier phase saved the binding.
+        (pipeline.ref_dir / ".impl-root").write_text(
+            impl_root_resolved + "\n", encoding="utf-8",
+        )
+        # Mutual handshake: the impl dir vouches for this ref dir so
+        # find-impl-root.sh trusts the marker even when the impl lives
+        # under scratch/ with an unrelated slot name. Stale markers
+        # (copied ref dirs) fail the handshake because the old impl's
+        # backlink points at its own ref dir.
+        _impl_p = Path(impl_root_resolved)
+        if _impl_p.is_dir():
+            expected_ref = str(pipeline.ref_dir.resolve())
+            backlink = _impl_p / ".ref-dir"
+            backlink.write_text(expected_ref + "\n", encoding="utf-8")
+            if backlink.read_text(encoding="utf-8").strip() != expected_ref:
+                raise OSError(f"impl ownership readback mismatch at {backlink}")
+    except OSError as exc:
+        print(f"  {_RED}✗{_NC} cannot persist impl ownership: {exc}")
+        return 1
     # Tell the agent — in-band — exactly where to scaffold so it does not
     # default to the repo/plugin root it can see via --add-dir.
     print(
