@@ -30,6 +30,7 @@
 #   scroll-completion.json     — Tier 3 (scroll reveal completion)
 #   reveal-trigger.json            — Tier 3 (IO reveal triggers)
 #   hidden-children.json           — Tier 4 (initially-hidden settle)
+#   splash-lifecycle.json          — Tier 2 (first-load overlay lifecycle)
 #   svg-provenance.json            — Tier 5 (SVG source-shape provenance)
 #   hero-composite.json            — Tier 1 (hero composite parity)
 #
@@ -179,6 +180,27 @@ def runtime_dom_measure(d: dict) -> tuple[bool, str]:
         return False, "pass but no measurement payload"
     return True, "DOM parity measured"
 
+def splash_lifecycle_measure(d: dict) -> tuple[bool, str]:
+    if d.get("status") != "pass":
+        return False, f"status={d.get('status')}"
+    ref_samples = (d.get("refCapture") or {}).get("samples") or []
+    impl_samples = (d.get("implCapture") or {}).get("samples") or []
+    if not ref_samples or not impl_samples:
+        return False, (
+            "pass but lifecycle samples are empty "
+            f"(ref={len(ref_samples)} impl={len(impl_samples)})"
+        )
+    for side in ("ref", "impl"):
+        analysis = d.get(side) or {}
+        if not analysis.get("mounted") or not analysis.get("exited"):
+            return False, (
+                f"pass but {side} lifecycle analysis lacks mounted+exited proof"
+            )
+    return True, (
+        f"refSamples={len(ref_samples)} implSamples={len(impl_samples)} "
+        "mounted+exited"
+    )
+
 def svg_provenance_measure(d: dict) -> tuple[bool, str]:
     if d.get("status") == "skip":
         return True, "skipped (no inline SVG in ref or impl)"
@@ -261,6 +283,7 @@ components = [
     ("lottie-runtime.json",        "Tier 2 media",    lottie_measure),
     ("runtime-image-validity.json","Tier 2 media",    generic_pass),
     ("blank-viewport.json",        "Tier 2 first-paint", generic_pass),
+    ("splash-lifecycle.json",      "Tier 2 first-paint", splash_lifecycle_measure),
     ("runtime-dom-parity.json",    "Tier 2 structure", runtime_dom_measure),
     ("motion-coverage.json",       "Tier 2 motion",   motion_coverage_measure),
     ("runtime-spec-coverage.json", "Tier 3 spec",     runtime_spec_coverage_measure),

@@ -690,6 +690,138 @@ def test_runtime_proof_rollup_fails_blank_viewport_artifact(tmp_path: Path) -> N
     assert any("blank-viewport.json" in reason for reason in artifact["reasons"])
 
 
+def _write_splash_runtime_plan(ref: Path) -> None:
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {"id": "hydration-check", "produces": "hydration-check.json"},
+                    {
+                        "id": "text-fidelity-check",
+                        "produces": "text-fidelity-check.json",
+                    },
+                    {"id": "image-fidelity", "produces": "image-fidelity.json"},
+                    {"id": "asset-transfer", "produces": "asset-transfer.json"},
+                    {"id": "scaffold-warn", "produces": "scaffold-warn.json"},
+                    {"id": "splash-lifecycle", "produces": "splash-lifecycle.json"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _run_runtime_rollup(ref: Path) -> tuple[subprocess.CompletedProcess[str], dict]:
+    proc = _run("runtime-proof-rollup.sh", ref)
+    artifact = json.loads((ref / "runtime-proof.json").read_text(encoding="utf-8"))
+    return proc, artifact
+
+
+def test_runtime_proof_rollup_requires_planned_splash_lifecycle(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_splash_runtime_plan(ref)
+
+    proc, artifact = _run_runtime_rollup(ref)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    splash = next(
+        component
+        for component in artifact["components"]
+        if component["artifact"] == "splash-lifecycle.json"
+    )
+    assert splash["present"] is False
+    assert splash["valid"] is False
+
+
+def test_runtime_proof_rollup_rejects_measurement_free_splash_pass(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_splash_runtime_plan(ref)
+    (ref / "splash-lifecycle.json").write_text(
+        json.dumps({"schemaVersion": 1, "status": "pass"}),
+        encoding="utf-8",
+    )
+
+    proc, artifact = _run_runtime_rollup(ref)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    splash = next(
+        component
+        for component in artifact["components"]
+        if component["artifact"] == "splash-lifecycle.json"
+    )
+    assert splash["present"] is True
+    assert splash["valid"] is False
+    assert "samples" in splash["note"] or "analysis" in splash["note"]
+
+
+def test_runtime_proof_rollup_rejects_failing_splash_lifecycle(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_splash_runtime_plan(ref)
+    (ref / "splash-lifecycle.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "fail",
+                "violations": ["impl-overlay-never-exited"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc, artifact = _run_runtime_rollup(ref)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    splash = next(
+        component
+        for component in artifact["components"]
+        if component["artifact"] == "splash-lifecycle.json"
+    )
+    assert splash["valid"] is False
+    assert splash["note"] == "status=fail"
+
+
+def test_runtime_proof_rollup_accepts_measured_splash_mount_and_exit(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_splash_runtime_plan(ref)
+    (ref / "splash-lifecycle.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "pass",
+                "ref": {"mounted": True, "exited": True},
+                "impl": {"mounted": True, "exited": True},
+                "refCapture": {"samples": [{"t": 0}, {"t": 300}]},
+                "implCapture": {"samples": [{"t": 0}, {"t": 320}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc, artifact = _run_runtime_rollup(ref)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert artifact["status"] == "pass"
+    splash = next(
+        component
+        for component in artifact["components"]
+        if component["artifact"] == "splash-lifecycle.json"
+    )
+    assert splash["valid"] is True
+    assert "refSamples=2" in splash["note"]
+    assert "implSamples=2" in splash["note"]
+
+
 _ZERO_SURFACE_PROBE = json.dumps(
     {
         "canvasTotal": 0,

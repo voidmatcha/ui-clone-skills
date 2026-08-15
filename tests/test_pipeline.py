@@ -187,7 +187,7 @@ class TestAgentReadableCliSurfaces:
                     "current_gate": "post-implement",
                     "terminalState": {
                         "status": "failed",
-                        "category": "canonical-verify-failed",
+                        "category": "explicit-terminal",
                         "gate": "post-implement",
                         "reason": "verify failed",
                         "recorded_at": "2026-01-01T00:00:00Z",
@@ -202,7 +202,45 @@ class TestAgentReadableCliSurfaces:
         assert payload["status"] == "failed"
         assert payload["next_action"] == "read verify-report.json"
 
-    def test_verify_json_failure_marks_terminal_without_success_stamp(
+    def test_status_payload_treats_legacy_canonical_verify_failure_as_active(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        (ref_dir / "verify-report.json").write_text("{}", encoding="utf-8")
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps(
+                {
+                    "component": "comp",
+                    "current_gate": "post-implement",
+                    "terminalState": {
+                        "status": "failed",
+                        "category": "canonical-verify-failed",
+                        "gate": "post-implement",
+                        "reason": "verify failed",
+                        "recorded_at": "2026-01-01T00:00:00Z",
+                        "next_action": "read verify-report.json",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        payload = Pipeline("https://example.com", "comp", "sess").status_payload()
+
+        assert payload["status"] == "active"
+        assert payload["terminalState"] == {}
+        next_action = payload["next_action"]
+        assert isinstance(next_action, str)
+        assert next_action.endswith("comp sess verify")
+        read_for_llm = payload["read_for_llm"]
+        assert isinstance(read_for_llm, list)
+        assert str(ref_dir / "verify-report.json") in read_for_llm
+
+    def test_verify_json_failure_is_recoverable_without_success_stamp(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -236,11 +274,97 @@ class TestAgentReadableCliSurfaces:
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "failed"
         assert payload["verify_stamp"]["created"] is False
+        assert payload["reports"]["json"].endswith("verify-report.json")
+        assert "post-implement" in payload["logs"]
+        assert "terminalState" not in payload
         assert not (ref_dir / "verify-stamp.json").exists()
         state = PipelineState.load(ref_dir)
-        assert state.terminal_state["status"] == "failed"
-        assert state.terminal_state["category"] == "canonical-verify-failed"
+        assert state.terminal_state == {}
         assert (ref_dir / "logs" / "verify" / "post-implement.log").is_file()
+        assert (ref_dir / "verify-report.json").is_file()
+
+    def test_verify_text_failure_does_not_label_state_as_terminal_state(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ui_clone.pipeline_phases.verify import execute_verify
+        from ui_clone.state import PipelineState
+
+        monkeypatch.chdir(tmp_path)
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        impl_dir = tmp_path / "impl"
+        impl_dir.mkdir()
+        PipelineState(component="comp", current_gate="post-implement").save(ref_dir)
+
+        def fake_run(
+            cmd: list[str],
+            capture_output: bool,
+            text: bool,
+            env: dict[str, str] | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            gate = cmd[-1]
+            code = 1 if gate == "post-implement" else 0
+            return subprocess.CompletedProcess(cmd, code, stdout=f"{gate} stdout", stderr="")
+
+        monkeypatch.setattr("ui_clone.pipeline_phases.verify.subprocess.run", fake_run)
+
+        assert execute_verify(Pipeline("https://example.com", "comp", "sess")) == 1
+        out = capsys.readouterr().out
+        assert "terminalState:" not in out
+        assert "pipeline-state:" in out
+        assert PipelineState.load(ref_dir).terminal_state == {}
+
+    def test_verify_json_failure_preserves_preexisting_hard_cap_terminal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ui_clone.pipeline_phases.verify import execute_verify
+        from ui_clone.state import PipelineState
+
+        monkeypatch.chdir(tmp_path)
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        ref_dir.mkdir(parents=True)
+        impl_dir = tmp_path / "impl"
+        impl_dir.mkdir()
+        state = PipelineState(component="comp", current_gate="post-implement")
+        state.mark_terminal(
+            ref_dir,
+            status="unclonable",
+            category="hard-cap-fail",
+            gate="post-implement",
+            reason="hard cap reached",
+            written_by="pipeline",
+        )
+
+        def fake_run(
+            cmd: list[str],
+            capture_output: bool,
+            text: bool,
+            env: dict[str, str] | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            gate = cmd[-1]
+            code = 1 if gate == "post-implement" else 0
+            return subprocess.CompletedProcess(cmd, code, stdout=f"{gate} stdout", stderr="")
+
+        monkeypatch.setattr("ui_clone.pipeline_phases.verify.subprocess.run", fake_run)
+        pipeline = Pipeline("https://example.com", "comp", "sess")
+
+        assert execute_verify(pipeline, json_output=True) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "unclonable"
+        assert payload["terminalState"]["status"] == "unclonable"
+        assert payload["terminalState"]["category"] == "hard-cap-fail"
+        assert payload["next_action"] == (
+            "Resolve the terminal hard-cap-fail state before rerunning verify."
+        )
+        reloaded = PipelineState.load(ref_dir)
+        assert reloaded.terminal_state["status"] == "unclonable"
+        assert reloaded.terminal_state["category"] == "hard-cap-fail"
 
 
 class TestFindAppDir:

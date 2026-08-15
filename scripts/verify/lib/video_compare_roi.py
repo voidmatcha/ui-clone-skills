@@ -68,6 +68,29 @@ def _crop_for(
     }
 
 
+def _crop_from_reference(
+    ref_crop: dict[str, int],
+    ref_rect: dict[str, float],
+    impl_rect: dict[str, float],
+    viewport_width: int,
+    viewport_height: int,
+) -> dict[str, int]:
+    ref_center_x = ref_rect["x"] + ref_rect["width"] / 2
+    ref_center_y = ref_rect["y"] + ref_rect["height"] / 2
+    impl_center_x = impl_rect["x"] + impl_rect["width"] / 2
+    impl_center_y = impl_rect["y"] + impl_rect["height"] / 2
+    x = ref_crop["x"] + round(impl_center_x - ref_center_x)
+    y = ref_crop["y"] + round(impl_center_y - ref_center_y)
+    x = max(0, min(x, viewport_width - ref_crop["width"]))
+    y = max(0, min(y, viewport_height - ref_crop["height"]))
+    return {
+        "x": x,
+        "y": y,
+        "width": ref_crop["width"],
+        "height": ref_crop["height"],
+    }
+
+
 def build_plan(
     ref_rect: dict[str, float],
     impl_rect: dict[str, float],
@@ -96,10 +119,10 @@ def build_plan(
         viewport_width,
         viewport_height,
     )
-    impl_crop = _crop_for(
+    impl_crop = _crop_from_reference(
+        ref_crop,
+        ref_rect,
         impl_rect,
-        crop_width,
-        crop_height,
         viewport_width,
         viewport_height,
     )
@@ -119,10 +142,7 @@ def build_plan(
 
 
 def _filter(crop: dict[str, int]) -> str:
-    return (
-        f"crop={crop['width']}:{crop['height']}:"
-        f"{crop['x']}:{crop['y']}"
-    )
+    return f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}"
 
 
 def main(argv: list[str]) -> int:
@@ -150,10 +170,7 @@ def main(argv: list[str]) -> int:
             json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        print(
-            f"{_filter(plan['ref']['crop'])}\t"
-            f"{_filter(plan['impl']['crop'])}"
-        )
+        print(f"{_filter(plan['ref']['crop'])}\t{_filter(plan['impl']['crop'])}")
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         print(f"target ROI error: {exc}", file=sys.stderr)
         return 1

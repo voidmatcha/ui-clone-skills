@@ -7,12 +7,41 @@ rebound onto the Gate class in `ui_clone.gates.__init__`.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .base import CheckResult
 
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
+
+
+def _local_only_declared_font_faces(ref_dir: Path) -> set[str]:
+    path = ref_dir / "fonts.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    faces = data.get("faces")
+    if not isinstance(faces, list):
+        return set()
+
+    by_family: dict[str, list[dict[str, Any]]] = {}
+    for face in faces:
+        if not isinstance(face, dict):
+            continue
+        family = face.get("family")
+        if isinstance(family, str) and family.strip():
+            by_family.setdefault(family.strip().lower(), []).append(face)
+
+    local_only = set()
+    for family, rows in by_family.items():
+        if rows and all(row.get("urls") == [] for row in rows):
+            local_only.add(family)
+    return local_only
+
 
 def gate_font_parity(self: Gate) -> list[CheckResult]:
     """Check that the impl loads the same font as the ref, OR that the substitution is declared.
@@ -138,10 +167,13 @@ def gate_font_parity(self: Gate) -> list[CheckResult]:
 
         ref_faces = _faces(ref_obj)
         impl_faces = _faces(impl_obj)
+        primary_key = family.strip().lower() if isinstance(family, str) else ""
+        local_only_faces = _local_only_declared_font_faces(self.ref_dir)
         dropped = [
             display
             for key, (display, loaded) in sorted(ref_faces.items())
             if loaded and not impl_faces.get(key, ("", False))[1]
+            and not (key != primary_key and key in local_only_faces)
         ]
         if dropped:
             results.append(
@@ -232,4 +264,3 @@ def gate_font_parity(self: Gate) -> list[CheckResult]:
         )
     )
     return results
-

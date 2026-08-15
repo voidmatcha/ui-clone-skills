@@ -275,13 +275,18 @@ arc_timing_verdict() {
 #   deltas 0,0,5,29,41 across 5 runs vs the static max 18. This grounds the
 #   tolerance in the SAME ref-vs-ref measurement the SSIM distribution uses (a
 #   refcal recorded this run), NOT a constant:
-#     - each side's arc is bounded to the 3-side common budget (min remaining
-#       frames) so a longer recording window cannot inflate one side's arc;
+#     - the direct ref-vs-impl arc is bounded to the 2-side ref/impl budget
+#       before refcal is considered, so a late refcal cannot shrink/equalize a
+#       bad impl timeline;
 #     - one-side-no-motion (arc 0 against a real arc) stays a HARD fail — the
 #       live noise floor must never rescue a missing/blank splash;
 #     - the impl arc is compared to the NEARER of {ref, refcal} (the impl
 #       matches whichever ref recording shares its cold/warm load state), with
-#       tol = max(default_max_delta, |ref_arc - refcal_arc|) + cal_margin.
+#       the refcal-nearer branch only trusted while ref/refcal divergence stays
+#       inside one ordinary tolerance plus one default detector delta, refcal
+#       has real motion, and the noise is not more than half the ref arc; with
+#       usable ref-vs-refcal noise capped by the ordinary default tolerance
+#       policy so a broken calibration run cannot mask a wrong impl timeline.
 #   A genuinely wrong timeline (too-long/too-short splash) matches NEITHER ref
 #   recording and exceeds the tolerance by far, so it still fails.
 #   Returns 0 (arc OK) / 1 (arc FAIL).
@@ -289,14 +294,16 @@ arc_calibrated_verdict() {
   local rfc="$1" rlc="$2" rtot="$3" ifc="$4" ilc="$5" itot="$6" \
         cfc="$7" clc="$8" ctot="$9" defmax="${10:-18}" margin="${11:-20}"
   local rrem=$((rtot - rfc)) irem=$((itot - ifc)) crem=$((ctot - cfc))
-  local budget=$rrem
-  [[ "$irem" -lt "$budget" ]] && budget=$irem
-  [[ "$crem" -lt "$budget" ]] && budget=$crem
-  [[ "$budget" -lt 0 ]] && budget=0
+  local ref_impl_budget=$rrem
+  [[ "$irem" -lt "$ref_impl_budget" ]] && ref_impl_budget=$irem
+  [[ "$ref_impl_budget" -lt 0 ]] && ref_impl_budget=0
+  local cal_budget=$ref_impl_budget
+  [[ "$crem" -lt "$cal_budget" ]] && cal_budget=$crem
+  [[ "$cal_budget" -lt 0 ]] && cal_budget=0
   local ra=$((rlc - rfc)) ia=$((ilc - ifc)) ca=$((clc - cfc))
-  [[ "$ra" -gt "$budget" ]] && ra=$budget; [[ "$ra" -lt 0 ]] && ra=0
-  [[ "$ia" -gt "$budget" ]] && ia=$budget; [[ "$ia" -lt 0 ]] && ia=0
-  [[ "$ca" -gt "$budget" ]] && ca=$budget; [[ "$ca" -lt 0 ]] && ca=0
+  [[ "$ra" -gt "$ref_impl_budget" ]] && ra=$ref_impl_budget; [[ "$ra" -lt 0 ]] && ra=0
+  [[ "$ia" -gt "$ref_impl_budget" ]] && ia=$ref_impl_budget; [[ "$ia" -lt 0 ]] && ia=0
+  [[ "$ca" -gt "$cal_budget" ]] && ca=$cal_budget; [[ "$ca" -lt 0 ]] && ca=0
   if [[ "$ra" -eq 0 && "$ia" -eq 0 ]]; then
     echo "  arc(cal): neither side detected motion — SSIM/vacuous guards own this"
     return 0
@@ -309,11 +316,21 @@ arc_calibrated_verdict() {
   local d_ref=$((ia - ra)); [[ "$d_ref" -lt 0 ]] && d_ref=$((-d_ref))
   local d_cal=$((ia - ca)); [[ "$d_cal" -lt 0 ]] && d_cal=$((-d_cal))
   local impl_delta=$d_ref
-  [[ "$d_cal" -lt "$impl_delta" ]] && impl_delta=$d_cal
+  local refcal_nearer_limit=$((defmax + margin + defmax))
+  local refcal_eligible=0
+  if [[ "$ca" -gt 0 && "$noise" -le "$refcal_nearer_limit" && $((2 * noise)) -le "$ra" ]]; then
+    refcal_eligible=1
+  fi
+  [[ "$refcal_eligible" -eq 1 && "$d_cal" -lt "$impl_delta" ]] && impl_delta=$d_cal
+  # The margin is added once below. Cap the calibrated contribution at the
+  # default delta so extreme refcal noise cannot widen the final boundary twice.
+  local noise_cap=$defmax
+  local usable_noise=$noise
+  [[ "$usable_noise" -gt "$noise_cap" ]] && usable_noise=$noise_cap
   local tol=$defmax
-  [[ "$noise" -gt "$tol" ]] && tol=$noise
+  [[ "$usable_noise" -gt "$tol" ]] && tol=$usable_noise
   tol=$((tol + margin))
-  echo "  arc(cal): ref ${ra} impl ${ia} refcal ${ca} frames (budget ${budget}); impl-vs-nearer-ref delta ${impl_delta}, live ref-vs-ref noise ${noise}, tol ${tol}"
+  echo "  arc(cal): ref ${ra} impl ${ia} refcal ${ca} frames (ref/impl budget ${ref_impl_budget}, cal budget ${cal_budget}); impl-vs-nearer-ref delta ${impl_delta}, live ref-vs-ref noise ${noise}, refcal-nearer limit ${refcal_nearer_limit}, refcal eligible ${refcal_eligible}, usable noise ${usable_noise}, tol ${tol}"
   if [[ "$impl_delta" -le "$tol" ]]; then
     return 0
   fi

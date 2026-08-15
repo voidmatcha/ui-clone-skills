@@ -28,7 +28,11 @@ from ui_clone.pipeline_logs import (
     tail_text,
     write_process_log,
 )
-from ui_clone.state import POST_IMPL_VERIFY_GATES, PipelineState
+from ui_clone.state import (
+    POST_IMPL_VERIFY_GATES,
+    PipelineState,
+    is_authoritative_terminal_state,
+)
 from ui_clone.verify_report import build_verify_report, write_verify_report
 
 if TYPE_CHECKING:
@@ -285,6 +289,21 @@ def _split_root_cause_and_cascade(
     return root, cascade
 
 
+def _authoritative_terminal_payload(state: PipelineState) -> dict[str, object]:
+    terminal = dict(state.terminal_state)
+    if not is_authoritative_terminal_state(terminal):
+        return {}
+    category = terminal.get("category") or terminal.get("status") or "terminal"
+    return {
+        "status": str(terminal.get("status") or "terminal"),
+        "terminalState": terminal,
+        "next_action": (
+            terminal.get("next_action")
+            or f"Resolve the terminal {category} state before rerunning verify."
+        ),
+    }
+
+
 def execute_verify(pipeline: Pipeline, json_output: bool = False) -> int:
     gates_post_impl = POST_IMPL_VERIFY_GATES
     stamp_path = pipeline.ref_dir / "verify-stamp.json"
@@ -416,51 +435,19 @@ def execute_verify(pipeline: Pipeline, json_output: bool = False) -> int:
         )
         state = PipelineState.load(pipeline.ref_dir)
         root_gates, cascade_gates = _split_root_cause_and_cascade(failures, state)
-        if root_gates:
-            reason = (
-                f"canonical verify failed {len(root_gates)} gate(s) on their own "
-                f"evidence: {', '.join(root_gates)}"
-            )
-        else:
-            reason = (
-                f"canonical verify failed {len(failures)} gate(s): "
-                f"{', '.join(failures)}"
-            )
-        if cascade_gates:
-            reason += (
-                f" ({len(cascade_gates)} further gate(s) blocked only by gate order, "
-                f"carrying no independent evidence: {', '.join(cascade_gates)})"
-            )
-        state.mark_terminal(
-            pipeline.ref_dir,
-            status="failed",
-            category="canonical-verify-failed",
-            gate=(root_gates or failures)[0],
-            reason=reason,
-            detail={
-                "failed_gates": failures,
-                "root_cause_gates": root_gates,
-                "cascade_gates": cascade_gates,
-                "gate_exit_codes": gate_exit_codes,
-                "verify_report": str(json_path),
-                "verify_report_html": str(html_path),
-                "gate_logs": gate_logs,
-                "implDir": str(impl_dir),
-            },
-            next_action=next_action,
-            written_by="pipeline",
-        )
+        terminal_payload = _authoritative_terminal_payload(state)
         payload = {
             "schemaVersion": 1,
             "status": "failed",
             "failed_gates": failures,
+            "root_cause_gates": root_gates,
+            "cascade_gates": cascade_gates,
             "gate_exit_codes": gate_exit_codes,
             "verify_stamp": {
                 "path": str(pipeline.ref_dir / "verify-stamp.json"),
                 "created": False,
                 "success_only": True,
             },
-            "terminalState": state.terminal_state,
             "reports": {
                 "json": str(json_path),
                 "html": str(html_path),
@@ -475,6 +462,8 @@ def execute_verify(pipeline: Pipeline, json_output: bool = False) -> int:
                 str(pipeline.ref_dir / "raw" / "styles.json"),
             ],
         }
+        if terminal_payload:
+            payload.update(terminal_payload)
         if json_output:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
@@ -484,7 +473,7 @@ def execute_verify(pipeline: Pipeline, json_output: bool = False) -> int:
             )
             print(f"  report: {json_path}")
             print(f"  html  : {html_path}")
-            print(f"  terminalState: {pipeline.ref_dir / 'pipeline-state.json'}")
+            print(f"  pipeline-state: {pipeline.ref_dir / 'pipeline-state.json'}")
         return 1
     # All post-impl gates ran and passed (each cleared its own skip above). Any
     # gate STILL in .gate-skip-log was skipped fail-open earlier and never

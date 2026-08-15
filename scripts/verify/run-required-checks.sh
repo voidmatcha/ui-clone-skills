@@ -51,6 +51,13 @@ set -uo pipefail
 # Default 3 min; override via RUN_REQUIRED_CHECK_TIMEOUT_SEC.
 : "${RUN_REQUIRED_CHECK_TIMEOUT_SEC:=180}"
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+_LOCK_HELPER="$_SCRIPT_DIR/../lib/exclusive-lock.sh"
+if [ ! -f "$_LOCK_HELPER" ]; then
+  echo "run-required-checks: ERROR — exclusive lock helper missing: $_LOCK_HELPER" >&2
+  exit 2
+fi
+# shellcheck source=../lib/exclusive-lock.sh
+source "$_LOCK_HELPER"
 
 # Bash 5.1 switched here-documents from temporary files to pipes. On macOS,
 # sufficiently large interpreter heredocs can block in heredoc_write before
@@ -81,6 +88,10 @@ fi
 # agent-browser sessions, and trap-close all derived sessions on exit.
 RUN_UUID=$(date +%s%N | tail -c 8)
 SESSION="${SESSION}-${RUN_UUID}"
+LOCK_DIR="$REF_DIR/.run-required-checks.lock"
+LOCK_TOKEN="$$-$RUN_UUID"
+LOCK_HELD=0
+DISPATCH_FILE="$REF_DIR/.run-required-checks-dispatch.${LOCK_TOKEN}.txt"
 
 # shellcheck disable=SC2329 # Invoked via trap.
 cleanup_browser_sessions() {
@@ -89,9 +100,35 @@ cleanup_browser_sessions() {
   # prefix. Guessing derived names and closing absent sessions can create ghost
   # registrations on some agent-browser versions; prefix discovery also catches
   # nested names created internally (for example hover fallback sessions).
-  bash "$_SCRIPT_DIR/cleanup-sessions.sh" "$SESSION" >/dev/null 2>&1 || true
+  bash "$_SCRIPT_DIR/cleanup-sessions.sh" "$SESSION"
 }
-trap cleanup_browser_sessions EXIT INT TERM
+
+release_dispatch_lock() {
+  [ "$LOCK_HELD" = "1" ] || return 0
+  ui_clone_exclusive_lock_release "$LOCK_DIR" "$LOCK_TOKEN"
+  LOCK_HELD=0
+}
+
+cleanup_run() {
+  # EXIT cleanup cannot change an already-decided verdict. Keep it bounded and
+  # best-effort; row-boundary cleanup below is the fail-closed control point.
+  cleanup_browser_sessions >/dev/null 2>&1 || true
+  rm -f "$DISPATCH_FILE"
+  release_dispatch_lock
+}
+
+acquire_dispatch_lock() {
+  if ui_clone_exclusive_lock_acquire \
+    "$LOCK_DIR" "$LOCK_TOKEN" "ref-dir $REF_DIR" "$SESSION"; then
+    LOCK_HELD=1
+    return 0
+  fi
+  return 1
+}
+
+trap cleanup_run EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [ ! -d "$REF_DIR" ]; then
   echo "ref-dir not found: $REF_DIR" >&2
@@ -101,6 +138,9 @@ fi
 PLAN="$REF_DIR/verification-plan.json"
 if [ ! -f "$PLAN" ]; then
   echo "verification-plan.json missing — run verification-plan.sh first" >&2
+  exit 2
+fi
+if ! acquire_dispatch_lock; then
   exit 2
 fi
 
@@ -257,7 +297,7 @@ TOTAL=0; PASS=0; FAIL=0; WARN=0; SKIP=0; STALE=0
 # Build the list of (id, script, produces, args-mode) tuples from the plan.
 # args-mode is determined by the script basename — kept small and
 # explicit so adding a new gate means updating this table.
-"$PYTHON_BIN" "$REPO_ROOT/scripts/verify/build_required_dispatch.py" "$PLAN" "$REF_DIR" "$REPO_ROOT" "$IMPL_ROOT" "$IMPL_SRC" "$IMPL_PUBLIC" "$REF_URL" "$IMPL_URL" "$SESSION" > "$REF_DIR/.run-required-checks-dispatch.txt"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/verify/build_required_dispatch.py" "$PLAN" "$REF_DIR" "$REPO_ROOT" "$IMPL_ROOT" "$IMPL_SRC" "$IMPL_PUBLIC" "$REF_URL" "$IMPL_URL" "$SESSION" > "$DISPATCH_FILE"
 
 
 SETUP_FAILURE=0
@@ -279,7 +319,7 @@ dep_failed() {
   done
   return 1
 }
-while IFS=$'\t' read -r kind cid script_path args produces severity deps; do
+while IFS=$'\t' read -r kind cid script_path args produces severity deps <&3; do
   TOTAL=$((TOTAL + 1))
   severity="${severity:-block}"
   # Dry mode: print the resolved dispatch rows without executing anything.
@@ -475,10 +515,30 @@ except Exception:
     transition-compare|click-state-compare|video-motion-compare)
       row_timeout="${RUN_REQUIRED_HEAVY_TIMEOUT_SEC:-540}"
       ;;
+    masked-region-static)
+      row_timeout="${RUN_REQUIRED_MASKED_STATIC_TIMEOUT_SEC:-420}"
+      ;;
+    transition-fires)
+      row_timeout="${RUN_REQUIRED_TRANSITION_FIRES_TIMEOUT_SEC:-900}"
+      ;;
+    breakpoint-collision)
+      row_timeout="${RUN_REQUIRED_BREAKPOINT_COLLISION_TIMEOUT_SEC:-300}"
+      ;;
   esac
   for _kv in $env_vars; do
     case "$_kv" in ROW_TIMEOUT_SEC=*) row_timeout="${_kv#ROW_TIMEOUT_SEC=}" ;; esac
   done
+  if ! "$PYTHON_BIN" -c 'import math,sys; v=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(v) and v > 0 else 1)' "$row_timeout" >/dev/null 2>&1; then
+    echo "  → invalid row timeout for $cid: ${row_timeout} (must be a positive finite number)" >&2
+    FAIL=$((FAIL + 1))
+    mark_failed "$cid"
+    if ! cleanup_browser_sessions >/dev/null; then
+      echo "  → owned browser session cleanup failed after $cid; stopping dispatch" >&2
+      SETUP_FAILURE=1
+      break
+    fi
+    continue
+  fi
   # Pick the interpreter from the row's script extension. Hardcoding `bash`
   # here meant every .py-backed row (unresolved-imports) died on a shell
   # syntax error and could never emit its artifact.
@@ -493,12 +553,12 @@ except Exception:
       # Put the dispatcher-owned assignment last so a plan row cannot silently
       # defeat the containment; use UI_CLONE_DISPATCH_BASH_COMPAT to override.
       # shellcheck disable=SC2086 # intentional word-split on env_vars/positional
-      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
         rc=0
       else
         rc=$?
       fi
-    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "$_row_interp" "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
@@ -506,12 +566,12 @@ except Exception:
   else
     if [ -n "$_DISPATCH_CHILD_BASH_COMPAT" ]; then
       # shellcheck disable=SC2086 # intentional word-split on positional
-      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
         rc=0
       else
         rc=$?
       fi
-    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" "$_row_interp" "$script_path" $positional 2>&1 | tail -3 | sed 's/^/  /'; then
+    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
@@ -617,10 +677,14 @@ except Exception:
   # approach set a viewport on the bare run prefix after every row, which
   # created a persistent browser that accumulated across the whole dispatcher
   # and eventually poisoned late runtime-text/section captures.
-  cleanup_browser_sessions
-done < "$REF_DIR/.run-required-checks-dispatch.txt"
+  if ! cleanup_browser_sessions >/dev/null; then
+    echo "  → owned browser session cleanup failed after $cid; stopping dispatch" >&2
+    SETUP_FAILURE=1
+    break
+  fi
+done 3< "$DISPATCH_FILE"
 
-rm -f "$REF_DIR/.run-required-checks-dispatch.txt"
+rm -f "$DISPATCH_FILE"
 
 echo
 echo "═══ run-required-checks summary ═══"
@@ -632,7 +696,7 @@ echo "  skipped:    $SKIP (unknown signature or missing script — wire into SIG
 echo "  stale:      $STALE (re-dispatched because impl source moved)"
 echo
 if [ "$SETUP_FAILURE" = "1" ]; then
-  echo -e "${RED}DISPATCHER_SETUP_FAILED — at least one required-check has no SIGNATURES entry or its script is missing. Wire it into run-required-checks.sh before re-running.${NC}"
+  echo -e "${RED}DISPATCHER_SETUP_FAILED — a required-check signature, script, or owned browser cleanup failed. Inspect the preceding error before re-running.${NC}"
   exit 2
 fi
 

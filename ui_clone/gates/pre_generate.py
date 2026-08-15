@@ -10,8 +10,10 @@ in `ui_clone.gates.__init__`.
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from collections import Counter
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ui_clone import dag as _dag
@@ -36,6 +38,167 @@ from .state_coverage import (
 
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
+
+
+_MOTION_WIRE_RE = re.compile(
+    r"\b(scroll|motion|animate|animation|sticky|pin|parallax|scrub|reveal|"
+    r"transform|opacity|fade|dissolve|stagger|tween|spring|keyframes)\b",
+    re.IGNORECASE,
+)
+_MOTION_LIBRARIES = {"framermotion", "framer", "gsap", "animejs", "anime"}
+_MOTION_APIS = {
+    "useinview",
+    "usescroll",
+    "usetransform",
+    "usespring",
+    "animatepresence",
+    "scrolltrigger",
+}
+_MOTION_GROUNDING_ARTIFACTS = {
+    "animation-runtime-dump.json",
+    "transition-spec.json",
+    "bundle-extraction.json",
+    "animations-detected.json",
+    "scroll-engine.json",
+    "sticky-elements.json",
+    "scroll-state-machine.json",
+    "signature-effects-candidates.json",
+    "states/scroll/trajectory.json",
+}
+
+
+def _motion_token(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[\s_.-]+", "", value).casefold()
+
+
+def _has_structured_motion_indicator(wire: dict[str, Any]) -> bool:
+    if _motion_token(wire.get("library")) in _MOTION_LIBRARIES:
+        return True
+    if _MOTION_WIRE_RE.search(str(wire.get("kind") or "")):
+        return True
+    if _MOTION_WIRE_RE.search(str(wire.get("trigger") or "")):
+        return True
+    hooks = wire.get("hooks")
+    hook_values = hooks if isinstance(hooks, list) else []
+    for hook in hook_values:
+        hook_raw = hook if isinstance(hook, str) else ""
+        if hook_raw.casefold().startswith("motion."):
+            return True
+        hook_token = _motion_token(hook_raw)
+        if hook_token in _MOTION_APIS or _MOTION_WIRE_RE.search(hook_raw):
+            return True
+    return False
+
+
+def _contains_exact_scalar(value: Any, needle: str) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_exact_scalar(child, needle) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_exact_scalar(child, needle) for child in value)
+    return bool(value == needle)
+
+
+def _safe_source_artifact_path(
+    ref_dir: Path, source_artifact: str
+) -> tuple[Path | None, str | None]:
+    source = source_artifact.strip()
+    source_path = Path(source)
+    if source_path.is_absolute() or ".." in source_path.parts:
+        return None, "sourceArtifact escapes ref_dir"
+    if source not in _MOTION_GROUNDING_ARTIFACTS:
+        return None, "sourceArtifact not allowed for motion grounding"
+    candidate = ref_dir / source
+    if not candidate.exists() and not candidate.is_symlink():
+        return None, "sourceArtifact missing or not a file"
+    try:
+        ref_root = ref_dir.resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(ref_root)
+    except (OSError, ValueError):
+        return None, "sourceArtifact escapes ref_dir"
+    if not resolved.is_file():
+        return None, "sourceArtifact missing or not a file"
+    return resolved, None
+
+
+def _runtime_dump_matches_wire(artifact: Any, source_id: str, selector: str) -> bool:
+    if not isinstance(artifact, dict):
+        return False
+    rows = artifact.get("scrollLinkedStyles")
+    if not isinstance(rows, list):
+        return False
+    return any(
+        isinstance(row, dict)
+        and row.get("sourceId") == source_id
+        and row.get("selector") == selector
+        for row in rows
+    )
+
+
+def _transition_spec_matches_wire(artifact: Any, source_id: str, selector: str) -> bool:
+    if not isinstance(artifact, dict):
+        return False
+    transitions = artifact.get("transitions")
+    if not isinstance(transitions, list):
+        return False
+    return any(
+        isinstance(transition, dict)
+        and (transition.get("id") == source_id or transition.get("sourceId") == source_id)
+        and (transition.get("target") == selector or transition.get("selector") == selector)
+        for transition in transitions
+    )
+
+
+def _motion_wire_reason(ref_dir: Path, wire: Any) -> str | None:
+    if isinstance(wire, str):
+        return "ungrounded motion prose" if _MOTION_WIRE_RE.search(wire) else None
+    if not isinstance(wire, dict):
+        return None
+
+    if not _has_structured_motion_indicator(wire):
+        return None
+
+    required = ("kind", "library", "trigger", "selector", "sourceArtifact", "sourceId")
+    for field in required:
+        if not isinstance(wire.get(field), str) or not wire.get(field, "").strip():
+            return f"missing {field}"
+
+    library = wire["library"].strip()
+    kind = wire["kind"].strip()
+    hooks = wire.get("hooks")
+    if not isinstance(hooks, list) or any(
+        not isinstance(hook, str) or not hook.strip() for hook in hooks
+    ):
+        return "hooks must be a list of nonempty strings"
+    if not hooks and not (library == "css" and kind == "sticky-layout"):
+        return "hooks must contain at least one hook"
+
+    source_artifact = wire["sourceArtifact"].strip()
+    source_id = wire["sourceId"].strip()
+    selector = wire["selector"].strip()
+    source_path, artifact_error = _safe_source_artifact_path(ref_dir, source_artifact)
+    if source_path is None:
+        return artifact_error or "sourceArtifact missing or not a file"
+    try:
+        artifact = json.loads(source_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "sourceArtifact invalid JSON"
+    if source_artifact == "animation-runtime-dump.json":
+        if not _runtime_dump_matches_wire(artifact, source_id, selector):
+            return "sourceId/selector absent from same runtime row"
+        return None
+    # transition-spec already has a compact transition list with target/selector,
+    # so require same-row id+selector. Other allowlisted extraction artifacts do
+    # not share one stable schema, and remain exact-scalar provenance checks.
+    if source_artifact == "transition-spec.json":
+        if not _transition_spec_matches_wire(artifact, source_id, selector):
+            return "sourceId/selector absent from same transition row"
+        return None
+    if not _contains_exact_scalar(artifact, source_id):
+        return "sourceId absent from sourceArtifact"
+    return None
 
 
 def gate_pre_generate(self: Gate) -> list[CheckResult]:
@@ -189,6 +352,23 @@ def gate_pre_generate(self: Gate) -> list[CheckResult]:
                 enrichment_gaps.append(
                     "componentList entries missing wires[] at indexes "
                     + ", ".join(str(index) for index in missing_wires[:8])
+                )
+            invalid_wires: list[str] = []
+            for index, component in enumerate(components):
+                if not isinstance(component, dict) or not isinstance(
+                    component.get("wires"), list
+                ):
+                    continue
+                for wire_index, wire in enumerate(component["wires"]):
+                    reason = _motion_wire_reason(self.ref_dir, wire)
+                    if reason:
+                        invalid_wires.append(
+                            f"componentList[{index}].wires[{wire_index}] {reason}"
+                        )
+                        break
+            if invalid_wires:
+                enrichment_gaps.append(
+                    "invalid grounded wires: " + "; ".join(invalid_wires[:8])
                 )
 
             section_map = self._load_json("section-map.json")

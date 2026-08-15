@@ -1452,6 +1452,56 @@ hover_expected() {
   return 1
 }
 
+affected_selector_for_hover() {  # <activation-selector>
+  python3 - "$REF_DIR/transition-spec.json" "$HOVER_CSS" "$1" <<'PY'
+import json
+import sys
+
+spec_path, hover_css_path, activation = sys.argv[1:4]
+
+def load(path):
+    try:
+        return json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return {}
+
+def selectors(raw):
+    return [part.strip() for part in str(raw or "").split(",") if part.strip()]
+
+spec = load(spec_path)
+for item in spec.get("transitions") or []:
+    if not isinstance(item, dict):
+        continue
+    if activation not in selectors(item.get("target")):
+        continue
+    affected = str(item.get("affectedTarget") or "").strip()
+    if affected and affected != activation:
+        print(affected)
+        raise SystemExit(0)
+
+hover_css = load(hover_css_path)
+rules = hover_css if isinstance(hover_css, list) else hover_css.get("rules") or []
+for item in rules:
+    if not isinstance(item, dict):
+        continue
+    affected = str(item.get("affected") or "").strip()
+    if str(item.get("activation") or "").strip() == activation and affected and affected != activation:
+        print(affected)
+        raise SystemExit(0)
+
+for item in rules:
+    if not isinstance(item, dict):
+        continue
+    raw = str(item.get("selector") or "").split(",", 1)[0].strip()
+    marker = f"{activation}:hover"
+    if marker in raw:
+        affected = raw.replace(marker, activation, 1).strip()
+        if affected and affected != activation:
+            print(affected)
+            raise SystemExit(0)
+PY
+}
+
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 {
   echo "# hover-state-compare"
@@ -1750,6 +1800,7 @@ print("\n".join(kept))
 PY
   while IFS=$'\t' read -r NAME TTYPE SELECTOR; do
     [ -z "$SELECTOR" ] && continue
+    AFFECTED_SELECTOR="$(affected_selector_for_hover "$SELECTOR" 2>/dev/null || true)"
     RUN_COUNT=$((RUN_COUNT + 1))
     printf '%s\n' "$SELECTOR" >> "$MEASURED_SEL_FILE"
     SAFE_NAME="${NAME//[^A-Za-z0-9_-]/_}"
@@ -1758,15 +1809,23 @@ PY
     {
       echo "## $NAME ($TTYPE) [$VP_LABEL]"
       echo "selector: $SELECTOR"
+      [ -n "$AFFECTED_SELECTOR" ] && echo "affected-selector: $AFFECTED_SELECTOR"
       echo
     } >> "$RESULT"
 
     MEASURE_SESSION="$SESSION-hs${VP_SESSION_SUFFIX}-$RUN_COUNT"
     register_hover_session "$MEASURE_SESSION"
     MEASURE_STATUS=0
-    bash "$COMPARE" "$MEASURE_SESSION" "$ORIG_URL" "$IMPL_URL" \
-      "$TARGET_DIR" "${HOVER_MODE_PREFIX}:$SELECTOR" \
-      >> "$RESULT" 2>&1 || MEASURE_STATUS=$?
+    if [ -n "$AFFECTED_SELECTOR" ]; then
+      VIDEO_COMPARE_AFFECTED_SELECTOR="$AFFECTED_SELECTOR" \
+        bash "$COMPARE" "$MEASURE_SESSION" "$ORIG_URL" "$IMPL_URL" \
+        "$TARGET_DIR" "${HOVER_MODE_PREFIX}:$SELECTOR" \
+        >> "$RESULT" 2>&1 || MEASURE_STATUS=$?
+    else
+      bash "$COMPARE" "$MEASURE_SESSION" "$ORIG_URL" "$IMPL_URL" \
+        "$TARGET_DIR" "${HOVER_MODE_PREFIX}:$SELECTOR" \
+        >> "$RESULT" 2>&1 || MEASURE_STATUS=$?
+    fi
     MEASURE_CLEANUP_STATUS=0
     cleanup_hover_sessions "$MEASURE_SESSION" || MEASURE_CLEANUP_STATUS=$?
     if [ "$MEASURE_CLEANUP_STATUS" -ne 0 ]; then
@@ -1789,9 +1848,16 @@ PY
         clear_attempt_evidence "$RETRY_DIR"
         echo "↻ $NAME retryable-unmeasurable [$VP_LABEL] — confirming once with a fresh session" >> "$RESULT"
         register_hover_session "$RETRY_SESSION"
-        bash "$COMPARE" "$RETRY_SESSION" "$ORIG_URL" "$IMPL_URL" \
-          "$RETRY_DIR" "${HOVER_MODE_PREFIX}:$SELECTOR" \
-          >> "$RESULT" 2>&1 || RETRY_STATUS=$?
+        if [ -n "$AFFECTED_SELECTOR" ]; then
+          VIDEO_COMPARE_AFFECTED_SELECTOR="$AFFECTED_SELECTOR" \
+            bash "$COMPARE" "$RETRY_SESSION" "$ORIG_URL" "$IMPL_URL" \
+            "$RETRY_DIR" "${HOVER_MODE_PREFIX}:$SELECTOR" \
+            >> "$RESULT" 2>&1 || RETRY_STATUS=$?
+        else
+          bash "$COMPARE" "$RETRY_SESSION" "$ORIG_URL" "$IMPL_URL" \
+            "$RETRY_DIR" "${HOVER_MODE_PREFIX}:$SELECTOR" \
+            >> "$RESULT" 2>&1 || RETRY_STATUS=$?
+        fi
         RETRY_CLEANUP_STATUS=0
         cleanup_hover_sessions "$RETRY_SESSION" || RETRY_CLEANUP_STATUS=$?
         if [ "$RETRY_CLEANUP_STATUS" -ne 0 ]; then

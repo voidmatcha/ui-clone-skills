@@ -36,12 +36,14 @@ _found_crumbs() {
 _payload=""
 if ! _found_ref && ! _found_crumbs; then
   _payload="$(cat 2>/dev/null || true)"
-  case "$_payload" in
+  case "${1:-}:$_payload" in
+    ui_clone.hooks.claude_continuation:*) : ;;
     *agent-browser*open*http*) : ;;  # external browse — proceed to write the crumb
     *) exit 0 ;;
   esac
 fi
 if ! command -v uv >/dev/null 2>&1; then
+  # shellcheck disable=SC2016
   echo 'ui-clone-skills: uv not found. Install: uv_tmp=$(mktemp) && curl -LsSf -o "$uv_tmp" https://astral.sh/uv/install.sh && sh "$uv_tmp" && rm -f "$uv_tmp"' >&2
   exit 0
 fi

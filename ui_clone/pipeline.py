@@ -28,7 +28,7 @@ from ui_clone.hooks._common import RED as _RED
 from ui_clone.hooks._common import YELLOW as _YELLOW
 from ui_clone.hooks._common import find_project_root
 from ui_clone.pipeline_phases.types import PhaseCheck, PhaseResult
-from ui_clone.state import GATE_ORDER, PipelineState
+from ui_clone.state import GATE_ORDER, PipelineState, is_authoritative_terminal_state
 
 __all__ = [
     "Pipeline",
@@ -329,7 +329,12 @@ class Pipeline:
         verify_stamp = self.ref_dir / "verify-stamp.json"
         verify_report = self.ref_dir / "verify-report.json"
         impl_dir = _resolve_verify_impl_dir(self.ref_dir, self.project_root)
-        terminal = dict(state.terminal_state)
+        raw_terminal = dict(state.terminal_state)
+        terminal = (
+            raw_terminal
+            if is_authoritative_terminal_state(raw_terminal)
+            else {}
+        )
         stamp_problem = (
             canonical_stamp_problem(self.ref_dir) if verify_stamp.is_file() else None
         )

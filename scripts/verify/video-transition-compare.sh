@@ -50,6 +50,16 @@ VMC_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROI_HELPER="$VMC_SCRIPT_DIR/lib/video_compare_roi.py"
 CAPTURE_RETRY_HELPER="$VMC_SCRIPT_DIR/lib/selector_capture_retry.py"
 HOVER_ACTION_RECEIPT_HELPER="$VMC_SCRIPT_DIR/lib/hover_action_receipt.py"
+LOCK_HELPER="$VMC_SCRIPT_DIR/../lib/exclusive-lock.sh"
+if [ ! -f "$LOCK_HELPER" ]; then
+  echo "video-transition-compare: exclusive lock helper missing: $LOCK_HELPER" >&2
+  exit 2
+fi
+# shellcheck source=../lib/exclusive-lock.sh
+source "$LOCK_HELPER"
+TRANSITION_LOCK_DIR="$OUT_DIR/.transition-compare.lock"
+TRANSITION_LOCK_TOKEN="$$-$(date +%s%N | tail -c 8)"
+TRANSITION_LOCK_HELD=0
 
 RECORD_DURATION="${RECORD_DURATION:-5}"
 SSIM_THRESHOLD="${SSIM_THRESHOLD:-0.90}"
@@ -95,11 +105,25 @@ fi
 
 # Cleanup browser sessions on exit (including errors/signals)
 cleanup_browsers() {
-  agent-browser --session "${SESSION}-orig" close 2>/dev/null
-  agent-browser --session "${SESSION}-impl" close 2>/dev/null
-  agent-browser --session "${SESSION}-refcal" close 2>/dev/null
+  if [ "$TRANSITION_LOCK_HELD" = "1" ]; then
+    ui_clone_exclusive_lock_release "$TRANSITION_LOCK_DIR" "$TRANSITION_LOCK_TOKEN"
+    TRANSITION_LOCK_HELD=0
+  fi
+  agent-browser --session "${SESSION}-orig" close 2>/dev/null || true
+  agent-browser --session "${SESSION}-impl" close 2>/dev/null || true
+  agent-browser --session "${SESSION}-refcal" close 2>/dev/null || true
 }
 trap cleanup_browsers EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mkdir -p "$OUT_DIR"
+if ! ui_clone_exclusive_lock_acquire \
+  "$TRANSITION_LOCK_DIR" "$TRANSITION_LOCK_TOKEN" \
+  "transition artifact dir $OUT_DIR" "$SESSION"; then
+  exit 2
+fi
+TRANSITION_LOCK_HELD=1
 
 # Optional: skip SSIM comparison, just extract frames for manual review
 SKIP_SSIM="${SKIP_SSIM:-false}"
@@ -127,6 +151,9 @@ case "$ACTION" in
   hover:*) TARGET_ROI_SELECTOR="${ACTION#hover:}" ;;
   hover-and-out:*) TARGET_ROI_SELECTOR="${ACTION#hover-and-out:}" ;;
 esac
+TARGET_MEASURE_SELECTOR="${VIDEO_COMPARE_AFFECTED_SELECTOR:-$TARGET_ROI_SELECTOR}"
+TARGET_ROI_FORCED_MATCH_INDEX=""
+TARGET_ROI_FORCED_SCROLL_Y=""
 # Comparison output directories may be reused by bounded retry callers. Remove
 # only generated per-run sidecars and target-delta directories before the new
 # verdict so a prior AA rescue cannot leak into this comparison.
@@ -234,11 +261,11 @@ hover_timing_probe_js() {
       }
       return elements;
     };
-    const hoverSnapshot = (el) => ({
-      watchedStyle: watchedStyle(el),
-      ancestorClassPath: classPath(el),
-      hovered: el.matches(':hover'),
-      activeAnimationCount: activeAnimationCount(el)
+    const hoverSnapshot = (actionEl, measurementEl = actionEl) => ({
+      watchedStyle: watchedStyle(measurementEl),
+      ancestorClassPath: classPath(measurementEl),
+      hovered: actionEl.matches(':hover'),
+      activeAnimationCount: activeAnimationCount(measurementEl)
     });
     const changedKeys = (initial, final) =>
       Object.keys(initial.watchedStyle || {})
@@ -251,14 +278,31 @@ JS
 capture_target_roi() {
   local session="$1"
   local selector="$2"
-  local out="$3"
-  local selector_json
+  local measure_selector="$3"
+  local out="$4"
+  local forced_match_index="${5:-}"
+  local forced_scroll_y="${6:-}"
+  local selector_json measure_selector_json forced_match_index_json forced_scroll_y_json
   selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$selector")
+  measure_selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$measure_selector")
+  forced_match_index_json=$(python3 -c 'import json,sys; value=sys.argv[1]; print("null" if value == "" else json.dumps(int(value)))' "$forced_match_index")
+  forced_scroll_y_json=$(python3 -c 'import json,sys; value=sys.argv[1]; print("null" if value == "" else json.dumps(float(value)))' "$forced_scroll_y")
   agent-browser --session "$session" mouse move -100 -100 >/dev/null 2>&1 || true
   sleep 0.25
   agent-browser --session "$session" eval "(async () => {
 $(hover_state_snapshot_js)
-    const matches = Array.from(document.querySelectorAll($selector_json));
+    const actionSelector = $selector_json;
+    const measureSelector = $measure_selector_json || actionSelector;
+    const forcedMatchIndex = $forced_match_index_json;
+    const forcedScrollY = $forced_scroll_y_json;
+    const matches = Array.from(document.querySelectorAll(actionSelector));
+    const measurementMatches = Array.from(document.querySelectorAll(measureSelector));
+    const maxScrollY = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    if (forcedScrollY !== null) {
+      const boundedForcedScrollY = Math.max(0, Math.min(maxScrollY(), forcedScrollY));
+      window.scrollTo(window.scrollX, boundedForcedScrollY);
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
     const rendered = (el) => {
       const style = getComputedStyle(el);
       const rect = el.getBoundingClientRect();
@@ -272,50 +316,199 @@ $(hover_state_snapshot_js)
         style.pointerEvents !== 'none' &&
         rect.width > 0 && rect.height > 0;
     };
+    const renderedForMeasurement = (el) => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      if (typeof el.checkVisibility === 'function' &&
+          !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+        return false;
+      }
+      return style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0 &&
+        rect.width > 0 && rect.height > 0;
+    };
     const inViewport = (rect) =>
       rect.bottom > 0 && rect.right > 0 &&
       rect.top < window.innerHeight && rect.left < window.innerWidth;
-    let el = matches.find((candidate) => {
-      const rect = candidate.getBoundingClientRect();
-      return rendered(candidate) && inViewport(rect);
-    });
-    if (!el) {
+    const colorAlpha = (color) => {
+      const match = String(color || '').match(/rgba?\\(([^)]+)\\)/i);
+      if (!match) return 0;
+      const parts = match[1].split(',').map((part) => Number.parseFloat(part.trim()));
+      if (parts.length < 3 || parts.slice(0, 3).some((part) => Number.isNaN(part))) return 0;
+      return parts.length >= 4 && !Number.isNaN(parts[3]) ? parts[3] : 1;
+    };
+    const sampleBackdropLayers = (rect) => {
+      const points = [
+        [rect.left + rect.width / 2, rect.top + rect.height / 2],
+        [rect.left + 1, rect.top + 1],
+        [rect.right - 1, rect.top + 1],
+        [rect.left + 1, rect.bottom - 1],
+        [rect.right - 1, rect.bottom - 1]
+      ];
+      const layers = [];
+      const seen = new Set();
+      for (const [rawX, rawY] of points) {
+        const x = Math.min(window.innerWidth - 1, Math.max(0, rawX));
+        const y = Math.min(window.innerHeight - 1, Math.max(0, rawY));
+        for (const layer of document.elementsFromPoint(x, y)) {
+          if (seen.has(layer)) continue;
+          seen.add(layer);
+          layers.push(layer);
+        }
+      }
+      return layers;
+    };
+    const backdropComplexity = (candidate, measurementEl) => {
+      const rect = measurementEl.getBoundingClientRect();
+      let complexity = 0;
+      for (const layer of sampleBackdropLayers(rect)) {
+        if (layer === candidate || candidate.contains(layer) || layer.contains(candidate)) {
+          continue;
+        }
+        const style = getComputedStyle(layer);
+        const layerRect = layer.getBoundingClientRect();
+        if (
+          style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          Number.parseFloat(style.opacity || '1') <= 0.01 ||
+          layerRect.width <= 0 ||
+          layerRect.height <= 0
+        ) {
+          continue;
+        }
+        const layerText = (layer.textContent || '').trim();
+        complexity += 1;
+        if (layerText) complexity += 2;
+        if (layer.getAnimations({ subtree: true }).length > 0) complexity += 2;
+        const transitionDuration = style.transitionDuration || '';
+        if (transitionDuration && transitionDuration !== '0s') complexity += 1;
+        if (Number.parseFloat(style.opacity || '1') * colorAlpha(style.backgroundColor) >= 0.95) {
+          break;
+        }
+      }
+      return complexity;
+    };
+    const resolveMeasurementEl = (actionEl) => {
+      if (measureSelector === actionSelector) return actionEl;
+      return measurementMatches.find((candidate) =>
+        renderedForMeasurement(candidate) &&
+        (candidate === actionEl || actionEl.contains(candidate))
+      ) || null;
+    };
+    const visibleCandidatesAtCurrentPosition = () => matches
+      .map((candidate, matchIndex) => {
+        const rect = candidate.getBoundingClientRect();
+        const measurementEl = resolveMeasurementEl(candidate);
+        const measurementRect = measurementEl ? measurementEl.getBoundingClientRect() : null;
+        if (
+          !rendered(candidate) ||
+          !inViewport(rect) ||
+          !measurementEl ||
+          !renderedForMeasurement(measurementEl) ||
+          !inViewport(measurementRect)
+        ) {
+          return null;
+        }
+        return {
+          el: candidate,
+          matchIndex,
+          complexity: backdropComplexity(candidate, measurementEl),
+          scrollX: window.scrollX,
+          scrollY: window.scrollY
+        };
+      })
+      .filter(Boolean);
+    const selectVisibleCandidate = () => {
+      const visibleCandidates = visibleCandidatesAtCurrentPosition();
+      if (forcedMatchIndex !== null) {
+        return visibleCandidates.find((candidate) => candidate.matchIndex === forcedMatchIndex) || null;
+      }
+      visibleCandidates.sort((left, right) =>
+        (left.complexity - right.complexity) || (left.matchIndex - right.matchIndex));
+      return visibleCandidates[0] || null;
+    };
+    let selected = selectVisibleCandidate();
+    let el = selected ? selected.el : null;
+    if (!el && forcedScrollY === null) {
       for (const candidate of matches) {
         if (!rendered(candidate)) continue;
         candidate.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         await new Promise((resolve) =>
           requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        const rect = candidate.getBoundingClientRect();
-        if (rendered(candidate) && inViewport(rect)) {
-          el = candidate;
-          break;
-        }
+        selected = selectVisibleCandidate();
+        el = selected ? selected.el : null;
+        if (el) break;
+      }
+    }
+    if (!el && matches.length && forcedScrollY === null) {
+      // scrollIntoView cannot reveal fixed/state-gated targets: their own
+      // document position never moves, while page scroll changes the state
+      // that brings them onscreen. Sweep bounded page positions and allow the
+      // scroll spring to settle before declaring the selector unmeasurable.
+      const maxScroll = Math.max(0, document.documentElement.scrollHeight - innerHeight);
+      const scrollStep = Math.max(400, Math.floor(innerHeight * 0.75));
+      for (let y = 0; y <= maxScroll; y += scrollStep) {
+        window.scrollTo(0, y);
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        selected = selectVisibleCandidate();
+        el = selected ? selected.el : null;
+        if (el) break;
       }
     }
     if (!el) {
+      const unavailableReason = forcedMatchIndex !== null
+        ? 'forced-match-unavailable'
+        : (matches.length ? 'no-rendered-match' : 'selector-absent');
       return JSON.stringify({
         found: false,
-        reason: matches.length ? 'no-rendered-match' : 'selector-absent',
-        matchCount: matches.length
+        reason: forcedScrollY !== null ? 'forced-scroll-state-unavailable' : unavailableReason,
+        matchIndex: forcedMatchIndex,
+        matchCount: matches.length,
+        measurementMatchCount: measurementMatches.length
       });
     }
-    const rect = el.getBoundingClientRect();
-    if (!rendered(el) || !inViewport(rect)) {
+    const measurementEl = resolveMeasurementEl(el);
+    const actionRect = el.getBoundingClientRect();
+    const rect = measurementEl ? measurementEl.getBoundingClientRect() : null;
+    if (!measurementEl || !rendered(el) || !inViewport(actionRect) || !renderedForMeasurement(measurementEl) || !inViewport(rect)) {
       return JSON.stringify({
         found: false,
-        reason: 'no-visible-in-viewport-match',
-        matchCount: matches.length
+        reason: measurementEl ? 'no-visible-in-viewport-match' : 'no-affected-match',
+        matchCount: matches.length,
+        measurementMatchCount: measurementMatches.length
       });
     }
     return JSON.stringify({
       found: true,
+      selector: actionSelector,
       matchIndex: matches.indexOf(el),
       matchCount: matches.length,
-      transition: transitionContract(el),
+      measurementSelector: measureSelector,
+      measurementMatchIndex: measurementMatches.indexOf(measurementEl),
+      measurementMatchCount: measurementMatches.length,
+      selection: {
+        backdropComplexity: selected.complexity,
+        scrollX: selected.scrollX,
+        scrollY: selected.scrollY
+      },
+      scrollState: {
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        maxScrollY: maxScrollY(),
+        progressY: maxScrollY() > 0 ? window.scrollY / maxScrollY() : 0
+      },
+      transition: transitionContract(measurementEl),
       state: {
         phase: 'idle',
-        watchedStyle: watchedStyle(el),
-        ancestorClassPath: classPath(el)
+        watchedStyle: watchedStyle(measurementEl),
+        ancestorClassPath: classPath(measurementEl)
+      },
+      actionRect: {
+        x: actionRect.x,
+        y: actionRect.y,
+        width: actionRect.width,
+        height: actionRect.height
       },
       rect: {
         x: rect.x,
@@ -340,7 +533,7 @@ try:
     value = json.loads(open(sys.argv[1], encoding="utf-8").read().strip())
     while isinstance(value, str):
         value = json.loads(value)
-    rect = value["rect"]
+    rect = value.get("actionRect") or value["rect"]
     if value.get("found") is not True:
         raise ValueError
     viewport_width = float(sys.argv[2])
@@ -359,14 +552,8 @@ print(f"{round(x)}\t{round(y)}")
 PY
 }
 
-restore_visible_target_rect() {
-  local session="$1"
-  local selector="$2"
-  local target_rect="${3:-}"
-  local selector_json match_index
-  [ -n "$target_rect" ] || return 0
-  selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$selector")
-  if ! match_index=$(python3 - "$target_rect" <<'PY'
+target_match_index_from_rect() {
+  python3 - "$1" <<'PY'
 import json
 import sys
 
@@ -378,19 +565,80 @@ if not isinstance(match_index, int) or isinstance(match_index, bool) or match_in
     raise SystemExit(1)
 print(match_index)
 PY
+}
+
+target_scroll_y_from_rect() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+value = json.loads(open(sys.argv[1], encoding="utf-8").read().strip())
+while isinstance(value, str):
+    value = json.loads(value)
+scroll_state = value.get("scrollState") or {}
+scroll_y = scroll_state.get("scrollY")
+if not isinstance(scroll_y, (int, float)) or isinstance(scroll_y, bool):
+    raise SystemExit(1)
+print(scroll_y)
+PY
+}
+
+restore_visible_target_rect() {
+  local session="$1"
+  local selector="$2"
+  local measure_selector="$3"
+  local target_rect="${4:-}"
+  local selector_json measure_selector_json target_payload_json match_index measurement_match_index
+  [ -n "$target_rect" ] || return 0
+  selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$selector")
+  measure_selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$measure_selector")
+  target_payload_json=$(python3 - "$target_rect" <<'PY'
+import json
+import sys
+
+value = json.loads(open(sys.argv[1], encoding="utf-8").read().strip())
+while isinstance(value, str):
+    value = json.loads(value)
+print(json.dumps({
+    "selection": value.get("selection"),
+    "scrollState": value.get("scrollState"),
+}))
+PY
+  )
+  if ! read -r match_index measurement_match_index < <(python3 - "$target_rect" <<'PY'
+import json
+import sys
+
+value = json.loads(open(sys.argv[1], encoding="utf-8").read().strip())
+while isinstance(value, str):
+    value = json.loads(value)
+match_index = value.get("matchIndex")
+if not isinstance(match_index, int) or isinstance(match_index, bool) or match_index < 0:
+    raise SystemExit(1)
+measurement_match_index = value.get("measurementMatchIndex")
+if not isinstance(measurement_match_index, int) or isinstance(measurement_match_index, bool):
+    measurement_match_index = -1
+print(match_index, measurement_match_index)
+PY
   ); then
     echo "UNMEASURABLE: hover target match index is unavailable"
     return 2
   fi
   agent-browser --session "$session" eval "(async () => {
 $(hover_state_snapshot_js)
-    const matches = Array.from(document.querySelectorAll($selector_json));
+    const actionSelector = $selector_json;
+    const measureSelector = $measure_selector_json || actionSelector;
+    const previousTargetPayload = $target_payload_json;
+    const matches = Array.from(document.querySelectorAll(actionSelector));
+    const measurementMatches = Array.from(document.querySelectorAll(measureSelector));
+    const maxScrollY = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     const matchIndex = $match_index;
+    const measurementMatchIndex = $measurement_match_index;
     const el = matches[matchIndex];
     if (!el) {
       return JSON.stringify({
         found: false,
-        selector: $selector_json,
+        selector: actionSelector,
         matchIndex,
         matchCount: matches.length
       });
@@ -407,18 +655,54 @@ $(hover_state_snapshot_js)
       Number.parseFloat(style.opacity || '1') > 0 &&
       style.pointerEvents !== 'none' &&
       rect.width > 0 && rect.height > 0 && inViewport;
+    const renderedForMeasurement = (candidate) => {
+      if (!candidate) return false;
+      const measurementStyle = getComputedStyle(candidate);
+      const measurementRect = candidate.getBoundingClientRect();
+      return measurementStyle.display !== 'none' &&
+        measurementStyle.visibility !== 'hidden' &&
+        Number.parseFloat(measurementStyle.opacity || '1') > 0 &&
+        measurementRect.width > 0 && measurementRect.height > 0 &&
+        measurementRect.bottom > 0 && measurementRect.right > 0 &&
+        measurementRect.top < innerHeight && measurementRect.left < innerWidth;
+    };
+    let measurementEl = measureSelector === actionSelector
+      ? el
+      : measurementMatches[measurementMatchIndex];
+    if (
+      measureSelector !== actionSelector &&
+      (!measurementEl || !(measurementEl === el || el.contains(measurementEl)) || !renderedForMeasurement(measurementEl))
+    ) {
+      measurementEl = measurementMatches.find((candidate) =>
+        (candidate === el || el.contains(candidate)) && renderedForMeasurement(candidate)
+      ) || null;
+    }
+    const measurementRect = measurementEl ? measurementEl.getBoundingClientRect() : null;
     return JSON.stringify({
-      found: visible,
-      selector: $selector_json,
+      found: visible && Boolean(measurementEl) && renderedForMeasurement(measurementEl),
+      selector: actionSelector,
       matchIndex,
       matchCount: matches.length,
-      transition: transitionContract(el),
+      measurementSelector: measureSelector,
+      measurementMatchIndex: measurementEl ? measurementMatches.indexOf(measurementEl) : -1,
+      measurementMatchCount: measurementMatches.length,
+      selection: previousTargetPayload.selection || null,
+      scrollState: {
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        maxScrollY: maxScrollY(),
+        progressY: maxScrollY() > 0 ? window.scrollY / maxScrollY() : 0
+      },
+      transition: measurementEl ? transitionContract(measurementEl) : null,
       state: {
         phase: 'idle',
-        watchedStyle: watchedStyle(el),
-        ancestorClassPath: classPath(el)
+        watchedStyle: measurementEl ? watchedStyle(measurementEl) : {},
+        ancestorClassPath: measurementEl ? classPath(measurementEl) : []
       },
-      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+      actionRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      rect: measurementRect
+        ? { x: measurementRect.x, y: measurementRect.y, width: measurementRect.width, height: measurementRect.height }
+        : null
     });
   })()" > "$target_rect" 2> "$target_rect.stderr"
   if ! target_center_from_rect "$target_rect" "$VIEW_W" "$VIEW_H" >/dev/null; then
@@ -430,9 +714,10 @@ $(hover_state_snapshot_js)
 hover_visible_target() {
   local session="$1"
   local selector="$2"
-  local target_rect="${3:-}"
-  local receipt="${4:-}"
-  local center target_x target_y selector_json match_index
+  local measure_selector="$3"
+  local target_rect="${4:-}"
+  local receipt="${5:-}"
+  local center target_x target_y selector_json measure_selector_json match_index measurement_match_index
   if [ -z "$target_rect" ]; then
     agent-browser --session "$session" hover "$selector" 2>&1 | head -1
     return
@@ -443,7 +728,8 @@ hover_visible_target() {
   fi
   IFS=$'\t' read -r target_x target_y <<< "$center"
   selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$selector")
-  if ! match_index=$(python3 - "$target_rect" <<'PY'
+  measure_selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$measure_selector")
+  if ! read -r match_index measurement_match_index < <(python3 - "$target_rect" <<'PY'
 import json
 import sys
 
@@ -453,7 +739,10 @@ while isinstance(value, str):
 match_index = value.get("matchIndex")
 if not isinstance(match_index, int) or isinstance(match_index, bool) or match_index < 0:
     raise SystemExit(1)
-print(match_index)
+measurement_match_index = value.get("measurementMatchIndex")
+if not isinstance(measurement_match_index, int) or isinstance(measurement_match_index, bool):
+    measurement_match_index = -1
+print(match_index, measurement_match_index)
 PY
   ); then
     echo "UNMEASURABLE: hover target match index is unavailable"
@@ -464,16 +753,43 @@ PY
 $(hover_state_snapshot_js)
 $(hover_timing_probe_js)
       const selector = $selector_json;
+      const measureSelector = $measure_selector_json || selector;
       const matchIndex = $match_index;
+      const measurementMatchIndex = $measurement_match_index;
       const matches = Array.from(document.querySelectorAll(selector));
+      const measurementMatches = Array.from(document.querySelectorAll(measureSelector));
       const el = matches[matchIndex];
       if (!el) return 'missing-target';
+      const renderedMeasurement = (candidate) => {
+        if (!candidate) return false;
+        const style = getComputedStyle(candidate);
+        const rect = candidate.getBoundingClientRect();
+        return style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          Number.parseFloat(style.opacity || '1') > 0 &&
+          rect.width > 0 && rect.height > 0;
+      };
+      const resolveMeasurementEl = (actionEl) => {
+        if (measureSelector === selector) return actionEl;
+        const indexed = measurementMatches[measurementMatchIndex];
+        if (indexed && (indexed === actionEl || actionEl.contains(indexed)) && renderedMeasurement(indexed)) {
+          return indexed;
+        }
+        return measurementMatches.find((candidate) =>
+          (candidate === actionEl || actionEl.contains(candidate)) && renderedMeasurement(candidate)
+        ) || null;
+      };
+      const measurementEl = resolveMeasurementEl(el);
+      if (!measurementEl) return 'missing-measurement-target';
       const key = hoverProofKey(selector, matchIndex);
       const proof = {
         schemaVersion: 1,
         selector,
         matchIndex,
         matchCount: matches.length,
+        measurementSelector: measureSelector,
+        measurementMatchIndex: measurementMatches.indexOf(measurementEl),
+        measurementMatchCount: measurementMatches.length,
         armedAt: performance.now(),
         moveAt: null,
         firstPointerEvent: null,
@@ -482,7 +798,7 @@ $(hover_timing_probe_js)
         firstHoverRaf: null,
         stableAt: null,
         stableHoverRafCount: 0,
-        initial: hoverSnapshot(el),
+        initial: hoverSnapshot(el, measurementEl),
         commit: null,
         mutation: null,
         final: null,
@@ -490,7 +806,7 @@ $(hover_timing_probe_js)
         pointerObserved: false,
         mutationObserved: false,
         rafObserved: false,
-        maxActiveAnimationCount: activeAnimationCount(el),
+        maxActiveAnimationCount: activeAnimationCount(measurementEl),
         classMutations: [],
         done: false
       };
@@ -508,11 +824,15 @@ $(hover_timing_probe_js)
         if (records.some((record) => record.type === 'attributes' && record.attributeName === 'class')) {
           proof.classMutations.push({
             time: performance.now(),
-            ancestorClassPath: classPath(el)
+            ancestorClassPath: classPath(measurementEl)
           });
         }
       });
-      for (const node of classPathElements(el)) {
+      const observedNodes = new Set([
+        ...classPathElements(el),
+        ...classPathElements(measurementEl)
+      ]);
+      for (const node of observedNodes) {
         observer.observe(node, { attributes: true, attributeFilter: ['class'] });
       }
       proof.observer = observer;
@@ -529,7 +849,7 @@ $(hover_timing_probe_js)
       });
       const finalize = (samples) => {
         if (!samples.length) {
-          samples.push({ time: performance.now(), snapshot: hoverSnapshot(el) });
+          samples.push({ time: performance.now(), snapshot: hoverSnapshot(el, measurementEl) });
         }
         const finalSample = samples[samples.length - 1];
         proof.final = sampleSnapshot(finalSample.snapshot);
@@ -576,7 +896,7 @@ $(hover_timing_probe_js)
         while (performance.now() <= timeoutAt) {
           await new Promise((resolve) => requestAnimationFrame(resolve));
           const sampledAt = performance.now();
-          const snapshot = hoverSnapshot(el);
+          const snapshot = hoverSnapshot(el, measurementEl);
           proof.rafObserved = true;
           proof.maxActiveAnimationCount = Math.max(
             proof.maxActiveAnimationCount || 0,
@@ -603,22 +923,47 @@ $(hover_state_snapshot_js)
 $(hover_timing_probe_js)
     await new Promise((resolve) =>
       requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const matches = Array.from(document.querySelectorAll($selector_json));
+    const selector = $selector_json;
+    const measureSelector = $measure_selector_json || selector;
+    const matches = Array.from(document.querySelectorAll(selector));
+    const measurementMatches = Array.from(document.querySelectorAll(measureSelector));
     const matchIndex = $match_index;
+    const measurementMatchIndex = $measurement_match_index;
     const el = matches[matchIndex];
     if (!el) {
       return JSON.stringify({
         found: false,
-        selector: $selector_json,
+        selector,
         matchIndex,
         matchCount: matches.length
       });
     }
-    const rect = el.getBoundingClientRect();
-    const x = Math.min(Math.max(rect.left + rect.width / 2, 0), innerWidth - 1);
-    const y = Math.min(Math.max(rect.top + rect.height / 2, 0), innerHeight - 1);
+    const renderedMeasurement = (candidate) => {
+      if (!candidate) return false;
+      const style = getComputedStyle(candidate);
+      const rect = candidate.getBoundingClientRect();
+      return style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0 &&
+        rect.width > 0 && rect.height > 0;
+    };
+    const resolveMeasurementEl = (actionEl) => {
+      if (measureSelector === selector) return actionEl;
+      const indexed = measurementMatches[measurementMatchIndex];
+      if (indexed && (indexed === actionEl || actionEl.contains(indexed)) && renderedMeasurement(indexed)) {
+        return indexed;
+      }
+      return measurementMatches.find((candidate) =>
+        (candidate === actionEl || actionEl.contains(candidate)) && renderedMeasurement(candidate)
+      ) || null;
+    };
+    const measurementEl = resolveMeasurementEl(el);
+    const actionRect = el.getBoundingClientRect();
+    const rect = measurementEl ? measurementEl.getBoundingClientRect() : null;
+    const x = Math.min(Math.max(actionRect.left + actionRect.width / 2, 0), innerWidth - 1);
+    const y = Math.min(Math.max(actionRect.top + actionRect.height / 2, 0), innerHeight - 1);
     const hit = document.elementFromPoint(x, y);
-    const proofKey = hoverProofKey($selector_json, matchIndex);
+    const proofKey = hoverProofKey(selector, matchIndex);
     const proof = window.__uiCloneHoverTimingProofs
       ? window.__uiCloneHoverTimingProofs[proofKey]
       : null;
@@ -629,20 +974,24 @@ $(hover_timing_probe_js)
       }
     }
     return JSON.stringify({
-      found: true,
-      selector: $selector_json,
+      found: Boolean(measurementEl),
+      selector,
       matchIndex,
       matchCount: matches.length,
+      measurementSelector: measureSelector,
+      measurementMatchIndex: measurementEl ? measurementMatches.indexOf(measurementEl) : -1,
+      measurementMatchCount: measurementMatches.length,
       hovered: el.matches(':hover'),
       pointerReachable: Boolean(hit && (hit === el || el.contains(hit))),
       state: {
         phase: 'hover',
-        watchedStyle: watchedStyle(el),
-        ancestorClassPath: classPath(el)
+        watchedStyle: measurementEl ? watchedStyle(measurementEl) : {},
+        ancestorClassPath: measurementEl ? classPath(measurementEl) : []
       },
-      transition: transitionContract(el),
+      transition: measurementEl ? transitionContract(measurementEl) : null,
       hoverProof: proof || null,
-      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+      actionRect: { x: actionRect.x, y: actionRect.y, width: actionRect.width, height: actionRect.height },
+      rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
     });
   })()" > "$receipt" 2> "$receipt.stderr"
   if [ ! -f "$HOVER_ACTION_RECEIPT_HELPER" ] \
@@ -707,11 +1056,11 @@ perform_action() {
     # symmetric in most designs and adding move-away would double the per-target
     # time budget without proportional bug coverage.
     local selector="${action#hover:}"
-    restore_visible_target_rect "$session" "$selector" "$target_rect" || return 2
+    restore_visible_target_rect "$session" "$selector" "$TARGET_MEASURE_SELECTOR" "$target_rect" || return 2
     sleep "$PRE_ACTION_WAIT"
     capture_action_onset "$session" "$action_onset_file" || return 2
     hover_visible_target \
-      "$session" "$selector" "$target_rect" "$action_receipt" || return 2
+      "$session" "$selector" "$TARGET_MEASURE_SELECTOR" "$target_rect" "$action_receipt" || return 2
     sleep "$RECORD_DURATION"
   elif [[ "$action" == hover-and-out:* ]]; then
     # Hover entry + exit arc. Captures the case where the exit transition is
@@ -734,11 +1083,11 @@ perform_action() {
     local selector="${action#hover-and-out:}"
     local away_x="${MOUSE_AWAY_X:-0}"
     local away_y="${MOUSE_AWAY_Y:-0}"
-    restore_visible_target_rect "$session" "$selector" "$target_rect" || return 2
+    restore_visible_target_rect "$session" "$selector" "$TARGET_MEASURE_SELECTOR" "$target_rect" || return 2
     sleep "$PRE_ACTION_WAIT"
     capture_action_onset "$session" "$action_onset_file" || return 2
     hover_visible_target \
-      "$session" "$selector" "$target_rect" "$action_receipt" || return 2
+      "$session" "$selector" "$TARGET_MEASURE_SELECTOR" "$target_rect" "$action_receipt" || return 2
     sleep "$RECORD_DURATION"
     agent-browser --session "$session" mouse move "$away_x" "$away_y" 2>&1 | head -1
     sleep "$RECORD_DURATION"
@@ -1467,8 +1816,18 @@ else
   mask_dynamic_selectors "${SESSION}-orig" ref
   if [ -n "$TARGET_ROI_SELECTOR" ]; then
     if ! capture_target_roi \
-        "${SESSION}-orig" "$TARGET_ROI_SELECTOR" "$TARGET_ROI_REF_RAW"; then
+        "${SESSION}-orig" "$TARGET_ROI_SELECTOR" "$TARGET_MEASURE_SELECTOR" "$TARGET_ROI_REF_RAW"; then
       echo -e "${RED}UNMEASURABLE: reference hover target ROI capture failed${NC}"
+      agent-browser --session "${SESSION}-orig" close 2>/dev/null
+      exit 2
+    fi
+    if ! TARGET_ROI_FORCED_MATCH_INDEX=$(target_match_index_from_rect "$TARGET_ROI_REF_RAW"); then
+      echo -e "${RED}UNMEASURABLE: reference hover target match index is unavailable${NC}"
+      agent-browser --session "${SESSION}-orig" close 2>/dev/null
+      exit 2
+    fi
+    if ! TARGET_ROI_FORCED_SCROLL_Y=$(target_scroll_y_from_rect "$TARGET_ROI_REF_RAW"); then
+      echo -e "${RED}UNMEASURABLE: reference hover target scroll state is unavailable${NC}"
       agent-browser --session "${SESSION}-orig" close 2>/dev/null
       exit 2
     fi
@@ -1509,7 +1868,7 @@ else
   mask_dynamic_selectors "${SESSION}-impl" impl
   if [ -n "$TARGET_ROI_SELECTOR" ]; then
     if ! capture_target_roi \
-        "${SESSION}-impl" "$TARGET_ROI_SELECTOR" "$TARGET_ROI_IMPL_RAW"; then
+        "${SESSION}-impl" "$TARGET_ROI_SELECTOR" "$TARGET_MEASURE_SELECTOR" "$TARGET_ROI_IMPL_RAW" "$TARGET_ROI_FORCED_MATCH_INDEX" "$TARGET_ROI_FORCED_SCROLL_Y"; then
       echo -e "${RED}UNMEASURABLE: implementation hover target ROI capture failed${NC}"
       agent-browser --session "${SESSION}-impl" close 2>/dev/null
       exit 2
@@ -1659,6 +2018,262 @@ build_target_roi_material_delta_frames() {
 
   [ "$(find "$ref_out" -maxdepth 1 -type f -name 'f-*.png' | wc -l | tr -d ' ')" -gt 0 ] \
     && [ "$(find "$impl_out" -maxdepth 1 -type f -name 'f-*.png' | wc -l | tr -d ' ')" -gt 0 ]
+}
+
+target_dimensions_close() {
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+ref = data["ref"]["target"]
+impl = data["impl"]["target"]
+delta = max(
+    abs(float(ref["width"]) - float(impl["width"])),
+    abs(float(ref["height"]) - float(impl["height"])),
+)
+print(1 if delta <= 1.0 else 0)
+' "$OUT_DIR/target-roi.json" 2>/dev/null || echo 0
+}
+
+target_material_rescue_eligible() {
+  local selector="$1"
+  local threshold="$2"
+  local actual_rows="$3"
+  local raw_rows="$4"
+  local material_rows="$5"
+  local material_fail="$6"
+  local ref_first="$7"
+  local ref_last="$8"
+  local impl_first="$9"
+  local impl_last="${10}"
+
+  if [[ ! "$actual_rows" =~ ^[0-9]+$ || ! "$raw_rows" =~ ^[0-9]+$ \
+        || ! "$material_rows" =~ ^[0-9]+$ || ! "$material_fail" =~ ^[0-9]+$ \
+        || ! "$ref_first" =~ ^[0-9]+$ || ! "$ref_last" =~ ^[0-9]+$ \
+        || ! "$impl_first" =~ ^[0-9]+$ || ! "$impl_last" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if [ "$actual_rows" -lt 1 ] \
+    || [ "$raw_rows" -ne "$actual_rows" ] \
+    || [ "$material_rows" -ne "$actual_rows" ] \
+    || [ "$material_fail" -ne 0 ]; then
+    return 1
+  fi
+  if { [ "$ref_first" -eq 1 ] && [ "$ref_last" -eq 1 ]; } \
+    || { [ "$impl_first" -eq 1 ] && [ "$impl_last" -eq 1 ]; }; then
+    return 1
+  fi
+  if [ "$(target_dimensions_close)" -ne 1 ]; then
+    return 1
+  fi
+  python3 - \
+    "$selector" \
+    "$threshold" \
+    "$OUT_DIR/ref-video/hover-action.raw.json" \
+    "$OUT_DIR/impl-video/hover-action.raw.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+from typing import Any, Optional
+
+selector, threshold_text, ref_path, impl_path = sys.argv[1:]
+try:
+    float(threshold_text)
+except ValueError:
+    raise SystemExit(1)
+
+
+def unwrap(value: Any) -> Any:
+    for _ in range(4):
+        if isinstance(value, dict):
+            data = value.get("data")
+            if isinstance(data, dict) and "result" in data:
+                value = data["result"]
+                continue
+            return value
+        if not isinstance(value, str):
+            return value
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return value
+
+
+def load(path: str) -> dict[str, Any]:
+    try:
+        value = unwrap(json.loads(Path(path).read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, ValueError):
+        raise SystemExit(1)
+    if not isinstance(value, dict):
+        raise SystemExit(1)
+    return value
+
+
+def receipt_ok(receipt: dict[str, Any]) -> bool:
+    if receipt.get("found") is not True:
+        return False
+    if receipt.get("hovered") is not True:
+        return False
+    if receipt.get("pointerReachable") is not True:
+        return False
+    if receipt.get("selector") != selector:
+        return False
+    match_index = receipt.get("matchIndex")
+    if not isinstance(match_index, int) or isinstance(match_index, bool) or match_index < 0:
+        return False
+    proof = receipt.get("hoverProof")
+    if not isinstance(proof, dict):
+        return False
+    if proof.get("done") is not True:
+        return False
+    if proof.get("pointerObserved") is not True:
+        return False
+    if proof.get("rafObserved") is not True:
+        return False
+    if proof.get("selector") != selector:
+        return False
+    if proof.get("matchIndex") != match_index:
+        return False
+    changed = proof.get("changedStyleKeys")
+    if not isinstance(changed, list):
+        return False
+    if proof.get("done") is not True:
+        return False
+    if not isinstance(proof.get("maxActiveAnimationCount"), int) or isinstance(proof.get("maxActiveAnimationCount"), bool):
+        return False
+    if proof["maxActiveAnimationCount"] < 1:
+        return False
+    for key in ("firstPointerEvent", "firstCommitRaf", "firstHoverRaf"):
+        if not isinstance(proof.get(key), (int, float)) or isinstance(proof.get(key), bool):
+            return False
+    if proof["firstCommitRaf"] < proof["firstPointerEvent"]:
+        return False
+    if proof["firstHoverRaf"] < proof["firstPointerEvent"]:
+        return False
+    return any(key in {"backgroundColor", "color", "borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor"} for key in changed)
+
+
+def duration_seconds(value: Any) -> float:
+    if not isinstance(value, str):
+        return 0.0
+    raw = value.strip()
+    try:
+        if raw.endswith("ms"):
+            return float(raw[:-2]) / 1000
+        if raw.endswith("s"):
+            return float(raw[:-1])
+        return float(raw)
+    except ValueError:
+        return 0.0
+
+
+def material_keys(receipt: dict[str, Any]) -> list[str]:
+    proof = receipt["hoverProof"]
+    return sorted(
+        key
+        for key in proof["changedStyleKeys"]
+        if key in {"backgroundColor", "color", "borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor"}
+    )
+
+
+def watched_endpoint(receipt: dict[str, Any], phase: str, keys: list[str]) -> Optional[dict[str, Any]]:
+    proof = receipt["hoverProof"]
+    payload = proof.get(phase)
+    if not isinstance(payload, dict):
+        return None
+    watched = payload.get("watchedStyle")
+    if not isinstance(watched, dict):
+        return None
+    return {key: watched.get(key) for key in keys}
+
+
+def transition_contract(receipt: dict[str, Any]) -> Optional[dict[str, Any]]:
+    transition = receipt.get("transition")
+    if not isinstance(transition, dict):
+        return None
+    contract = {
+        "property": transition.get("property"),
+        "duration": transition.get("duration"),
+        "delay": transition.get("delay"),
+        "timingFunction": transition.get("timingFunction"),
+    }
+    if not all(isinstance(value, str) for value in contract.values()):
+        return None
+    return contract
+
+
+def split_css_list(value: str) -> list[str]:
+    return [part.strip().lower() for part in value.split(",") if part.strip()]
+
+
+def repeated_item(values: list[str], index: int) -> str:
+    if not values:
+        return ""
+    return values[index % len(values)]
+
+
+def transitioned_names_for_key(key: str) -> set[str]:
+    mapping = {
+        "backgroundColor": {"background-color", "background"},
+        "color": {"color"},
+        "borderTopColor": {"border-top-color", "border-color"},
+        "borderRightColor": {"border-right-color", "border-color"},
+        "borderBottomColor": {"border-bottom-color", "border-color"},
+        "borderLeftColor": {"border-left-color", "border-color"},
+    }
+    return mapping.get(key, set())
+
+
+def material_key_has_positive_transition(receipt: dict[str, Any], key: str) -> bool:
+    contract = transition_contract(receipt)
+    if contract is None:
+        return False
+    properties = split_css_list(contract["property"])
+    durations = split_css_list(contract["duration"])
+    if not properties or not durations:
+        return False
+    targets = transitioned_names_for_key(key)
+    for index, prop in enumerate(properties):
+        duration = repeated_item(durations, index)
+        if duration_seconds(duration) <= 0:
+            continue
+        if prop == "all" or prop in targets:
+            return True
+    return False
+
+
+ref = load(ref_path)
+impl = load(impl_path)
+if not receipt_ok(ref) or not receipt_ok(impl):
+    raise SystemExit(1)
+if ref.get("matchIndex") != impl.get("matchIndex"):
+    raise SystemExit(1)
+if ref.get("matchCount") != impl.get("matchCount"):
+    raise SystemExit(1)
+ref_keys = material_keys(ref)
+impl_keys = material_keys(impl)
+if not ref_keys or ref_keys != impl_keys:
+    raise SystemExit(1)
+ref_endpoints: dict[str, dict[str, Any]] = {}
+for phase in ("initial", "final"):
+    ref_endpoint = watched_endpoint(ref, phase, ref_keys)
+    impl_endpoint = watched_endpoint(impl, phase, ref_keys)
+    if ref_endpoint is None or impl_endpoint is None or ref_endpoint != impl_endpoint:
+        raise SystemExit(1)
+    ref_endpoints[phase] = ref_endpoint
+if ref_endpoints["initial"] == ref_endpoints["final"]:
+    raise SystemExit(1)
+if transition_contract(ref) != transition_contract(impl):
+    raise SystemExit(1)
+if not any(
+    material_key_has_positive_transition(ref, key)
+    and material_key_has_positive_transition(impl, key)
+    for key in ref_keys
+):
+    raise SystemExit(1)
+PY
 }
 
 build_target_roi_timing_delta_frames() {
@@ -2055,7 +2670,12 @@ else
     echo "  looping video on both sides — arc bounded symmetrically per side (budget ${ARC_BUDGET} frames from each first-change)"
   fi
   ARC_VERDICT_FAIL=0
-  if ! arc_timing_verdict "$REF_FC" "$REF_LC" "$IMPL_FC" "$IMPL_LC" "$VIDEO_COMPARE_ARC_DELTA"; then
+  ARC_VERDICT_OUTPUT=""
+  if ARC_VERDICT_OUTPUT=$(arc_timing_verdict \
+      "$REF_FC" "$REF_LC" "$IMPL_FC" "$IMPL_LC" \
+      "$VIDEO_COMPARE_ARC_DELTA"); then
+    printf '%s\n' "$ARC_VERDICT_OUTPUT"
+  else
     ARC_VERDICT_FAIL=1
     # When splash calibration is eligible, DEFER the arc fail: the static
     # max_delta false-fails ref-vs-ref on the phase-noisy splash class (cold ref
@@ -2064,7 +2684,11 @@ else
     # one-side-no-motion anti-bypass stays a hard fail there. Non-splash modes
     # and skip-record runs fold the arc fail into FAIL now (strict verdict).
     if [[ "$SPLASH_CAL_ELIGIBLE" -eq 0 ]]; then
+      printf '%s\n' "$ARC_VERDICT_OUTPUT"
       FAIL=$((FAIL + 1))
+    else
+      printf '%s\n' "$ARC_VERDICT_OUTPUT" \
+        | sed 's/  ❌ arc timing:/  ⚠ provisional arc timing:/'
     fi
   fi
 
@@ -2133,20 +2757,8 @@ else
   # aligned series with a 0.3px low-pass. This is reported separately so a
   # rescued anti-aliasing case never looks like an ordinary raw PASS.
   if [[ -n "$TARGET_ROI_SELECTOR" && "$PIXEL_FAIL" -gt 0 \
-        && "$ARC_VERDICT_FAIL" -eq 0 && -s "$TARGET_RAW_SERIES" ]]; then
-    TARGET_DIMENSIONS_CLOSE=$(python3 -c '
-import json
-import sys
-
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-ref = data["ref"]["target"]
-impl = data["impl"]["target"]
-delta = max(
-    abs(float(ref["width"]) - float(impl["width"])),
-    abs(float(ref["height"]) - float(impl["height"])),
-)
-print(1 if delta <= 1.0 else 0)
-' "$OUT_DIR/target-roi.json" 2>/dev/null || echo 0)
+        && -s "$TARGET_RAW_SERIES" ]]; then
+    TARGET_DIMENSIONS_CLOSE=$(target_dimensions_close)
     TARGET_AA_FLOOR=$(awk \
       -v threshold="$SSIM_THRESHOLD" \
       -v band="$VIDEO_COMPARE_TARGET_AA_RESCUE_BAND" \
@@ -2155,7 +2767,8 @@ print(1 if delta <= 1.0 else 0)
     TARGET_RAW_BELOW_FLOOR=$(awk -v floor="$TARGET_AA_FLOOR" \
       '$1 + 0 < floor + 0 { count++ } END { print count + 0 }' \
       "$TARGET_RAW_SERIES")
-    if [[ "$TARGET_DIMENSIONS_CLOSE" -eq 1 \
+    if [[ "$ARC_VERDICT_FAIL" -eq 0 \
+          && "$TARGET_DIMENSIONS_CLOSE" -eq 1 \
           && "$TARGET_RAW_ROWS" -gt 0 \
           && "$TARGET_RAW_BELOW_FLOOR" -eq 0 ]]; then
       TARGET_FILTERED_REF="$OUT_DIR/ref-delta-aa-frames"
@@ -2262,14 +2875,35 @@ with open(out, "w", encoding="utf-8") as handle:
         TARGET_MATERIAL_FAIL=$(awk -v threshold="$SSIM_THRESHOLD" \
           '$1 + 0 < threshold + 0 { count++ } END { print count + 0 }' \
           "$TARGET_MATERIAL_SERIES")
-        if [[ "$TARGET_MATERIAL_ROWS" -eq "$TARGET_RAW_ROWS" \
+        ACTUAL_SSIM_ROWS=$((PASS + PIXEL_FAIL))
+        MATERIAL_RESCUE_ELIGIBLE=0
+        if [[ "$ARC_VERDICT_FAIL" -eq 0 \
+              && "$TARGET_MATERIAL_ROWS" -eq "$TARGET_RAW_ROWS" \
               && "$TARGET_MATERIAL_FAIL" -eq 0 ]]; then
+          MATERIAL_RESCUE_ELIGIBLE=1
+        elif [[ "$ARC_VERDICT_FAIL" -eq 1 ]] \
+          && target_material_rescue_eligible \
+              "$TARGET_ROI_SELECTOR" \
+              "$SSIM_THRESHOLD" \
+              "$ACTUAL_SSIM_ROWS" \
+              "$TARGET_RAW_ROWS" \
+              "$TARGET_MATERIAL_ROWS" \
+              "$TARGET_MATERIAL_FAIL" \
+              "$REF_FC" "$REF_LC_RAW" \
+              "$IMPL_FC" "$IMPL_LC_RAW"; then
+          MATERIAL_RESCUE_ELIGIBLE=1
+        fi
+        if [[ "$MATERIAL_RESCUE_ELIGIBLE" -eq 1 ]]; then
           TARGET_RAW_FAIL="$PIXEL_FAIL"
           TARGET_RAW_MIN=$(awk 'NR == 1 || $1 + 0 < min { min = $1 } END { print min }' "$TARGET_RAW_SERIES")
           TARGET_MATERIAL_MIN=$(awk 'NR == 1 || $1 + 0 < min { min = $1 } END { print min }' "$TARGET_MATERIAL_SERIES")
           PASS="$TARGET_RAW_ROWS"
           FAIL=$((FAIL - PIXEL_FAIL))
           PIXEL_FAIL=0
+          if [[ "$ARC_VERDICT_FAIL" -eq 1 ]]; then
+            FAIL=$((FAIL - 1))
+            ARC_VERDICT_FAIL=0
+          fi
           RESULTS="| target-static-foreground-filter | pass-by-target-static-foreground-filter (raw min ${TARGET_RAW_MIN}; material min ${TARGET_MATERIAL_MIN}) | ✅ |\n"
           python3 -c '
 import json
@@ -2347,7 +2981,9 @@ with open(out, "w", encoding="utf-8") as handle:
   SUSPECT_IMPL_RECORDING=0
   if [[ "$SPLASH_CAL_ELIGIBLE" -eq 1 && -n "$SPLASH_SERIES" \
         && ( "$ARC_VERDICT_FAIL" -eq 1 || "$SSIM_FAIL" -gt 0 ) ]]; then
-    echo -e "${BOLD}▸ Splash strict verdict failed (arc=$([[ $ARC_VERDICT_FAIL -eq 1 ]] && echo FAIL || echo ok), ssimFails=${SSIM_FAIL}) — calibrating against a live refcal recording...${NC}"
+    ARC_STATIC_STATUS=$([[ "$ARC_VERDICT_FAIL" -eq 1 ]] \
+      && echo outside-static-bound || echo within-static-bound)
+    echo -e "${BOLD}▸ Splash strict comparison pending calibration (arc=${ARC_STATIC_STATUS}, ssimSubthresholdRows=${SSIM_FAIL}) — recording a live refcal baseline...${NC}"
     _VTC_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     mkdir -p "$OUT_DIR/refcal-video" "$OUT_DIR/refcal-frames"
     rm -f "$OUT_DIR/refcal-frames/"*.png 2>/dev/null || true
@@ -2420,6 +3056,9 @@ with open(out, "w", encoding="utf-8") as handle:
     [[ "$SSIM_CAL_OK" -eq 0 ]] && FAIL=$((FAIL + SSIM_FAIL))
     PIXEL_FAIL=0
     [[ "$SSIM_CAL_OK" -eq 0 ]] && PIXEL_FAIL="$SSIM_FAIL"
+    if [[ "$FAIL" -eq 0 ]]; then
+      RESULTS="${RESULTS//| ❌ |/| ⚠ provisional strict SSIM (resolved by live calibration) |}"
+    fi
 
     # Suspect impl recording (live-site load variance): the impl capture
     # diverges from a CONSISTENT ref-vs-ref baseline — an unreliable

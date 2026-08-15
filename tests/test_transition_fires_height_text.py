@@ -8,6 +8,8 @@ strokeDashoffset already is (e.prop precedent)."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ui_clone.gates.transition_fires import (
     _child_height_grew,
     _text_digest_changed,
@@ -166,6 +168,93 @@ def test_dead_scrub_with_extended_early_samples_still_fails() -> None:
         {**flat, "scrollY": 700},
     ]
     assert not _samples_vary(samples, "width")
+
+
+def test_scrub_height_series_counts_only_with_declared_height_property() -> None:
+    """A height-only scrub must be judged from the declared height channel,
+    without letting unrelated specs pass on incidental layout changes."""
+    from ui_clone.gates.transition_fires import _samples_vary
+
+    samples = [
+        {
+            "scrollY": 0,
+            "transform": "none",
+            "opacity": 1,
+            "width": 100,
+            "height": 0,
+        },
+        {
+            "scrollY": 1000,
+            "transform": "none",
+            "opacity": 1,
+            "width": 100,
+            "height": 181,
+        },
+    ]
+    assert _samples_vary(samples, "height")
+    assert not _samples_vary(samples, "transform")
+
+
+def test_merge_viewport_artifacts_replaces_rows_and_recomputes_rollup() -> None:
+    from ui_clone.gates.transition_fires import merge_viewport_artifacts
+
+    base = {
+        "schemaVersion": 1,
+        "status": "fail",
+        "implUrl": "http://impl.test/",
+        "total": 3,
+        "fired": 1,
+        "known_skip": 0,
+        "failed": 2,
+        "unmeasurable": 0,
+        "unmeasurableIds": [],
+        "unreasonedSkipIds": ["rejected-skip"],
+        "entries": [
+            {"id": "desktop", "status": "pass"},
+            {"id": "mobile-nav", "status": "fail"},
+            {"id": "mobile-label", "status": "fail"},
+        ],
+    }
+    mobile = {
+        "entries": [
+            {"id": "mobile-nav", "status": "pass"},
+            {"id": "mobile-label", "status": "unmeasurable"},
+        ]
+    }
+
+    merged = merge_viewport_artifacts(base, [mobile])
+
+    assert [row["status"] for row in merged["entries"]] == [
+        "pass",
+        "pass",
+        "unmeasurable",
+    ]
+    assert merged["status"] == "pass"
+    assert merged["fired"] == 2
+    assert merged["failed"] == 0
+    assert merged["unmeasurable"] == 1
+    assert merged["unmeasurableIds"] == ["mobile-label"]
+    assert merged["unreasonedSkipIds"] == ["rejected-skip"]
+
+
+def test_transition_fires_retries_hidden_failures_and_samples_fast_scroll_styles() -> None:
+    script = (
+        Path(__file__).parents[1]
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "transition-fires-check.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "UI_CLONE_FIRES_RESPONSIVE_RETRY" in script
+    assert "getClientRects().length" in script
+    assert 'VIEW_W=375 VIEW_H=812' in script
+    assert "transientStyle" in script
+    assert "await wait(80); takeSample();" in script
+    wheel_probe = script.split("# ── Wheel re-probe", 1)[1].split(
+        "# ── Load-phase probe", 1
+    )[0]
+    assert 'navigate "$URL"' in wheel_probe
 
 
 def test_scrub_color_series_counts_only_with_declared_color_property() -> None:

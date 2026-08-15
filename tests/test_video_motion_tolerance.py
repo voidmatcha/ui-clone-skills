@@ -33,9 +33,7 @@ SCRIPT = REPO / "scripts" / "verify" / "video-transition-compare.sh"
 
 
 def _bash(snippet: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["bash", "-c", snippet], capture_output=True, text=True, timeout=120
-    )
+    return subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, timeout=120)
 
 
 def _make_frames(d: Path, colors: list[str], prefix: str = "f") -> None:
@@ -204,7 +202,7 @@ def test_e2e9_looping_video_arc_passes_when_bounded(tmp_path: Path) -> None:
     # bounded: ref last 486->390 (arc 329), impl arc 330 -> delta 1 <= 18
     r = _bash(
         f'source "{ALIGN_LIB}"; '
-        f'RL=$(clamp_arc_last 61 486 390); IL=$(clamp_arc_last 60 390 390); '
+        f"RL=$(clamp_arc_last 61 486 390); IL=$(clamp_arc_last 60 390 390); "
         f'arc_timing_verdict 61 "$RL" 60 "$IL" 18'
     )
     assert r.returncode == 0, r.stdout + r.stderr
@@ -237,7 +235,10 @@ def test_script_bounds_splash_arc_only_for_looping_video() -> None:
 
 def test_mask_area_cap_uses_page_area_denominator() -> None:
     body = SCRIPT.read_text(encoding="utf-8")
-    assert "scrollHeight" in body.split("mask_dynamic_selectors()", 1)[1].split("capture_scroll_positions()", 1)[0], (
+    assert (
+        "scrollHeight"
+        in body.split("mask_dynamic_selectors()", 1)[1].split("capture_scroll_positions()", 1)[0]
+    ), (
         "mask_dynamic_selectors must measure the area cap against the full "
         "scrolled page area, not a single viewport (e2e-9: areaPct 201% on a "
         "22-viewport page made every full-bleed dynamic section unmaskable)"
@@ -285,14 +286,10 @@ def test_compare_position_frames_writes_ssim_sidecar(tmp_path: Path) -> None:
                 check=True,
                 capture_output=True,
             )
-    _bash(
-        f'source "{POS_LIB}"; compare_position_frames "{ref}" "{impl}" "{diff}" 0.90'
-    )
+    _bash(f'source "{POS_LIB}"; compare_position_frames "{ref}" "{impl}" "{diff}" 0.90')
     sidecar = diff / "position-ssim.tsv"
     assert sidecar.is_file(), "per-position SSIM sidecar missing"
-    rows = dict(
-        line.split("\t")[:2] for line in sidecar.read_text().strip().splitlines()
-    )
+    rows = dict(line.split("\t")[:2] for line in sidecar.read_text().strip().splitlines())
     assert "pos-000.png" in rows and "pos-001.png" in rows
 
 
@@ -384,7 +381,7 @@ def test_selector_runtime_masks_are_applied_after_record_context_swap() -> None:
         "# ── Phase 2: Record implementation", 1
     )[0]
     impl_segment = body.split("# ── Phase 2: Record implementation", 1)[1].split(
-        "echo \"  ✓ Implementation recorded\"", 1
+        'echo "  ✓ Implementation recorded"', 1
     )[0]
     assert ref_segment.index('record start "$OUT_DIR/ref-video/raw.webm"') < (
         ref_segment.index('mask_dynamic_selectors "${SESSION}-orig" ref')
@@ -395,12 +392,19 @@ def test_selector_runtime_masks_are_applied_after_record_context_swap() -> None:
 
 
 def test_hover_wrapper_forwards_spec_dynamic_selectors() -> None:
-    hover = (
-        REPO
-        / "skills"
-        / "visual-debug"
-        / "scripts"
-        / "hover-state-compare.sh"
-    ).read_text(encoding="utf-8")
+    hover = (REPO / "skills" / "visual-debug" / "scripts" / "hover-state-compare.sh").read_text(
+        encoding="utf-8"
+    )
     assert "dynamic_selectors_from_spec" in hover
     assert "VIDEO_COMPARE_DYNAMIC_SELECTORS" in hover
+
+
+def test_hover_wrapper_forwards_affected_selector_to_video_compare() -> None:
+    hover = (REPO / "skills" / "visual-debug" / "scripts" / "hover-state-compare.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "affected_selector_for_hover()" in hover
+    assert 'item.get("affectedTarget")' in hover
+    assert 'item.get("affected")' in hover
+    assert 'AFFECTED_SELECTOR="$(affected_selector_for_hover "$SELECTOR"' in hover
+    assert 'VIDEO_COMPARE_AFFECTED_SELECTOR="$AFFECTED_SELECTOR"' in hover

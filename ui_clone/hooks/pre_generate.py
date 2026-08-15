@@ -30,7 +30,7 @@ from ui_clone.hooks._common import mark_clone_write
 from ui_clone.hooks._common import mark_ref_session as _mark_ref_session
 from ui_clone.hooks._common import run_gate as _run_gate_common
 from ui_clone.hooks._common import session_id_from_payload as _session_id_from_payload
-from ui_clone.state import PipelineState
+from ui_clone.state import PipelineState, is_authoritative_terminal_state
 
 # Clone-shaped write detection for the widened off-pipeline guard: the file
 # classes a scratch clone produces. Repo-infrastructure segments are exempt
@@ -438,7 +438,7 @@ def main() -> None:
     # this: old refs terminal, new clone hand-built, zero gates).
     import os as _os
     if (
-        state.terminal_state
+        is_authoritative_terminal_state(state.terminal_state)
         and session_id
         and _os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1"
         and _has_external_browse(project_root, session_id)

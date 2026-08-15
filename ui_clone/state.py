@@ -38,6 +38,21 @@ GATE_ORDER: list[str] = [
 # (hooks/section_gate.py) enforces the same set on persisted terminalState,
 # so writer and enforcer can never drift.
 TERMINAL_STATUSES: tuple[str, ...] = ("failed", "incomplete", "unclonable", "abandoned")
+RECOVERABLE_TERMINAL_CATEGORIES: tuple[str, ...] = ("canonical-verify-failed",)
+
+
+def is_recoverable_terminal_state(terminal: object) -> bool:
+    """Return True for legacy terminalState records that now mean active rework."""
+    return (
+        isinstance(terminal, dict)
+        and terminal.get("status") == "failed"
+        and terminal.get("category") in RECOVERABLE_TERMINAL_CATEGORIES
+    )
+
+
+def is_authoritative_terminal_state(terminal: object) -> bool:
+    """Return True when terminalState should end the lifecycle."""
+    return bool(terminal) and not is_recoverable_terminal_state(terminal)
 
 # Gate suite that canonical verify (pipeline_phases/verify.py) runs and that
 # the Stop hook (hooks/section_gate.py) requires in verify-stamp.json

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 from ui_clone.hooks._common import ref_touched_by_session
 
@@ -28,6 +29,49 @@ def _bash_input_with_session(cmd: str, session_id: str, cwd: Path) -> str:
             "cwd": str(cwd),
         }
     )
+
+
+def _continuation_receipt_path(project: Path, session_id: str) -> Path:
+    return project / ".ui-re-continuation" / f"{session_id}.json"
+
+
+def _write_continuation_receipt(
+    project: Path,
+    session_id: str,
+    *,
+    state: str,
+    ref_dir: str | None = None,
+) -> Path:
+    import hashlib
+
+    path = _continuation_receipt_path(project, session_id)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "schemaVersion": 1,
+        "host": "claude-code",
+        "sessionId": session_id,
+        "skill": "ui-clone-skills:ui-reverse-engineering",
+        "state": state,
+        "leaseTag": "UI_RE_CONTINUATION:"
+        + hashlib.sha256(f"{project.resolve()}\0{session_id}".encode()).hexdigest()[:24],
+        "createdAt": "2026-08-15T00:00:00Z",
+        "updatedAt": "2026-08-15T00:00:00Z",
+    }
+    if ref_dir is not None:
+        payload["refDir"] = ref_dir
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _read_continuation_receipt(project: Path, session_id: str) -> dict[str, object]:
+    return cast(
+        dict[str, object],
+        json.loads(_continuation_receipt_path(project, session_id).read_text()),
+    )
+
+
+def _pipeline_run_command(component: str = "target-ref") -> str:
+    return f"python -m ui_clone.pipeline https://example.com {component} sess run"
 
 
 class TestPreBash:
@@ -103,6 +147,178 @@ class TestPreBash:
 
         assert result.returncode == 0
         assert ref_touched_by_session(ref_dir, session_id)
+
+    def test_continuation_pending_blocks_ui_re_execution_without_binding(
+        self, tmp_path: Path
+    ) -> None:
+        """A pending Claude continuation receipt must activate cron first."""
+        make_search_root(tmp_path)
+        session_id = "claude-session"
+        _write_continuation_receipt(tmp_path, session_id, state="pending")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                _pipeline_run_command("target-ref"), session_id, tmp_path
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "continuation" in reason.lower()
+        assert "cron" in reason.lower()
+        assert "create-pending" in reason
+        assert "refDir" not in _read_continuation_receipt(tmp_path, session_id)
+        assert not ref_touched_by_session(tmp_path / "tmp" / "ref" / "target-ref", session_id)
+
+    def test_continuation_active_binds_first_resolved_ref_and_allows(
+        self, tmp_path: Path
+    ) -> None:
+        make_search_root(tmp_path)
+        session_id = "claude-session"
+        _write_continuation_receipt(tmp_path, session_id, state="active")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                _pipeline_run_command("target-ref"), session_id, tmp_path
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+        assert _read_continuation_receipt(tmp_path, session_id)["refDir"] == (
+            "tmp/ref/target-ref"
+        )
+        assert ref_touched_by_session(tmp_path / "tmp" / "ref" / "target-ref", session_id)
+
+    def test_continuation_active_bound_to_different_ref_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        make_search_root(tmp_path)
+        session_id = "claude-session"
+        _write_continuation_receipt(
+            tmp_path, session_id, state="active", ref_dir="tmp/ref/ref-a"
+        )
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                _pipeline_run_command("ref-b"), session_id, tmp_path
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "continuation" in reason.lower()
+        assert "tmp/ref/ref-a" in reason
+        assert "tmp/ref/ref-b" in reason
+        assert _read_continuation_receipt(tmp_path, session_id)["refDir"] == "tmp/ref/ref-a"
+        assert not ref_touched_by_session(tmp_path / "tmp" / "ref" / "ref-b", session_id)
+
+    def test_continuation_paused_and_unsupported_do_not_deny(
+        self, tmp_path: Path
+    ) -> None:
+        make_search_root(tmp_path)
+        for state in ("paused", "unsupported"):
+            session_id = f"session-{state}"
+            _write_continuation_receipt(tmp_path, session_id, state=state)
+
+            result = run_hook(
+                self.MODULE,
+                stdin_data=_bash_input_with_session(
+                    _pipeline_run_command(f"target-{state}"), session_id, tmp_path
+                ),
+                env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            )
+
+            assert result.returncode == 0
+            assert result.stdout.strip() == ""
+
+    def test_continuation_control_commands_are_always_allowed(
+        self, tmp_path: Path
+    ) -> None:
+        make_search_root(tmp_path)
+        session_id = "claude-session"
+        _continuation_receipt_path(tmp_path, session_id).parent.mkdir(parents=True)
+        _continuation_receipt_path(tmp_path, session_id).write_text("{not-json", encoding="utf-8")
+
+        for subcommand in ("create-pending", "bind-ref", "mark-unsupported", "pause", "status"):
+            result = run_hook(
+                self.MODULE,
+                stdin_data=_bash_input_with_session(
+                    f"python -m ui_clone.claude_continuation {subcommand}",
+                    session_id,
+                    tmp_path,
+                ),
+                env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            )
+
+            assert result.returncode == 0
+            assert result.stdout.strip() == ""
+
+    def test_continuation_ignores_other_session_and_missing_session(
+        self, tmp_path: Path
+    ) -> None:
+        make_search_root(tmp_path)
+        _write_continuation_receipt(tmp_path, "other-session", state="pending")
+
+        no_session = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input(_pipeline_run_command("no-session-ref")),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        other_session = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                _pipeline_run_command("current-ref"), "current-session", tmp_path
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert no_session.returncode == 0
+        assert no_session.stdout.strip() == ""
+        assert other_session.returncode == 0
+        assert other_session.stdout.strip() == ""
+        assert "refDir" not in _read_continuation_receipt(tmp_path, "other-session")
+
+    def test_continuation_invalid_current_session_receipt_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        make_search_root(tmp_path)
+        session_id = "claude-session"
+        receipt_path = _continuation_receipt_path(tmp_path, session_id)
+        receipt_path.parent.mkdir(parents=True)
+        receipt_path.write_text("{not-json", encoding="utf-8")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                _pipeline_run_command("target-ref"), session_id, tmp_path
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "continuation receipt" in reason.lower()
+        assert "invalid" in reason.lower() or "corrupt" in reason.lower()
+        assert receipt_path.read_text(encoding="utf-8") == "{not-json"
 
     def test_section_compare_blocked_until_dom_mirror_check_passes(self, tmp_path: Path) -> None:
         """section-compare is not useful if DOM mirror has already hard-failed/missing."""
@@ -686,6 +902,43 @@ class TestEnforcementStateRmGuard:
             )
         )
 
+    # --- generation-plan.json provenance ---
+    # generation-plan.json carries sourceHashes/generatedAt provenance consumed by
+    # downstream gates. Direct agent rewrites/removals must be denied; the
+    # canonical generation-plan.sh writer names the script, not the artifact.
+
+    def test_heredoc_generation_plan_provenance_rewrite_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        assert self._denied(
+            self._run(
+                "cat <<EOF > tmp/ref/comp/generation-plan.json\n"
+                '{"provenance":{"generatedAt":"forged","sourceHashes":{}}}\n'
+                "EOF",
+                tmp_path,
+            )
+        )
+
+    def test_python_generation_plan_source_hash_rewrite_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        assert self._denied(
+            self._run(
+                "python3 -c \"import pathlib; pathlib.Path("
+                "'tmp/ref/comp/generation-plan.json').write_text("
+                "'{\\\"provenance\\\":{\\\"sourceHashes\\\":{}}}')\"",
+                tmp_path,
+            )
+        )
+
+    def test_rm_generation_plan_blocked(self, tmp_path: Path) -> None:
+        assert self._denied(self._run("rm tmp/ref/comp/generation-plan.json", tmp_path))
+
+    def test_canonical_generation_plan_script_allowed(self, tmp_path: Path) -> None:
+        assert not self._denied(
+            self._run("bash scripts/extract/generation-plan.sh tmp/ref/comp", tmp_path)
+        )
+
     # --- id17/id19: forgeable closeout stamps + driver-session id ---
     # structural-convergence-stamp.json / canvas-replay-stamp.json release the
     # Stop gate; .driver-session.id is the registered-driver identity. All are
@@ -776,6 +1029,11 @@ def test_enforcement_state_target_unit_coverage() -> None:
         f"echo x >|{g}",  # ...and unspaced
         f"echo x 1> {g}",  # fd-prefixed redirect
         "find tmp/ref -name .gate-skip-log -exec rm {} +",  # -exec rm, not -delete
+        "cat <<EOF > tmp/ref/comp/generation-plan.json\n"
+        '{"provenance":{"generatedAt":"forged","sourceHashes":{}}}\n'
+        "EOF",
+        "python3 -c \"import pathlib; pathlib.Path('tmp/ref/comp/generation-plan.json').write_text('{}')\"",
+        "rm tmp/ref/comp/generation-plan.json",
     ]
     for cmd in blocked:
         assert _bash_enforcement_state_target(cmd) is not None, cmd
@@ -801,6 +1059,10 @@ def test_enforcement_state_target_unit_coverage() -> None:
         'git commit -m "block cat <<EOF >.gate-skip-log forging"',
         'git log --grep="cat <<EOF >.gate-skip-log"',
         "cat <<EOF >normal.txt\nbody\nEOF",  # heredoc redirecting elsewhere
+        "bash scripts/extract/generation-plan.sh tmp/ref/comp",
+        "echo '{}' > tmp/ref/comp/not-generation-plan.json",
+        "echo '{}' > tmp/ref/comp/generation-plan.json.bak",
+        "echo '{}' > tmp/ref/comp/xgeneration-plan.json",
     ]
     for cmd in allowed:
         assert _bash_enforcement_state_target(cmd) is None, cmd

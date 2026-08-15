@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from ui_clone.gates.masked_region_motion import (
     evaluate_entry,
@@ -22,7 +23,7 @@ from ui_clone.gates.masked_region_motion import (
     select_entries,
 )
 
-CAROUSEL_ENTRY = {
+CAROUSEL_ENTRY: dict[str, Any] = {
     "id": "eatreal-food-carousel",
     "trigger": "timer (setInterval 3500ms)",
     "source_chunk": "page-x.js",
@@ -90,6 +91,41 @@ def test_parse_params_interval_channels_selectors() -> None:
     assert params["channels"] == {"imgSrc", "text", "cardTransform"}
     assert params["selectors"] == [".cards", ".h2_food"]
     assert not params["unmeasurable"]
+
+
+def test_parse_params_uses_structured_animation_interval_ms() -> None:
+    entry: dict[str, Any] = dict(
+        CAROUSEL_ENTRY,
+        trigger="timer",
+        bundle_branch="final Eat Real card stack",
+    )
+    entry["animation"] = {
+        "property": "card asset and transform state",
+        "intervalMs": 2000,
+        "type": "auto-carousel",
+    }
+
+    params = parse_params(entry)
+
+    assert params["intervalMs"] == 2000
+    assert not params["unmeasurable"]
+
+
+def test_structured_animation_interval_ms_overrides_legacy_text() -> None:
+    entry = dict(CAROUSEL_ENTRY)
+    entry["animation"] = {**CAROUSEL_ENTRY["animation"], "intervalMs": 2000}
+
+    assert parse_params(entry)["intervalMs"] == 2000
+
+
+def test_invalid_structured_animation_interval_ms_fails_closed() -> None:
+    entry = dict(CAROUSEL_ENTRY)
+    entry["animation"] = {**CAROUSEL_ENTRY["animation"], "intervalMs": 0}
+
+    params = parse_params(entry)
+
+    assert params["intervalMs"] is None
+    assert params["unmeasurable"]
 
 
 def test_parse_params_without_interval_is_unmeasurable() -> None:

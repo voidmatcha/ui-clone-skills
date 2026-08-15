@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ui_clone.hooks._common import has_external_browse, mark_external_browse
 
-from ._helpers import run_hook
+from ._helpers import _populate_pre_generate_artifacts, _set_pre_generate_passed_state, run_hook
 
 MODULE = "ui_clone.hooks.pre_generate"
 SESSION = "offpipe-test-session"
@@ -112,3 +112,28 @@ def test_terminal_ref_with_external_browse_blocks_new_clone_work(tmp_path: Path)
     data = json.loads(result.stdout.strip())
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "TERMINAL" in data["reason"]
+
+
+def test_recoverable_canonical_verify_ref_allows_rework(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "tmp" / "ref" / "old-clone"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / ".ui-re-active").write_text("")
+    _populate_pre_generate_artifacts(ref_dir)
+    _set_pre_generate_passed_state(ref_dir)
+    state = json.loads((ref_dir / "pipeline-state.json").read_text())
+    state["terminalState"] = {
+        "status": "failed",
+        "category": "canonical-verify-failed",
+        "reason": "verify failed; rework allowed",
+    }
+    (ref_dir / "pipeline-state.json").write_text(json.dumps(state))
+    _crumb(tmp_path)
+
+    result = run_hook(
+        MODULE,
+        stdin_data=_payload(str(tmp_path / "src/components/Hero.tsx")),
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+
+    assert result.returncode == 0
+    assert not result.stdout.strip(), result.stdout

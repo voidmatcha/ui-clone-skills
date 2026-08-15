@@ -106,16 +106,30 @@ elif command == "eval":
     }
     if found and "const tracked=" in script:
         active = state.get(session, False) and os.environ.get("FAKE_NO_CHANGE") != "1"
-        result.update({
-            "styles": {
-                "transform": "matrix(1.1, 0, 0, 1.1, 0, 0)" if active else "none",
-                "boxShadow": "rgba(0, 0, 0, 0.07) 0px 4px 12px 0px" if scrolled >= 100 else "none",
-                "opacity": str(round(scrolled / 1000, 2)) if os.environ.get("FAKE_SCROLL_MODE") == "scrubbed" else "1",
-            },
-            "transitionProperty": "transform",
-            "transitionDuration": "0.2s",
-            "transitionTimingFunction": "ease-out",
-        })
+        descendant_style = (
+            os.environ.get("FAKE_DESCENDANT_STYLE") == "1"
+            and "data-uiclone-observation" in script
+        )
+        if descendant_style:
+            result.update({
+                "styles": {
+                    "backgroundColor": "rgb(200, 0, 0)" if active else "rgb(0, 0, 0)",
+                },
+                "transitionProperty": "background-color",
+                "transitionDuration": "0.15s",
+                "transitionTimingFunction": "ease-in-out",
+            })
+        else:
+            result.update({
+                "styles": {
+                    "transform": "matrix(1.1, 0, 0, 1.1, 0, 0)" if active else "none",
+                    "boxShadow": "rgba(0, 0, 0, 0.07) 0px 4px 12px 0px" if scrolled >= 100 else "none",
+                    "opacity": str(round(scrolled / 1000, 2)) if os.environ.get("FAKE_SCROLL_MODE") == "scrubbed" else "1",
+                },
+                "transitionProperty": "transform",
+                "transitionDuration": "0.2s",
+                "transitionTimingFunction": "ease-out",
+            })
     print(json.dumps({"success": True, "data": {"result": result}}))
 elif command == "hover":
     state[session] = bool(rest and rest[0] != "body")
@@ -190,7 +204,9 @@ def _run(
     adjacent_scroll_only: bool = False,
     delayed_scroll_drift: bool = False,
     no_change: bool = False,
+    descendant_style: bool = False,
     prior_artifacts: bool = False,
+    timeout: int = 20,
 ) -> tuple[subprocess.CompletedProcess[str], Path, list[list[str]]]:
     ref_dir = tmp_path / "ref"
     _write_regions(ref_dir, regions, source=region_source)
@@ -252,6 +268,8 @@ def _run(
         env["FAKE_DELAYED_SCROLL_DRIFT"] = "1"
     if no_change:
         env["FAKE_NO_CHANGE"] = "1"
+    if descendant_style:
+        env["FAKE_DESCENDANT_STYLE"] = "1"
     args = [
         sys.executable,
         str(SCRIPT),
@@ -266,7 +284,7 @@ def _run(
         capture_output=True,
         text=True,
         env=env,
-        timeout=20,
+        timeout=timeout,
     )
     calls = (
         [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
@@ -783,6 +801,111 @@ def test_legacy_tooling_source_chunk_is_repaired_from_hover_rules(
     )
 
 
+def test_generated_hover_transition_preserves_distinct_affected_target(
+    tmp_path: Path,
+) -> None:
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [
+            {
+                "name": "card-title",
+                "triggerType": "hover",
+                "selector": ".card",
+                "dispatchOnly": True,
+            },
+            {
+                "name": "same-target",
+                "triggerType": "hover",
+                "selector": ".same",
+                "dispatchOnly": True,
+            },
+        ],
+        transition_spec={
+            "source": "ui_clone.extraction_artifacts",
+            "placeholder": True,
+            "transitions": [],
+        },
+        hover_css_rules={
+            "source": "scripts/extract/capture-hover.sh",
+            "rules": [
+                {
+                    "selector": ".card:hover .title",
+                    "activation": ".card",
+                    "affected": ".card .title",
+                },
+                {
+                    "selector": ".same:hover",
+                    "activation": ".same",
+                    "affected": ".same",
+                },
+            ],
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    spec = json.loads((ref_dir / "transition-spec.json").read_text())
+    by_target = {transition["target"]: transition for transition in spec["transitions"]}
+    assert by_target[".card"]["affectedTarget"] == ".card .title"
+    assert "affectedTarget" not in by_target[".same"]
+
+
+def test_generated_hover_transition_observes_affected_descendant_styles(
+    tmp_path: Path,
+) -> None:
+    proc, ref_dir, calls = _run(
+        tmp_path,
+        [
+            {
+                "name": "card-title",
+                "triggerType": "hover",
+                "selector": ".card",
+                "dispatchOnly": True,
+            }
+        ],
+        transition_spec={
+            "source": "ui_clone.extraction_artifacts",
+            "placeholder": True,
+            "transitions": [],
+        },
+        hover_css_rules={
+            "rules": [
+                {
+                    "selector": ".card:hover .title",
+                    "activation": ".card",
+                    "affected": ".card .title",
+                }
+            ]
+        },
+        descendant_style=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    spec = json.loads((ref_dir / "transition-spec.json").read_text())
+    transition = spec["transitions"][0]
+    assert transition["target"] == ".card"
+    assert transition["affectedTarget"] == ".card .title"
+    assert transition["animation"] == {
+        "type": "css-hover",
+        "property": "backgroundColor",
+        "changedProperties": ["backgroundColor"],
+        "from": {"backgroundColor": "rgb(0, 0, 0)"},
+        "to": {"backgroundColor": "rgb(200, 0, 0)"},
+        "duration": "0.15s",
+        "easing": "ease-in-out",
+        "pixelCorroborated": True,
+    }
+    assert any(call[2] == "hover" and "data-uiclone-region" in call[3] for call in calls)
+    evals = [call[-1] for call in calls if call[2] == "eval"]
+    assert any(
+        json.dumps(".card .title") in script and "activation.contains(node)" in script
+        for script in evals
+    )
+    assert any(
+        "data-uiclone-observation" in script and "getComputedStyle(observed)" in script
+        for script in evals
+    )
+
+
 def test_preserved_live_hover_transitions_are_repaired_without_recapture(
     tmp_path: Path,
 ) -> None:
@@ -922,7 +1045,10 @@ def test_capture_is_capped_at_twenty_unique_hover_regions(tmp_path: Path) -> Non
         }
         for index in range(21)
     ]
-    proc, ref_dir, _ = _run(tmp_path, regions)
+    # The maximum-cap fixture performs 20 complete hover captures (more than
+    # 300 fake browser process calls), so it legitimately exceeds the helper's
+    # default timeout on a loaded serial CI run.
+    proc, ref_dir, _ = _run(tmp_path, regions, timeout=60)
     assert proc.returncode == 0
     payload = json.loads((ref_dir / "regions.json").read_text())
     assert len(payload["regions"]) == 20
@@ -1000,6 +1126,39 @@ def test_promoted_transition_ids_remain_unique_across_preserved_and_captured_row
     ids = [transition["id"] for transition in spec["transitions"]]
     assert ids == ["00-header-nav-link", "00-header-nav-link-2"]
     assert len(ids) == len(set(ids))
+
+
+def test_live_transition_id_stays_stable_after_regions_are_rederived(
+    tmp_path: Path,
+) -> None:
+    stable_id = "00-auto-hover-0"
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [
+            {
+                "name": stable_id,
+                "triggerType": "hover",
+                "selector": ".card",
+                "dispatchOnly": True,
+            }
+        ],
+        transition_spec={
+            "source": "ui_clone.extraction_artifacts",
+            "placeholder": True,
+            "transitions": [],
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    first_spec = json.loads((ref_dir / "transition-spec.json").read_text())
+    assert [transition["id"] for transition in first_spec["transitions"]] == [stable_id]
+
+    (ref_dir / "regions.json").unlink()
+    rerun_dir = tmp_path / "rerun"
+    rerun_dir.mkdir()
+    rerun, _ = _run_existing_ref(rerun_dir, ref_dir)
+    assert rerun.returncode == 0, rerun.stderr
+    second_spec = json.loads((ref_dir / "transition-spec.json").read_text())
+    assert [transition["id"] for transition in second_spec["transitions"]] == [stable_id]
 
 
 def test_hover_target_resolution_forces_instant_scroll() -> None:

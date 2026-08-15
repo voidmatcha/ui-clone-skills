@@ -144,6 +144,18 @@ REF_SECTIONS: tuple[str, ...] = (
 )
 REF_REGIONS: tuple[str, ...] = ("regions.json", "section-map.json", "component-map.json")
 REF_SPEC: tuple[str, ...] = ("transition-spec.json", "animation-runtime-dump.json")
+# Keep extensions in sync with ui_clone.gates.spec._REFERENCE_MEDIA_EXTENSIONS.
+REF_CAPTURE_FRAME_INVENTORY: tuple[str, ...] = (
+    "**/*.gif",
+    "**/*.jpeg",
+    "**/*.jpg",
+    "**/*.m4v",
+    "**/*.mov",
+    "**/*.mp4",
+    "**/*.png",
+    "**/*.webm",
+    "**/*.webp",
+)
 REF_BUNDLE: tuple[str, ...] = (
     "bundle-map.json",
     "external-sdks.json",
@@ -177,6 +189,7 @@ RUNTIME_CONSTITUENTS: tuple[str, ...] = (
     "runtime-spec-coverage.json",
     "runtime-spec.json",
     "scroll-completion.json",
+    "splash-lifecycle.json",
     "svg-provenance.json",
 )
 TRANSITION_CONSTITUENTS: tuple[str, ...] = (
@@ -330,6 +343,9 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     # no ref-dir artifacts): head assets from ENTRY, overflow from styles,
     # scroll-state/header mutations from behavior source.
     "preview-runtime-health": _ci(SRC + PUBLIC + ENTRY),
+    # Fresh navigation probes the served first-load runtime, including source,
+    # styles, entry wiring, package behavior, and public splash media.
+    "splash-lifecycle": _ci(BROAD),
     "tree-diff": _ci(SRC, REF_ASSET_SUB),
     "geometry-sanity": _ci(SRC + PUBLIC, REF_REGIONS),
     "scroll-coverage": _ci(SRC + PUBLIC, REF_REGIONS),
@@ -379,7 +395,13 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     "alignment-parity": _ci((), REF_SECTIONS + ("transition-spec.json",)),
     "runtime-spec-coverage": _ci((), REF_SPEC + ("generation-plan.json",)),
     "capture-artifact-inventory": _ci(
-        (), ("regions.json", "section-map.json", "transition-spec.json")
+        (),
+        (
+            "regions.json",
+            "section-map.json",
+            "transition-spec.json",
+        )
+        + REF_CAPTURE_FRAME_INVENTORY,
     ),
     # ── asset checks ──
     "asset-transfer": _ci(PUBLIC, REF_IMAGES + REF_ASSET_SUB),

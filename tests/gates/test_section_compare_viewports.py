@@ -389,6 +389,43 @@ def test_inner_run_resolves_dynamic_spec_from_ref_root(tmp_path: Path) -> None:
     )
 
 
+def test_direct_viewport_run_infers_ref_root_for_dynamic_spec(tmp_path: Path) -> None:
+    """A direct run against ``<ref>/sections/viewports/<WxH>`` must not drop
+    dynamic masks merely because the fan-out wrapper did not set REF_ROOT_DIR."""
+    root = _project_root()
+    ref = tmp_path / "ref"
+    vp_dir = ref / "sections" / "viewports" / "1920x1080"
+    vp_dir.mkdir(parents=True)
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "eatreal-food-carousel", "dynamic": True, "target": ".dga-carousel-target"},
+        ]
+    }))
+    env = os.environ.copy()
+    env.pop("REF_ROOT_DIR", None)
+    env["SECTION_COMPARE_INNER"] = "1"
+    env["VIEW_W"] = "1920"
+    env["VIEW_H"] = "1080"
+    combined = _run_section_compare(
+        [
+            "bash",
+            str(root / "skills" / "visual-debug" / "scripts" / "section-compare.sh"),
+            "https://ref.test",
+            "http://impl.test",
+            "direct-viewport-spec-test",
+            str(vp_dir),
+        ],
+        env,
+        tmp_path / "agent-browser-stub",
+    )
+    mask_lines = [ln for ln in combined.splitlines() if "masking:" in ln]
+    assert mask_lines, f"masking echo missing from direct viewport run: {combined[:2000]}"
+    assert ".dga-carousel-target" in mask_lines[0], (
+        "direct viewport runs must infer the ref root before loading dynamic "
+        f"targets: {mask_lines[0]}"
+    )
+
+
 def test_single_viewport_spec_resolution_unchanged(tmp_path: Path) -> None:
     """No REF_ROOT_DIR, spec in $DIR: behavior identical to before."""
     root = _project_root()

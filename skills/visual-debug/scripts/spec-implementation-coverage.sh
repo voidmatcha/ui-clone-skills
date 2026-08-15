@@ -428,7 +428,8 @@ function scrollScrubRequiresPin(entry) {
 function triggerStaticReason(entry, sanitized) {
   const key = `${entry.id} ${entry.type} ${entry.trigger}`;
   if (/hover|mouseenter|mouseover|pointerenter/i.test(key)) {
-    const ok = /(^|[^A-Za-z0-9_-])(:hover|hover:|group-hover:|onMouseEnter|onMouseLeave|onPointerEnter|onPointerLeave|whileHover|useHover|addEventListener\s*\(\s*["'](?:mouseenter|mouseover|pointerenter))/m.test(sanitized);
+    const ok = /(^|[{},]\s*)[^\n{}"'<>=]*:hover\b[^{]*\{/m.test(sanitized)
+      || /(^|[^A-Za-z0-9_-])(:hover|hover:|group-hover:|onMouseEnter|onMouseLeave|onPointerEnter|onPointerLeave|whileHover|useHover|addEventListener\s*\(\s*["'](?:mouseenter|mouseover|pointerenter))/m.test(sanitized);
     if (!ok) return 'hover trigger missing handler/css';
   }
   const explicitClickTrigger = /click|tap/i.test(entry.trigger);

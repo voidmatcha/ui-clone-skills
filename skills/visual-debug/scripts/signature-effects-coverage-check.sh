@@ -45,6 +45,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
 ref_dir = Path(sys.argv[1])
 impl_src = sys.argv[2]
@@ -103,8 +104,10 @@ EMITTED_HELPERS = {
     "ScrollReveal.tsx", "SmoothScroll.tsx", "ScrollStateDriver.tsx",
 }
 
-# Concatenate impl source (excluding emitted helper definitions).
+# Concatenate impl source (excluding emitted helper definitions), while keeping
+# per-file text for same-file runtime-binding checks.
 blob = []
+file_blobs = []
 for path in Path(impl_src).rglob("*"):
     if path.is_file() and path.suffix.lower() in {
         ".tsx", ".jsx", ".ts", ".js", ".css", ".scss", ".vue", ".svelte"
@@ -112,9 +115,11 @@ for path in Path(impl_src).rglob("*"):
         if path.name in EMITTED_HELPERS and path.parent.name == "lib":
             continue
         try:
-            blob.append(path.read_text(encoding="utf-8", errors="ignore"))
+            text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        blob.append(text)
+        file_blobs.append(text)
 src = "\n".join(blob)
 
 # Basenames of every impl source file — used to enforce the per-effect
@@ -145,6 +150,93 @@ def _has_per_word_wiring(s: str) -> bool:
     if "ScrollWordHighlight" in s or "data-scroll-word-highlight" in s:
         return True
     return "useMotionValueEvent" in s and ('split(" ")' in s or "split(' ')" in s)
+
+
+def _has_handrolled_scroll_scale(s: str) -> bool:
+    """Recognize a manual scroll/UI-clone-scroll binding that writes scale.
+
+    This intentionally runs per file and requires reachability from the scroll
+    listener body/handler: a scroll listener plus an unrelated top-level scale
+    write must not satisfy the runtime contract.
+    """
+    scale_transform = re.compile(
+        r"(?:\.style\.setProperty\(\s*['\"]transform['\"]\s*,|"
+        r"\.style\.transform\s*=)\s*(?:`|['\"])?[^;\n]*scale\(",
+        re.DOTALL,
+    )
+    style_scale = re.compile(r"\.style\.scale\s*=")
+
+    def has_scale_write(body: str) -> bool:
+        return scale_transform.search(body) is not None or style_scale.search(body) is not None
+
+    def brace_body(open_brace: int) -> Optional[str]:
+        depth = 0
+        for i in range(open_brace, len(s)):
+            ch = s[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return s[open_brace + 1:i]
+        return None
+
+    functions: dict[str, str] = {}
+    fn_decl = re.compile(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{")
+    arrow_fn = re.compile(
+        r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{"
+    )
+    for match in list(fn_decl.finditer(s)) + list(arrow_fn.finditer(s)):
+        body = brace_body(match.end() - 1)
+        if body is not None:
+            functions[match.group(1)] = body
+
+    def called_functions(body: str) -> set[str]:
+        calls = {
+            m.group(1)
+            for m in re.finditer(r"\b([A-Za-z_$][\w$]*)\s*\(", body)
+            if m.group(1) not in {"if", "for", "while", "switch", "function"}
+        }
+        calls.update(
+            m.group(1)
+            for m in re.finditer(r"\brequestAnimationFrame\(\s*([A-Za-z_$][\w$]*)", body)
+        )
+        return calls
+
+    def reaches_scale(entry_body: str, seen: Optional[set[str]] = None) -> bool:
+        if has_scale_write(entry_body):
+            return True
+        seen = set() if seen is None else seen
+        for name in called_functions(entry_body):
+            if name in seen or name not in functions:
+                continue
+            seen.add(name)
+            if reaches_scale(functions[name], seen):
+                return True
+        return False
+
+    scroll_listener = re.compile(
+        r"\baddEventListener\(\s*['\"](?:scroll|ui-clone-scroll)['\"]\s*,\s*",
+    )
+    for match in scroll_listener.finditer(s):
+        pos = match.end()
+        inline_arrow = re.match(r"(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{", s[pos:])
+        if inline_arrow is not None:
+            body = brace_body(pos + inline_arrow.end() - 1)
+            if body is not None and reaches_scale(body):
+                return True
+            continue
+        handler = re.match(r"([A-Za-z_$][\w$]*)", s[pos:])
+        if handler is not None and reaches_scale(functions.get(handler.group(1), "")):
+            return True
+
+    onscroll = re.compile(r"\bon(?:window)?scroll\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{")
+    for match in onscroll.finditer(s):
+        body = brace_body(match.end() - 1)
+        if body is not None and reaches_scale(body):
+            return True
+
+    return False
 
 missing = []
 for eff in effects:
@@ -212,7 +304,8 @@ if scrub_has_scale:
         and ("scrollYProgress" in src or "useScroll" in src)
         and re.search(r"\bscale[XY]?\s*[:}]", src) is not None
     )
-    if not (has_scale_prop or has_idiomatic_scale):
+    has_handrolled_scale = any(_has_handrolled_scroll_scale(text) for text in file_blobs)
+    if not (has_scale_prop or has_idiomatic_scale or has_handrolled_scale):
         missing.append({
             "name": "scroll-scrub-scale",
             "effectType": "scroll-scrub (background zoom)",
@@ -220,7 +313,8 @@ if scrub_has_scale:
             "missingPrimitives": [
                 "scroll-bound scale (wrap the scrubbed element in <ScrollScrub> "
                 "with the scale band from scrollScrubSites, or useScroll + "
-                "useTransform/useSpring onto scale)"
+                "useTransform/useSpring onto scale, or use a same-file scroll "
+                "event binding that writes a runtime scale transform)"
             ],
         })
 

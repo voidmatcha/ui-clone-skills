@@ -199,10 +199,38 @@ EASING_PAT = re.compile(
     # Framework union: CSS, Framer Motion (ease), GSAP (ease:), anime.js
     # (easing:), motion-one (easing:). All share the same shape.
     r"(?:transition-timing-function|animation-timing-function|"
+    r"transitionTimingFunction|animationTimingFunction|"
     r"easing\s*[:=]|ease\s*[:=]|"
     r"--[a-z-]*-easing|--[a-z-]*-timing)"
-    r"[\s:={'\"]*([a-zA-Z0-9._-]+(?:\([^)]*\))?)",
+    r"[\s:={]*(['\"]?)([a-zA-Z0-9._-]+(?:\([^)]*\))?)",
     re.IGNORECASE,
+)
+CONST_STRING_PAT = re.compile(
+    r"\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*['\"]([^'\"]+)['\"]",
+)
+CONST_TUPLE_PAT = re.compile(
+    r"\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]",
+)
+SCRIPT_EASING_PROP_PAT = re.compile(
+    r"\b(?:transitionTimingFunction|animationTimingFunction|easing|ease)\s*[:=]\s*",
+    re.IGNORECASE,
+)
+CSS_IN_JS_EASING_PAT = re.compile(
+    r"\b(?:transition-timing-function|animation-timing-function)\s*:\s*([^;\n`]+)",
+    re.IGNORECASE,
+)
+TEMPLATE_LITERAL_PAT = re.compile(r"`(?:\\.|[^`])*`", re.DOTALL)
+TEMPLATE_INTERPOLATION_PAT = re.compile(r"\$\{\s*([^{}]+?)\s*\}")
+EXACT_IDENT_PAT = re.compile(r"[A-Za-z_$][\w$]*")
+IDENT_PAT = re.compile(r"\b([A-Za-z_$][\w$]*)\b")
+MEMBER_INDEX_PAT = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]")
+QUOTED_VALUE_PAT = re.compile(r"['\"]([^'\"]+)['\"]")
+QUOTED_MEMBER_KEY_PAT = re.compile(r"\[\s*(['\"])[^'\"]*\1\s*\]")
+QUOTED_COMPARISON_RHS_PAT = re.compile(
+    r"((?:===?|!==?)\s*)['\"][^'\"]*['\"]",
+)
+QUOTED_COMPARISON_LHS_PAT = re.compile(
+    r"['\"][^'\"]*['\"](\s*(?:===?|!==?))",
 )
 SPRING_PAT = re.compile(
     r"(?:type\s*[:=]\s*['\"]spring['\"]|"
@@ -221,6 +249,136 @@ impl_easings: set[str] = set()
 impl_spring_uses = 0
 files_scanned = 0
 ignored_reference_mirror_files: list[str] = []
+
+
+def is_script_source(path: Path) -> bool:
+    return path.suffix.lower() in {".tsx", ".jsx", ".ts", ".js"}
+
+
+def bounded_expr(text: str, start: int) -> str:
+    end = start
+    quote = ""
+    bracket_depth = 0
+    paren_depth = 0
+    brace_depth = 0
+    while end < len(text):
+        ch = text[end]
+        prev = text[end - 1] if end > start else ""
+        if quote:
+            if ch == quote and prev != "\\":
+                quote = ""
+            end += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            end += 1
+            continue
+        if ch == "[":
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        elif ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif ch == "{":
+            brace_depth += 1
+        elif ch == "}":
+            if brace_depth == 0:
+                break
+            brace_depth -= 1
+        elif (
+            ch in {",", ";", "\n"}
+            and bracket_depth == 0
+            and paren_depth == 0
+            and brace_depth == 0
+        ):
+            break
+        end += 1
+    return text[start:end]
+
+
+def split_easing_values(value: str) -> list[str]:
+    values: list[str] = []
+    part_start = 0
+    paren_depth = 0
+    for index, ch in enumerate(value):
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif ch == "," and paren_depth == 0:
+            values.append(value[part_start:index].strip())
+            part_start = index + 1
+    values.append(value[part_start:].strip())
+    return [norm_easing(part) for part in values if part]
+
+
+def add_easing_value(values: set[str], value: str) -> None:
+    for part in split_easing_values(value):
+        values.add(part)
+
+
+def resolve_template_interpolations(
+    raw_value: str,
+    const_string_values: dict[str, str],
+) -> str | None:
+    chunks: list[str] = []
+    cursor = 0
+    found = False
+    for interpolation in TEMPLATE_INTERPOLATION_PAT.finditer(raw_value):
+        found = True
+        chunks.append(raw_value[cursor:interpolation.start()])
+        expr = interpolation.group(1).strip()
+        resolved = None
+        if EXACT_IDENT_PAT.fullmatch(expr):
+            resolved = const_string_values.get(expr)
+        if resolved is None:
+            return None
+        chunks.append(resolved)
+        cursor = interpolation.end()
+    if not found:
+        return None if "${" in raw_value else raw_value
+    chunks.append(raw_value[cursor:])
+    resolved_value = "".join(chunks)
+    return None if "${" in resolved_value else resolved_value
+
+
+def collect_script_easing_values(
+    text: str,
+    const_string_values: dict[str, str],
+    const_tuple_values: dict[str, list[str]],
+) -> set[str]:
+    values: set[str] = set()
+    for template in TEMPLATE_LITERAL_PAT.findall(text):
+        for raw_css_value in CSS_IN_JS_EASING_PAT.findall(template):
+            resolved_css_value = resolve_template_interpolations(
+                raw_css_value,
+                const_string_values,
+            )
+            if resolved_css_value is not None:
+                add_easing_value(values, resolved_css_value)
+    for prop in SCRIPT_EASING_PROP_PAT.finditer(text):
+        expr = bounded_expr(text, prop.end())
+        literal_expr = QUOTED_MEMBER_KEY_PAT.sub("[]", expr)
+        literal_expr = QUOTED_COMPARISON_RHS_PAT.sub(r"\1 ", literal_expr)
+        literal_expr = QUOTED_COMPARISON_LHS_PAT.sub(r" \1", literal_expr)
+        for quoted in QUOTED_VALUE_PAT.findall(literal_expr):
+            add_easing_value(values, quoted)
+        for name, index_text in MEMBER_INDEX_PAT.findall(expr):
+            tuple_values = const_tuple_values.get(name)
+            if tuple_values is None:
+                continue
+            index = int(index_text)
+            if index < len(tuple_values):
+                add_easing_value(values, tuple_values[index])
+        without_literals = QUOTED_VALUE_PAT.sub(" ", literal_expr)
+        without_members = MEMBER_INDEX_PAT.sub(" ", without_literals)
+        for ident in IDENT_PAT.findall(without_members):
+            resolved = const_string_values.get(ident)
+            if resolved is not None:
+                add_easing_value(values, resolved)
+    return values
 
 
 def is_reference_mirror(path: Path) -> bool:
@@ -257,6 +415,14 @@ for d in SCAN_DIRS:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
+        const_string_values = {
+            name: norm_easing(value)
+            for name, value in CONST_STRING_PAT.findall(text)
+        }
+        const_tuple_values = {
+            name: [norm_easing(value) for value in QUOTED_VALUE_PAT.findall(body)]
+            for name, body in CONST_TUPLE_PAT.findall(text)
+        }
         for m in DURATION_PAT.finditer(text):
             try:
                 n = float(m.group(1))
@@ -264,8 +430,20 @@ for d in SCAN_DIRS:
                 impl_durations.add(int(n * 1000) if unit == "s" else int(n))
             except ValueError:
                 continue
+        if is_script_source(path):
+            for val in collect_script_easing_values(
+                text,
+                const_string_values,
+                const_tuple_values,
+            ):
+                if val in {"none", "var", "inherit", "initial", "unset"}:
+                    continue
+                impl_easings.add(norm_easing(val))
+            impl_spring_uses += len(SPRING_PAT.findall(text))
+            continue
         for m in EASING_PAT.finditer(text):
-            val = m.group(1).lower()
+            raw = m.group(2)
+            val = raw.lower()
             if val in {"none", "var", "inherit", "initial", "unset"}:
                 continue
             impl_easings.add(norm_easing(val))

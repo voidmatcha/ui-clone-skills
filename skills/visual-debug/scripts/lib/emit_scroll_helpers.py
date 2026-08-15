@@ -115,6 +115,8 @@ export default function SmoothScroll({{ children }}: {{ children: React.ReactNod
     // from a genuinely unmeasurable one. window.lenis is often a {{version}} decoy,
     // so the re-probe reads window.__lenis specifically — expose that handle.
     (window as any).__lenis = lenis;
+    const notifyScroll = () => window.dispatchEvent(new Event("ui-clone-scroll"));
+    lenis.on("scroll", notifyScroll);
     // gen-H2 — honor the capture flag: section_capture forces native scrollTo to
     // crop exact ref frames, but a running Lenis raf loop reverts that forced
     // scroll (actualY -> 0, wrong-frame crops on Lenis sites). While capturing
@@ -135,6 +137,7 @@ export default function SmoothScroll({{ children }}: {{ children: React.ReactNod
     }}
     return () => {{
       cancelAnimationFrame(raf);
+      lenis.off("scroll", notifyScroll);
       lenis.destroy();
       (window as any).__lenis = null;
     }};
@@ -341,14 +344,14 @@ def _spec_state_fade_entry() -> dict[str, Any] | None:
         if not (isinstance(frm, dict) and isinstance(to, dict)):
             continue
         fo, to_o = frm.get("opacity"), to.get("opacity")
-        if not (
-            _is_number(fo)
-            and _is_number(to_o)
-            and 0 < fo < 1
-        ):
+        if not (_is_number(fo) and _is_number(to_o)):
+            continue
+        from_opacity = float(cast(float, fo))
+        to_opacity = float(cast(float, to_o))
+        if not 0 < from_opacity < 1:
             continue
         dur = anim.get("duration")
-        dur = dur if _is_number(dur) else 0.8
+        duration = float(cast(float, dur)) if _is_number(dur) else 0.8
         easing = "ease"
         try:
             parsed = json.loads(str(anim.get("ease") or ""))
@@ -358,7 +361,12 @@ def _spec_state_fade_entry() -> dict[str, Any] | None:
                 easing = "cubic-bezier(" + ", ".join(str(x) for x in parsed) + ")"
         except (json.JSONDecodeError, ValueError):
             pass
-        return {"from_opacity": fo, "to_opacity": to_o, "ms": int(round(dur * 1000)), "easing": easing}
+        return {
+            "from_opacity": from_opacity,
+            "to_opacity": to_opacity,
+            "ms": int(round(duration * 1000)),
+            "easing": easing,
+        }
     return None
 
 
@@ -382,7 +390,7 @@ def _spec_stroke_draw_entry() -> dict[str, Any] | None:
         if "strokedashoffset" not in hint.replace("-", "") and "strokedashoffset" not in prop.replace("-", ""):
             continue
         dur = anim.get("duration") if isinstance(anim, dict) else None
-        dur = dur if _is_number(dur) else 1.0
+        duration = float(cast(float, dur)) if _is_number(dur) else 1.0
         easing = "ease"
         try:
             parsed = json.loads(str(anim.get("ease") or "")) if isinstance(anim, dict) else None
@@ -392,7 +400,7 @@ def _spec_stroke_draw_entry() -> dict[str, Any] | None:
                 easing = "cubic-bezier(" + ", ".join(str(x) for x in parsed) + ")"
         except (json.JSONDecodeError, ValueError):
             pass
-        return {"ms": int(round(dur * 1000)), "easing": easing}
+        return {"ms": int(round(duration * 1000)), "easing": easing}
     return None
 
 
@@ -560,7 +568,7 @@ def _spec_class_toggles() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         remove = [token for token in before_tokens if token not in after_tokens]
         if not add and not remove:
             continue
-        entry = {"target": target.strip(), "add": add, "remove": remove}
+        entry: dict[str, Any] = {"target": target.strip(), "add": add, "remove": remove}
         if "scroll" in trigger:
             match = threshold_re.match(str(animation.get("threshold") or ""))
             if match is None:
@@ -659,11 +667,11 @@ if _hover_class_toggles:
 
 import {{ useEffect }} from "react";
 
-interface HoverClassToggle {
+interface HoverClassToggle {{
   node: HTMLElement;
   onEnter: () => void;
   onLeave: () => void;
-}
+}}
 
 /** Replays discrete hover/class state declared in transition-spec.json. */
 export default function HoverClassToggleDriver() {{
@@ -700,6 +708,7 @@ _SCRUB_PROP_KEYS = (
     "scale", "scaleX", "scaleY", "opacity", "x", "y", "rotate",
     "width", "height", "borderRadius",
 )
+_LINKED_SCRUB_PROP_KEYS = (*_SCRUB_PROP_KEYS, "blur", "brightness")
 _STATE_MACHINE_PIXEL_PROP_UNITS = {"top": "px"}
 
 
@@ -746,12 +755,19 @@ def _scrub_band_plausible(prop: str, output: list[float]) -> bool:
     """Guard against the bundle resolver mis-binding a property: an opacity band
     must stay in [0, 1.5] and a scale band in [0, 8]. Implausible ranges (e.g.
     opacity output [80, 100]) mean the property tag is wrong — drop the band
-    rather than emit a broken effect. Positional props (x/y/rotate) are px/deg
-    and unconstrained."""
+    rather than emit a broken effect. Blur is replayed only as plain CSS
+    blur(px), capped at 200px to avoid fabricating pathological filter states.
+    Positional props (x/y/rotate) are px/deg and unconstrained."""
+    if not _finite_values(output):
+        return False
     if prop == "opacity":
         return all(-0.01 <= v <= 1.5 for v in output)
     if prop in ("scale", "scaleX", "scaleY"):
         return all(0 <= v <= 8 for v in output)
+    if prop == "blur":
+        return all(0 <= v <= 200 for v in output)
+    if prop == "brightness":
+        return all(0 <= v for v in output)
     if prop in ("width", "height", "borderRadius"):
         return True
     return True
@@ -781,7 +797,7 @@ if isinstance(_ss, dict) and _ss.get("required"):
             if not isinstance(_t, dict):
                 continue
             _prop = _t.get("property")
-            if _prop not in _SCRUB_PROP_KEYS or _prop in _bands:
+            if _prop not in _LINKED_SCRUB_PROP_KEYS or _prop in _bands:
                 continue
             _inp = _parse_scrub_range(_t.get("input"))
             _outp = _parse_scrub_range(_t.get("output"))
@@ -795,7 +811,7 @@ if isinstance(_ss, dict) and _ss.get("required"):
             _unit = _t.get("unit")
             if (
                 _prop in {"width", "height", "borderRadius"}
-                and _unit in {"", "px", "%"}
+                and _unit in {"", "px", "%", "vw"}
             ):
                 _units[_prop] = _unit
         if not _bands:
@@ -814,11 +830,23 @@ if isinstance(_ss, dict) and _ss.get("required"):
             ),
             "bands": _bands,
         }
+        if _site.get("replay") == "all-matches":
+            _linked["replay"] = "all-matches"
+            _source_ids = [
+                _source_id
+                for _source_id in (_site.get("sourceIds") or [])
+                if isinstance(_source_id, str) and _source_id.strip()
+            ]
+            if _source_ids:
+                _linked["sourceIds"] = _source_ids
         if _units:
             _linked["units"] = _units
         _scope = _site.get("scope")
         if isinstance(_scope, str) and _scope.strip():
             _linked["scope"] = _scope.strip()
+        _media = _site.get("media")
+        if isinstance(_media, str) and _media.strip():
+            _linked["media"] = _media.strip()
         _offset = _site.get("offset")
         if isinstance(_offset, str):
             try:
@@ -843,13 +871,13 @@ if isinstance(_sm, dict) and _sm.get("required"):
         _selector = _site.get("selector")
         if not isinstance(_selector, str) or not _selector.strip():
             continue
-        _bands: dict[str, Any] = {}
-        _units: dict[str, str] = {}
+        _state_bands: dict[str, Any] = {}
+        _state_units: dict[str, str] = {}
         for _t in _site.get("transforms", []) or []:
             if not isinstance(_t, dict):
                 continue
             _prop = _t.get("property")
-            if _prop not in _STATE_MACHINE_PIXEL_PROP_UNITS or _prop in _bands:
+            if _prop not in _STATE_MACHINE_PIXEL_PROP_UNITS or _prop in _state_bands:
                 continue
             _unit = _t.get("unit")
             if _unit != _STATE_MACHINE_PIXEL_PROP_UNITS[_prop]:
@@ -860,9 +888,9 @@ if isinstance(_sm, dict) and _sm.get("required"):
                 continue
             if not _finite_ascending_input(_inp) or not _finite_values(_outp):
                 continue
-            _bands[_prop] = [_inp, _outp]
-            _units[_prop] = _unit
-        if not _bands:
+            _state_bands[_prop] = [_inp, _outp]
+            _state_units[_prop] = _unit
+        if not _state_bands:
             continue
         _selector_index = _site.get("selectorIndex")
         if not isinstance(_selector_index, int) or _selector_index < 0:
@@ -871,8 +899,8 @@ if isinstance(_sm, dict) and _sm.get("required"):
             "selector": _selector.strip(),
             "selectorIndex": _selector_index,
             "inputDomain": "scroll-y-px",
-            "bands": _bands,
-            "units": _units,
+            "bands": _state_bands,
+            "units": _state_units,
         })
 
 if _linked_sites:
@@ -883,7 +911,10 @@ if _linked_sites:
         "export interface ScrollLinkedStyleSite {\n"
         "  selector: string;\n"
         "  selectorIndex: number;\n"
+        '  replay?: "all-matches";\n'
+        "  sourceIds?: string[];\n"
         "  scope?: string;\n"
+        "  media?: string;\n"
         '  inputDomain: "progress" | "scroll-y-px";\n'
         '  progressSource?: "document-progress" | "target-offset";\n'
         "  offset?: UseScrollOptions[\"offset\"];\n"
@@ -933,6 +964,9 @@ function applyBandStyles(
   if (bands.height) set("height", length("height"));
   if (bands.borderRadius) set("border-radius", length("borderRadius"));
   if (bands.top) set("top", length("top"));
+  if (bands.blur && bands.brightness) {
+    set("filter", `blur(${value("blur")}px) brightness(${value("brightness")})`);
+  } else if (bands.blur) set("filter", `blur(${value("blur")}px)`);
 
   const transforms: string[] = [];
   if (bands.x) transforms.push(`translateX(${value("x")}px)`);
@@ -944,16 +978,137 @@ function applyBandStyles(
   if (transforms.length) set("transform", transforms.join(" "));
 }
 
-function selectScopedCandidate(
+type InlineStyleSnapshot = { value: string; priority: string };
+type StyledTarget = HTMLElement | SVGElement;
+type OriginalStyles = Map<
+  StyledTarget,
+  Map<string, InlineStyleSnapshot>
+>;
+type ActiveProperties = Map<StyledTarget, Set<string>>;
+type StyleApplication = {
+  target: StyledTarget;
+  progress: number;
+  bands: Record<string, LinkedBand>;
+  units?: Record<string, string>;
+};
+
+function bandStyleProperties(bands: Record<string, LinkedBand>): string[] {
+  const properties = new Set<string>();
+  if (bands.opacity) properties.add("opacity");
+  if (bands.width) properties.add("width");
+  if (bands.height) properties.add("height");
+  if (bands.borderRadius) properties.add("border-radius");
+  if (bands.top) properties.add("top");
+  if (bands.blur || bands.brightness) properties.add("filter");
+  if (
+    bands.x ||
+    bands.y ||
+    bands.rotate ||
+    bands.scale ||
+    bands.scaleX ||
+    bands.scaleY
+  ) {
+    properties.add("transform");
+  }
+  return Array.from(properties);
+}
+
+function rememberBandStyles(
+  originalStyles: OriginalStyles,
+  target: StyledTarget,
+  bands: Record<string, LinkedBand>,
+) {
+  let saved = originalStyles.get(target);
+  if (!saved) {
+    saved = new Map();
+    originalStyles.set(target, saved);
+  }
+  const { style } = target;
+  for (const property of bandStyleProperties(bands)) {
+    if (saved.has(property)) continue;
+    saved.set(property, {
+      value: style.getPropertyValue(property),
+      priority: style.getPropertyPriority(property),
+    });
+  }
+}
+
+function noteActiveBandProperties(
+  activeProperties: ActiveProperties,
+  target: StyledTarget,
+  bands: Record<string, LinkedBand>,
+) {
+  let properties = activeProperties.get(target);
+  if (!properties) {
+    properties = new Set();
+    activeProperties.set(target, properties);
+  }
+  for (const property of bandStyleProperties(bands)) {
+    properties.add(property);
+  }
+}
+
+function restoreInactiveBandStyles(
+  originalStyles: OriginalStyles,
+  activeProperties: ActiveProperties,
+) {
+  for (const [target, saved] of originalStyles) {
+    const active = activeProperties.get(target);
+    const { style } = target;
+    for (const [property, snapshot] of saved) {
+      if (active?.has(property)) continue;
+      if (snapshot.value) {
+        style.setProperty(property, snapshot.value, snapshot.priority);
+      } else {
+        style.removeProperty(property);
+      }
+      saved.delete(property);
+    }
+    if (!saved.size) originalStyles.delete(target);
+  }
+}
+
+function restoreAllBandStyles(originalStyles: OriginalStyles) {
+  for (const [target, saved] of originalStyles) {
+    const { style } = target;
+    for (const [property, snapshot] of saved) {
+      if (snapshot.value) {
+        style.setProperty(property, snapshot.value, snapshot.priority);
+      } else {
+        style.removeProperty(property);
+      }
+    }
+  }
+  originalStyles.clear();
+}
+
+function mediaMatches(media?: string): boolean {
+  if (!media) return true;
+  try {
+    return window.matchMedia(media).matches;
+  } catch {
+    return false;
+  }
+}
+
+function selectScopedCandidates(
   root: ParentNode,
   selector: string,
   selectorIndex: number,
-): Element | undefined {
+  replay?: "all-matches",
+): Element[] {
   const descendants = Array.from(root.querySelectorAll(selector));
+  const candidates =
+    root instanceof Element && root.matches(selector)
+      ? [root, ...descendants]
+      : descendants;
+  if (replay === "all-matches") return candidates;
   if (root instanceof Element && root.matches(selector)) {
-    return [root, ...descendants][selectorIndex];
+    const selected = [root, ...descendants][selectorIndex];
+    return selected ? [selected] : [];
   }
-  return descendants[selectorIndex];
+  const selected = descendants[selectorIndex];
+  return selected ? [selected] : [];
 }
 
 const anchorFractions: Record<string, number> = {
@@ -1033,16 +1188,23 @@ function siteProgress(
 export default function ScrollLinkedStyleDriver() {
   useEffect(() => {
     let raf = 0;
+    const originalStyles: OriginalStyles = new Map();
     const apply = () => {
+      const activeProperties: ActiveProperties = new Map();
+      const applications: StyleApplication[] = [];
       for (const site of scrollLinkedStyleSites) {
         try {
+          if (!mediaMatches(site.media)) continue;
           const root: ParentNode | null = site.scope
             ? document.querySelector(site.scope)
             : document;
-          const target = root
-            ? selectScopedCandidate(root, site.selector, site.selectorIndex)
-            : undefined;
-          if (target instanceof HTMLElement || target instanceof SVGElement) {
+          const targets = root
+            ? selectScopedCandidates(root, site.selector, site.selectorIndex, site.replay)
+            : [];
+          for (const target of targets) {
+            if (!(target instanceof HTMLElement || target instanceof SVGElement)) {
+              continue;
+            }
             const progress = root
               ? siteProgress(
                   site.inputDomain,
@@ -1051,11 +1213,34 @@ export default function ScrollLinkedStyleDriver() {
                   root,
                 )
               : documentProgress();
-            applyBandStyles(target.style, progress, site.bands, site.units);
+            noteActiveBandProperties(activeProperties, target, site.bands);
+            applications.push({
+              target,
+              progress,
+              bands: site.bands,
+              units: site.units,
+            });
           }
         } catch {
           // Selector syntax is validated upstream; keep one bad site isolated.
         }
+      }
+      // Restore only properties for which no currently enabled site has a
+      // write. This keeps an inactive breakpoint site from erasing an active
+      // site's value when both target the same element/property.
+      restoreInactiveBandStyles(originalStyles, activeProperties);
+      for (const application of applications) {
+        rememberBandStyles(
+          originalStyles,
+          application.target,
+          application.bands,
+        );
+        applyBandStyles(
+          application.target.style,
+          application.progress,
+          application.bands,
+          application.units,
+        );
       }
     };
     const schedule = () => {
@@ -1067,11 +1252,14 @@ export default function ScrollLinkedStyleDriver() {
     };
     apply();
     window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("ui-clone-scroll", schedule as EventListener);
     window.addEventListener("resize", schedule);
     return () => {
       window.removeEventListener("scroll", schedule);
+      window.removeEventListener("ui-clone-scroll", schedule as EventListener);
       window.removeEventListener("resize", schedule);
       cancelAnimationFrame(raf);
+      restoreAllBandStyles(originalStyles);
     };
   }, []);
   return null;
@@ -1087,13 +1275,13 @@ if isinstance(_ss, dict) and _ss.get("required"):
             "document", "document-progress", "target-offset"
         }:
             continue
-        _bands: dict[str, Any] = {}
+        _wrapper_bands: dict[str, Any] = {}
         _has_scale = False
         for _t in _site.get("transforms", []) or []:
             if not isinstance(_t, dict):
                 continue
             _prop = _t.get("property")
-            if _prop not in _SCRUB_PROP_KEYS or _prop in _bands:
+            if _prop not in _SCRUB_PROP_KEYS or _prop in _wrapper_bands:
                 continue
             _inp = _parse_scrub_range(_t.get("input"))
             _outp = _parse_scrub_range(_t.get("output"))
@@ -1103,10 +1291,10 @@ if isinstance(_ss, dict) and _ss.get("required"):
                 continue
             if not _scrub_band_plausible(_prop, _outp):
                 continue
-            _bands[_prop] = [_inp, _outp]
+            _wrapper_bands[_prop] = [_inp, _outp]
             if _prop.startswith("scale"):
                 _has_scale = True
-        if not _bands:
+        if not _wrapper_bands:
             continue
         _offset = None
         if isinstance(_site.get("offset"), str):
@@ -1116,7 +1304,7 @@ if isinstance(_ss, dict) and _ss.get("required"):
                     _offset = _parsed
             except (json.JSONDecodeError, ValueError):
                 _offset = None
-        _entry = dict(_bands)
+        _entry = dict(_wrapper_bands)
         if _offset is not None:
             _entry["offset"] = _offset
         # The bundle's decompiled spring params are direct evidence of which
@@ -1129,7 +1317,7 @@ if isinstance(_ss, dict) and _ss.get("required"):
                 _k: _v
                 for _k, _v in _site_spring.items()
                 if _k in ("stiffness", "damping", "mass", "restDelta")
-                and isinstance(_v, (int, float))
+                and isinstance(_v, (int, float))  # noqa: UP038
                 and not isinstance(_v, bool)
             }
             if _spring_cfg:
@@ -1586,11 +1774,15 @@ for _site in _latch_raw if isinstance(_latch_raw, list) else []:
     }
     if not _declarations:
         continue
-    _index = _site.get("selectorIndex")
+    _latch_selector_index = _site.get("selectorIndex")
     _latch_sites.append(
         {
             "selector": _selector,
-            "selectorIndex": _index if isinstance(_index, int) and _index >= 0 else 0,
+            "selectorIndex": (
+                _latch_selector_index
+                if isinstance(_latch_selector_index, int) and _latch_selector_index >= 0
+                else 0
+            ),
             "progress": float(cast(float, _progress)),
             "endState": _declarations,
         }
@@ -1653,7 +1845,7 @@ export default function ScrollLatchDriver() {{
   }}, []);
   return null;
 }}
-'''.format(sites=json.dumps(_latch_sites, indent=2)),
+'''.format(sites=json.dumps(_latch_sites, indent=2)),  # noqa: UP032
     )
 
 

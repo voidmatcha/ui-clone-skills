@@ -45,6 +45,7 @@ paid_features = load("paid-features.json", {})
 asset_sub = load("asset-substitution.json", {})
 font_parity = load("font-parity.json", {})
 canvas_webgl = load("canvas-webgl-detection.json", {})
+splash_contract = load("states/splash/contract.json", {})
 
 
 CSS_MODULE_CLASS_RE = re.compile(r"\b[A-Za-z][\w-]*__[A-Za-z0-9_-]{4,}\b")
@@ -409,6 +410,7 @@ for s in sections:
         "selector": selector,
         "path": f"components/sections/{name}.tsx",
         "initialState": init,
+        "wires": [],
     })
 
 
@@ -688,12 +690,109 @@ _SCRUB_PROP_MAP = {
     "translatex": "x", "translatey": "y",
     "width": "width", "height": "height", "borderradius": "borderRadius",
 }
+_BLUR_FILTER_RE = re.compile(
+    r"^\s*blur\(\s*(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))px\s*\)\s*$",
+    re.IGNORECASE,
+)
+_BLUR_BRIGHTNESS_FILTER_RE = re.compile(
+    r"^\s*blur\(\s*(?P<blur>[+-]?(?:\d+(?:\.\d*)?|\.\d+))px\s*\)\s+"
+    r"brightness\(\s*(?P<brightness>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*\)\s*$",
+    re.IGNORECASE,
+)
 def _norm_scrub_prop(_p):
     if not isinstance(_p, str) or not _p.strip():
         return None
     _base = _p.strip().split()[0].lower()
     _base = _base.replace("-", "").replace("_", "")
     return _SCRUB_PROP_MAP.get(_base)
+
+
+def _parse_filter_value(_raw):
+    if not isinstance(_raw, str):
+        return None
+    if _raw.strip().lower() == "none":
+        return ("blur", (0.0,))
+    _match = _BLUR_FILTER_RE.match(_raw)
+    if _match:
+        try:
+            _value = float(_match.group("value"))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(_value) or _value < 0:
+            return None
+        return ("blur", (_value,))
+    _match = _BLUR_BRIGHTNESS_FILTER_RE.match(_raw)
+    if not _match:
+        return None
+    try:
+        _blur = float(_match.group("blur"))
+        _brightness = float(_match.group("brightness"))
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(_blur)
+        or not math.isfinite(_brightness)
+        or _blur < 0
+        or _brightness < 0
+    ):
+        return None
+    return ("blur-brightness", (_blur, _brightness))
+
+
+def _filter_channels(_values):
+    _mode = None
+    _blur = []
+    _brightness = []
+    for _raw in _values:
+        _parsed = _parse_filter_value(_raw)
+        if _parsed is None:
+            return None
+        _kind, _vals = _parsed
+        if _mode is None:
+            _mode = _kind
+        if _mode != _kind:
+            return None
+        _blur.append(_vals[0])
+        if _kind == "blur-brightness":
+            _brightness.append(_vals[1])
+    if _mode == "blur":
+        return {"blur": _blur}
+    if _mode == "blur-brightness":
+        return {"blur": _blur, "brightness": _brightness}
+    return None
+
+
+def _blur_filter_series(_values):
+    _channels = _filter_channels(_values)
+    if not isinstance(_channels, dict):
+        return None
+    _out = _channels.get("blur")
+    return _out if isinstance(_out, list) else None
+
+
+def _runtime_site_signature(_site):
+    _transforms = []
+    for _transform in _site.get("transforms") or []:
+        if not isinstance(_transform, dict):
+            return None
+        try:
+            _inp = tuple(float(_v) for _v in json.loads(_transform.get("input") or "[]"))
+            _out = tuple(float(_v) for _v in json.loads(_transform.get("output") or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not all(math.isfinite(_v) for _v in (*_inp, *_out)):
+            return None
+        _transforms.append(
+            (
+                _transform.get("property"),
+                _inp,
+                _out,
+                _transform.get("unit") or "",
+            )
+        )
+    return tuple(sorted(_transforms))
+
+
 def _progress_domain(_v):
     # A scroll-scrub input range is a scrollYProgress fraction in [0,1]
     # (js-animation-extraction.md). A decompile that captured raw scrollY
@@ -912,7 +1011,7 @@ def _coerce_scalar(_s):
             return None
         if _v.lower() in ("auto", "none", "unset", "initial", "inherit"):
             return None
-        _m = re.fullmatch(r"([-+]?\d*\.?\d+)(px|%)?", _v)
+        _m = re.fullmatch(r"([-+]?\d*\.?\d+)(px|%|vw)?", _v)
         if _m:
             return float(_m.group(1))
         return float(str(_s).strip())
@@ -925,7 +1024,7 @@ def _scalar_unit(_s):
         return None
     if isinstance(_s, (int, float)):
         return ""
-    _m = re.fullmatch(r"[-+]?\d*\.?\d+(px|%)?", str(_s).strip())
+    _m = re.fullmatch(r"[-+]?\d*\.?\d+(px|%|vw)?", str(_s).strip())
     return (_m.group(1) or "") if _m else None
 
 
@@ -1128,6 +1227,40 @@ def _runtime_scroll_scrub_sites(_dump):
     if not isinstance(rows, list):
         return []
     out = []
+    # A runtime dump is captured at one viewport, so its measured curve must
+    # not be assumed to apply at every viewport. Exact sourceId pairing lets
+    # the spec carry a CSS-grounded media query without guessing from the
+    # capture width.
+    _media_by_source_id = {}
+    _conflicting_media_source_ids = set()
+    for _transition in (
+        (transition_spec.get("transitions") or [])
+        if isinstance(transition_spec, dict)
+        else []
+    ):
+        if (
+            not isinstance(_transition, dict)
+            or _transition.get("sourceArtifact") != "animation-runtime-dump.json"
+        ):
+            continue
+        _media = _transition.get("media")
+        if not isinstance(_media, str) or not _media.strip():
+            continue
+        _media = _media.strip()
+        _source_ids = [_transition.get("sourceId")]
+        if isinstance(_transition.get("sourceIds"), list):
+            _source_ids.extend(_transition["sourceIds"])
+        for _source_id in _source_ids:
+            if not isinstance(_source_id, str) or not _source_id.strip():
+                continue
+            _source_id = _source_id.strip()
+            _existing = _media_by_source_id.get(_source_id)
+            if _existing is not None and _existing != _media:
+                _conflicting_media_source_ids.add(_source_id)
+                continue
+            _media_by_source_id[_source_id] = _media
+    for _source_id in _conflicting_media_source_ids:
+        _media_by_source_id.pop(_source_id, None)
     # Runtime sampling records document-scroll fractions, while the individual
     # selectors are often deliberately short (``svg``, ``g#even``). Scope them
     # to the sole declared scrub target when the spec provides one so replay
@@ -1202,13 +1335,18 @@ def _runtime_scroll_scrub_sites(_dump):
         for _prop in _varies:
             if not isinstance(_prop, str):
                 continue
-            _series = [_coerce_scalar(_frames[_f].get(_prop)) for _f in _fracs]
             _unit = None
             if _prop.strip().lower() == "transform":
                 _channels = _decompose_transform_series(
                     [_frames[_f].get(_prop) for _f in _fracs]
                 )
+            elif _prop.strip().lower() == "filter":
+                _filter_values = _filter_channels(
+                    [_frames[_f].get(_prop) for _f in _fracs]
+                )
+                _channels = _filter_values if isinstance(_filter_values, dict) else {}
             else:
+                _series = [_coerce_scalar(_frames[_f].get(_prop)) for _f in _fracs]
                 _norm = _norm_scrub_prop(_prop)
                 if _norm in _LENGTH_SCRUB_PROPS:
                     _units = {
@@ -1244,6 +1382,16 @@ def _runtime_scroll_scrub_sites(_dump):
             continue
         _selector_index = _selector_counts.get(_selector, 0)
         _selector_counts[_selector] = _selector_index + 1
+        _source_id = _row.get("sourceId")
+        if isinstance(_source_id, str) and _source_id.strip():
+            _source_id = _source_id.strip()
+            # Contradictory breakpoint evidence must not silently become an
+            # unguarded global replay. Leave the row out until the spec has one
+            # authoritative media condition.
+            if _source_id in _conflicting_media_source_ids:
+                continue
+        else:
+            _source_id = None
         _entry = {
             "transforms": _xf,
             "selector": _selector,
@@ -1253,6 +1401,10 @@ def _runtime_scroll_scrub_sites(_dump):
             ),
             "source": "animation-runtime-dump.json:scrollLinkedStyles",
         }
+        if _source_id is not None:
+            _entry["sourceId"] = _source_id
+            if _source_id in _media_by_source_id:
+                _entry["media"] = _media_by_source_id[_source_id]
         if _scope:
             _entry["target"] = _scope
             _entry["scope"] = _scope
@@ -1261,7 +1413,42 @@ def _runtime_scroll_scrub_sites(_dump):
         out.append(_entry)
     return out
 
-def _runtime_scroll_latch_sites(_dump):
+def _structured_scroll_latch_claims(_transition_spec):
+    _source_ids = set()
+    _selectors = set()
+    _transitions = (
+        _transition_spec.get("transitions") if isinstance(_transition_spec, dict) else None
+    )
+    if not isinstance(_transitions, list):
+        return _source_ids, _selectors
+    for _transition in _transitions:
+        if not isinstance(_transition, dict):
+            continue
+        _animation = _transition.get("animation")
+        if isinstance(_animation, dict):
+            _kind = str(_animation.get("type") or "").lower()
+        else:
+            _kind = str(_animation or "").lower()
+        _trigger = str(_transition.get("trigger") or "").lower()
+        _contract = f"{_kind} {_trigger}"
+        if "scroll" not in _contract:
+            continue
+        if not any(
+            _marker in _contract
+            for _marker in ("state", "reveal", "active", "latch")
+        ):
+            continue
+        _source_id = _transition.get("sourceId")
+        if isinstance(_source_id, str) and _source_id.strip():
+            _source_ids.add(_source_id.strip())
+        for _field in ("selector", "target", "scope"):
+            _selector = _transition.get(_field)
+            if isinstance(_selector, str) and _selector.strip():
+                _selectors.add(_selector.strip())
+    return _source_ids, _selectors
+
+
+def _runtime_scroll_latch_sites(_dump, _transition_spec=None):
     # Latched rows are discrete states. Key them by progress fraction, never by
     # capture-session pixels, so the threshold survives a document-height
     # change; the driver resolves the fraction against the live scroll range.
@@ -1272,10 +1459,18 @@ def _runtime_scroll_latch_sites(_dump):
         return []
     _out = []
     _counts = {}
+    _claimed_source_ids, _claimed_selectors = _structured_scroll_latch_claims(
+        _transition_spec
+    )
     for _row in _rows:
         if not isinstance(_row, dict) or _row.get("latched") is not True:
             continue
         _selector = _row.get("selector")
+        _source_id = _row.get("sourceId")
+        if isinstance(_source_id, str) and _source_id.strip() in _claimed_source_ids:
+            continue
+        if isinstance(_selector, str) and _selector.strip() in _claimed_selectors:
+            continue
         _varies = _row.get("varies")
         _by_scroll = _row.get("byScroll")
         if (
@@ -1432,7 +1627,97 @@ _runtime_sites = [
     for _s in _runtime_scroll_scrub_sites(load("animation-runtime-dump.json", {}))
     if _s.get("selector") not in _spec_claimed_selectors
 ]
+
+
+def _collapse_identical_runtime_sites(_sites):
+    _groups = {}
+    for _index, _site in enumerate(_sites):
+        _key = (
+            _site.get("selector"),
+            _site.get("scope"),
+            _site.get("target"),
+            _site.get("progressSource"),
+            _site.get("offset"),
+            _site.get("media"),
+        )
+        _groups.setdefault(_key, []).append((_index, _site))
+    _collapsed_indexes = set()
+    _collapsed_by_first = {}
+    for _items in _groups.values():
+        if len(_items) < 2:
+            continue
+        _source_ids = [
+            _site.get("sourceId")
+            for _, _site in _items
+            if isinstance(_site.get("sourceId"), str) and _site.get("sourceId").strip()
+        ]
+        _distinct_source_ids = list(dict.fromkeys(_source_ids))
+        if len(_distinct_source_ids) < 2:
+            continue
+        _signatures = [_runtime_site_signature(_site) for _, _site in _items]
+        if any(_sig is None for _sig in _signatures):
+            continue
+        if len(set(_signatures)) != 1:
+            continue
+        _first_index, _first_site = _items[0]
+        _collapsed = {
+            _k: _v
+            for _k, _v in _first_site.items()
+            if _k not in {"selectorIndex", "sourceId"}
+        }
+        _collapsed["replay"] = "all-matches"
+        _collapsed["sourceIds"] = _distinct_source_ids
+        _collapsed_by_first[_first_index] = _collapsed
+        _collapsed_indexes.update(_index for _index, _ in _items[1:])
+    _out = []
+    for _index, _site in enumerate(_sites):
+        if _index in _collapsed_indexes:
+            continue
+        _out.append(_collapsed_by_first.get(_index, _site))
+    return _out
+
+
+_runtime_sites = _collapse_identical_runtime_sites(_runtime_sites)
 _scrub_sites.extend(_runtime_sites[:24])
+
+_component_indexes_by_selector = {}
+for _index, _component in enumerate(components):
+    _selector = _component.get("selector") if isinstance(_component, dict) else None
+    if isinstance(_selector, str) and _selector.strip():
+        _component_indexes_by_selector.setdefault(_selector.strip(), []).append(_index)
+_wired_source_ids = set()
+for _site in _runtime_sites[:24]:
+    _source_id = _site.get("sourceId")
+    if not isinstance(_source_id, str) or not _source_id.strip():
+        continue
+    _source_id = _source_id.strip()
+    if _source_id in _wired_source_ids:
+        continue
+    _selectors = {
+        _site.get(_field).strip()
+        for _field in ("selector", "target", "scope")
+        if isinstance(_site.get(_field), str) and _site.get(_field).strip()
+    }
+    _matches = {
+        _index
+        for _selector in _selectors
+        for _index in _component_indexes_by_selector.get(_selector, [])
+    }
+    if len(_matches) != 1:
+        continue
+    _component_index = next(iter(_matches))
+    components[_component_index].setdefault("wires", []).append(
+        {
+            "kind": "scroll-motion",
+            "library": "framer-motion",
+            "hooks": ["useScroll", "useTransform"],
+            "trigger": "scroll",
+            "selector": _site.get("selector"),
+            "sourceArtifact": "animation-runtime-dump.json",
+            "sourceId": _source_id,
+        }
+    )
+    _wired_source_ids.add(_source_id)
 
 if _scrub_sites:
     scroll_scrub_plan = {
@@ -1451,7 +1736,10 @@ if _scrub_sites:
 else:
     scroll_scrub_plan = {"required": False, "library": None, "count": 0, "sites": [], "note": ""}
 
-_latch_sites = _runtime_scroll_latch_sites(load("animation-runtime-dump.json", {}))
+_latch_sites = _runtime_scroll_latch_sites(
+    load("animation-runtime-dump.json", {}),
+    transition_spec,
+)
 scroll_latch_plan = {
     "required": bool(_latch_sites),
     "count": len(_latch_sites),
@@ -1465,15 +1753,152 @@ scroll_latch_plan = {
 
 
 # ── Intro animation ──────────────────────────────────────────────
-intro_animation_required = (
+def _as_int(value):
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _intro_from_splash_contract(contract):
+    if not isinstance(contract, dict):
+        return None
+    if not (
+        contract.get("detected")
+        or contract.get("hasSplash")
+        or contract.get("requiresOverlay")
+    ):
+        return None
+    overlay_value = contract.get("overlay")
+    overlay = overlay_value if isinstance(overlay_value, dict) else {}
+    exit_timing_value = contract.get("exitTiming")
+    exit_timing = exit_timing_value if isinstance(exit_timing_value, dict) else {}
+    overlay_selector = contract.get("overlaySelector") or overlay.get("selector")
+    plan = {
+        "sourceArtifact": "states/splash/contract.json",
+        "requiresOverlay": bool(
+            contract.get("detected")
+            or contract.get("hasSplash")
+            or contract.get("requiresOverlay")
+            or overlay_selector
+        ),
+    }
+    if contract.get("sourceArtifact"):
+        plan["evidenceArtifact"] = contract.get("sourceArtifact")
+    if contract.get("sourceId"):
+        plan["sourceId"] = contract.get("sourceId")
+    if overlay_selector:
+        plan["overlaySelector"] = overlay_selector
+    duration = _as_int(
+        contract.get("visibleDurationMs")
+        or contract.get("durationMs")
+        or exit_timing.get("durationMs")
+    )
+    if duration is not None:
+        plan["visibleDurationMs"] = duration
+    return plan
+
+
+def _intro_from_page_load_splash_transition(spec):
+    transitions = spec.get("transitions") if isinstance(spec, dict) else None
+    if not isinstance(transitions, list):
+        return None
+    page_load_markers = ("page-load", "pageload", "load", "domcontentloaded", "mount", "once")
+    splash_markers = ("splash", "preloader", "loader", "overlay", "curtain")
+    for transition in transitions:
+        if not isinstance(transition, dict):
+            continue
+        trigger = str(transition.get("trigger") or "").lower()
+        if not any(marker in trigger for marker in page_load_markers):
+            continue
+        animation_value = transition.get("animation")
+        animation = animation_value if isinstance(animation_value, dict) else {}
+        signal_text = " ".join(
+            str(value or "").lower()
+            for value in (
+                transition.get("kind"),
+                transition.get("type"),
+                animation.get("type"),
+                transition.get("selector"),
+                transition.get("target"),
+            )
+        )
+        if not any(marker in signal_text for marker in splash_markers):
+            continue
+        if not transition.get("sourceArtifact"):
+            continue
+        duration = _as_int(
+            transition.get("visibleDurationMs")
+            or transition.get("durationMs")
+            or animation.get("visibleDurationMs")
+            or animation.get("durationMs")
+            or animation.get("duration")
+        )
+        overlay_selector = transition.get("overlaySelector") or transition.get("selector") or transition.get("target")
+        plan = {
+            "sourceArtifact": transition.get("sourceArtifact"),
+            "sourceId": transition.get("sourceId") or transition.get("id"),
+            "requiresOverlay": True,
+        }
+        if overlay_selector:
+            plan["overlaySelector"] = overlay_selector
+        if duration is not None:
+            plan["visibleDurationMs"] = duration
+        return plan
+    return None
+
+
+def _splash_contract_blocks_fallback(contract):
+    if not isinstance(contract, dict):
+        return False
+    if contract.get("schemaVersion") is None:
+        return False
+    if contract.get("detected") is not False:
+        return False
+    if contract.get("captureMode") == "reuse-session":
+        return False
+    overlay = contract.get("overlay")
+    capture = contract.get("capture")
+    has_overlay_metadata = isinstance(overlay, dict) and "everVisible" in overlay
+    has_capture_metadata = isinstance(capture, dict)
+    if not has_overlay_metadata and not has_capture_metadata:
+        return True
+    if isinstance(capture, dict) and capture.get("authoritativeNegative") is False:
+        return False
+    if isinstance(capture, dict) and capture.get("authoritativeNegative") is True:
+        return True
+    ever_visible = bool(overlay.get("everVisible")) if isinstance(overlay, dict) else False
+    state_count = capture.get("stateCount") if isinstance(capture, dict) else None
+    timed_out = bool(capture.get("timedOut")) if isinstance(capture, dict) else False
+    return not ever_visible and state_count == 1 and not timed_out
+
+
+_init_intro_required = (
     sum(1 for v in init_by_selector.values() if v.get("inlineOpacity") in ("0", "0.0") or v.get("inlineTransform") not in ("", "none"))
     >= 1
+)
+_splash_contract_intro = _intro_from_splash_contract(splash_contract)
+_page_load_splash_intro = (
+    None
+    if _splash_contract_blocks_fallback(splash_contract)
+    else _intro_from_page_load_splash_transition(transition_spec)
+)
+intro_animation_required = bool(
+    _init_intro_required or _splash_contract_intro or _page_load_splash_intro
 )
 intro_plan = {
     "required": intro_animation_required,
     "wrapper": "components/ui/IntroAnimation.tsx" if intro_animation_required else None,
     "note": "Coordinates initial visibility resets + post-mount/scroll triggers.",
 }
+if _init_intro_required:
+    intro_plan["sourceArtifact"] = "animation-init-styles.json"
+if _page_load_splash_intro:
+    intro_plan.update(_page_load_splash_intro)
+if _splash_contract_intro:
+    intro_plan.update(_splash_contract_intro)
 
 
 # ── Asset substitution + validation (Common cheat pattern) ───────────
@@ -1599,10 +2024,12 @@ provenance_sources = (
     "asset-substitution.json",
     "font-parity.json",
     "bundle-extraction.json",
+    "animation-runtime-dump.json",
     "sticky-elements.json",
     "hidden-elements.json",
     "mobile-swap.json",
     "animation-init-styles.json",
+    "states/splash/contract.json",
     "external-sdks.json",
     "bundle-map.json",
     "scroll-engine.json",

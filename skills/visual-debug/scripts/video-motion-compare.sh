@@ -108,6 +108,26 @@ fi
 
 OUT_DIR="$REF_DIR/transitions/video-motion"
 mkdir -p "$OUT_DIR"
+LOCK_HELPER="$PROJECT_ROOT/scripts/lib/exclusive-lock.sh"
+if [ ! -f "$LOCK_HELPER" ]; then
+  echo "ERROR: exclusive lock helper not found at $LOCK_HELPER" >&2
+  exit 2
+fi
+# shellcheck source=../../../scripts/lib/exclusive-lock.sh
+source "$LOCK_HELPER"
+MOTION_LOCK_DIR="$OUT_DIR/.compare.lock"
+MOTION_LOCK_TOKEN="$$-$(date +%s%N | tail -c 8)"
+if ! ui_clone_exclusive_lock_acquire \
+  "$MOTION_LOCK_DIR" "$MOTION_LOCK_TOKEN" \
+  "motion artifact dir $OUT_DIR" "$SESSION"; then
+  exit 2
+fi
+release_motion_lock() {
+  ui_clone_exclusive_lock_release "$MOTION_LOCK_DIR" "$MOTION_LOCK_TOKEN"
+}
+trap release_motion_lock EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 RESULT="$REF_DIR/transitions/video-motion-result.txt"
 
 structural_only_mode() {

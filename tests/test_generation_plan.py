@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, cast
 
+from ui_clone.dag import generation_plan_source_hashes
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -907,6 +909,153 @@ def test_generation_plan_scroll_scrub_absent_when_no_bundle_extraction(tmp_path:
     assert ss["sites"] == []
 
 
+def test_generation_plan_script_receipt_includes_runtime_dump_hash(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "runtime-receipt"
+    ref.mkdir(parents=True)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps({"scrollLinkedStyles": []}),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    assert plan["provenance"]["sourceHashes"] == generation_plan_source_hashes(ref)
+    assert plan["provenance"]["sourceHashes"]["animation-runtime-dump.json"]
+
+
+def test_generation_plan_preserves_runtime_source_id_and_emits_exact_match_wire(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "runtime-wire"
+    ref.mkdir(parents=True)
+    (ref / "section-map.json").write_text(
+        json.dumps(
+            {
+                "sections": [
+                    {
+                        "id": "hero",
+                        "tag": "section",
+                        "className": "hero",
+                        "height": 720,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-scroll-hero",
+                        "selector": "section.hero",
+                        "varies": ["opacity"],
+                        "byScroll": {
+                            "0": {"opacity": "0"},
+                            "1": {"opacity": "1"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    site = plan["scrollScrub"]["sites"][0]
+    assert site["sourceId"] == "runtime-scroll-hero"
+    assert plan["componentList"][0]["wires"] == [
+        {
+            "kind": "scroll-motion",
+            "library": "framer-motion",
+            "hooks": ["useScroll", "useTransform"],
+            "trigger": "scroll",
+            "selector": "section.hero",
+            "sourceArtifact": "animation-runtime-dump.json",
+            "sourceId": "runtime-scroll-hero",
+        }
+    ]
+
+
+def test_generation_plan_does_not_guess_runtime_wire_for_unmatched_selector(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "runtime-unmatched"
+    ref.mkdir(parents=True)
+    (ref / "section-map.json").write_text(
+        json.dumps(
+            {
+                "sections": [
+                    {
+                        "id": "hero",
+                        "tag": "section",
+                        "className": "hero",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-scroll-hero",
+                        "selector": ".hero",
+                        "varies": ["transform"],
+                        "byScroll": {
+                            "0": {"transform": "scale(0.8)"},
+                            "1": {"transform": "scale(1)"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    assert plan["scrollScrub"]["sites"][0]["sourceId"] == "runtime-scroll-hero"
+    assert plan["componentList"][0]["wires"] == []
+
+
+def test_generation_plan_emits_stable_empty_wires_without_motion_prose(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "plain-wires"
+    ref.mkdir(parents=True)
+    (ref / "section-map.json").write_text(
+        json.dumps([{"id": "about", "tag": "section", "className": "about"}]),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    assert plan["componentList"][0]["wires"] == []
+
+
 def test_generation_plan_scroll_driven_absent_when_no_block(tmp_path: Path) -> None:
     """No scrollDriven evidence → required is False and hooks empty."""
     ref = tmp_path / "ref" / "realfood"
@@ -1640,6 +1789,98 @@ def test_generation_plan_routes_latched_rows_away_from_scrub_bands(tmp_path: Pat
     assert latch["endState"] == {"opacity": "1"}
 
 
+def test_generation_plan_does_not_latch_structured_scroll_owned_rows(tmp_path: Path) -> None:
+    """Runtime latch rows are a fallback, not a second owner. When a
+    transition-spec already declares structured scroll behavior for a sourceId
+    or selector, the generic latch driver must not also write those properties."""
+    ref = tmp_path / "ref" / "realfood-site"
+    ref.mkdir(parents=True)
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "source": "bundle-analyzer",
+                "transitions": [
+                    {
+                        "id": "desktop-nav-state",
+                        "trigger": "scroll-state-machine",
+                        "target": "nav",
+                        "selector": "nav",
+                        "sourceId": "n0",
+                        "animation": {
+                            "type": "scroll-state-machine",
+                            "property": "transform",
+                        },
+                    },
+                    {
+                        "id": "stats-reveal",
+                        "trigger": "scroll-reveal",
+                        "target": ".stats .bar",
+                        "selector": ".stats .bar",
+                        "sourceId": "n33",
+                        "animation": {
+                            "type": "scroll-state-machine",
+                            "property": "height",
+                        },
+                    },
+                ],
+            }
+        )
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "selector": "nav",
+                        "selectorIndex": 0,
+                        "sourceId": "n0",
+                        "varies": ["transform"],
+                        "latched": True,
+                        "byScroll": {
+                            "0": {"transform": "translateY(-100px)"},
+                            "0.1": {"transform": "translateY(0px)"},
+                        },
+                    },
+                    {
+                        "selector": ".stats .bar",
+                        "selectorIndex": 0,
+                        "sourceId": "n34",
+                        "varies": ["height"],
+                        "latched": True,
+                        "byScroll": {
+                            "0": {"height": "0px"},
+                            "0.1": {"height": "271px"},
+                        },
+                    },
+                    {
+                        "selector": ".unclaimed",
+                        "selectorIndex": 0,
+                        "sourceId": "u1",
+                        "varies": ["opacity"],
+                        "latched": True,
+                        "byScroll": {
+                            "0": {"opacity": "0"},
+                            "0.2": {"opacity": "1"},
+                        },
+                    },
+                ]
+            }
+        )
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text())
+    latch_sites = (plan.get("scrollLatch") or {}).get("sites") or []
+    latch_selectors = {site.get("selector") for site in latch_sites}
+    assert "nav" not in latch_selectors
+    assert ".stats .bar" not in latch_selectors
+    assert ".unclaimed" in latch_selectors
+
+
 def test_generation_plan_mines_breakpoint_scoped_input_range(tmp_path: Path) -> None:
     """Specs that decompile a per-breakpoint useTransform record the domain as
     inputRangeDesktop/inputRangeMobile rather than a bare inputRange. The
@@ -1867,6 +2108,110 @@ def test_generation_plan_runtime_scroll_scrub_keeps_duplicate_selector_indexes(
     assert [site.get("selectorIndex") for site in even_sites] == [0, 1]
 
 
+def test_generation_plan_runtime_scroll_scrub_collapses_identical_repeated_selector(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "repeated-identical-selector"
+    ref.mkdir(parents=True)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": f"char-{index}",
+                        "selector": "span.disintegrating_char",
+                        "varies": ["filter", "opacity"],
+                        "byScroll": {
+                            "0": {
+                                "filter": "blur(0px) brightness(1)",
+                                "opacity": "1",
+                            },
+                            "1": {
+                                "filter": "blur(8px) brightness(0.2)",
+                                "opacity": "0",
+                            },
+                        },
+                    }
+                    for index in range(3)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    sites = [
+        site
+        for site in plan["scrollScrub"]["sites"]
+        if site.get("source") == "animation-runtime-dump.json:scrollLinkedStyles"
+    ]
+
+    assert len(sites) == 1
+    assert sites[0]["selector"] == "span.disintegrating_char"
+    assert sites[0]["replay"] == "all-matches"
+    assert sites[0]["sourceIds"] == ["char-0", "char-1", "char-2"]
+    assert "selectorIndex" not in sites[0]
+    transforms = {item["property"]: item for item in sites[0]["transforms"]}
+    assert json.loads(transforms["blur"]["output"]) == [0.0, 8.0]
+    assert json.loads(transforms["brightness"]["output"]) == [1.0, 0.2]
+    assert json.loads(transforms["opacity"]["output"]) == [1.0, 0.0]
+
+
+def test_generation_plan_runtime_scroll_scrub_keeps_mixed_repeated_selector_indexed(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "repeated-mixed-selector"
+    ref.mkdir(parents=True)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "char-a",
+                        "selector": "span.disintegrating_char",
+                        "varies": ["opacity"],
+                        "byScroll": {
+                            "0": {"opacity": "1"},
+                            "1": {"opacity": "0"},
+                        },
+                    },
+                    {
+                        "sourceId": "char-b",
+                        "selector": "span.disintegrating_char",
+                        "varies": ["opacity"],
+                        "byScroll": {
+                            "0": {"opacity": "1"},
+                            "1": {"opacity": "0.4"},
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    sites = [
+        site
+        for site in plan["scrollScrub"]["sites"]
+        if site.get("source") == "animation-runtime-dump.json:scrollLinkedStyles"
+        and site.get("selector") == "span.disintegrating_char"
+    ]
+
+    assert [site.get("selectorIndex") for site in sites] == [0, 1]
+    assert all(site.get("replay") != "all-matches" for site in sites)
+
+
 def test_generation_plan_runtime_scroll_scrub_decomposes_transform_scale(
     tmp_path: Path,
 ) -> None:
@@ -1992,6 +2337,260 @@ def test_generation_plan_runtime_scroll_scrub_remaps_document_samples_to_target_
     assert json.loads(width["output"]) == [100.0, 75.0, 50.0]
 
 
+def test_generation_plan_runtime_scroll_scrub_preserves_vw_width_band(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "runtime-vw-width"
+    ref.mkdir(parents=True)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-vw-width",
+                        "selector": ".n28-panel",
+                        "varies": ["width"],
+                        "byScroll": {
+                            "0": {"width": "80vw"},
+                            "0.5": {"width": "90vw"},
+                            "1": {"width": "100vw"},
+                        },
+                    },
+                    {
+                        "sourceId": "runtime-mixed-width",
+                        "selector": ".mixed-panel",
+                        "varies": ["width"],
+                        "byScroll": {
+                            "0": {"width": "80vw"},
+                            "1": {"width": "100px"},
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    runtime_sites = [
+        site
+        for site in plan["scrollScrub"]["sites"]
+        if site.get("source") == "animation-runtime-dump.json:scrollLinkedStyles"
+    ]
+    by_selector = {site["selector"]: site for site in runtime_sites}
+
+    width = next(t for t in by_selector[".n28-panel"]["transforms"] if t["property"] == "width")
+    assert width["unit"] == "vw"
+    assert json.loads(width["output"]) == [80.0, 90.0, 100.0]
+    assert ".mixed-panel" not in by_selector
+
+
+def test_generation_plan_runtime_scroll_scrub_preserves_explicit_media_guard(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "runtime-media-guard"
+    ref.mkdir(parents=True)
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "desktop-hero-width",
+                        "trigger": "scroll-linked-style",
+                        "target": ".hero-video",
+                        "sourceArtifact": "animation-runtime-dump.json",
+                        "sourceId": "runtime-hero-width",
+                        "media": "(min-width: 581px)",
+                        "animation": {"type": "scroll-linked-style"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "viewport": {"width": 1280, "height": 800},
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-hero-width",
+                        "selector": ".hero-video",
+                        "varies": ["width"],
+                        "byScroll": {
+                            "0": {"width": "80vw"},
+                            "1": {"width": "100vw"},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    site = next(
+        item
+        for item in plan["scrollScrub"]["sites"]
+        if item.get("sourceId") == "runtime-hero-width"
+    )
+    assert site["media"] == "(min-width: 581px)"
+
+
+def test_generation_plan_runtime_scroll_scrub_drops_conflicting_media_evidence(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "runtime-media-conflict"
+    ref.mkdir(parents=True)
+    transitions = [
+        {
+            "id": f"hero-width-{index}",
+            "trigger": "scroll-linked-style",
+            "target": ".hero-video",
+            "sourceArtifact": "animation-runtime-dump.json",
+            "sourceId": "runtime-hero-width",
+            "media": media,
+            "animation": {"type": "scroll-linked-style"},
+        }
+        for index, media in enumerate(
+            ["(min-width: 581px)", "(max-width: 580px)"]
+        )
+    ]
+    transitions.append(
+        {
+            "id": "hero-width-valid-sibling",
+            "trigger": "scroll-linked-style",
+            "target": ".hero-video",
+            "sourceArtifact": "animation-runtime-dump.json",
+            "sourceId": "runtime-hero-width-sibling",
+            "media": "(min-width: 581px)",
+            "animation": {"type": "scroll-linked-style"},
+        }
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": transitions}),
+        encoding="utf-8",
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-hero-width",
+                        "selector": ".hero-video",
+                        "varies": ["width"],
+                        "byScroll": {
+                            "0": {"width": "80vw"},
+                            "1": {"width": "100vw"},
+                        },
+                    },
+                    {
+                        "sourceId": "runtime-hero-width-sibling",
+                        "selector": ".hero-video",
+                        "varies": ["width"],
+                        "byScroll": {
+                            "0": {"width": "70vw"},
+                            "1": {"width": "90vw"},
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    assert all(
+        site.get("sourceId") != "runtime-hero-width"
+        for site in plan["scrollScrub"]["sites"]
+    )
+    sibling = next(
+        site
+        for site in plan["scrollScrub"]["sites"]
+        if site.get("sourceId") == "runtime-hero-width-sibling"
+    )
+    assert sibling["selectorIndex"] == 1
+
+
+def test_generation_plan_runtime_scroll_scrub_does_not_collapse_different_media(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "runtime-media-distinct"
+    ref.mkdir(parents=True)
+    media_by_source = {
+        "desktop-char": "(min-width: 581px)",
+        "mobile-char": "(max-width: 580px)",
+    }
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": source_id,
+                        "trigger": "scroll-linked-style",
+                        "target": ".char",
+                        "sourceArtifact": "animation-runtime-dump.json",
+                        "sourceId": source_id,
+                        "media": media,
+                        "animation": {"type": "scroll-linked-style"},
+                    }
+                    for source_id, media in media_by_source.items()
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": source_id,
+                        "selector": ".char",
+                        "varies": ["opacity"],
+                        "byScroll": {
+                            "0": {"opacity": "1"},
+                            "1": {"opacity": "0"},
+                        },
+                    }
+                    for source_id in media_by_source
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    sites = [
+        site
+        for site in plan["scrollScrub"]["sites"]
+        if site.get("sourceId") in media_by_source
+    ]
+    assert len(sites) == 2
+    assert {site["sourceId"]: site["media"] for site in sites} == media_by_source
+    assert all(site.get("replay") != "all-matches" for site in sites)
+
+
 def test_generation_plan_runtime_scroll_scrub_preserves_svg_opacity_and_div_size_bands(
     tmp_path: Path,
 ) -> None:
@@ -2012,6 +2611,181 @@ def test_generation_plan_runtime_scroll_scrub_preserves_svg_opacity_and_div_size
     assert json.loads(opacity["output"]) == [0.0, 0.35, 1.0]
     assert json.loads(width["output"]) == [112.0, 160.0, 208.0]
     assert json.loads(border_radius["output"]) == [24.0, 16.0, 8.0]
+
+
+def test_generation_plan_runtime_scroll_scrub_preserves_supported_blur_filter(
+    tmp_path: Path,
+) -> None:
+    """Runtime filter samples are replayable only for plain blur(px) curves."""
+    ref = tmp_path / "ref" / "blur-site"
+    ref.mkdir(parents=True)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-blur-hero",
+                        "selector": ".hero-art",
+                        "varies": ["filter"],
+                        "byScroll": {
+                            "0": {"filter": "blur(20px)"},
+                            "0.5": {"filter": " blur(8.5px) "},
+                            "1": {"filter": "blur(0px)"},
+                        },
+                    },
+                    {
+                        "selector": ".none-mix",
+                        "varies": ["filter"],
+                        "byScroll": {
+                            "0": {"filter": "blur(10px)"},
+                            "1": {"filter": "none"},
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    sites = {
+        site["selector"]: site
+        for site in plan["scrollScrub"]["sites"]
+        if site.get("source") == "animation-runtime-dump.json:scrollLinkedStyles"
+    }
+    hero = sites[".hero-art"]
+    blur = next(t for t in hero["transforms"] if t["property"] == "blur")
+
+    assert hero["sourceId"] == "runtime-blur-hero"
+    assert json.loads(blur["input"]) == [0.0, 0.5, 1.0]
+    assert json.loads(blur["output"]) == [20.0, 8.5, 0.0]
+    none_mix = next(t for t in sites[".none-mix"]["transforms"] if t["property"] == "blur")
+    assert json.loads(none_mix["output"]) == [10.0, 0.0]
+
+
+def test_generation_plan_runtime_scroll_scrub_preserves_blur_brightness_filter(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "blur-brightness-site"
+    ref.mkdir(parents=True)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-filter-hero",
+                        "selector": ".hero-art",
+                        "varies": ["filter"],
+                        "byScroll": {
+                            "0": {"filter": "blur(0px) brightness(1)"},
+                            "0.5": {"filter": " blur(4.5px) brightness(0.72) "},
+                            "1": {"filter": "blur(12px) brightness(0.15)"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    site = next(
+        site
+        for site in plan["scrollScrub"]["sites"]
+        if site.get("selector") == ".hero-art"
+    )
+    transforms = {item["property"]: item for item in site["transforms"]}
+
+    assert json.loads(transforms["blur"]["output"]) == [0.0, 4.5, 12.0]
+    assert json.loads(transforms["brightness"]["output"]) == [1.0, 0.72, 0.15]
+
+
+def test_generation_plan_runtime_scroll_scrub_drops_unsupported_filter_only(
+    tmp_path: Path,
+) -> None:
+    """Unsupported filter strings stay as evidence, but produce no blur band."""
+    ref = tmp_path / "ref" / "unsupported-filter-site"
+    ref.mkdir(parents=True)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "selector": ".mixed",
+                        "varies": ["filter", "opacity"],
+                        "byScroll": {
+                            "0": {
+                                "filter": "brightness(1.2) blur(2px)",
+                                "opacity": "0",
+                            },
+                            "1": {"filter": "blur(0px)", "opacity": "1"},
+                        },
+                    },
+                    {
+                        "selector": ".negative",
+                        "varies": ["filter"],
+                        "byScroll": {
+                            "0": {"filter": "blur(-1px)"},
+                            "1": {"filter": "blur(0px)"},
+                        },
+                    },
+                    {
+                        "selector": ".nan",
+                        "varies": ["filter"],
+                        "byScroll": {
+                            "0": {"filter": "blur(NaNpx)"},
+                            "1": {"filter": "blur(0px)"},
+                        },
+                    },
+                    {
+                        "selector": ".unitless",
+                        "varies": ["filter"],
+                        "byScroll": {
+                            "0": {"filter": "blur(12)"},
+                            "1": {"filter": "blur(0px)"},
+                        },
+                    },
+                    {
+                        "selector": ".infinite",
+                        "varies": ["filter"],
+                        "byScroll": {
+                            "0": {"filter": "blur(Infinitypx)"},
+                            "1": {"filter": "blur(0px)"},
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    runtime_sites = [
+        site
+        for site in plan["scrollScrub"]["sites"]
+        if site.get("source") == "animation-runtime-dump.json:scrollLinkedStyles"
+    ]
+    by_selector = {site["selector"]: site for site in runtime_sites}
+
+    assert list(by_selector) == [".mixed"]
+    transforms = by_selector[".mixed"]["transforms"]
+    assert [item["property"] for item in transforms] == ["opacity"]
+    assert json.loads(transforms[0]["output"]) == [0.0, 1.0]
 
 
 def test_generation_plan_runtime_scroll_scrub_sites_carry_document_progress_target_scope(
@@ -2045,3 +2819,326 @@ def test_generation_plan_runtime_scroll_scrub_preserves_scoped_root_self_target(
     assert root_site["target"] == ".style_scrollcontainer__Vup4r"
     opacity = next(t for t in root_site["transforms"] if t["property"] == "opacity")
     assert json.loads(opacity["output"]) == [0.4, 0.7, 1.0]
+
+
+def test_generation_plan_intro_animation_uses_splash_contract_without_init_styles(
+    tmp_path: Path,
+) -> None:
+    """A captured splash contract must require IntroAnimation even with no init styles."""
+    ref = tmp_path / "ref" / "splash-contract"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (ref / "animation-init-styles.json").write_text("[]", encoding="utf-8")
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "detected": True,
+                "overlay": {
+                    "selector": ".rf-splash",
+                    "maxCoverage": 1.0,
+                    "initial": {"visible": True},
+                    "settled": {"visible": False},
+                },
+                "activeAnimation": {"maxActiveCount": 3},
+                "exitTiming": {"fromMs": 0, "toMs": 1800, "durationMs": 1800},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    intro = plan["introAnimation"]
+    assert intro["required"] is True
+    assert intro["wrapper"] == "components/ui/IntroAnimation.tsx"
+    assert intro["sourceArtifact"] == "states/splash/contract.json"
+    assert intro["overlaySelector"] == ".rf-splash"
+    assert intro["visibleDurationMs"] == 1800
+    assert intro["requiresOverlay"] is True
+    assert plan["provenance"]["sourceHashes"]["states/splash/contract.json"]
+
+
+def test_generation_plan_detected_splash_requires_overlay_without_selector(
+    tmp_path: Path,
+) -> None:
+    """Detection itself requires overlay DOM even when no stable selector was captured."""
+    ref = tmp_path / "ref" / "selectorless-splash"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (ref / "animation-init-styles.json").write_text("[]", encoding="utf-8")
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "detected": True,
+                "overlay": {
+                    "selector": None,
+                    "maxCoverage": 1.0,
+                    "everVisible": True,
+                    "exitObserved": True,
+                },
+                "exitTiming": {"durationMs": 1200},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    intro = json.loads((ref / "generation-plan.json").read_text())["introAnimation"]
+    assert intro["required"] is True
+    assert intro["requiresOverlay"] is True
+    assert "overlaySelector" not in intro
+
+
+def test_generation_plan_intro_animation_uses_page_load_splash_transition_only(
+    tmp_path: Path,
+) -> None:
+    """Evidence-backed page-load splash transitions count; unrelated intro copy does not."""
+    ref = tmp_path / "ref" / "page-load-splash"
+    ref.mkdir(parents=True)
+    (ref / "animation-init-styles.json").write_text("[]", encoding="utf-8")
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "intro-copy-hover",
+                        "trigger": "hover",
+                        "selector": ".intro-card",
+                        "animation": {"type": "fade"},
+                    },
+                    {
+                        "id": "hero-splash-page-load",
+                        "trigger": "page-load",
+                        "selector": ".rf-splash",
+                        "kind": "splash",
+                        "durationMs": 1600,
+                        "sourceArtifact": "transition-spec.json",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    intro = plan["introAnimation"]
+    assert intro["required"] is True
+    assert intro["sourceArtifact"] == "transition-spec.json"
+    assert intro["sourceId"] == "hero-splash-page-load"
+    assert intro["overlaySelector"] == ".rf-splash"
+    assert intro["visibleDurationMs"] == 1600
+    assert intro["requiresOverlay"] is True
+
+
+def test_generation_plan_false_splash_contract_suppresses_transition_fallback(
+    tmp_path: Path,
+) -> None:
+    """A legacy negative capture must override stale page-load splash evidence."""
+    ref = tmp_path / "ref" / "negative-splash-contract"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (ref / "animation-init-styles.json").write_text("[]", encoding="utf-8")
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "detected": False,
+                "overlay": {"selector": None, "maxCoverage": 0, "exitObserved": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "stale-page-load-overlay",
+                        "trigger": "page-load",
+                        "selector": ".old-splash",
+                        "kind": "splash",
+                        "durationMs": 1600,
+                        "sourceArtifact": "transition-spec.json",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    intro = plan["introAnimation"]
+    assert intro["required"] is False
+    assert intro["wrapper"] is None
+
+
+def test_generation_plan_pre_navigation_false_splash_contract_suppresses_transition_fallback(
+    tmp_path: Path,
+) -> None:
+    """A pre-navigation negative capture is authoritative."""
+    ref = tmp_path / "ref" / "pre-navigation-negative-splash-contract"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (ref / "animation-init-styles.json").write_text("[]", encoding="utf-8")
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "pre-navigation",
+                "detected": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "stale-pre-nav-page-load-overlay",
+                        "trigger": "page-load",
+                        "selector": ".old-splash",
+                        "kind": "splash",
+                        "durationMs": 1600,
+                        "sourceArtifact": "transition-spec.json",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    intro = plan["introAnimation"]
+    assert intro["required"] is False
+    assert intro["wrapper"] is None
+
+
+def test_generation_plan_observed_overlay_negative_falls_through_to_transition_fallback(
+    tmp_path: Path,
+) -> None:
+    """A long-lived observed overlay negative must not suppress independent splash evidence."""
+    ref = tmp_path / "ref" / "observed-overlay-negative-splash-contract"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (ref / "animation-init-styles.json").write_text("[]", encoding="utf-8")
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "pre-navigation",
+                "detected": False,
+                "overlay": {"everVisible": True, "exitObserved": False},
+                "capture": {
+                    "stateCount": 3,
+                    "timedOut": False,
+                    "reason": "stable-2s",
+                    "authoritativeNegative": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "fallback-page-load-overlay",
+                        "trigger": "page-load",
+                        "selector": ".fable-splash",
+                        "kind": "splash",
+                        "durationMs": 1400,
+                        "sourceArtifact": "transition-spec.json",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    intro = plan["introAnimation"]
+    assert intro["required"] is True
+    assert intro["sourceArtifact"] == "transition-spec.json"
+    assert intro["sourceId"] == "fallback-page-load-overlay"
+
+
+def test_generation_plan_reuse_session_false_splash_contract_falls_through_to_page_load_transition(
+    tmp_path: Path,
+) -> None:
+    """A reuse-session negative does not mask independent page-load evidence."""
+    ref = tmp_path / "ref" / "reuse-session-negative-splash-contract"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (ref / "animation-init-styles.json").write_text("[]", encoding="utf-8")
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "reuse-session",
+                "detected": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "page-load-overlay-from-transition-spec",
+                        "trigger": "page-load",
+                        "selector": ".fable-splash",
+                        "kind": "splash",
+                        "durationMs": 1400,
+                        "sourceArtifact": "transition-spec.json",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    intro = plan["introAnimation"]
+    assert intro["required"] is True
+    assert intro["sourceArtifact"] == "transition-spec.json"
+    assert intro["sourceId"] == "page-load-overlay-from-transition-spec"
+    assert intro["overlaySelector"] == ".fable-splash"
+    assert intro["visibleDurationMs"] == 1400

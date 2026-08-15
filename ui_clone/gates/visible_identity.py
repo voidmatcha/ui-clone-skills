@@ -24,6 +24,8 @@ import os
 from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
+_RGB_SEQUENCE_TYPES = (list, tuple)
+
 # ── shared thresholds (mirror lib/visible-identity.js) ─────────────────
 MIN_AREA_PX2: float = 4.0
 """Minimum rendered area (width*height). A sub-2x2 element paints nothing
@@ -196,7 +198,7 @@ def occluded_verdict(occluded: int, measured: int) -> str | None:
 def _rgb(value: Any) -> tuple[float, float, float] | None:
     """Parse a colour to an (r,g,b) triple from a [r,g,b] list or an
     'rgb(r, g, b)' / 'rgba(...)' string. None when unparseable."""
-    if isinstance(value, list | tuple) and len(value) >= 3:
+    if isinstance(value, _RGB_SEQUENCE_TYPES) and len(value) >= 3:
         try:
             return (float(value[0]), float(value[1]), float(value[2]))
         except (TypeError, ValueError):

@@ -37,6 +37,7 @@ CLI:
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,20 @@ def select_entries(spec: Any) -> list[dict[str, Any]]:
 def _parse_interval_ms(entry: dict[str, Any]) -> int | None:
     animation_raw = entry.get("animation")
     animation = animation_raw if isinstance(animation_raw, dict) else {}
+    if "intervalMs" in animation:
+        structured = animation["intervalMs"]
+        if isinstance(structured, bool):
+            return None
+        if isinstance(structured, int):
+            return structured if structured > 0 else None
+        if (
+            isinstance(structured, float)
+            and math.isfinite(structured)
+            and structured > 0
+            and structured.is_integer()
+        ):
+            return int(structured)
+        return None
     for text in (
         str(entry.get("trigger") or ""),
         str(animation.get("duration") or ""),
@@ -132,7 +147,10 @@ def parse_params(entry: dict[str, Any]) -> dict[str, Any]:
     ]
     unmeasurable: list[str] = []
     if interval is None:
-        unmeasurable.append("no parseable timer interval in trigger/duration/bundle_branch")
+        unmeasurable.append(
+            "no parseable timer interval in animation.intervalMs or "
+            "trigger/duration/bundle_branch"
+        )
     if not selectors:
         unmeasurable.append("no target selectors")
     if not channels:

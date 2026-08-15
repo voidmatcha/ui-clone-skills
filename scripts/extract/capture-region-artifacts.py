@@ -104,6 +104,14 @@ def _safe_name(value: object, index: int) -> str:
     return f"{index:02d}-{(name or 'hover')[:60]}"
 
 
+def _safe_transition_id(value: object, index: int) -> str:
+    """Keep an existing capture ID stable while retaining indexed fallbacks."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "")).strip("-._")
+    if re.match(r"^\d{2}-", name):
+        return name[:63]
+    return _safe_name(name, index)
+
+
 def _wait_ms(region: dict[str, Any]) -> int:
     raw = str(region.get("transitionDuration") or "").strip().lower()
     match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ms|s)", raw)
@@ -300,6 +308,7 @@ TRACKED_STYLE_PROPERTIES = (
 )
 
 REGION_MARKER_ATTRIBUTE = "data-uiclone-region"
+OBSERVATION_MARKER_ATTRIBUTE = "data-uiclone-observation"
 
 MIN_HOVER_TARGET_PX = 4
 
@@ -445,15 +454,42 @@ def _settle_target_js(target_literal: str) -> str:
     )
 
 
-def _observe_target_js(target_literal: str) -> str:
+def _resolve_observation_target_js(
+    target_literal: str,
+    affected_literal: str,
+    marker: str,
+) -> str:
+    """Pin an affected node contained by the exact activated region."""
+    marker_literal = json.dumps(marker)
+    return (
+        "(() => {"
+        f"for(const stale of document.querySelectorAll('[{OBSERVATION_MARKER_ATTRIBUTE}]'))"
+        f"stale.removeAttribute('{OBSERVATION_MARKER_ATTRIBUTE}');"
+        f"const activation=document.querySelector({target_literal});"
+        "if(!activation)return {found:false,activationFound:false,matches:0};"
+        f"const candidates=[...document.querySelectorAll({affected_literal})];"
+        "const observed=candidates.find(node=>node===activation||activation.contains(node));"
+        "if(!observed)return {found:false,activationFound:true,matches:candidates.length};"
+        f"observed.setAttribute('{OBSERVATION_MARKER_ATTRIBUTE}',{marker_literal});"
+        "return {found:true,activationFound:true,matches:candidates.length};"
+        "})()"
+    )
+
+
+def _observe_target_js(
+    target_literal: str,
+    observation_target_literal: str | None = None,
+) -> str:
     tracked = json.dumps(list(TRACKED_STYLE_PROPERTIES))
+    observed_literal = observation_target_literal or target_literal
     return (
         "(() => {"
         f"const tracked={tracked};"
         f"const el=document.querySelector({target_literal});"
-        "if(!el)return {found:false};"
+        f"const observed=document.querySelector({observed_literal});"
+        "if(!el||!observed)return {found:false};"
         "const r=el.getBoundingClientRect();"
-        "const cs=getComputedStyle(el);"
+        "const cs=getComputedStyle(observed);"
         "const styles={};for(const name of tracked)styles[name]=cs[name];"
         "return {found:true,x:r.x,y:r.y,width:r.width,height:r.height,styles,"
         "scrollX:window.scrollX,scrollY:window.scrollY,"
@@ -479,6 +515,10 @@ def _capture_one(
     marker = f"region-{index}"
     target = f'[{REGION_MARKER_ATTRIBUTE}="{marker}"]'
     target_literal = json.dumps(target)
+    affected_target = _hover_rule_affected_targets(ref_dir).get(_hover_activation(selector))
+    observation_marker = f"observation-{index}"
+    observation_target = f'[{OBSERVATION_MARKER_ATTRIBUTE}="{observation_marker}"]'
+    observation_target_literal = json.dumps(observation_target) if affected_target else None
 
     # A prior hover can leave a fixed mega-menu covering the next target.
     # Moving outside the viewport clears the real CSS :hover chain before
@@ -493,6 +533,8 @@ def _capture_one(
                 "(() => {"
                 f"for(const el of document.querySelectorAll({target_literal}))"
                 f"el.removeAttribute('{REGION_MARKER_ATTRIBUTE}');"
+                f"for(const el of document.querySelectorAll('[{OBSERVATION_MARKER_ATTRIBUTE}]'))"
+                f"el.removeAttribute('{OBSERVATION_MARKER_ATTRIBUTE}');"
                 "return {found:true};"
                 "})()"
             ),
@@ -513,7 +555,22 @@ def _capture_one(
     if settled.get("found") is not True:
         _release()
         return False, "selector missing or not observable", None, None
-    idle_observation = _eval(session, _observe_target_js(target_literal))
+    if affected_target:
+        observation_target_result = _eval(
+            session,
+            _resolve_observation_target_js(
+                target_literal,
+                json.dumps(affected_target),
+                observation_marker,
+            ),
+        )
+        if observation_target_result.get("found") is not True:
+            _release()
+            return False, "affected selector missing or not observable", None, None
+    idle_observation = _eval(
+        session,
+        _observe_target_js(target_literal, observation_target_literal),
+    )
     if (
         idle_observation.get("found") is not True
         or float(idle_observation.get("width") or 0) <= 0
@@ -574,7 +631,10 @@ def _capture_one(
         ),
     )
     _run(session, "wait", str(_wait_ms(region)))
-    active_observation = _eval(session, _observe_target_js(target_literal))
+    active_observation = _eval(
+        session,
+        _observe_target_js(target_literal, observation_target_literal),
+    )
 
     idle_scroll_x = float(idle_observation.get("scrollX") or 0)
     idle_scroll_y = float(idle_observation.get("scrollY") or 0)
@@ -1371,6 +1431,38 @@ def _hover_rule_source_chunks(ref_dir: Path) -> dict[str, str]:
     return mapped
 
 
+def _hover_rule_affected_targets(ref_dir: Path) -> dict[str, str]:
+    path = ref_dir / "hover-css-rules.json"
+    try:
+        payload: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    rules = (
+        payload.get("rules") or payload.get("entries")
+        if isinstance(payload, dict)
+        else payload
+        if isinstance(payload, list)
+        else None
+    )
+    if not isinstance(rules, list):
+        return {}
+
+    affected_by_activation: dict[str, list[str]] = {}
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        activation = _hover_activation(rule.get("activation") or rule.get("selector"))
+        affected = " ".join(str(rule.get("affected") or "").split())
+        if not activation or not affected or affected == activation:
+            continue
+        targets = affected_by_activation.setdefault(activation, [])
+        if affected not in targets:
+            targets.append(affected)
+    return {
+        activation: ", ".join(targets) for activation, targets in affected_by_activation.items()
+    }
+
+
 def _reconcile_interactions(
     ref_dir: Path,
     captured: list[dict[str, Any]],
@@ -1510,6 +1602,7 @@ PROBE_FAILURE_REASONS = frozenset(
         "active screenshot failed",
         "viewport screenshot failed",
         "CDP hover failed",
+        "affected selector missing or not observable",
         "region rect lies outside the viewport",
         "page does not scroll",
         "region is observable at fewer than two scroll positions",
@@ -1562,6 +1655,7 @@ def _promote_transition_spec(
         else []
     )
     hover_rule_sources = _hover_rule_source_chunks(ref_dir)
+    hover_rule_affected_targets = _hover_rule_affected_targets(ref_dir)
     spec_is_live = existing.get("source") == BRIDGE_SOURCE or (
         isinstance(existing.get("provenance"), dict)
         and existing["provenance"].get("kind") == "live-capture"
@@ -1662,16 +1756,14 @@ def _promote_transition_spec(
         not in captured_keys
     ]
     transition_ids = {
-        str(item.get("id") or "")
-        for item in transitions
-        if str(item.get("id") or "")
+        str(item.get("id") or "") for item in transitions if str(item.get("id") or "")
     }
 
     for index, item in enumerate(captured):
         observation = item["observation"]
         changed = observation["changedProperties"]
         is_scroll = _is_scroll_trigger(str(item.get("triggerType") or "").strip().lower())
-        transition_id = _safe_name(item["region"], index)
+        transition_id = _safe_transition_id(item["region"], index)
         if transition_id in transition_ids:
             base_id = transition_id
             suffix = 2
@@ -1698,25 +1790,30 @@ def _promote_transition_spec(
         ):
             if key in observation:
                 generated_animation[key] = observation[key]
-        transitions.append(
-            {
-                "id": transition_id,
-                "trigger": "scroll" if is_scroll else "hover",
-                "source_chunk": source_chunks.get(str(item["selector"]), "inline init"),
-                "bundle_branch": (
-                    "live-capture: agent-browser scroll ladder"
-                    if is_scroll
-                    else "live-capture: agent-browser CDP hover plus DOM hover events"
-                ),
-                "target": item["selector"],
-                "animation": generated_animation,
-                "reference_frames": [
-                    item["artifacts"][key]
-                    for key in ("idle", "active", "before", "mid", "after")
-                    if key in item["artifacts"]
-                ],
-            }
-        )
+        generated_transition: dict[str, Any] = {
+            "id": transition_id,
+            "trigger": "scroll" if is_scroll else "hover",
+            "source_chunk": source_chunks.get(str(item["selector"]), "inline init"),
+            "bundle_branch": (
+                "live-capture: agent-browser scroll ladder"
+                if is_scroll
+                else "live-capture: agent-browser CDP hover plus DOM hover events"
+            ),
+            # Keep the activation selector as the primary target so the entry
+            # remains a valid input to regions.json derivation and hover dispatch.
+            "target": item["selector"],
+            "animation": generated_animation,
+            "reference_frames": [
+                item["artifacts"][key]
+                for key in ("idle", "active", "before", "mid", "after")
+                if key in item["artifacts"]
+            ],
+        }
+        if not is_scroll:
+            affected_target = hover_rule_affected_targets.get(_hover_activation(item["selector"]))
+            if affected_target:
+                generated_transition["affectedTarget"] = affected_target
+        transitions.append(generated_transition)
 
     promoted: dict[str, Any] = {
         **existing,

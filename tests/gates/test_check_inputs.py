@@ -181,6 +181,113 @@ def test_rollup_constituent_invalidation(tmp_path: Path) -> None:
     assert h1 != h0
 
 
+def test_capture_artifact_inventory_hash_tracks_ref_frame_inventory(
+    tmp_path: Path,
+) -> None:
+    """The inventory check reads concrete ref frames, so replaced or renamed
+    static ref files must invalidate its input fingerprint."""
+    impl = tmp_path / "impl"
+    ref = tmp_path / "ref"
+    (ref / "static" / "ref").mkdir(parents=True)
+    _impl_tree(impl)
+    (ref / "regions.json").write_text('{"regions":[]}\n', encoding="utf-8")
+    (ref / "section-map.json").write_text('{"sections":[]}\n', encoding="utf-8")
+    (ref / "transition-spec.json").write_text(
+        '{"transitions":[{"id":"hero","reference_frames":["static/ref/section-0.png"]}]}\n',
+        encoding="utf-8",
+    )
+    frame = ref / "static" / "ref" / "section-0.png"
+    frame.write_bytes(b"\x89PNGinitial")
+
+    initial_hash = _h(impl, ref, "capture-artifact-inventory")
+    frame.write_bytes(b"\x89PNGreplaced")
+    replaced_hash = _h(impl, ref, "capture-artifact-inventory")
+    frame.rename(ref / "static" / "ref" / "section-1.png")
+    renamed_hash = _h(impl, ref, "capture-artifact-inventory")
+
+    assert initial_hash
+    assert replaced_hash != initial_hash
+    assert renamed_hash != replaced_hash
+
+
+def test_capture_artifact_inventory_hash_tracks_verify_media(
+    tmp_path: Path,
+) -> None:
+    """Schema-valid verify/ reference media are inventory inputs too."""
+    impl = tmp_path / "impl"
+    ref = tmp_path / "ref"
+    (ref / "verify").mkdir(parents=True)
+    _impl_tree(impl)
+    (ref / "regions.json").write_text('{"regions":[]}\n', encoding="utf-8")
+    (ref / "section-map.json").write_text('{"sections":[]}\n', encoding="utf-8")
+    (ref / "transition-spec.json").write_text(
+        '{"transitions":[{"id":"hero","reference_frames":"verify/hero.png"}]}\n',
+        encoding="utf-8",
+    )
+    frame = ref / "verify" / "hero.png"
+    frame.write_bytes(b"\x89PNGinitial")
+
+    initial_hash = _h(impl, ref, "capture-artifact-inventory")
+    frame.write_bytes(b"\x89PNGreplaced")
+    replaced_hash = _h(impl, ref, "capture-artifact-inventory")
+    frame.rename(ref / "verify" / "hero-renamed.png")
+    renamed_hash = _h(impl, ref, "capture-artifact-inventory")
+
+    assert initial_hash
+    assert replaced_hash != initial_hash
+    assert renamed_hash != replaced_hash
+
+
+@pytest.mark.parametrize("reference_path", ("hero.png", "evidence/hero.png"))
+def test_capture_artifact_inventory_hash_tracks_root_and_nested_media_only(
+    tmp_path: Path,
+    reference_path: str,
+) -> None:
+    """Any gate-spec-supported media under ref-dir is inventory input, but
+    unrelated nonmedia artifacts should not broaden the fingerprint."""
+    impl = tmp_path / "impl"
+    ref = tmp_path / "ref"
+    frame = ref / reference_path
+    frame.parent.mkdir(parents=True, exist_ok=True)
+    _impl_tree(impl)
+    (ref / "regions.json").write_text('{"regions":[]}\n', encoding="utf-8")
+    (ref / "section-map.json").write_text('{"sections":[]}\n', encoding="utf-8")
+    (ref / "transition-spec.json").write_text(
+        f'{{"transitions":[{{"id":"hero","reference_frames":"{reference_path}"}}]}}\n',
+        encoding="utf-8",
+    )
+    frame.write_bytes(b"\x89PNGinitial")
+
+    initial_hash = _h(impl, ref, "capture-artifact-inventory")
+    (frame.parent / "notes.txt").write_text("not media\n", encoding="utf-8")
+    nonmedia_hash = _h(impl, ref, "capture-artifact-inventory")
+    frame.write_bytes(b"\x89PNGreplaced")
+    replaced_hash = _h(impl, ref, "capture-artifact-inventory")
+    frame.rename(frame.with_name("hero-renamed.png"))
+    renamed_hash = _h(impl, ref, "capture-artifact-inventory")
+
+    assert initial_hash
+    assert nonmedia_hash == initial_hash
+    assert replaced_hash != initial_hash
+    assert renamed_hash != replaced_hash
+
+
+def test_splash_lifecycle_invalidation_busts_runtime_rollup_hash(tmp_path: Path) -> None:
+    impl = tmp_path / "impl"
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _impl_tree(impl)
+    splash = ref / "splash-lifecycle.json"
+    splash.write_text('{"status":"pass","impl":{"exited":true}}\n')
+
+    passing_hash = _h(impl, ref, "runtime-proof")
+    splash.write_text('{"status":"fail","impl":{"exited":false}}\n')
+    failing_hash = _h(impl, ref, "runtime-proof")
+
+    assert passing_hash
+    assert failing_hash != passing_hash
+
+
 @pytest.mark.parametrize("check_id", ("runtime-proof", "transition-proof"))
 def test_rollup_verification_plan_mutation_invalidates_hash(
     tmp_path: Path,

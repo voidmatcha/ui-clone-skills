@@ -102,9 +102,15 @@ def _build_splash_events(ref_dir: Path) -> list[dict[str, Any]]:
     splash_dir = ref_dir / "states" / "splash"
     summary_path = splash_dir / "summary.json"
     trajectory_path = splash_dir / "trajectory.json"
+    contract_path = splash_dir / "contract.json"
     summary = _load_json(summary_path)
     trajectory = _load_json(trajectory_path)
     if not isinstance(summary, dict) or not isinstance(trajectory, list) or len(trajectory) < 2:
+        return []
+    splash_contract = _load_json(contract_path)
+    if not isinstance(splash_contract, dict):
+        splash_contract = {}
+    if _splash_contract_is_authoritative_negative(splash_contract):
         return []
 
     first = trajectory[0] if isinstance(trajectory[0], dict) else {}
@@ -120,6 +126,8 @@ def _build_splash_events(ref_dir: Path) -> list[dict[str, Any]]:
         bool(dom_delta["addedSignatures"] or dom_delta["removedSignatures"]),
     ))
     artifacts = [summary_path, trajectory_path]
+    if contract_path.is_file():
+        artifacts.append(contract_path)
     for file in (before_file, after_file):
         if file and file.is_file():
             artifacts.append(file)
@@ -138,8 +146,32 @@ def _build_splash_events(ref_dir: Path) -> list[dict[str, Any]]:
         "domLengthBefore": first.get("domLength"),
         "domLengthAfter": last.get("domLength"),
         "domMutation": {"changed": bool(dom_changed), **dom_delta},
+        "splashContract": splash_contract,
         "artifacts": [_rel(ref_dir, path) for path in artifacts],
     }]
+
+
+def _splash_contract_is_authoritative_negative(contract: dict[str, Any]) -> bool:
+    if contract.get("schemaVersion") is None:
+        return False
+    if contract.get("detected") is not False:
+        return False
+    if contract.get("captureMode") == "reuse-session":
+        return False
+    overlay = contract.get("overlay")
+    capture = contract.get("capture")
+    has_overlay_metadata = isinstance(overlay, dict) and "everVisible" in overlay
+    has_capture_metadata = isinstance(capture, dict)
+    if not has_overlay_metadata and not has_capture_metadata:
+        return True
+    if isinstance(capture, dict) and capture.get("authoritativeNegative") is False:
+        return False
+    if isinstance(capture, dict) and capture.get("authoritativeNegative") is True:
+        return True
+    ever_visible = bool(overlay.get("everVisible")) if isinstance(overlay, dict) else False
+    state_count = capture.get("stateCount") if isinstance(capture, dict) else None
+    timed_out = bool(capture.get("timedOut")) if isinstance(capture, dict) else False
+    return not ever_visible and state_count == 1 and not timed_out
 
 
 def _build_scroll_events(ref_dir: Path) -> list[dict[str, Any]]:

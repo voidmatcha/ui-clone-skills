@@ -61,6 +61,16 @@ def test_state_structure_spec_aggregates_browser_observed_states(tmp_path: Path)
     (splash / "settled.json").write_text(json.dumps({
         "outerHTML": "<html class='js'><body class='is-loaded'><main><section class='hero'></section></main></body></html>"
     }))
+    (splash / "contract.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "detected": True,
+        "overlay": {"selector": "#splash", "maxCoverage": 1.0},
+        "activeAnimation": {"maxActiveCount": 1, "samples": [{"selector": "#splash"}]},
+        "motionEvidence": {"changed": True, "signals": ["active-animation"]},
+        "mediaFingerprint": {"hashes": ["media-start", "media-end"]},
+        "exitTiming": {"fromMs": 0, "toMs": 600, "durationMs": 600},
+        "bookends": ["states/splash/0ms.json", "states/splash/settled.json"],
+    }))
 
     (scroll / "summary.json").write_text(json.dumps({
         "checked": True,
@@ -128,7 +138,12 @@ def test_state_structure_spec_aggregates_browser_observed_states(tmp_path: Path)
     assert splash_event["bodyClassBefore"] == "is-loading"
     assert splash_event["bodyClassAfter"] == "is-loaded"
     assert "states/splash/trajectory.json" in splash_event["artifacts"]
+    assert "states/splash/contract.json" in splash_event["artifacts"]
     assert splash_event["domMutation"]["changed"] is True
+    assert splash_event["splashContract"]["detected"] is True
+    assert splash_event["splashContract"]["overlay"]["selector"] == "#splash"
+    assert splash_event["splashContract"]["activeAnimation"]["maxActiveCount"] == 1
+    assert splash_event["splashContract"]["exitTiming"]["durationMs"] == 600
 
     scroll_event = next(event for event in events if event["phase"] == "scroll")
     assert scroll_event["scrollEngine"] == "lenis"
@@ -146,3 +161,166 @@ def test_state_structure_spec_aggregates_browser_observed_states(tmp_path: Path)
     serialized = json.dumps(spec)
     assert "outerHTML" not in serialized
     assert "<section" not in serialized
+
+
+def test_state_structure_spec_omits_authoritative_negative_splash(tmp_path: Path) -> None:
+    """Legacy media-driven multi-sample captures must not become splash events."""
+    ref = tmp_path / "ref"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 3}),
+        encoding="utf-8",
+    )
+    (splash / "trajectory.json").write_text(
+        json.dumps(
+            [
+                {"ts_ms": 0, "hash": 1, "bodyClass": "", "htmlClass": ""},
+                {"ts_ms": 900, "hash": 2, "bodyClass": "", "htmlClass": ""},
+                {"ts_ms": 2900, "hash": 3, "bodyClass": "", "htmlClass": ""},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (splash / "contract.json").write_text(
+        json.dumps({"schemaVersion": 1, "detected": False}),
+        encoding="utf-8",
+    )
+
+    proc = _run_state_structure_spec(ref)
+    assert proc.returncode == 0, proc.stderr
+
+    spec = json.loads((ref / "state-structure-spec.json").read_text(encoding="utf-8"))
+    assert not [event for event in spec["events"] if event["phase"] == "splash"]
+    assert spec["phases"]["splash"]["present"] is False
+    assert spec["phases"]["splash"]["eventCount"] == 0
+
+
+def test_state_structure_spec_omits_pre_navigation_negative_splash(tmp_path: Path) -> None:
+    """Pre-navigation negative captures remain authoritative."""
+    ref = tmp_path / "ref"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 3}),
+        encoding="utf-8",
+    )
+    (splash / "trajectory.json").write_text(
+        json.dumps(
+            [
+                {"ts_ms": 0, "hash": 1, "bodyClass": "", "htmlClass": ""},
+                {"ts_ms": 900, "hash": 2, "bodyClass": "", "htmlClass": ""},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "pre-navigation",
+                "detected": False,
+                "overlay": {"selector": None, "maxCoverage": 0, "exitObserved": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = _run_state_structure_spec(ref)
+    assert proc.returncode == 0, proc.stderr
+
+    spec = json.loads((ref / "state-structure-spec.json").read_text(encoding="utf-8"))
+    assert not [event for event in spec["events"] if event["phase"] == "splash"]
+    assert spec["phases"]["splash"]["present"] is False
+    assert spec["phases"]["splash"]["eventCount"] == 0
+
+
+def test_state_structure_spec_falls_through_for_observed_overlay_negative(
+    tmp_path: Path,
+) -> None:
+    """Observed-but-unexited overlays keep independent splash evidence available."""
+    ref = tmp_path / "ref"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 3, "reason": "stable-2s"}),
+        encoding="utf-8",
+    )
+    (splash / "trajectory.json").write_text(
+        json.dumps(
+            [
+                {"ts_ms": 0, "hash": 1, "bodyClass": "loading", "htmlClass": ""},
+                {"ts_ms": 900, "hash": 2, "bodyClass": "loading-mid", "htmlClass": ""},
+                {"ts_ms": 2900, "hash": 3, "bodyClass": "loading", "htmlClass": ""},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "pre-navigation",
+                "detected": False,
+                "overlay": {"everVisible": True, "exitObserved": False},
+                "capture": {
+                    "stateCount": 3,
+                    "timedOut": False,
+                    "reason": "stable-2s",
+                    "authoritativeNegative": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = _run_state_structure_spec(ref)
+    assert proc.returncode == 0, proc.stderr
+
+    spec = json.loads((ref / "state-structure-spec.json").read_text(encoding="utf-8"))
+    splash_events = [event for event in spec["events"] if event["phase"] == "splash"]
+    assert len(splash_events) == 1
+    assert splash_events[0]["splashContract"]["overlay"]["everVisible"] is True
+
+
+def test_state_structure_spec_reuse_session_negative_splash_falls_through_to_trajectory(
+    tmp_path: Path,
+) -> None:
+    """Reuse-session negatives do not mask independent trajectory evidence."""
+    ref = tmp_path / "ref"
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 3}),
+        encoding="utf-8",
+    )
+    (splash / "trajectory.json").write_text(
+        json.dumps(
+            [
+                {"ts_ms": 0, "hash": 1, "bodyClass": "loading", "htmlClass": ""},
+                {"ts_ms": 900, "hash": 2, "bodyClass": "loaded", "htmlClass": ""},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "reuse-session",
+                "detected": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = _run_state_structure_spec(ref)
+    assert proc.returncode == 0, proc.stderr
+
+    spec = json.loads((ref / "state-structure-spec.json").read_text(encoding="utf-8"))
+    splash_events = [event for event in spec["events"] if event["phase"] == "splash"]
+    assert len(splash_events) == 1
+    assert splash_events[0]["splashContract"]["captureMode"] == "reuse-session"
+    assert splash_events[0]["splashContract"]["detected"] is False
+    assert spec["phases"]["splash"]["present"] is True
+    assert spec["phases"]["splash"]["eventCount"] == 1

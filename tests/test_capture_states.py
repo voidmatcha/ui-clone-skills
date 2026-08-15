@@ -31,11 +31,19 @@ def _make_fake_agent_browser(
     fake.write_text(
         "#!/usr/bin/env bash\n"
         f"echo \"$@\" >> '{tmp_path / 'calls.log'}'\n"
-        "# Find the subcommand position — after --session NAME comes 'open' or 'eval'.\n"
-        "shift 2  # consume --session NAME\n"
-        'if [ "$1" = "open" ]; then\n'
+        "cmd=''\n"
+        "# Find the subcommand position after global options.\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        "    --session|--init-script) shift 2 ;;\n"
+        "    --json) shift ;;\n"
+        "    open|eval) cmd=\"$1\"; shift; break ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        'if [ "$cmd" = "open" ]; then\n'
         f"  exit {open_returncode}\n"
-        'elif [ "$1" = "eval" ]; then\n'
+        'elif [ "$cmd" = "eval" ]; then\n'
         f"  echo '{eval_payload}'\n"
         f"  exit {eval_returncode}\n"
         "fi\n"
@@ -77,6 +85,39 @@ def _eval_payload(states: list[dict], duration_ms: int = 100,
     }
     # Escape single quotes for embedding inside the fake script's `echo '...'`.
     return json.dumps(payload, ensure_ascii=False).replace("'", "'\\''")
+
+
+def test_browser_eval_uses_bounded_selector_fallback_for_classless_elements() -> None:
+    """Classless overlay targets must not fall back to broad tag selectors."""
+    script = SCRIPT.read_text()
+
+    assert "nth-of-type" in script
+    assert "el.tagName.toLowerCase()" not in script
+    assert "selectorFor(el)" in script
+
+
+def test_init_sampler_waits_for_document_root_before_computing_state() -> None:
+    """Pre-navigation init scripts may run before html/body exist."""
+    script = SCRIPT.read_text()
+
+    wait_marker = "while (!document.documentElement || !document.body)"
+    assert wait_marker in script
+    assert script.index(wait_marker) < script.index("const startedAt = performance.now()")
+
+
+def test_overlay_candidate_matches_runtime_probe_visibility_threshold() -> None:
+    """Capture overlay detection must mirror the runtime splash probe predicate."""
+    script = SCRIPT.read_text()
+
+    assert "visibleWidth" in script
+    assert "visibleHeight" in script
+    assert "viewportCoverage" in script
+    assert "viewportCoverage >= 0.75" in script
+    assert 'cs.position === "sticky"' in script
+    assert 'cs.position === "fixed" || (cs.position === "absolute" && z >= 10)' in script
+    assert "opacity > 0.05" in script
+    assert "r.width >= vw * 0.95" not in script
+    assert "z > 10" not in script
 
 
 # ── tests ────────────────────────────────────────────────────────────
@@ -189,6 +230,432 @@ def test_multi_transition_emits_trajectory_and_bookends(tmp_path: Path) -> None:
     assert not (splash / "300ms.json").is_file()
 
 
+def test_classless_fullscreen_splash_writes_contract(tmp_path: Path) -> None:
+    """Classless fullscreen splash lifecycles must become an explicit
+    schema-versioned contract, not just a trajectory side effect."""
+    ref_dir = tmp_path / "ref"
+    states = [
+        {
+            "ts_ms": 0,
+            "hash": 1,
+            "bodyClass": "",
+            "htmlClass": "",
+            "compositeDigest": "overlay:#intro|coverage:1|animation:1|media:bg",
+            "domLength": 1200,
+            "overlay": {
+                "selector": "#intro",
+                "coverage": 0.98,
+                "visible": True,
+                "opacity": "1",
+            },
+            "animationEvidence": {
+                "activeCount": 1,
+                "runningCount": 1,
+                "samples": [{"selector": "#intro", "currentTime": 0, "duration": 900}],
+            },
+            "motionEvidence": {
+                "changed": True,
+                "signals": ["overlay-coverage", "active-animation"],
+            },
+            "mediaFingerprint": {
+                "videos": [{"src": "/splash.webm", "currentTime": 0, "paused": False}],
+                "hash": "media-start",
+            },
+            "fullHTML": "<html><body><div id='intro'><video src='/splash.webm'></video></div><main hidden></main></body></html>",
+            "bookend": "0ms",
+        },
+        {
+            "ts_ms": 940,
+            "hash": 2,
+            "bodyClass": "",
+            "htmlClass": "",
+            "compositeDigest": "overlay:none|coverage:0|animation:0|media:bg",
+            "domLength": 1210,
+            "overlay": {
+                "selector": None,
+                "coverage": 0,
+                "visible": False,
+                "opacity": "0",
+            },
+            "animationEvidence": {
+                "activeCount": 0,
+                "runningCount": 0,
+                "samples": [],
+            },
+            "motionEvidence": {
+                "changed": True,
+                "signals": ["overlay-exit"],
+            },
+            "mediaFingerprint": {
+                "videos": [{"src": "/splash.webm", "currentTime": 0.94, "paused": True}],
+                "hash": "media-end",
+            },
+            "fullHTML": None,
+            "structuralDelta": False,
+        },
+        {
+            "ts_ms": 2940,
+            "hash": 3,
+            "bodyClass": "",
+            "htmlClass": "",
+            "compositeDigest": "overlay:none|coverage:0|animation:0|media:settled",
+            "domLength": 1210,
+            "overlay": {
+                "selector": None,
+                "coverage": 0,
+                "visible": False,
+                "opacity": "0",
+            },
+            "animationEvidence": {
+                "activeCount": 0,
+                "runningCount": 0,
+                "samples": [],
+            },
+            "motionEvidence": {
+                "changed": False,
+                "signals": [],
+            },
+            "mediaFingerprint": {
+                "videos": [{"src": "/splash.webm", "currentTime": 0.94, "paused": True}],
+                "hash": "media-end",
+            },
+            "fullHTML": "<html><body><main>loaded</main></body></html>",
+            "bookend": "settled",
+        },
+    ]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path, _eval_payload(states, duration_ms=2940, reason="stable-2s")
+    )
+    proc = _run_capture_states(ref_dir, bin_dir)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    contract = json.loads((ref_dir / "states" / "splash" / "contract.json").read_text())
+    assert contract["schemaVersion"] == 1
+    assert contract["detected"] is True
+    assert contract["overlay"]["selector"] == "#intro"
+    assert contract["overlay"]["maxCoverage"] == 0.98
+    assert contract["activeAnimation"]["maxActiveCount"] == 1
+    assert contract["motionEvidence"]["changed"] is True
+    assert contract["mediaFingerprint"]["hashes"] == ["media-start", "media-end"]
+    assert contract["exitTiming"]["fromMs"] == 0
+    assert contract["exitTiming"]["toMs"] == 940
+    assert "states/splash/0ms.json" in contract["bookends"]
+    assert "states/splash/settled.json" in contract["bookends"]
+
+
+def test_background_media_motion_without_overlay_is_not_a_splash(tmp_path: Path) -> None:
+    """A normal page-load video/animation must not promote itself to a splash."""
+    ref_dir = tmp_path / "ref"
+    states = []
+    for ts_ms, media_hash in ((0, "video-0"), (900, "video-1"), (2900, "video-2")):
+        states.append(
+            {
+                "ts_ms": ts_ms,
+                "hash": ts_ms + 1,
+                "bodyClass": "",
+                "htmlClass": "",
+                "compositeDigest": media_hash,
+                "domLength": 1200,
+                "overlay": {
+                    "selector": None,
+                    "coverage": 0,
+                    "visible": False,
+                    "opacity": "0",
+                },
+                "animationEvidence": {
+                    "activeCount": 1,
+                    "runningCount": 1,
+                    "samples": [{"selector": "#hero-video", "currentTime": ts_ms}],
+                },
+                "motionEvidence": {"changed": ts_ms > 0, "signals": ["media"]},
+                "mediaFingerprint": {
+                    "videos": [{"src": "/hero.mp4", "currentTime": ts_ms / 1000}],
+                    "hash": media_hash,
+                },
+                "fullHTML": "<html><body><main><video id='hero-video'></video></main></body></html>",
+                "bookend": "0ms" if ts_ms == 0 else "settled" if ts_ms == 2900 else None,
+            }
+        )
+    bin_dir = _make_fake_agent_browser(
+        tmp_path, _eval_payload(states, duration_ms=2900, reason="stable-2s")
+    )
+    proc = _run_capture_states(ref_dir, bin_dir)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    contract = json.loads((ref_dir / "states" / "splash" / "contract.json").read_text())
+    assert contract["detected"] is False
+    assert contract["overlay"]["selector"] is None
+
+
+def test_persistent_fullscreen_overlay_is_not_a_completed_splash(tmp_path: Path) -> None:
+    """A static persistent modal plus unrelated motion has no splash exit lifecycle."""
+    ref_dir = tmp_path / "ref"
+    states = []
+    for ts_ms in (0, 900, 2900):
+        states.append(
+            {
+                "ts_ms": ts_ms,
+                "hash": ts_ms + 1,
+                "bodyClass": "",
+                "htmlClass": "",
+                "compositeDigest": f"modal|video-{ts_ms}",
+                "domLength": 1200,
+                "overlay": {
+                    "selector": "#consent-modal",
+                    "coverage": 1,
+                    "visible": True,
+                    "opacity": "1",
+                },
+                "animationEvidence": {
+                    "activeCount": 1,
+                    "runningCount": 1,
+                    "samples": [{"selector": "#hero-video", "currentTime": ts_ms}],
+                },
+                "motionEvidence": {"changed": ts_ms > 0, "signals": ["media"]},
+                "mediaFingerprint": {"videos": [{"src": "/hero.mp4"}], "hash": f"v-{ts_ms}"},
+                "fullHTML": "<html><body><div id='consent-modal'></div><video id='hero-video'></video></body></html>",
+                "bookend": "0ms" if ts_ms == 0 else "settled" if ts_ms == 2900 else None,
+            }
+        )
+    bin_dir = _make_fake_agent_browser(
+        tmp_path, _eval_payload(states, duration_ms=2900, reason="stable-2s")
+    )
+    proc = _run_capture_states(ref_dir, bin_dir)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    contract = json.loads((ref_dir / "states" / "splash" / "contract.json").read_text())
+    assert contract["detected"] is False
+    assert contract["overlay"]["exitObserved"] is False
+
+
+def test_persistent_changing_overlay_is_not_a_completed_splash(tmp_path: Path) -> None:
+    """Phase changes without disappearance must not prove splash completion."""
+    ref_dir = tmp_path / "ref"
+    states = []
+    for ts_ms, opacity in ((0, "1"), (600, "0.5"), (2600, "0.8")):
+        states.append(
+            {
+                "ts_ms": ts_ms,
+                "hash": ts_ms + 1,
+                "bodyClass": "",
+                "htmlClass": "",
+                "compositeDigest": f"persistent-overlay|{opacity}",
+                "domLength": 1200,
+                "overlay": {
+                    "selector": "#persistent-overlay",
+                    "coverage": 1,
+                    "visible": True,
+                    "opacity": opacity,
+                    "position": "fixed",
+                    "zIndex": 100,
+                },
+                "animationEvidence": {
+                    "activeCount": 1,
+                    "runningCount": 1,
+                    "samples": [{"selector": "#persistent-overlay", "currentTime": ts_ms}],
+                },
+                "motionEvidence": {"changed": ts_ms > 0, "signals": ["active-animation"]},
+                "mediaFingerprint": {"videos": [], "hash": "empty"},
+                "fullHTML": "<html><body><div id='persistent-overlay'></div></body></html>",
+                "bookend": "0ms" if ts_ms == 0 else "settled" if ts_ms == 2600 else None,
+            }
+        )
+    bin_dir = _make_fake_agent_browser(
+        tmp_path, _eval_payload(states, duration_ms=2600, reason="stable-2s")
+    )
+
+    proc = _run_capture_states(ref_dir, bin_dir)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    contract = json.loads((ref_dir / "states" / "splash" / "contract.json").read_text())
+    assert contract["detected"] is False
+    assert contract["overlay"]["exitObserved"] is False
+    assert contract["overlay"]["everVisible"] is True
+    assert contract["capture"]["stateCount"] == 3
+    assert contract["capture"]["timedOut"] is False
+    assert contract["capture"]["authoritativeNegative"] is False
+    assert contract["exitTiming"]["durationMs"] is None
+
+
+def test_stable_no_overlay_negative_is_authoritative(tmp_path: Path) -> None:
+    """A single stable pre-navigation state with no overlay is an authoritative negative."""
+    ref_dir = tmp_path / "ref"
+    states = [{
+        "ts_ms": 0,
+        "hash": 1,
+        "bodyClass": "",
+        "htmlClass": "",
+        "compositeDigest": "stable-no-overlay",
+        "domLength": 100,
+        "overlay": {
+            "selector": None,
+            "identity": None,
+            "coverage": 0,
+            "visible": False,
+            "opacity": "0",
+        },
+        "fullHTML": "<html><body><main>stable</main></body></html>",
+        "bookend": "0ms",
+    }]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path, _eval_payload(states, duration_ms=100, reason="no-change")
+    )
+
+    proc = _run_capture_states(ref_dir, bin_dir, reuse_session=False)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    contract = json.loads((ref_dir / "states" / "splash" / "contract.json").read_text())
+    assert contract["detected"] is False
+    assert contract["overlay"]["everVisible"] is False
+    assert contract["capture"]["stateCount"] == 1
+    assert contract["capture"]["timedOut"] is False
+    assert contract["capture"]["reason"] == "no-change"
+    assert contract["capture"]["authoritativeNegative"] is True
+
+
+def test_overlay_class_flip_does_not_count_as_exit(tmp_path: Path) -> None:
+    """Stable overlay identity must survive mutable class selector changes."""
+    ref_dir = tmp_path / "ref"
+    states = []
+    for ts_ms, selector in ((0, "div.loading"), (600, "div"), (2600, "div.loading")):
+        states.append(
+            {
+                "ts_ms": ts_ms,
+                "hash": ts_ms + 1,
+                "bodyClass": "",
+                "htmlClass": "",
+                "compositeDigest": f"overlay|{selector}",
+                "domLength": 1200,
+                "overlay": {
+                    "selector": selector,
+                    "identity": "body > div:nth-of-type(1)",
+                    "coverage": 1,
+                    "visible": True,
+                    "opacity": "1",
+                    "position": "fixed",
+                    "zIndex": 100,
+                },
+                "animationEvidence": {"activeCount": 0, "runningCount": 0, "samples": []},
+                "motionEvidence": {"changed": ts_ms > 0, "signals": ["fullscreen-overlay"]},
+                "mediaFingerprint": {"videos": [], "hash": "empty"},
+                "fullHTML": "<html><body><div></div></body></html>",
+                "bookend": "0ms" if ts_ms == 0 else "settled" if ts_ms == 2600 else None,
+            }
+        )
+    bin_dir = _make_fake_agent_browser(
+        tmp_path, _eval_payload(states, duration_ms=2600, reason="stable-2s")
+    )
+
+    proc = _run_capture_states(ref_dir, bin_dir)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    contract = json.loads((ref_dir / "states" / "splash" / "contract.json").read_text())
+    assert contract["detected"] is False
+    assert contract["overlay"]["identity"] == "body > div:nth-of-type(1)"
+    assert contract["overlay"]["exitObserved"] is False
+    assert contract["exitTiming"]["toMs"] is None
+
+
+def test_overlay_class_flip_before_disappearance_uses_real_exit_time(tmp_path: Path) -> None:
+    """Selector churn before disappearance must not shorten exit timing."""
+    ref_dir = tmp_path / "ref"
+    states = [
+        {
+            "ts_ms": 0,
+            "hash": 1,
+            "bodyClass": "",
+            "htmlClass": "",
+            "compositeDigest": "overlay|loading",
+            "domLength": 1200,
+            "overlay": {
+                "selector": "div.loading",
+                "identity": "body > div:nth-of-type(1)",
+                "coverage": 1,
+                "visible": True,
+                "opacity": "1",
+            },
+            "animationEvidence": {"activeCount": 1, "runningCount": 1, "samples": []},
+            "motionEvidence": {"changed": True, "signals": ["fullscreen-overlay"]},
+            "mediaFingerprint": {"videos": [], "hash": "empty"},
+            "fullHTML": "<html><body><div class='loading'></div></body></html>",
+            "bookend": "0ms",
+        },
+        {
+            "ts_ms": 500,
+            "hash": 2,
+            "bodyClass": "",
+            "htmlClass": "",
+            "compositeDigest": "overlay|class-removed",
+            "domLength": 1200,
+            "overlay": {
+                "selector": "div",
+                "identity": "body > div:nth-of-type(1)",
+                "coverage": 1,
+                "visible": True,
+                "opacity": "1",
+            },
+            "animationEvidence": {"activeCount": 1, "runningCount": 1, "samples": []},
+            "motionEvidence": {"changed": True, "signals": ["fullscreen-overlay"]},
+            "mediaFingerprint": {"videos": [], "hash": "empty"},
+            "fullHTML": None,
+            "structuralDelta": False,
+        },
+        {
+            "ts_ms": 1400,
+            "hash": 3,
+            "bodyClass": "",
+            "htmlClass": "",
+            "compositeDigest": "overlay|gone",
+            "domLength": 800,
+            "overlay": {
+                "selector": None,
+                "identity": None,
+                "coverage": 0,
+                "visible": False,
+                "opacity": "0",
+            },
+            "animationEvidence": {"activeCount": 0, "runningCount": 0, "samples": []},
+            "motionEvidence": {"changed": True, "signals": ["overlay-exit"]},
+            "mediaFingerprint": {"videos": [], "hash": "empty"},
+            "fullHTML": None,
+            "structuralDelta": True,
+        },
+        {
+            "ts_ms": 3400,
+            "hash": 4,
+            "bodyClass": "",
+            "htmlClass": "",
+            "compositeDigest": "settled",
+            "domLength": 800,
+            "overlay": {
+                "selector": None,
+                "identity": None,
+                "coverage": 0,
+                "visible": False,
+                "opacity": "0",
+            },
+            "animationEvidence": {"activeCount": 0, "runningCount": 0, "samples": []},
+            "motionEvidence": {"changed": False, "signals": []},
+            "mediaFingerprint": {"videos": [], "hash": "empty"},
+            "fullHTML": "<html><body><main>loaded</main></body></html>",
+            "bookend": "settled",
+        },
+    ]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path, _eval_payload(states, duration_ms=3400, reason="stable-2s")
+    )
+
+    proc = _run_capture_states(ref_dir, bin_dir)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    contract = json.loads((ref_dir / "states" / "splash" / "contract.json").read_text())
+    assert contract["detected"] is True
+    assert contract["overlay"]["identity"] == "body > div:nth-of-type(1)"
+    assert contract["overlay"]["exitObserved"] is True
+    assert contract["exitTiming"]["toMs"] == 1400
+    assert contract["exitTiming"]["durationMs"] == 1400
+
+
 def test_timeout_marks_summary_timed_out(tmp_path: Path) -> None:
     """5s wall-clock cap hit → summary.timedOut=true + reason='wall-clock-cap'."""
     ref_dir = tmp_path / "ref"
@@ -249,6 +716,67 @@ def test_derived_session_used_by_default(tmp_path: Path) -> None:
         if "--session sess1 " in (line + " ") and "sess1-states" not in line
     ]
     assert not bare_session_lines, f"derived session must be used: {calls}"
+
+
+def test_derived_session_installs_init_script_before_open(tmp_path: Path) -> None:
+    """Default first-load capture must begin before navigation, not after open."""
+    ref_dir = tmp_path / "ref"
+    states = [{
+        "ts_ms": 0, "hash": 1, "bodyClass": "", "htmlClass": "",
+        "compositeDigest": "", "domLength": 100,
+        "fullHTML": "<html></html>", "bookend": "0ms",
+    }]
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(states))
+
+    proc = _run_capture_states(ref_dir, bin_dir, reuse_session=False)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    open_calls = [line for line in calls if " open " in f" {line} "]
+    assert open_calls, f"expected an open call: {calls}"
+    assert "--init-script " in open_calls[0]
+    assert open_calls[0].index("--init-script ") < open_calls[0].index(" open ")
+    assert "sleep 2" not in SCRIPT.read_text()
+
+
+def test_summary_and_contract_capture_mode_default_pre_navigation(tmp_path: Path) -> None:
+    """Default capture mode has pre-navigation negative authority."""
+    ref_dir = tmp_path / "ref"
+    states = [{
+        "ts_ms": 0, "hash": 1, "bodyClass": "", "htmlClass": "",
+        "compositeDigest": "", "domLength": 100,
+        "fullHTML": "<html></html>", "bookend": "0ms",
+    }]
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(states))
+
+    proc = _run_capture_states(ref_dir, bin_dir, reuse_session=False)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    splash = ref_dir / "states" / "splash"
+    summary = json.loads((splash / "summary.json").read_text())
+    contract = json.loads((splash / "contract.json").read_text())
+    assert summary["captureMode"] == "pre-navigation"
+    assert contract["captureMode"] == "pre-navigation"
+
+
+def test_summary_and_contract_capture_mode_reuse_session(tmp_path: Path) -> None:
+    """Reuse-session capture mode is weaker for missed first-load negatives."""
+    ref_dir = tmp_path / "ref"
+    states = [{
+        "ts_ms": 0, "hash": 1, "bodyClass": "", "htmlClass": "",
+        "compositeDigest": "", "domLength": 100,
+        "fullHTML": "<html></html>", "bookend": "0ms",
+    }]
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(states))
+
+    proc = _run_capture_states(ref_dir, bin_dir, reuse_session=True)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+    splash = ref_dir / "states" / "splash"
+    summary = json.loads((splash / "summary.json").read_text())
+    contract = json.loads((splash / "contract.json").read_text())
+    assert summary["captureMode"] == "reuse-session"
+    assert contract["captureMode"] == "reuse-session"
 
 
 def test_reuse_session_flag_uses_callers_session(tmp_path: Path) -> None:

@@ -41,7 +41,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-from ui_clone.gates.visible_identity import is_visible, settled_state
+from ui_clone.gates.visible_identity import ALPHA_FLOOR, is_visible, settled_state
 
 DEFAULT_STYLE_PROPS = [
     "text-align",
@@ -257,6 +257,19 @@ def _impl_visible(entry: dict[str, Any]) -> bool:
     being animated; the decoy classes we reject are display:none / off-screen /
     zero-area.
     """
+    # Timer crossfades can leave an outgoing label in layout at a tiny non-zero
+    # opacity while the incoming label is already material. Counting both makes
+    # the live-ref cardinality depend on capture phase. Reuse the shared visual
+    # alpha floor locally for whole-element opacity; paint remains optional for
+    # this static-style gate.
+    op = entry.get("opacity")
+    if op is not None:
+        try:
+            if float(op) < ALPHA_FLOOR:
+                return False
+        except (TypeError, ValueError):
+            pass
+
     rect = entry.get("rect")
     if isinstance(rect, dict) and rect:
         # below_fold_ok (batch-8 ITEM 10, hardened batch-9 minor): a faithful
@@ -273,13 +286,6 @@ def _impl_visible(entry: dict[str, Any]) -> bool:
         return False
     if str(entry.get("visibility", "")).lower() == "hidden":
         return False
-    op = entry.get("opacity")
-    if op is not None:
-        try:
-            if float(op) <= 0:
-                return False
-        except (TypeError, ValueError):
-            pass
     return True
 
 

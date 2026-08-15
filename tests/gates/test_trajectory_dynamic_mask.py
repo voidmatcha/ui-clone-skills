@@ -22,10 +22,13 @@ def test_mask_block_present_and_two_sided() -> None:
     code = SCRIPT.read_text(encoding="utf-8")
     assert "__traj-mask__" in code
     assert code.count('eval "$MASK_JS"') == 2, "mask must be injected in BOTH sessions"
-    assert "canvas, video, iframe, nav" in code
+    for selector in ("canvas", "video", "iframe", "nav"):
+        assert selector in code
     assert '[class*=\\"slideshow\\"]' in code
     assert '[class*=\\"carousel\\"]' in code
     assert 'section:has(canvas)' in code
+    assert 'img:has(+ video)' in code
+    assert 'video + img' in code
 
 
 def test_dynamic_targets_derived_from_spec(tmp_path: Path) -> None:

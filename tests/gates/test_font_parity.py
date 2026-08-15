@@ -213,3 +213,113 @@ def test_gate_font_parity_fails_when_a_secondary_face_loads_only_on_the_ref(
     assert any("Geist Mono" in r.message for r in failures), (
         f"a declared face the impl never loaded must fail: {failures}"
     )
+
+
+def _write_geist_secondary_face_case(ref: Path) -> None:
+    (ref / "font-parity.json").write_text(
+        json.dumps(
+            {
+                "ref": {
+                    "family": "Geist Mono",
+                    "loaded": True,
+                    "families": [
+                        {"family": "Geist Mono", "loaded": True},
+                        {"family": "Geist Mono Fallback", "loaded": True},
+                    ],
+                },
+                "impl": {
+                    "family": "Geist Mono",
+                    "loaded": True,
+                    "families": [
+                        {"family": "Geist Mono", "loaded": True},
+                        {"family": "Geist Mono Fallback", "loaded": False},
+                    ],
+                },
+                "parity": "match",
+            }
+        )
+    )
+
+
+def test_gate_font_parity_ignores_local_only_secondary_fallback_face(
+    tmp_path: Path,
+) -> None:
+    """Next metric fallback faces are local aliases, not transferable font binaries."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_geist_secondary_face_case(ref)
+    (ref / "fonts.json").write_text(
+        json.dumps(
+            {
+                "faces": [
+                    {
+                        "family": "Geist Mono",
+                        "urls": ["https://example.com/geist-mono.woff2"],
+                    },
+                    {"family": "Geist Mono Fallback", "urls": []},
+                ]
+            }
+        )
+    )
+
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_font_parity() if r.status == "fail"]
+    assert not failures, f"local-only fallback face must not block: {failures}"
+
+
+def test_gate_font_parity_keeps_url_backed_secondary_face_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """A missing declared face with transferable URLs remains enforced."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_geist_secondary_face_case(ref)
+    (ref / "fonts.json").write_text(
+        json.dumps(
+            {
+                "faces": [
+                    {
+                        "family": "Geist Mono Fallback",
+                        "urls": ["https://example.com/geist-fallback.woff2"],
+                    }
+                ]
+            }
+        )
+    )
+
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_font_parity() if r.status == "fail"]
+    assert any("Geist Mono Fallback" in r.message for r in failures), (
+        f"URL-backed missing face must fail: {failures}"
+    )
+
+
+def test_gate_font_parity_requires_fonts_metadata_before_ignoring_secondary_face(
+    tmp_path: Path,
+) -> None:
+    """With malformed provenance, a missing declared face keeps failing."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_geist_secondary_face_case(ref)
+    (ref / "fonts.json").write_text(json.dumps({"faces": "malformed"}))
+
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_font_parity() if r.status == "fail"]
+    assert any("Geist Mono Fallback" in r.message for r in failures), (
+        f"missing/malformed provenance must fail closed: {failures}"
+    )
+
+
+def test_gate_font_parity_requires_fonts_metadata_file_before_ignoring_secondary_face(
+    tmp_path: Path,
+) -> None:
+    """Without fonts.json provenance, a missing declared face keeps failing."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_geist_secondary_face_case(ref)
+
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_font_parity() if r.status == "fail"]
+    assert any("Geist Mono Fallback" in r.message for r in failures), (
+        f"missing provenance must fail closed: {failures}"
+    )

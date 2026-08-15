@@ -26,6 +26,7 @@ Exit codes (matching GNU timeout):
 
 from __future__ import annotations
 
+import math
 import os
 import signal
 import subprocess
@@ -55,7 +56,7 @@ def main(argv: list[str]) -> int:
         return 125
     try:
         seconds = _parse_seconds(argv[1])
-        if seconds <= 0:
+        if not math.isfinite(seconds) or seconds <= 0:
             raise ValueError(f"timeout must be > 0, got {seconds}")
     except ValueError as exc:
         print(f"run_with_timeout: invalid timeout {argv[1]!r}: {exc}", file=sys.stderr)

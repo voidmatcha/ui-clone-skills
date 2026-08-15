@@ -224,6 +224,110 @@ def test_gate_section_compare_accepts_legitimate_minor_under_threshold(tmp_path:
     assert not any(r.label == "section-threshold gaming" for r in failures)
 
 
+def test_gate_section_compare_accepts_low_contrast_signal_rich_media_guard_evidence(
+    tmp_path: Path,
+) -> None:
+    """A dark video frame can have std below the blank-ref floor while still
+    carrying real media signal. The guard artifact must make that measurable
+    evidence visible instead of tripping blank-ref threshold gaming.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    sections = ref / "sections"
+    sections.mkdir()
+    (sections / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---|---|---|---|---|\n"
+        "| hero-video | 200 | 50 | ok | ✅ |\n",
+        encoding="utf-8",
+    )
+    (sections / "crop-guards.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "thresholds": {"refMinStd": 0.05},
+                "sections": {
+                    "hero-video": {
+                        "reason": None,
+                        "policy": "pass-only",
+                        "contentBearing": True,
+                        "mediaBearing": True,
+                        "maskPct": 0.0,
+                        "ref": {
+                            "mean": 0.0533,
+                            "std": 0.0406,
+                            "unique": 38,
+                            "dominant": 0.2829,
+                        },
+                        "impl": {
+                            "mean": 0.0533,
+                            "std": 0.0406,
+                            "unique": 38,
+                            "dominant": 0.2829,
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_section_compare() if r.status == "fail"]
+
+    assert not any(r.label == "blank-ref threshold gaming" for r in failures)
+
+
+def test_gate_section_compare_accepts_low_variance_sparse_detail_guard_evidence(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    sections = ref / "sections"
+    sections.mkdir()
+    (sections / "result.txt").write_text(
+        "| Section | AE | AE/Mpx | Severity | Status |\n"
+        "|---|---|---|---|---|\n"
+        "| resources | 0 | 0 | ok | ✅ |\n",
+        encoding="utf-8",
+    )
+    (sections / "crop-guards.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "thresholds": {"refMinStd": 0.05},
+                "sections": {
+                    "resources": {
+                        "reason": None,
+                        "policy": "pass-only",
+                        "contentBearing": True,
+                        "mediaBearing": False,
+                        "maskPct": 0.0,
+                        "ref": {
+                            "mean": 0.9765,
+                            "std": 0.0274,
+                            "unique": 147,
+                            "dominant": 0.9698,
+                        },
+                        "impl": {
+                            "mean": 0.9765,
+                            "std": 0.0274,
+                            "unique": 145,
+                            "dominant": 0.9698,
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_section_compare() if r.status == "fail"]
+
+    assert not any(r.label == "blank-ref threshold gaming" for r in failures)
+
+
 
 def test_gate_section_compare_accepts_pass_by_perceptual(tmp_path: Path) -> None:
     """SECTION_PERCEPTUAL_DENSE=1 emits `pass-by-perceptual` ✅ rows for dense

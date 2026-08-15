@@ -219,6 +219,11 @@
         && (s.visibility !== "hidden" || isMaskHidden(node))
         && parseFloat(s.opacity || "1") > 0;
     });
+    const visibleMediaKindCounts = visibleMedia.reduce((counts, node) => {
+      const kind = node.tagName.toLowerCase();
+      counts[kind] = (counts[kind] || 0) + 1;
+      return counts;
+    }, {});
 
     // Get rendering info
     const cs = getComputedStyle(el);
@@ -371,6 +376,10 @@
       hasSvgText,
       hasVisibleMedia: visibleMedia.length > 0,
       visibleMediaCount: visibleMedia.length,
+      visibleMediaKinds: Array.from(new Set(
+        visibleMedia.map(node => node.tagName.toLowerCase())
+      )).sort(),
+      visibleMediaKindCounts,
       rect: {
         top: Math.round(rect.top + scrollY),
         left: Math.round(rect.left),

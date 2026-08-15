@@ -1066,6 +1066,21 @@ def test_scrub_probe_samples_svg_descendant_motion() -> None:
     assert "span,div,em,b,i,p,a,img,video,svg,g,path" in text
 
 
+def test_scrub_probe_samples_filter_in_normal_and_wheel_paths() -> None:
+    root = Path(__file__).resolve().parents[2]
+    script = root / "skills" / "visual-debug" / "scripts" / "transition-fires-check.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert (
+        "samples.push({ transform: cs.transform, opacity: parseFloat(cs.opacity), "
+        "filter: cs.filter"
+    ) in text
+    assert (
+        "out[t.idx] = { transform: cs.transform, opacity: parseFloat(cs.opacity), "
+        "filter: cs.filter"
+    ) in text
+
+
 def test_transition_fires_resets_pointer_before_hover_baseline() -> None:
     """A reused agent-browser daemon may leave the pointer over a target.
 

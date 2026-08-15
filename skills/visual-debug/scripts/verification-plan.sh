@@ -476,13 +476,50 @@ fi
 # was scheduled. Fall-through to transition-spec entries with page-load
 # trigger keeps a third signal path.
 DOM_STATE_DIFF="$REF_DIR/dom-state-diff.json"
+SPLASH_CONTRACT="$REF_DIR/states/splash/contract.json"
 SPLASH_SUMMARY="$REF_DIR/states/splash/summary.json"
 HAS_SPLASH="false"
-if contains_pattern "$INTERACTIONS" '"hasPreloader":\s*true' \
+SPLASH_CONTRACT_SIGNAL="fallthrough"
+if [ -f "$SPLASH_CONTRACT" ]; then
+  SPLASH_CONTRACT_SIGNAL=$(SPLASH_CONTRACT_PATH="$SPLASH_CONTRACT" "$PYTHON_BIN" -c "
+import json, os
+try:
+    data = json.loads(open(os.environ['SPLASH_CONTRACT_PATH']).read())
+    if isinstance(data, dict) and data.get('detected') is True:
+        print('true')
+    elif isinstance(data, dict) and data.get('schemaVersion') is not None and data.get('detected') is False:
+        if data.get('captureMode') == 'reuse-session':
+            print('fallthrough')
+        else:
+            overlay = data.get('overlay') if isinstance(data.get('overlay'), dict) else None
+            capture = data.get('capture') if isinstance(data.get('capture'), dict) else None
+            has_overlay_metadata = overlay is not None and 'everVisible' in overlay
+            has_capture_metadata = capture is not None
+            if not has_overlay_metadata and not has_capture_metadata:
+                print('false')
+            elif capture is not None and capture.get('authoritativeNegative') is False:
+                print('fallthrough')
+            elif capture is not None and capture.get('authoritativeNegative') is True:
+                print('false')
+            else:
+                ever_visible = bool(overlay.get('everVisible')) if overlay is not None else False
+                state_count = capture.get('stateCount') if capture is not None else None
+                timed_out = bool(capture.get('timedOut')) if capture is not None else False
+                print('false' if (not ever_visible and state_count == 1 and not timed_out) else 'fallthrough')
+    else:
+        print('fallthrough')
+except Exception:
+    print('fallthrough')
+" 2>/dev/null || echo fallthrough)
+  if [ "$SPLASH_CONTRACT_SIGNAL" = "true" ] || [ "$SPLASH_CONTRACT_SIGNAL" = "false" ]; then
+    HAS_SPLASH="$SPLASH_CONTRACT_SIGNAL"
+  fi
+fi
+if [ "$SPLASH_CONTRACT_SIGNAL" != "false" ] && { contains_pattern "$INTERACTIONS" '"hasPreloader":\s*true' \
    || contains_pattern "$INTERACTIONS" '"hasSplash":\s*true' \
-   || contains_pattern "$DOM_STATE_DIFF" '"(dom_changes|splashElements|changes|preloaderRemoved)":\s*\[?[^][}{]'; then
+   || contains_pattern "$DOM_STATE_DIFF" '"(dom_changes|splashElements|changes|preloaderRemoved)":\s*\[?[^][}{]'; }; then
   HAS_SPLASH="true"
-elif [ -f "$SPLASH_SUMMARY" ]; then
+elif [ "$SPLASH_CONTRACT_SIGNAL" != "false" ] && [ -f "$SPLASH_SUMMARY" ]; then
   # polls > 1 = capture-states.sh recorded at least one class transition
   # during the splash window (loading → loaded). Treat as splash present.
   SPLASH_POLLS=$("$PYTHON_BIN" -c "
@@ -496,7 +533,7 @@ except Exception:
   if [ "$SPLASH_POLLS" -gt 1 ]; then
     HAS_SPLASH="true"
   fi
-elif contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(page-?load|onLoad|load)"'; then
+elif [ "$SPLASH_CONTRACT_SIGNAL" != "false" ] && contains_pattern "$TRANSITION_SPEC" '"trigger":\s*"(page-?load|onLoad|load)"'; then
   HAS_SPLASH="true"
 fi
 
@@ -955,6 +992,17 @@ if [ "$HAS_IO_REVEAL" = "true" ]; then
             "block" \
             "standard" \
           "runtime-env"
+fi
+
+if [ "$HAS_SPLASH" = "true" ]; then
+  add_check "splash-lifecycle" \
+            "skills/visual-debug/scripts/splash-lifecycle-check.sh" \
+            "splash-lifecycle.json" \
+            "signals.hasSplash=true — first-load splash overlays must mount, change phase, and exit on both ref and impl; static screenshots and background video motion are not lifecycle proof" \
+            "block" \
+            "standard" \
+            "runtime-env" \
+            "{session}-splash {ref_url} {impl_url} {ref_dir}"
 fi
 
 add_check "svg-provenance" \

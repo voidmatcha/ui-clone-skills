@@ -57,3 +57,7 @@ docs/*-E1.md
 # Convenience symlinks to scratch impl roots — created so pipeline.verify
 # (which expects <repo>/impl) can locate a non-canonical impl path.
 /impl
+
+# Isolated implementation worktrees created by agent workflows
+.worktrees/
+.ui-re-continuation/

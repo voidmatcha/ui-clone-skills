@@ -8,6 +8,7 @@ import pytest
 
 from ui_clone.dag import GENERATION_PLAN_SOURCES, generation_plan_source_hashes
 from ui_clone.gate import Gate
+from ui_clone.gates.base import CheckResult
 
 from ._helpers import (
     _write_pre_generate_baseline,
@@ -919,6 +920,459 @@ def _write_generation_plan(ref: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_generation_plan_with_wires(ref: Path, wires: list[object]) -> None:
+    source_hashes = generation_plan_source_hashes(ref)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "componentList": [
+                    {
+                        "name": "Hero",
+                        "matchedSection": "hero",
+                        "selector": "section.hero",
+                        "path": "components/sections/Hero.tsx",
+                        "wires": wires,
+                    }
+                ],
+                "dsComponentsRequired": [],
+                "tokens": {
+                    "colors": {},
+                    "spacing": {},
+                    "typography": {},
+                    "radius": {},
+                    "shadows": {},
+                },
+                "guidance": {},
+                "provenance": {
+                    "source": "generation-planner",
+                    "generatedAt": "2026-07-29T00:00:00Z",
+                    "hashAlgorithm": "sha256",
+                    "sourceHashes": source_hashes,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_single_section_plan_fixture(ref: Path) -> None:
+    _write_pre_generate_baseline(ref)
+    _write_valid_artifact_provenance(ref)
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": [{"id": "hero", "tag": "section", "className": "hero"}]}),
+        encoding="utf-8",
+    )
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-scroll-hero",
+                        "selector": "section.hero",
+                        "varies": ["opacity"],
+                        "byScroll": {
+                            "0": {"opacity": "0"},
+                            "1": {"opacity": "1"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _enrichment_failures(ref: Path) -> list[CheckResult]:
+    return [
+        result
+        for result in Gate(ref).gate_pre_generate()
+        if result.status == "fail"
+        and result.label == "generation-plan enrichment"
+    ]
+
+
+def test_gate_pre_generate_accepts_non_motion_string_wires(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    _write_generation_plan_with_wires(
+        ref,
+        ["data fetching from CMS", "click handler toggles menu", "setInterval clock tick"],
+    )
+
+    assert _enrichment_failures(ref) == []
+
+
+def test_gate_pre_generate_accepts_non_motion_structured_wires(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "data",
+                "library": "cms-client",
+                "trigger": "render",
+                "selector": "section.hero",
+                "notes": {"cache": "static"},
+            }
+        ],
+    )
+
+    assert _enrichment_failures(ref) == []
+
+
+def test_gate_pre_generate_rejects_motion_prose_wires(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    _write_generation_plan_with_wires(ref, ["scroll scrub opacity reveal with transform"])
+
+    failures = _enrichment_failures(ref)
+
+    assert failures
+    assert "componentList[0].wires[0]" in failures[0].message
+    assert "ungrounded motion prose" in failures[0].message
+
+
+def test_gate_pre_generate_rejects_framer_viewport_fade_without_grounding(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "fade",
+                "library": "framer-motion",
+                "hooks": ["useInView"],
+                "trigger": "viewport",
+                "selector": "section.hero",
+            }
+        ],
+    )
+
+    failures = _enrichment_failures(ref)
+
+    assert failures
+    assert "componentList[0].wires[0]" in failures[0].message
+    assert "missing sourceArtifact" in failures[0].message
+
+
+def test_gate_pre_generate_accepts_complete_grounded_motion_wire(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll", "useTransform"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "animation-runtime-dump.json",
+                "sourceId": "runtime-scroll-hero",
+            }
+        ],
+    )
+
+    assert _enrichment_failures(ref) == []
+
+
+def test_gate_pre_generate_rejects_generation_plan_self_grounding(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll", "useTransform"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "generation-plan.json",
+                "sourceId": "self-grounded-id",
+            }
+        ],
+    )
+
+    failures = _enrichment_failures(ref)
+
+    assert failures
+    assert "sourceArtifact not allowed" in failures[0].message
+
+
+def test_gate_pre_generate_rejects_runtime_source_id_outside_scroll_row(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"sourceId": "runtime-scroll-hero"},
+                "scrollLinkedStyles": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll", "useTransform"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "animation-runtime-dump.json",
+                "sourceId": "runtime-scroll-hero",
+            }
+        ],
+    )
+
+    failures = _enrichment_failures(ref)
+
+    assert failures
+    assert "sourceId/selector absent from same runtime row" in failures[0].message
+
+
+def test_gate_pre_generate_rejects_runtime_source_id_wrong_selector(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    (ref / "animation-runtime-dump.json").write_text(
+        json.dumps(
+            {
+                "scrollLinkedStyles": [
+                    {
+                        "sourceId": "runtime-scroll-hero",
+                        "selector": "section.other",
+                        "varies": ["opacity"],
+                        "byScroll": {
+                            "0": {"opacity": "0"},
+                            "1": {"opacity": "1"},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll", "useTransform"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "animation-runtime-dump.json",
+                "sourceId": "runtime-scroll-hero",
+            }
+        ],
+    )
+
+    failures = _enrichment_failures(ref)
+
+    assert failures
+    assert "sourceId/selector absent from same runtime row" in failures[0].message
+
+
+def test_gate_pre_generate_accepts_grounded_viewport_fade_wire(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    (ref / "animations-detected.json").write_text(
+        json.dumps({"events": [{"motion": {"sourceId": "viewport-fade-hero"}}]}),
+        encoding="utf-8",
+    )
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "fade",
+                "library": "framer-motion",
+                "hooks": ["useInView"],
+                "trigger": "viewport",
+                "selector": "section.hero",
+                "sourceArtifact": "animations-detected.json",
+                "sourceId": "viewport-fade-hero",
+            }
+        ],
+    )
+
+    assert _enrichment_failures(ref) == []
+
+
+@pytest.mark.parametrize(
+    ("wire", "expected"),
+    [
+        ({"kind": "scroll-motion"}, "missing library"),
+        (
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": [],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "animation-runtime-dump.json",
+                "sourceId": "runtime-scroll-hero",
+            },
+            "hooks must contain",
+        ),
+        (
+            {
+                "kind": "sticky-layout",
+                "library": "css",
+                "hooks": [],
+                "trigger": "sticky",
+                "selector": "section.hero",
+                "sourceArtifact": "animation-runtime-dump.json",
+                "sourceId": "runtime-scroll-hero",
+            },
+            "",
+        ),
+        (
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "scroll-state-machine.json",
+                "sourceId": "runtime-scroll-hero",
+            },
+            "sourceArtifact missing",
+        ),
+        (
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "../runtime.json",
+                "sourceId": "runtime-scroll-hero",
+            },
+            "sourceArtifact escapes",
+        ),
+        (
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "scroll-engine.json",
+                "sourceId": "runtime-scroll-hero",
+            },
+            "invalid JSON",
+        ),
+        (
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "animation-runtime-dump.json",
+                "sourceId": "absent-id",
+            },
+            "sourceId/selector absent",
+        ),
+    ],
+)
+def test_gate_pre_generate_validates_grounded_motion_wire_failures(
+    tmp_path: Path,
+    wire: dict[str, object],
+    expected: str,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    (ref / "scroll-engine.json").write_text("{not-json", encoding="utf-8")
+    _write_generation_plan_with_wires(ref, [wire])
+
+    failures = _enrichment_failures(ref)
+
+    if not expected:
+        assert failures == []
+    else:
+        assert failures
+        assert expected in failures[0].message
+
+
+def test_gate_pre_generate_rejects_source_artifact_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    outside = tmp_path / "outside-runtime.json"
+    outside.write_text(json.dumps({"id": "runtime-scroll-hero"}), encoding="utf-8")
+    (ref / "scroll-engine.json").symlink_to(outside)
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "scroll-engine.json",
+                "sourceId": "runtime-scroll-hero",
+            }
+        ],
+    )
+
+    failures = _enrichment_failures(ref)
+
+    assert failures
+    assert "sourceArtifact escapes" in failures[0].message
+
+
+def test_gate_pre_generate_accepts_source_id_nested_in_artifact(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_single_section_plan_fixture(ref)
+    (ref / "animations-detected.json").write_text(
+        json.dumps({"outer": [{"inner": {"sourceId": "nested-runtime-id"}}]}),
+        encoding="utf-8",
+    )
+    _write_generation_plan_with_wires(
+        ref,
+        [
+            {
+                "kind": "scroll-motion",
+                "library": "framer-motion",
+                "hooks": ["useScroll"],
+                "trigger": "scroll",
+                "selector": "section.hero",
+                "sourceArtifact": "animations-detected.json",
+                "sourceId": "nested-runtime-id",
+            }
+        ],
+    )
+
+    assert _enrichment_failures(ref) == []
 
 
 def test_gate_pre_generate_accepts_current_generation_plan_provenance(

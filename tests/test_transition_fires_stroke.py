@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ui_clone.gates.transition_fires import _stroke_drew, decide
+from ui_clone.gates.transition_fires import _stroke_drew, classify, decide
 
 REVEAL_ENTRY = {
     "id": "svg-stroke-draw",
@@ -8,6 +8,136 @@ REVEAL_ENTRY = {
     "target": "decorative SVG strokes",
     "animation": {"property": "strokeDashoffset", "from": "dashLength", "to": 0},
 }
+
+
+def test_scroll_linked_style_uses_scrub_sampling_strategy() -> None:
+    entry = {
+        "id": "hero-width-runtime",
+        "trigger": "scroll-linked-style",
+        "target": ".hero-video",
+        "animation": {
+            "type": "scroll-linked-style",
+            "property": "width",
+            "changedProperties": ["width"],
+            "from": {"width": "80vw"},
+            "to": {"width": "100vw"},
+        },
+    }
+
+    assert classify(entry) == "scrub"
+    result = decide(
+        entry,
+        {
+            "found": True,
+            "before": {"opacity": 1, "transform": "none", "width": 1024},
+            "after": {"opacity": 1, "transform": "none", "width": 1024},
+            "samples": [
+                {
+                    "opacity": 1,
+                    "transform": "none",
+                    "width": 1024,
+                    "scrollY": 0,
+                },
+                {
+                    "opacity": 1,
+                    "transform": "none",
+                    "width": 1280,
+                    "scrollY": 500,
+                },
+            ],
+        },
+        set(),
+    )
+    assert result["status"] == "pass", result
+    assert "scroll samples" in result["observed"]
+
+
+def test_scroll_linked_style_filter_counts_when_declared() -> None:
+    entry = {
+        "id": "disintegrating-char-filter-runtime",
+        "trigger": "scroll-linked-style",
+        "target": ".char",
+        "animation": {
+            "type": "scroll-linked-style",
+            "property": "filter",
+            "changedProperties": ["filter"],
+            "from": {"filter": "blur(0px) brightness(1)"},
+            "to": {"filter": "blur(12px) brightness(4)"},
+        },
+    }
+    result = decide(
+        entry,
+        {
+            "found": True,
+            "before": {"opacity": 1, "transform": "none", "filter": "none"},
+            "after": {"opacity": 1, "transform": "none", "filter": "none"},
+            "samples": [
+                {"opacity": 1, "transform": "none", "filter": "blur(0px)", "scrollY": 4400},
+                {"opacity": 1, "transform": "none", "filter": "blur(8px)", "scrollY": 4550},
+            ],
+        },
+        set(),
+    )
+    assert result["status"] == "pass", result
+
+
+def test_scroll_linked_style_filter_is_ignored_when_undeclared() -> None:
+    entry = {
+        "id": "dead-width-runtime",
+        "trigger": "scroll-linked-style",
+        "target": ".hero-video",
+        "animation": {
+            "type": "scroll-linked-style",
+            "property": "width",
+            "changedProperties": ["width"],
+            "from": {"width": "80vw"},
+            "to": {"width": "100vw"},
+        },
+    }
+    result = decide(
+        entry,
+        {
+            "found": True,
+            "before": {"opacity": 1, "transform": "none", "width": 1024},
+            "after": {"opacity": 1, "transform": "none", "width": 1024},
+            "samples": [
+                {"opacity": 1, "transform": "none", "width": 1024, "filter": "blur(0px)", "scrollY": 0},
+                {"opacity": 1, "transform": "none", "width": 1024, "filter": "blur(8px)", "scrollY": 500},
+            ],
+        },
+        set(),
+    )
+    assert result["status"] == "fail", result
+
+
+def test_scroll_linked_style_filter_metadata_does_not_authorize_filter_evidence() -> None:
+    entry = {
+        "id": "dead-width-filter-mentioned-runtime",
+        "trigger": "scroll-linked-style",
+        "description": "The related bundle mentions filter handling in prose only.",
+        "target": ".hero-video",
+        "animation": {
+            "type": "scroll-linked-style",
+            "property": "width",
+            "changedProperties": ["width"],
+            "from": {"width": "80vw"},
+            "to": {"width": "100vw"},
+        },
+    }
+    result = decide(
+        entry,
+        {
+            "found": True,
+            "before": {"opacity": 1, "transform": "none", "width": 1024},
+            "after": {"opacity": 1, "transform": "none", "width": 1024},
+            "samples": [
+                {"opacity": 1, "transform": "none", "width": 1024, "filter": "blur(0px)", "scrollY": 0},
+                {"opacity": 1, "transform": "none", "width": 1024, "filter": "blur(8px)", "scrollY": 500},
+            ],
+        },
+        set(),
+    )
+    assert result["status"] == "fail", result
 
 
 def test_stroke_drew_detects_draw_in() -> None:

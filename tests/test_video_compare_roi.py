@@ -254,7 +254,9 @@ def _hover_proof(
         **(initial_state or cast(dict[str, object], _target_payload()["state"])),
         "activeAnimationCount": 0,
     }
-    action_state = action_state or cast(dict[str, object], _hover_action_payloads()["firstRef"]["state"])
+    action_state = action_state or cast(
+        dict[str, object], _hover_action_payloads()["firstRef"]["state"]
+    )
     final = {
         "watchedStyle": action_state["watchedStyle"],
         "ancestorClassPath": action_state["ancestorClassPath"],
@@ -435,46 +437,49 @@ def _calibrate_static_discrete_with_payloads(
     retry_values = [0.80 if index in (7, 8, 9, 10, 11, 12) else 0.96 for index in range(1, 19)]
     metadata = _source_metadata_payloads()
     hashes = _source_metadata_hashes()
-    return cast(dict[str, Any], calibrate_static_discrete(
-        self_values,
-        retry_values,
-        threshold=0.90,
-        expected_rows=18,
-        first_cross_values=first_values,
-        first_capture_receipt=_with_source_binding(
-            _early_window_receipt(
-                rows=19,
-                failure_rows=[13, 14, 15, 16, 17, 18],
-                arc_within_tolerance=False,
-                arc_delta_frames=24,
-                arc_max_delta_frames=18,
-                ref_duration_frames=24,
-                impl_duration_frames=48,
+    return cast(
+        dict[str, Any],
+        calibrate_static_discrete(
+            self_values,
+            retry_values,
+            threshold=0.90,
+            expected_rows=18,
+            first_cross_values=first_values,
+            first_capture_receipt=_with_source_binding(
+                _early_window_receipt(
+                    rows=19,
+                    failure_rows=[13, 14, 15, 16, 17, 18],
+                    arc_within_tolerance=False,
+                    arc_delta_frames=24,
+                    arc_max_delta_frames=18,
+                    ref_duration_frames=24,
+                    impl_duration_frames=48,
+                ),
+                attempt="first",
+                metadata=metadata,
+                hashes=hashes,
             ),
-            attempt="first",
-            metadata=metadata,
-            hashes=hashes,
-        ),
-        retry_capture_receipt=_with_source_binding(
-            _early_window_receipt(
-                rows=18,
-                failure_rows=[7, 8, 9, 10, 11, 12],
-                arc_within_tolerance=False,
-                arc_delta_frames=24,
-                arc_max_delta_frames=18,
-                ref_duration_frames=24,
-                impl_duration_frames=48,
+            retry_capture_receipt=_with_source_binding(
+                _early_window_receipt(
+                    rows=18,
+                    failure_rows=[7, 8, 9, 10, 11, 12],
+                    arc_within_tolerance=False,
+                    arc_delta_frames=24,
+                    arc_max_delta_frames=18,
+                    ref_duration_frames=24,
+                    impl_duration_frames=48,
+                ),
+                attempt="retry",
+                metadata=metadata,
+                hashes=hashes,
             ),
-            attempt="retry",
-            metadata=metadata,
-            hashes=hashes,
+            reference_self_receipt=_failed_standard_receipt(self_failure_rows),
+            target_payloads=target_payloads,
+            action_payloads=action_payloads,
+            source_metadata=metadata,
+            source_metadata_sha256=hashes,
         ),
-        reference_self_receipt=_failed_standard_receipt(self_failure_rows),
-        target_payloads=target_payloads,
-        action_payloads=action_payloads,
-        source_metadata=metadata,
-        source_metadata_sha256=hashes,
-    ))
+    )
 
 
 def test_build_plan_uses_equal_size_side_local_crops() -> None:
@@ -492,7 +497,26 @@ def test_build_plan_uses_equal_size_side_local_crops() -> None:
     assert plan["ref"]["crop"]["height"] == 100
     assert plan["impl"]["crop"]["height"] == 100
     assert plan["ref"]["crop"]["x"] == 0
-    assert plan["impl"]["crop"]["x"] == 680
+    assert plan["impl"]["crop"]["x"] == 690
+
+
+def test_build_plan_rounds_center_delta_before_offsetting_impl_crop() -> None:
+    plan = build_plan(
+        {"x": 589.49, "y": 39.0, "width": 4.0, "height": 3.0},
+        {"x": 589.5525, "y": 39.0, "width": 4.0, "height": 3.0},
+        viewport_width=1440,
+        viewport_height=900,
+        padding=20,
+        selector=".dot-button",
+    )
+
+    assert plan["ref"]["crop"] == {
+        "x": 569,
+        "y": 19,
+        "width": 44,
+        "height": 43,
+    }
+    assert plan["impl"]["crop"] == plan["ref"]["crop"]
 
 
 def test_load_target_rect_unwraps_agent_browser_string(tmp_path: Path) -> None:
@@ -875,20 +899,26 @@ def test_static_discrete_cli_accepts_provenance_flags_without_type_error(
             "python3",
             str(ROOT / "scripts" / "verify" / "lib" / "reference_self_calibration.py"),
             "--reference-self-series",
-            str(write_series(
-                tmp_path / "reference-self.txt",
-                [0.80 if index in self_failures else 0.96 for index in range(1, 19)],
-            )),
+            str(
+                write_series(
+                    tmp_path / "reference-self.txt",
+                    [0.80 if index in self_failures else 0.96 for index in range(1, 19)],
+                )
+            ),
             "--first-cross-series",
-            str(write_series(
-                tmp_path / "first-cross.txt",
-                [0.80 if index in first_failures else 0.96 for index in range(1, 19)],
-            )),
+            str(
+                write_series(
+                    tmp_path / "first-cross.txt",
+                    [0.80 if index in first_failures else 0.96 for index in range(1, 19)],
+                )
+            ),
             "--retry-cross-series",
-            str(write_series(
-                tmp_path / "retry-cross.txt",
-                [0.80 if index in retry_failures else 0.96 for index in range(1, 19)],
-            )),
+            str(
+                write_series(
+                    tmp_path / "retry-cross.txt",
+                    [0.80 if index in retry_failures else 0.96 for index in range(1, 19)],
+                )
+            ),
             "--threshold",
             "0.90",
             "--expected-rows",
@@ -904,41 +934,45 @@ def test_static_discrete_cli_accepts_provenance_flags_without_type_error(
             "--action",
             "hover:.target",
             "--first-capture-retry",
-            str(write_json(
-                tmp_path / "first-capture-retry.json",
-                _with_source_binding(
-                    _early_window_receipt(
-                        rows=18,
-                        failure_rows=first_failures,
-                        arc_within_tolerance=False,
-                        arc_delta_frames=24,
-                        arc_max_delta_frames=18,
-                        ref_duration_frames=54,
-                        impl_duration_frames=78,
+            str(
+                write_json(
+                    tmp_path / "first-capture-retry.json",
+                    _with_source_binding(
+                        _early_window_receipt(
+                            rows=18,
+                            failure_rows=first_failures,
+                            arc_within_tolerance=False,
+                            arc_delta_frames=24,
+                            arc_max_delta_frames=18,
+                            ref_duration_frames=54,
+                            impl_duration_frames=78,
+                        ),
+                        attempt="first",
+                        metadata=metadata,
+                        hashes=source_hashes,
                     ),
-                    attempt="first",
-                    metadata=metadata,
-                    hashes=source_hashes,
-                ),
-            )),
+                )
+            ),
             "--retry-capture-retry",
-            str(write_json(
-                tmp_path / "retry-capture-retry.json",
-                _with_source_binding(
-                    _early_window_receipt(
-                        rows=18,
-                        failure_rows=retry_failures,
-                        arc_within_tolerance=True,
-                        arc_delta_frames=6,
-                        arc_max_delta_frames=18,
-                        ref_duration_frames=24,
-                        impl_duration_frames=30,
+            str(
+                write_json(
+                    tmp_path / "retry-capture-retry.json",
+                    _with_source_binding(
+                        _early_window_receipt(
+                            rows=18,
+                            failure_rows=retry_failures,
+                            arc_within_tolerance=True,
+                            arc_delta_frames=6,
+                            arc_max_delta_frames=18,
+                            ref_duration_frames=24,
+                            impl_duration_frames=30,
+                        ),
+                        attempt="retry",
+                        metadata=metadata,
+                        hashes=source_hashes,
                     ),
-                    attempt="retry",
-                    metadata=metadata,
-                    hashes=source_hashes,
-                ),
-            )),
+                )
+            ),
             "--first-ref-target",
             str(write_json(tmp_path / "first-ref-target.json", _target_payload(prop="color"))),
             "--first-impl-target",
@@ -948,13 +982,33 @@ def test_static_discrete_cli_accepts_provenance_flags_without_type_error(
             "--retry-impl-target",
             str(write_json(tmp_path / "retry-impl-target.json", _target_payload(prop="color"))),
             "--first-ref-action",
-            str(write_json(tmp_path / "first-ref-action.json", _hover_action_payloads(prop="color")["firstRef"])),
+            str(
+                write_json(
+                    tmp_path / "first-ref-action.json",
+                    _hover_action_payloads(prop="color")["firstRef"],
+                )
+            ),
             "--first-impl-action",
-            str(write_json(tmp_path / "first-impl-action.json", _hover_action_payloads(prop="color")["firstImpl"])),
+            str(
+                write_json(
+                    tmp_path / "first-impl-action.json",
+                    _hover_action_payloads(prop="color")["firstImpl"],
+                )
+            ),
             "--retry-ref-action",
-            str(write_json(tmp_path / "retry-ref-action.json", _hover_action_payloads(prop="color")["retryRef"])),
+            str(
+                write_json(
+                    tmp_path / "retry-ref-action.json",
+                    _hover_action_payloads(prop="color")["retryRef"],
+                )
+            ),
             "--retry-impl-action",
-            str(write_json(tmp_path / "retry-impl-action.json", _hover_action_payloads(prop="color")["retryImpl"])),
+            str(
+                write_json(
+                    tmp_path / "retry-impl-action.json",
+                    _hover_action_payloads(prop="color")["retryImpl"],
+                )
+            ),
             "--first-ref-source-metadata",
             str(source_paths["first"]["ref"]),
             "--first-impl-source-metadata",
@@ -964,7 +1018,11 @@ def test_static_discrete_cli_accepts_provenance_flags_without_type_error(
             "--retry-impl-source-metadata",
             str(source_paths["retry"]["impl"]),
             "--standard-calibration-receipt",
-            str(write_json(tmp_path / "standard-calibration.json", _failed_standard_receipt(self_failures))),
+            str(
+                write_json(
+                    tmp_path / "standard-calibration.json", _failed_standard_receipt(self_failures)
+                )
+            ),
             "--trigger-type",
             "css-hover",
             "--provenance",
@@ -1020,7 +1078,12 @@ def test_static_discrete_cli_accepts_provenance_flags_without_type_error(
             {},
             ("statePayloadsValid", False),
         ),
-        ({}, {"transition": _target_payload(prop="all")["transition"]}, {}, ("statePayloadsValid", False)),
+        (
+            {},
+            {"transition": _target_payload(prop="all")["transition"]},
+            {},
+            ("statePayloadsValid", False),
+        ),
         ({}, {}, {"avgFrameRate": "9/1"}, ("sourceMetadataValid", False)),
         ({}, {}, {"sourceToExtractedRatio": 5}, ("sourceMetadataValid", False)),
         ({}, {}, {"sourceFps": 12.0}, ("sourceMetadataValid", False)),
@@ -1461,9 +1524,15 @@ def test_static_discrete_runtime_timing_proof_accepts_naver_adjacent_bin_compres
     first_failure_rows = [13, 14, 15, 16, 17, 18]
     retry_failure_rows = [8, 9, 10, 11, 13, 14, 15, 16, 17, 18]
     expected_rows = 342
-    self_values = [0.80 if index in self_failure_rows else 0.96 for index in range(1, expected_rows + 1)]
-    first_values = [0.80 if index in first_failure_rows else 0.96 for index in range(1, expected_rows + 1)]
-    retry_values = [0.80 if index in retry_failure_rows else 0.96 for index in range(1, expected_rows + 1)]
+    self_values = [
+        0.80 if index in self_failure_rows else 0.96 for index in range(1, expected_rows + 1)
+    ]
+    first_values = [
+        0.80 if index in first_failure_rows else 0.96 for index in range(1, expected_rows + 1)
+    ]
+    retry_values = [
+        0.80 if index in retry_failure_rows else 0.96 for index in range(1, expected_rows + 1)
+    ]
     metadata = _source_metadata_payloads(ratio=6)
     hashes = _source_metadata_hashes()
 
@@ -1545,26 +1614,26 @@ def _live_header_runtime_row_drift_payload(
     first_values_patch: dict[int, float] | None = None,
 ) -> dict[str, object]:
     expected_rows = 348
-    self_failure_rows = (
-        [13, 14, 15, 16, 17, 18] if self_failure_rows is None else self_failure_rows
-    )
+    self_failure_rows = [13, 14, 15, 16, 17, 18] if self_failure_rows is None else self_failure_rows
     first_failure_rows = (
-        [8, 9, 10, 11, 13, 14, 15, 16, 17, 18]
-        if first_failure_rows is None
-        else first_failure_rows
+        [8, 9, 10, 11, 13, 14, 15, 16, 17, 18] if first_failure_rows is None else first_failure_rows
     )
     retry_failure_rows = (
-        [13, 14, 15, 16, 17, 18]
-        if retry_failure_rows is None
-        else retry_failure_rows
+        [13, 14, 15, 16, 17, 18] if retry_failure_rows is None else retry_failure_rows
     )
-    self_values = [0.80 if index in self_failure_rows else 0.96 for index in range(1, expected_rows + 1)]
-    first_values = [0.80 if index in first_failure_rows else 0.96 for index in range(1, first_rows + 1)]
+    self_values = [
+        0.80 if index in self_failure_rows else 0.96 for index in range(1, expected_rows + 1)
+    ]
+    first_values = [
+        0.80 if index in first_failure_rows else 0.96 for index in range(1, first_rows + 1)
+    ]
     if first_values_patch:
         for row, value in first_values_patch.items():
             if 1 <= row <= len(first_values):
                 first_values[row - 1] = value
-    retry_values = [0.80 if index in retry_failure_rows else 0.96 for index in range(1, retry_rows + 1)]
+    retry_values = [
+        0.80 if index in retry_failure_rows else 0.96 for index in range(1, retry_rows + 1)
+    ]
     metadata = _source_metadata_payloads(ratio=source_ratio)
     extracted_fps = 60.0
     if metadata_patch:
@@ -1647,7 +1716,9 @@ def test_static_discrete_runtime_timing_proof_accepts_live_header_row_drift() ->
     assert metrics["runtimeTimingRelaxationUsed"] is True
 
 
-def test_static_discrete_runtime_timing_proof_accepts_two_source_frame_cross_attempt_drift() -> None:
+def test_static_discrete_runtime_timing_proof_accepts_two_source_frame_cross_attempt_drift() -> (
+    None
+):
     payload = _live_header_runtime_row_drift_payload(first_rows=342, retry_rows=354)
     metrics = cast(dict[str, Any], payload["metrics"])
 
@@ -1657,7 +1728,9 @@ def test_static_discrete_runtime_timing_proof_accepts_two_source_frame_cross_att
     assert metrics["runtimeTimingRelaxationUsed"] is True
 
 
-def test_static_discrete_runtime_timing_proof_rejects_more_than_two_source_frame_runtime_row_drift() -> None:
+def test_static_discrete_runtime_timing_proof_rejects_more_than_two_source_frame_runtime_row_drift() -> (
+    None
+):
     payload = _live_header_runtime_row_drift_payload(first_rows=342, retry_rows=355)
     metrics = cast(dict[str, Any], payload["metrics"])
 
@@ -1806,8 +1879,7 @@ def test_static_discrete_runtime_timing_proof_binds_sidecar_selector_to_action(
         retry_offset=528,
         action="hover:.btn",
         first_cross_values=[
-            0.80 if index in first_failure_rows else 0.96
-            for index in range(1, 343)
+            0.80 if index in first_failure_rows else 0.96 for index in range(1, 343)
         ],
         first_capture_receipt=_with_source_binding(
             first_receipt,
@@ -1841,7 +1913,9 @@ def test_static_discrete_runtime_timing_proof_binds_sidecar_selector_to_action(
     )
     metrics = cast(dict[str, Any], payload["metrics"])
 
-    assert (payload["status"] == "pass-after-static-discrete-hover-state-calibration") is expected_pass
+    assert (
+        payload["status"] == "pass-after-static-discrete-hover-state-calibration"
+    ) is expected_pass
     assert metrics["statePayloadsValid"] is expected_pass
     if not expected_pass:
         assert metrics["statePayloadReason"] == "target-payload-invalid"
@@ -1916,8 +1990,7 @@ def test_static_discrete_runtime_timing_proof_binds_symmetric_hover_rect_delta(
         first_offset=534,
         retry_offset=528,
         first_cross_values=[
-            0.80 if index in first_failure_rows else 0.96
-            for index in range(1, 343)
+            0.80 if index in first_failure_rows else 0.96 for index in range(1, 343)
         ],
         first_capture_receipt=_with_source_binding(
             first_receipt,
@@ -1947,7 +2020,9 @@ def test_static_discrete_runtime_timing_proof_binds_symmetric_hover_rect_delta(
     )
     metrics = cast(dict[str, Any], payload["metrics"])
 
-    assert (payload["status"] == "pass-after-static-discrete-hover-state-calibration") is expected_pass
+    assert (
+        payload["status"] == "pass-after-static-discrete-hover-state-calibration"
+    ) is expected_pass
     if expected_pass:
         assert metrics["statePayloadsValid"] is True
     else:
@@ -1969,9 +2044,7 @@ def test_static_discrete_accepts_pure_css_hover_without_ancestor_class_mutation(
             action_payloads[name],
             cast(
                 list[str],
-                cast(dict[str, object], target_payloads[name]["state"])[
-                    "ancestorClassPath"
-                ],
+                cast(dict[str, object], target_payloads[name]["state"])["ancestorClassPath"],
             ),
         )
 
@@ -2007,9 +2080,7 @@ def test_declared_transition_runtime_proof_requires_observed_animation() -> None
             action_payloads[name],
             cast(
                 list[str],
-                cast(dict[str, object], target_payloads[name]["state"])[
-                    "ancestorClassPath"
-                ],
+                cast(dict[str, object], target_payloads[name]["state"])["ancestorClassPath"],
             ),
         )
     action_payloads = _with_bound_declared_transition_proofs(
@@ -2048,9 +2119,7 @@ def test_declared_transition_runtime_proof_uses_changed_property_duration() -> N
             action_payloads[name],
             cast(
                 list[str],
-                cast(dict[str, object], target_payloads[name]["state"])[
-                    "ancestorClassPath"
-                ],
+                cast(dict[str, object], target_payloads[name]["state"])["ancestorClassPath"],
             ),
         )
     action_payloads = _with_bound_declared_transition_proofs(
@@ -2093,9 +2162,7 @@ def test_declared_transition_runtime_proof_supports_background_border_shorthands
             action_payloads[name],
             cast(
                 list[str],
-                cast(dict[str, object], target_payloads[name]["state"])[
-                    "ancestorClassPath"
-                ],
+                cast(dict[str, object], target_payloads[name]["state"])["ancestorClassPath"],
             ),
         )
     action_payloads = _with_bound_declared_transition_proofs(
@@ -2278,10 +2345,17 @@ def test_static_discrete_runtime_timing_proof_rejects_missing_proof() -> None:
         ({"firstRef": {"stable_hover_raf_count": 1}}, "incomplete-runtime-proof"),
         ({"firstRef": {"stable_hover_raf_count": True}}, "incomplete-runtime-proof"),
         ({"firstRef": {"stable_hover_raf_count": 2.5}}, "incomplete-runtime-proof"),
-        ({"firstRef": {"changed_style_keys": ["color", "fontWeight"]}}, "runtime-proof-state-mismatch"),
+        (
+            {"firstRef": {"changed_style_keys": ["color", "fontWeight"]}},
+            "runtime-proof-state-mismatch",
+        ),
         ({"firstRef": {"commit_patch": {"hovered": False}}}, "runtime-proof-state-mismatch"),
         (
-            {"firstRef": {"mutation_patch": {"ancestorClassPath": ["a.link", "li.item", "ul.menu"]}}},
+            {
+                "firstRef": {
+                    "mutation_patch": {"ancestorClassPath": ["a.link", "li.item", "ul.menu"]}
+                }
+            },
             "runtime-proof-state-mismatch",
         ),
         ({"firstRef": {"max_active_animation_count": 1}}, "incomplete-runtime-proof"),
@@ -2377,10 +2451,7 @@ def test_reference_self_calibration_rejects_worse_or_wrong_cross_row_count(
     if expected_metric == "rowCountsMatchExpected":
         assert payload["metrics"][expected_metric] is False
     else:
-        assert (
-            payload["metrics"]["retryCross"]["failureRowsSubsetOfReferenceSelf"]
-            is False
-        )
+        assert payload["metrics"]["retryCross"]["failureRowsSubsetOfReferenceSelf"] is False
 
 
 def test_reference_self_calibration_rejects_temporal_permutation() -> None:
@@ -2586,9 +2657,7 @@ def test_complementary_calibration_accepts_repeated_transition_time_lists() -> N
 
 
 def test_complementary_calibration_accepts_repeated_transition_timing_lists() -> None:
-    ref_transition = _target_payload(
-        timing="cubic-bezier(0.33, 1, 0.68, 1)"
-    )["transition"]
+    ref_transition = _target_payload(timing="cubic-bezier(0.33, 1, 0.68, 1)")["transition"]
     payload = calibrate_complementary(
         [0.80] * 5 + [0.96] * 13,
         [0.961] * 18,
@@ -2743,13 +2812,13 @@ def test_complementary_calibration_accepts_long_stable_cross_tails() -> None:
         (
             [0.81] * 5 + [0.97] * 13,
             [0.961] * 18,
-                _early_window_receipt(
-                    rows=18,
-                    failure_rows=list(range(1, 6)),
-                    arc_within_tolerance=False,
-                    ref_duration_frames=6,
-                    impl_duration_frames=36,
-                    arc_max_delta_frames=18,
+            _early_window_receipt(
+                rows=18,
+                failure_rows=list(range(1, 6)),
+                arc_within_tolerance=False,
+                ref_duration_frames=6,
+                impl_duration_frames=36,
+                arc_max_delta_frames=18,
             ),
             _arc_only_receipt(rows=18, min_ssim=0.961),
             _target_payloads(),
@@ -2782,28 +2851,8 @@ def test_complementary_calibration_accepts_long_stable_cross_tails() -> None:
             [0.961] * 18,
             _early_window_receipt(rows=18, failure_rows=list(range(1, 6))),
             _arc_only_receipt(rows=18, min_ssim=0.961),
-            _target_payloads(firstImpl={"transition": _target_payload(duration="0.4,0.4")["transition"]}),
-            "targetPayloadsValid",
-        ),
-        (
-            [0.81] * 5 + [0.97] * 13,
-            [0.961] * 18,
-            _early_window_receipt(rows=18, failure_rows=list(range(1, 6))),
-            _arc_only_receipt(rows=18, min_ssim=0.961),
-            _target_payloads(firstImpl={"transition": _target_payload(delay="0.1,0")["transition"]}),
-            "targetPayloadsValid",
-        ),
-        (
-            [0.81] * 5 + [0.97] * 13,
-            [0.961] * 18,
-            _early_window_receipt(rows=18, failure_rows=list(range(1, 6))),
-            _arc_only_receipt(rows=18, min_ssim=0.961),
             _target_payloads(
-                firstImpl={
-                    "transition": _target_payload(
-                        timing="ease-in,ease-out"
-                    )["transition"]
-                }
+                firstImpl={"transition": _target_payload(duration="0.4,0.4")["transition"]}
             ),
             "targetPayloadsValid",
         ),
@@ -2812,7 +2861,29 @@ def test_complementary_calibration_accepts_long_stable_cross_tails() -> None:
             [0.961] * 18,
             _early_window_receipt(rows=18, failure_rows=list(range(1, 6))),
             _arc_only_receipt(rows=18, min_ssim=0.961),
-            _target_payloads(firstRef={"transition": _target_payload(duration="0,0")["transition"]}),
+            _target_payloads(
+                firstImpl={"transition": _target_payload(delay="0.1,0")["transition"]}
+            ),
+            "targetPayloadsValid",
+        ),
+        (
+            [0.81] * 5 + [0.97] * 13,
+            [0.961] * 18,
+            _early_window_receipt(rows=18, failure_rows=list(range(1, 6))),
+            _arc_only_receipt(rows=18, min_ssim=0.961),
+            _target_payloads(
+                firstImpl={"transition": _target_payload(timing="ease-in,ease-out")["transition"]}
+            ),
+            "targetPayloadsValid",
+        ),
+        (
+            [0.81] * 5 + [0.97] * 13,
+            [0.961] * 18,
+            _early_window_receipt(rows=18, failure_rows=list(range(1, 6))),
+            _arc_only_receipt(rows=18, min_ssim=0.961),
+            _target_payloads(
+                firstRef={"transition": _target_payload(duration="0,0")["transition"]}
+            ),
             "targetPayloadsValid",
         ),
         (
@@ -2828,7 +2899,9 @@ def test_complementary_calibration_accepts_long_stable_cross_tails() -> None:
             [0.961] * 18,
             _early_window_receipt(rows=18, failure_rows=list(range(1, 6))),
             _arc_only_receipt(rows=18, min_ssim=0.961),
-            _target_payloads(firstRef={"transition": _target_payload(prop="none, none")["transition"]}),
+            _target_payloads(
+                firstRef={"transition": _target_payload(prop="none, none")["transition"]}
+            ),
             "targetPayloadsValid",
         ),
         (
@@ -3011,11 +3084,7 @@ def test_reference_self_calibration_blocks_anti_bypass_shapes(
         cross_values,
         threshold=0.90,
         expected_rows=len(self_values),
-        first_cross_values=(
-            [0.80] * 17 + [0.96]
-            if len(self_values) == 18
-            else self_values
-        ),
+        first_cross_values=([0.80] * 17 + [0.96] if len(self_values) == 18 else self_values),
         first_capture_receipt=first_receipt,
         retry_capture_receipt=retry_receipt,
     )
@@ -3036,6 +3105,10 @@ def test_selector_video_actions_wire_target_roi() -> None:
 
     assert 'hover:*) TARGET_ROI_SELECTOR="${ACTION#hover:}"' in script
     assert 'hover-and-out:*) TARGET_ROI_SELECTOR="${ACTION#hover-and-out:}"' in script
+    assert (
+        'TARGET_MEASURE_SELECTOR="${VIDEO_COMPARE_AFFECTED_SELECTOR:-$TARGET_ROI_SELECTOR}"'
+        in script
+    )
     assert "prepare_target_roi_filters" in script
     assert 'filter="$filter,$TARGET_ROI_REF_FILTER"' in script
     assert 'filter="$filter,$TARGET_ROI_IMPL_FILTER"' in script
@@ -3054,22 +3127,57 @@ def test_selector_roi_resolves_and_drives_the_same_visible_match() -> None:
     )[0]
 
     assert "document.querySelectorAll" in capture
-    assert "matches.find" in capture
+    assert "visibleCandidatesAtCurrentPosition" in capture
     assert "inViewport" in capture
-    assert "transitionContract(el)" in capture
+    assert "const measurementEl = resolveMeasurementEl(el)" in capture
+    assert "const backdropComplexity = (candidate, measurementEl) =>" in capture
+    assert "const forcedScrollY =" in capture
+    assert "window.scrollTo(window.scrollX, boundedForcedScrollY)" in capture
+    assert "'forced-scroll-state-unavailable'" in capture
+    assert "document.elementsFromPoint" in capture
+    assert "const sampleBackdropLayers = (rect) =>" in capture
+    assert "const layerText = (layer.textContent || '').trim()" in capture
+    assert "layer.getAnimations({ subtree: true }).length" in capture
+    assert "candidate.contains(layer) || layer.contains(candidate)" in capture
+    assert "visibleCandidates.sort((left, right) =>" in capture
+    assert "el = selected ? selected.el : null" in capture
+    assert "if (el) break;" in capture
+    assert "forcedMatchIndex" in capture
+    assert "'forced-match-unavailable'" in capture
+    assert "const unavailableReason =" in capture
+    assert (
+        "reason: forcedScrollY !== null ? 'forced-scroll-state-unavailable' : unavailableReason"
+        in capture
+    )
+    assert "selection:" in capture
+    assert "backdropComplexity: selected.complexity" in capture
+    assert "scrollState:" in capture
+    assert "measurementSelector: measureSelector" in capture
+    assert "measurementMatchIndex: measurementMatches.indexOf(measurementEl)" in capture
+    assert "transitionContract(measurementEl)" in capture
+    assert "actionRect:" in capture
     assert "transitionTimingFunction.replace" in script
     assert "scrollIntoView" in capture
+    assert "fixed/state-gated targets" in capture
+    assert "for (let y = 0; y <= maxScroll; y += scrollStep)" in capture
+    assert "window.scrollTo(0, y)" in capture
     assert 'scrollintoview "$selector"' not in capture
     assert "matches[matchIndex]" in restore
-    assert "transitionContract(el)" in restore
+    assert "measurementMatches[measurementMatchIndex]" in restore
+    assert "previousTargetPayload.selection || null" in restore
+    assert "scrollState:" in restore
+    assert "transitionContract(measurementEl)" in restore
     assert "scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })" in restore
     assert 'target_center_from_rect "$target_rect" "$VIEW_W" "$VIEW_H" >/dev/null' in restore
     assert 'target_center_from_rect "$target_rect" "$VIEW_W" "$VIEW_H"' in hover
+    assert 'rect = value.get("actionRect") or value["rect"]' in script
     assert "hover_timing_probe_js" in script
     arm = hover.index("window.__uiCloneHoverTimingProofs[key] = proof")
     sampler = hover.index("while (proof.moveAt === null")
     mark_move = hover.index("proof.moveAt = performance.now()")
-    mouse_move = hover.index('agent-browser --session "$session" mouse move "$target_x" "$target_y"')
+    mouse_move = hover.index(
+        'agent-browser --session "$session" mouse move "$target_x" "$target_y"'
+    )
     assert arm < sampler < mark_move < mouse_move
     assert "performance.now() - pointerWaitStart < 1000" in hover
     assert "const timeoutAt = startAt + 250" in hover
@@ -3078,17 +3186,43 @@ def test_selector_roi_resolves_and_drives_the_same_visible_match() -> None:
     assert "hoverProof: proof || null" in hover
     assert 'mouse move "$target_x" "$target_y"' in hover
     assert "const matchIndex =" in hover
+    assert "const measurementEl = resolveMeasurementEl(el)" in hover
+    assert "hoverSnapshot(el, measurementEl)" in hover
     assert "hovered: el.matches(':hover')" in hover
+    assert "measurementSelector: measureSelector" in hover
     assert "pointerReachable: Boolean" in hover
     assert 'python3 "$HOVER_ACTION_RECEIPT_HELPER" "$receipt"' in hover
     hover_branch = script.index('elif [[ "$action" == hover:* ]]')
     restore_call = script.index(
-        'restore_visible_target_rect "$session" "$selector" "$target_rect"',
+        'restore_visible_target_rect "$session" "$selector" "$TARGET_MEASURE_SELECTOR" "$target_rect"',
         hover_branch,
     )
     sleep_call = script.index('sleep "$PRE_ACTION_WAIT"', hover_branch)
     hover_call = script.index("hover_visible_target \\", hover_branch)
     assert restore_call < sleep_call < hover_call
+
+
+def test_impl_roi_capture_reuses_reference_selected_match_index() -> None:
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    assert "target_match_index_from_rect() {" in script
+    assert "target_scroll_y_from_rect() {" in script
+    assert (
+        'TARGET_ROI_FORCED_MATCH_INDEX=$(target_match_index_from_rect "$TARGET_ROI_REF_RAW")'
+        in script
+    )
+    assert 'TARGET_ROI_FORCED_SCROLL_Y=$(target_scroll_y_from_rect "$TARGET_ROI_REF_RAW")' in script
+    ref_capture = script.index(
+        '"${SESSION}-orig" "$TARGET_ROI_SELECTOR" "$TARGET_MEASURE_SELECTOR" "$TARGET_ROI_REF_RAW"',
+    )
+    selected_index = script.index(
+        'TARGET_ROI_FORCED_MATCH_INDEX=$(target_match_index_from_rect "$TARGET_ROI_REF_RAW")',
+        ref_capture,
+    )
+    impl_capture = script.index(
+        '"${SESSION}-impl" "$TARGET_ROI_SELECTOR" "$TARGET_MEASURE_SELECTOR" "$TARGET_ROI_IMPL_RAW" "$TARGET_ROI_FORCED_MATCH_INDEX" "$TARGET_ROI_FORCED_SCROLL_Y"',
+        selected_index,
+    )
+    assert ref_capture < selected_index < impl_capture
 
 
 def test_hover_action_receipt_requires_real_pointer_verification() -> None:
@@ -3270,13 +3404,16 @@ def test_60fps_duplicates_of_one_10fps_source_sample_stay_in_time_window() -> No
 def test_late_or_unsettled_failure_remains_hard_divergence(
     values: list[float],
 ) -> None:
-    assert build_retry_receipt(
-        values,
-        threshold=0.90,
-        fps=10,
-        early_window_seconds=0.3,
-        selector=".target",
-    ) is None
+    assert (
+        build_retry_receipt(
+            values,
+            threshold=0.90,
+            fps=10,
+            early_window_seconds=0.3,
+            selector=".target",
+        )
+        is None
+    )
 
 
 def test_delta_builder_uses_requested_blur_without_pipefail_sigpipe(
@@ -3552,10 +3689,7 @@ def _make_arc_jitter_target_video(path: Path, end_time: float) -> None:
             "-i",
             "color=c=black:s=320x240:r=30:d=1",
             "-vf",
-            (
-                "drawbox=x=100:y=90:w=40:h=25:color=white:t=fill:"
-                f"enable='between(t,0.3,{end_time})'"
-            ),
+            (f"drawbox=x=100:y=90:w=40:h=25:color=white:t=fill:enable='between(t,0.3,{end_time})'"),
             "-c:v",
             "libvpx",
             "-b:v",
@@ -3578,9 +3712,7 @@ def _make_selector_phase_video(
     rate: int = 30,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    filters = [
-        "drawbox=x=100:y=90:w=80:h=50:color=white:t=fill:enable='gte(t,0.3)'"
-    ]
+    filters = ["drawbox=x=100:y=90:w=80:h=50:color=white:t=fill:enable='gte(t,0.3)'"]
     if gray_start is not None and gray_end is not None:
         filters.append(
             f"drawbox=x=100:y=90:w=80:h=50:color={gray_color}:t=fill:"
@@ -3617,16 +3749,12 @@ def _make_static_foreground_delta_video(
     path.parent.mkdir(parents=True, exist_ok=True)
     filters = [
         "drawbox=x=80:y=60:w=160:h=120:color=0x404040:t=fill",
-        (
-            "drawbox=x=80:y=60:w=160:h=120:color=0x909090:t=fill:"
-            "enable='gte(t,0.2)'"
-        ),
+        ("drawbox=x=80:y=60:w=160:h=120:color=0x909090:t=fill:enable='gte(t,0.2)'"),
         "drawbox=x=120:y=90:w=80:h=60:color=black:t=fill",
     ]
     if foreground_after is not None:
         filters.append(
-            "drawbox=x=120:y=90:w=80:h=60:"
-            f"color={foreground_after}:t=fill:enable='gte(t,0.2)'"
+            f"drawbox=x=120:y=90:w=80:h=60:color={foreground_after}:t=fill:enable='gte(t,0.2)'"
         )
     subprocess.run(
         [
@@ -3668,6 +3796,456 @@ def _seed_target_rect(out: Path, *, impl_width: int = 160) -> None:
         json.dumps(impl_payload),
         encoding="utf-8",
     )
+
+
+def _extract_bash_function(script: str, name: str) -> str:
+    start = script.index(f"{name}() {{")
+    depth = 0
+    for index in range(start, len(script)):
+        char = script[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return script[start : index + 1]
+    raise AssertionError(f"function {name} did not terminate")
+
+
+def _hover_receipt_payload(
+    *,
+    selector: str = ".target",
+    match_index: int = 0,
+    changed_style_keys: list[str] | None = None,
+    initial_background: str = "rgba(0, 0, 0, 0)",
+    final_background: str = "rgb(255, 255, 255)",
+    transition_duration: str = "150ms",
+    transition_property: str = "background-color",
+    max_active_animation_count: int = 1,
+) -> dict[str, object]:
+    if changed_style_keys is None:
+        changed_style_keys = ["backgroundColor"]
+    initial = {"watchedStyle": {"backgroundColor": initial_background}}
+    final = {"watchedStyle": {"backgroundColor": final_background}}
+    return {
+        "found": True,
+        "hovered": True,
+        "pointerReachable": True,
+        "selector": selector,
+        "matchIndex": match_index,
+        "matchCount": 1,
+        "transition": {
+            "property": transition_property,
+            "duration": transition_duration,
+            "delay": "0s",
+            "timingFunction": "ease",
+        },
+        "hoverProof": {
+            "schemaVersion": 1,
+            "selector": selector,
+            "matchIndex": match_index,
+            "matchCount": 1,
+            "done": True,
+            "pointerObserved": True,
+            "rafObserved": True,
+            "firstPointerEvent": 1002.0,
+            "firstCommitRaf": 1010.0,
+            "firstHoverRaf": 1010.0,
+            "changedStyleKeys": changed_style_keys,
+            "initial": initial,
+            "commit": final,
+            "final": final,
+            "maxActiveAnimationCount": max_active_animation_count,
+        },
+    }
+
+
+def test_material_rescue_accepts_low_cadence_single_point_with_runtime_proof(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "material-rescue"
+    (out / "ref-video").mkdir(parents=True)
+    (out / "impl-video").mkdir(parents=True)
+    (out / "diff-frames").mkdir()
+    (out / "target-roi.json").write_text(
+        json.dumps(
+            {
+                "ref": {"target": {"width": 160, "height": 120}},
+                "impl": {"target": {"width": 160, "height": 120}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out / "ref-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload()),
+        encoding="utf-8",
+    )
+    (out / "impl-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload()),
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-raw-ssim.txt").write_text(
+        "\n".join(["0.88"] * 342) + "\n",
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-material-ssim.txt").write_text(
+        "\n".join(["0.90119"] * 342) + "\n",
+        encoding="utf-8",
+    )
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    harness = tmp_path / "material-rescue.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + _extract_bash_function(script, "target_dimensions_close")
+        + "\n"
+        + _extract_bash_function(script, "target_material_rescue_eligible")
+        + f'\nOUT_DIR="{out}"\n'
+        + 'target_material_rescue_eligible ".target" "0.90" "342" "342" "342" "0" "613" "613" "620" "640"\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_material_rescue_refuses_missing_impl_transition(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "missing-impl"
+    (out / "ref-video").mkdir(parents=True)
+    (out / "impl-video").mkdir(parents=True)
+    (out / "diff-frames").mkdir()
+    (out / "target-roi.json").write_text(
+        json.dumps(
+            {
+                "ref": {"target": {"width": 160, "height": 120}},
+                "impl": {"target": {"width": 160, "height": 120}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out / "ref-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload()),
+        encoding="utf-8",
+    )
+    (out / "impl-video" / "hover-action.raw.json").write_text(
+        json.dumps(
+            _hover_receipt_payload(
+                transition_duration="0s",
+                max_active_animation_count=0,
+            )
+        ),
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-raw-ssim.txt").write_text("0.50\n", encoding="utf-8")
+    (out / "diff-frames" / "target-material-ssim.txt").write_text("0.90119\n", encoding="utf-8")
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    harness = tmp_path / "material-rescue.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + _extract_bash_function(script, "target_dimensions_close")
+        + "\n"
+        + _extract_bash_function(script, "target_material_rescue_eligible")
+        + f'\nOUT_DIR="{out}"\n'
+        + 'target_material_rescue_eligible ".target" "0.90" "1" "1" "1" "0" "7" "24" "7" "7"\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+
+
+def test_material_rescue_refuses_mismatched_runtime_endpoints(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "endpoint-mismatch"
+    (out / "ref-video").mkdir(parents=True)
+    (out / "impl-video").mkdir(parents=True)
+    (out / "diff-frames").mkdir()
+    (out / "target-roi.json").write_text(
+        json.dumps(
+            {
+                "ref": {"target": {"width": 160, "height": 120}},
+                "impl": {"target": {"width": 160, "height": 120}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out / "ref-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload()),
+        encoding="utf-8",
+    )
+    (out / "impl-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload(final_background="rgb(240, 240, 240)")),
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-raw-ssim.txt").write_text("0.88\n", encoding="utf-8")
+    (out / "diff-frames" / "target-material-ssim.txt").write_text("0.90119\n", encoding="utf-8")
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    harness = tmp_path / "material-rescue.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + _extract_bash_function(script, "target_dimensions_close")
+        + "\n"
+        + _extract_bash_function(script, "target_material_rescue_eligible")
+        + f'\nOUT_DIR="{out}"\n'
+        + 'target_material_rescue_eligible ".target" "0.90" "1" "1" "1" "0" "613" "613" "620" "640"\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+
+
+@pytest.mark.parametrize("missing_phase", ["initial", "final"])
+def test_material_rescue_requires_both_runtime_endpoint_phases(
+    tmp_path: Path,
+    missing_phase: str,
+) -> None:
+    out = tmp_path / f"missing-{missing_phase}-endpoint"
+    (out / "ref-video").mkdir(parents=True)
+    (out / "impl-video").mkdir(parents=True)
+    (out / "diff-frames").mkdir()
+    (out / "target-roi.json").write_text(
+        json.dumps(
+            {
+                "ref": {"target": {"width": 160, "height": 120}},
+                "impl": {"target": {"width": 160, "height": 120}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    ref_receipt = _hover_receipt_payload()
+    impl_receipt = _hover_receipt_payload()
+    ref_proof = cast(dict[str, object], ref_receipt["hoverProof"])
+    impl_proof = cast(dict[str, object], impl_receipt["hoverProof"])
+    ref_proof.pop(missing_phase)
+    impl_proof.pop(missing_phase)
+    (out / "ref-video" / "hover-action.raw.json").write_text(
+        json.dumps(ref_receipt),
+        encoding="utf-8",
+    )
+    (out / "impl-video" / "hover-action.raw.json").write_text(
+        json.dumps(impl_receipt),
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-raw-ssim.txt").write_text("0.88\n", encoding="utf-8")
+    (out / "diff-frames" / "target-material-ssim.txt").write_text("0.90119\n", encoding="utf-8")
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    harness = tmp_path / "material-rescue.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + _extract_bash_function(script, "target_dimensions_close")
+        + "\n"
+        + _extract_bash_function(script, "target_material_rescue_eligible")
+        + f'\nOUT_DIR="{out}"\n'
+        + 'target_material_rescue_eligible ".target" "0.90" "1" "1" "1" "0" "613" "613" "620" "640"\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+
+
+def test_material_rescue_refuses_mismatched_transition_contract(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "contract-mismatch"
+    (out / "ref-video").mkdir(parents=True)
+    (out / "impl-video").mkdir(parents=True)
+    (out / "diff-frames").mkdir()
+    (out / "target-roi.json").write_text(
+        json.dumps(
+            {
+                "ref": {"target": {"width": 160, "height": 120}},
+                "impl": {"target": {"width": 160, "height": 120}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out / "ref-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload()),
+        encoding="utf-8",
+    )
+    (out / "impl-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload(transition_property="color")),
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-raw-ssim.txt").write_text("0.88\n", encoding="utf-8")
+    (out / "diff-frames" / "target-material-ssim.txt").write_text("0.90119\n", encoding="utf-8")
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    harness = tmp_path / "material-rescue.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + _extract_bash_function(script, "target_dimensions_close")
+        + "\n"
+        + _extract_bash_function(script, "target_material_rescue_eligible")
+        + f'\nOUT_DIR="{out}"\n'
+        + 'target_material_rescue_eligible ".target" "0.90" "1" "1" "1" "0" "613" "613" "620" "640"\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("transition_property", "transition_duration"),
+    [
+        ("opacity", "0.4s"),
+        ("background-color, opacity", "0s, 0.4s"),
+    ],
+)
+def test_material_rescue_requires_positive_duration_for_changed_material_property(
+    tmp_path: Path,
+    transition_property: str,
+    transition_duration: str,
+) -> None:
+    out = tmp_path / "wrong-property-duration"
+    (out / "ref-video").mkdir(parents=True)
+    (out / "impl-video").mkdir(parents=True)
+    (out / "diff-frames").mkdir()
+    (out / "target-roi.json").write_text(
+        json.dumps(
+            {
+                "ref": {"target": {"width": 160, "height": 120}},
+                "impl": {"target": {"width": 160, "height": 120}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    receipt = _hover_receipt_payload(
+        transition_property=transition_property,
+        transition_duration=transition_duration,
+    )
+    (out / "ref-video" / "hover-action.raw.json").write_text(
+        json.dumps(receipt),
+        encoding="utf-8",
+    )
+    (out / "impl-video" / "hover-action.raw.json").write_text(
+        json.dumps(receipt),
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-raw-ssim.txt").write_text("0.88\n", encoding="utf-8")
+    (out / "diff-frames" / "target-material-ssim.txt").write_text("0.90119\n", encoding="utf-8")
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    harness = tmp_path / "material-rescue.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + _extract_bash_function(script, "target_dimensions_close")
+        + "\n"
+        + _extract_bash_function(script, "target_material_rescue_eligible")
+        + f'\nOUT_DIR="{out}"\n'
+        + 'target_material_rescue_eligible ".target" "0.90" "1" "1" "1" "0" "613" "613" "620" "640"\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+
+
+def test_material_rescue_refuses_one_side_no_motion_arc_even_with_receipts(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "one-side-no-motion"
+    (out / "ref-video").mkdir(parents=True)
+    (out / "impl-video").mkdir(parents=True)
+    (out / "diff-frames").mkdir()
+    (out / "target-roi.json").write_text(
+        json.dumps(
+            {
+                "ref": {"target": {"width": 160, "height": 120}},
+                "impl": {"target": {"width": 160, "height": 120}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out / "ref-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload()),
+        encoding="utf-8",
+    )
+    (out / "impl-video" / "hover-action.raw.json").write_text(
+        json.dumps(_hover_receipt_payload()),
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-raw-ssim.txt").write_text(
+        "\n".join(["0.88"] * 24) + "\n",
+        encoding="utf-8",
+    )
+    (out / "diff-frames" / "target-material-ssim.txt").write_text(
+        "\n".join(["0.90119"] * 24) + "\n",
+        encoding="utf-8",
+    )
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    harness = tmp_path / "material-rescue.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + _extract_bash_function(script, "target_dimensions_close")
+        + "\n"
+        + _extract_bash_function(script, "target_material_rescue_eligible")
+        + f'\nOUT_DIR="{out}"\n'
+        + 'target_material_rescue_eligible ".target" "0.90" "24" "24" "24" "0" "7" "24" "1" "1"\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode != 0
 
 
 @needs_video_tools
@@ -3717,9 +4295,7 @@ def test_skip_record_selector_requires_explicit_positive_action_onset(
 
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "selector action onset must be an explicit positive number" in proc.stdout
-    assert "normalization" not in json.loads(
-        (out / "target-roi.json").read_text(encoding="utf-8")
-    )
+    assert "normalization" not in json.loads((out / "target-roi.json").read_text(encoding="utf-8"))
 
 
 @needs_video_tools
@@ -3883,8 +4459,7 @@ def test_arc_only_target_jitter_writes_retry_receipt_and_exits_two(
     assert receipt["arc"]["ref"]["durationFrames"] > 0
     assert receipt["arc"]["impl"]["durationFrames"] > 0
     assert receipt["arc"]["deltaFrames"] == abs(
-        receipt["arc"]["ref"]["durationFrames"]
-        - receipt["arc"]["impl"]["durationFrames"]
+        receipt["arc"]["ref"]["durationFrames"] - receipt["arc"]["impl"]["durationFrames"]
     )
     assert receipt["arc"]["withinTolerance"] == (
         receipt["arc"]["deltaFrames"] <= receipt["arc"]["maxDeltaFrames"]
@@ -4277,11 +4852,7 @@ def test_static_foreground_noise_filter_passes_equal_material_motion(
     assert "pass-by-target-static-foreground-filter" in proc.stdout
     assert not (out / "target-aa-filter.json").exists()
     assert not (out / "capture-retry.json").exists()
-    receipt = json.loads(
-        (out / "target-static-foreground-filter.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    receipt = json.loads((out / "target-static-foreground-filter.json").read_text(encoding="utf-8"))
     assert receipt["status"] == "pass-by-target-static-foreground-filter"
     assert receipt["materialThreshold"] == "6%"
     assert receipt["rawFailures"] > 0

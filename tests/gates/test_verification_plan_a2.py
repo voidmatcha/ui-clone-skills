@@ -575,6 +575,244 @@ def test_verification_plan_derives_hasSplash_from_states_summary(tmp_path: Path)
     )
 
 
+def test_verification_plan_splash_contract_false_overrides_noisy_summary(
+    tmp_path: Path,
+) -> None:
+    """Legacy states/splash/contract.json detected=false is authoritative."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "detected": False,
+                "overlay": {"selector": None, "maxCoverage": 0, "exitObserved": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 4, "reason": "stable-2s"}),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": [{"trigger": "page-load", "kind": "splash"}]}),
+        encoding="utf-8",
+    )
+
+    plan = _run_verification_plan(ref, tier="standard")
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+
+    assert plan["signals"]["hasSplash"] is False
+    assert "splash-lifecycle" not in rows
+    assert "video-motion-compare" not in rows
+
+
+def test_verification_plan_pre_navigation_splash_contract_false_overrides_noisy_summary(
+    tmp_path: Path,
+) -> None:
+    """Pre-navigation detected=false is authoritative."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "pre-navigation",
+                "detected": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 4, "reason": "stable-2s"}),
+        encoding="utf-8",
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": [{"trigger": "page-load", "kind": "splash"}]}),
+        encoding="utf-8",
+    )
+
+    plan = _run_verification_plan(ref, tier="standard")
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+
+    assert plan["signals"]["hasSplash"] is False
+    assert "splash-lifecycle" not in rows
+    assert "video-motion-compare" not in rows
+
+
+def test_verification_plan_observed_overlay_negative_falls_through_to_summary(
+    tmp_path: Path,
+) -> None:
+    """Observed-but-unexited overlays keep summary-derived splash checks active."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "pre-navigation",
+                "detected": False,
+                "overlay": {"everVisible": True, "exitObserved": False},
+                "capture": {
+                    "stateCount": 3,
+                    "timedOut": False,
+                    "reason": "stable-2s",
+                    "authoritativeNegative": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 4, "reason": "stable-2s"}),
+        encoding="utf-8",
+    )
+    (splash / "trajectory.json").write_text(
+        json.dumps(
+            [
+                {"ts_ms": 0, "bodyClass": "is-loading"},
+                {"ts_ms": 800, "bodyClass": "is-loaded"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    plan = _run_verification_plan(ref, tier="standard")
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+
+    assert plan["signals"]["hasSplash"] is True
+    assert "splash-lifecycle" in rows
+
+
+def test_verification_plan_reuse_session_splash_contract_false_falls_through_to_summary(
+    tmp_path: Path,
+) -> None:
+    """Reuse-session detected=false does not mask independent summary evidence."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "reuse-session",
+                "detected": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 4, "reason": "stable-2s"}),
+        encoding="utf-8",
+    )
+    (splash / "trajectory.json").write_text(
+        json.dumps(
+            [
+                {"ts_ms": 0, "bodyClass": "is-loading"},
+                {"ts_ms": 800, "bodyClass": "is-loaded"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    plan = _run_verification_plan(ref, tier="standard")
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+
+    assert plan["signals"]["hasSplash"] is True
+    assert "splash-lifecycle" in rows
+
+
+def test_verification_plan_splash_contract_true_enables_has_splash(
+    tmp_path: Path,
+) -> None:
+    """Explicit states/splash/contract.json detected=true sets hasSplash."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    (splash / "contract.json").write_text(
+        json.dumps({"schemaVersion": 1, "detected": True}),
+        encoding="utf-8",
+    )
+    (splash / "summary.json").write_text(
+        json.dumps({"checked": True, "polls": 1, "reason": "static"}),
+        encoding="utf-8",
+    )
+
+    plan = _run_verification_plan(ref, tier="standard")
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+
+    assert plan["signals"]["hasSplash"] is True
+    assert "splash-lifecycle" in rows
+
+
+@pytest.mark.parametrize("capture_mode", [None, "pre-navigation", "reuse-session"])
+def test_verification_plan_splash_contract_true_enables_has_splash_for_all_modes(
+    tmp_path: Path,
+    capture_mode: str | None,
+) -> None:
+    """detected=true is authoritative for every capture mode."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True)
+    contract: dict[str, object] = {"schemaVersion": 1, "detected": True}
+    if capture_mode is not None:
+        contract["captureMode"] = capture_mode
+    (splash / "contract.json").write_text(
+        json.dumps(contract),
+        encoding="utf-8",
+    )
+
+    plan = _run_verification_plan(ref, tier="standard")
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+
+    assert plan["signals"]["hasSplash"] is True
+    assert "splash-lifecycle" in rows
+
+
+def test_verification_plan_requires_splash_lifecycle_when_has_splash(
+    tmp_path: Path,
+) -> None:
+    """hasSplash=true must schedule the first-load lifecycle verifier.
+
+    Video SSIM can prove a splash-looking frame sequence, but it can still be
+    fooled by background video or a static overlay. A declared splash needs a
+    separate lifecycle artifact that proves mount/presence, phase change, and
+    exit on both ref and impl.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "interactions-detected.json").write_text(
+        json.dumps({"interactions": [], "hasSplash": True}),
+        encoding="utf-8",
+    )
+
+    plan = _run_verification_plan(ref, tier="standard")
+    rows = {c["id"]: c for c in plan["requiredChecks"]}
+
+    assert plan["signals"]["hasSplash"] is True
+    assert "splash-lifecycle" in rows
+    assert rows["splash-lifecycle"]["severity"] == "block"
+    assert rows["splash-lifecycle"]["tier"] == "standard"
+    assert rows["splash-lifecycle"]["produces"] == "splash-lifecycle.json"
+    assert rows["splash-lifecycle"]["script"] == (
+        "skills/visual-debug/scripts/splash-lifecycle-check.sh"
+    )
+    assert "runtime-env" in rows["splash-lifecycle"].get("dependsOn", [])
+    assert rows["splash-lifecycle"]["argsRecipe"] == (
+        "{session}-splash {ref_url} {impl_url} {ref_dir}"
+    )
+
+
 def test_verification_plan_derives_hasHover_from_states_manifest(tmp_path: Path) -> None:
     """Phase C `states/hover/manifest.json` entries must set HAS_HOVER=true."""
     ref = tmp_path / "ref"

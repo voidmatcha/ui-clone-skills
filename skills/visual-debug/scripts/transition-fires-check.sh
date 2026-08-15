@@ -89,6 +89,7 @@ VIEW_W="${VIEW_W:-1440}"
 VIEW_H="${VIEW_H:-900}"
 WAIT_MS="${WAIT_MS:-1600}"
 SETTLE_MS="${SETTLE_MS:-1100}"
+UI_CLONE_FIRES_RESPONSIVE_RETRY="${UI_CLONE_FIRES_RESPONSIVE_RETRY:-1}"
 
 python_imports_ui_clone() {
   (cd "$REPO_ROOT" && PYTHONPATH="$REPO_ROOT" "$@" - <<'PY'
@@ -669,12 +670,25 @@ PHASE2_TEMPLATE="(async () => {
           var sig = ''; var csig = ''; var lim = Math.min(chs.length, 48);
           for (var sci = 0; sci < lim; sci++){ var scc = getComputedStyle(chs[sci]); sig += scc.transform + '|' + scc.opacity + '|' + scc.zIndex + ';'; csig += scc.color + ';'; }
           var animRunning = (cs.animationName && cs.animationName !== 'none' && cs.animationPlayState !== 'paused' && cs.animationDuration && cs.animationDuration !== '0s');
-          samples.push({ transform: cs.transform, opacity: parseFloat(cs.opacity), top: rr.top, width: rr.width, childSig: sig, childColorSig: csig, cls: (el.getAttribute('class') || ''), scrollY: window.scrollY, docH: docH, smoothEngine: smoothEngine, animRunning: animRunning });
+          samples.push({ transform: cs.transform, opacity: parseFloat(cs.opacity), filter: cs.filter, top: rr.top, width: rr.width, height: rr.height, childSig: sig, childColorSig: csig, cls: (el.getAttribute('class') || ''), scrollY: window.scrollY, docH: docH, smoothEngine: smoothEngine, animRunning: animRunning });
+        };
+        // Scroll-linked label/state swaps can complete well before the normal
+        // settle window. Sample inside that window when the spec declares the
+        // affected visual channels, while keeping the same total settle time.
+        const transientStyle = /transform|opacity/i.test(e.prop || '') && /scroll/i.test(e.trigger || '');
+        const settleAndSample = async () => {
+          if (transientStyle) {
+            await wait(80); takeSample();
+            await wait(140); takeSample();
+            await wait(Math.max(0, SETTLE - 220));
+          } else {
+            await wait(SETTLE);
+          }
+          takeSample();
         };
         for (const p of [-1, -0.5, 0, 0.5, 1]) {
           window.scrollTo(0, Math.min(docH, Math.max(0, base - window.innerHeight * 0.4 + span * p)));
-          await wait(SETTLE);
-          takeSample();
+          await settleAndSample();
         }
         // D17a globalSweep fallback (loop-nvti-0): near-top elements clamp the
         // local sweep to ~0 (base - 0.4*viewport + span*p all negative), so
@@ -691,8 +705,7 @@ PHASE2_TEMPLATE="(async () => {
         if (new Set(sYs.map(y => Math.round(y))).size < 2 || ySpan < Math.min(2000, docH * 0.5)) {
           for (const gp of [0, 0.25, 0.5, 0.75, 1]) {
             window.scrollTo(0, Math.round(docH * gp));
-            await wait(SETTLE);
-            takeSample();
+            await settleAndSample();
           }
         }
         rec.samples = samples;
@@ -1160,6 +1173,12 @@ if [ -n "$WHEEL_TARGETS" ] && [ "$WHEEL_TARGETS" != "[]" ]; then
   WHEEL_B64=$(printf '%s' "$WHEEL_TARGETS" | base64 | tr -d '\n')
   WHEEL_SAMPLES="$(mktemp)"
   : > "$WHEEL_SAMPLES"
+  # The phase-2 sweep may already have latched a one-shot scrub (height bars,
+  # counters) in its final state. A fresh navigation restores the pre-trigger
+  # state before the wheel sweep; merely scrolling the same document to zero
+  # cannot undo an IntersectionObserver latch.
+  agent-browser --session "$SESSION" navigate "$URL" >/dev/null 2>&1
+  sleep $(( (WAIT_MS + 999) / 1000 ))
   # Reset to top: engine API when exposed, native scrollTo otherwise. The real
   # Lenis instance is window.__lenis (window.lenis is often a {version} decoy
   # with no scrollTo), so try it first, then any window.lenis that does expose
@@ -1205,7 +1224,7 @@ if [ -n "$WHEEL_TARGETS" ] && [ "$WHEEL_TARGETS" != "[]" ]; then
       var sig = ''; var csig = ''; var lim = Math.min(chs.length, 48);
       for (var wci = 0; wci < lim; wci++){ var wcc = getComputedStyle(chs[wci]); sig += wcc.transform + '|' + wcc.opacity + '|' + wcc.zIndex + ';'; csig += wcc.color + ';'; }
       var animRunning = (cs.animationName && cs.animationName !== 'none' && cs.animationPlayState !== 'paused' && cs.animationDuration && cs.animationDuration !== '0s');
-      out[t.idx] = { transform: cs.transform, opacity: parseFloat(cs.opacity), top: rr.top, width: rr.width, childSig: sig, childColorSig: csig, cls: (el.getAttribute('class') || ''), scrollY: window.scrollY, wheelDriven: true, smoothEngine: smoothEngine, engineDriven: engineDriven, animRunning: animRunning };
+      out[t.idx] = { transform: cs.transform, opacity: parseFloat(cs.opacity), filter: cs.filter, top: rr.top, width: rr.width, height: rr.height, childSig: sig, childColorSig: csig, cls: (el.getAttribute('class') || ''), scrollY: window.scrollY, wheelDriven: true, smoothEngine: smoothEngine, engineDriven: engineDriven, animRunning: animRunning };
     }
     return JSON.stringify(out);
   })()"
@@ -1514,6 +1533,109 @@ PY
 # ── Decide + write artifact + exit code (pure module, unit-tested). ───────
 run_py -m ui_clone.gates.transition_fires "$SPEC" "$OBS_TMP" "$ASSET_SUB" "$OUT" --impl-url "$URL"
 RC=$?
+
+# A responsive target can be intentionally absent from layout at the default
+# desktop viewport. Re-probe only failed targets that have no rendered box here
+# but do render at the canonical mobile viewport, then replace only those rows
+# in the canonical artifact. The scoped child disables this block to prevent
+# recursion; all other desktop verdicts remain authoritative.
+if [ "$UI_CLONE_FIRES_RESPONSIVE_RETRY" != "0" ] && [ -z "$FIRES_IDS" ]; then
+  RESPONSIVE_CANDIDATES_B64=$(run_py - "$SPEC" "$OUT" <<'PY'
+import base64, json, sys
+
+spec = json.load(open(sys.argv[1]))
+artifact = json.load(open(sys.argv[2]))
+failed = {
+    str(row.get("id", ""))
+    for row in artifact.get("entries", [])
+    if isinstance(row, dict) and row.get("status") == "fail"
+}
+rows = [
+    {"id": str(row.get("id", "")), "target": str(row.get("target", ""))}
+    for row in spec.get("transitions", [])
+    if isinstance(row, dict)
+    and str(row.get("id", "")) in failed
+    and str(row.get("target", ""))
+]
+sys.stdout.write(base64.b64encode(json.dumps(rows).encode()).decode())
+PY
+  )
+  if [ -n "$RESPONSIVE_CANDIDATES_B64" ]; then
+    HIDDEN_RAW=$(agent-browser --session "$SESSION" eval "(() => {
+      const rows = JSON.parse(atob('$RESPONSIVE_CANDIDATES_B64'));
+      const resolve = (target) => {
+        let el = null;
+        try { el = document.querySelector(target); } catch (_) {}
+        if (!el && target.indexOf('.') >= 0) {
+          try { el = document.querySelector(target.replace(/\.([A-Za-z0-9_-]+)/g, '[class*=\"\$1\"]')); } catch (_) {}
+          if (!el) {
+            try { el = document.querySelector(target.replace(/\.([A-Za-z0-9_-]+?)(?:__[A-Za-z0-9_-]{4,})(?=[\s>:\[.]|$)/g, '[class*=\"\$1\"]').replace(/\.([A-Za-z0-9_-]+)/g, '[class*=\"\$1\"]')); } catch (_) {}
+          }
+        }
+        return el;
+      };
+      return JSON.stringify(rows.filter((row) => {
+        const el = resolve(row.target);
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        return el.getClientRects().length === 0 || (rect.width <= 0 && rect.height <= 0);
+      }));
+    })()" 2>/dev/null)
+    HIDDEN_JSON=$(printf '%s' "$HIDDEN_RAW" | unwrap)
+    if [ -n "$HIDDEN_JSON" ] && [ "$HIDDEN_JSON" != "[]" ]; then
+      HIDDEN_B64=$(printf '%s' "$HIDDEN_JSON" | base64 | tr -d '\n')
+      agent-browser --session "$SESSION" set viewport 375 812 >/dev/null 2>&1
+      agent-browser --session "$SESSION" navigate "$URL" >/dev/null 2>&1
+      sleep $(( (WAIT_MS + 999) / 1000 ))
+      MOBILE_VISIBLE_RAW=$(agent-browser --session "$SESSION" eval "(() => {
+        const rows = JSON.parse(atob('$HIDDEN_B64'));
+        const resolve = (target) => {
+          let el = null;
+          try { el = document.querySelector(target); } catch (_) {}
+          if (!el && target.indexOf('.') >= 0) {
+            try { el = document.querySelector(target.replace(/\.([A-Za-z0-9_-]+)/g, '[class*=\"\$1\"]')); } catch (_) {}
+            if (!el) {
+              try { el = document.querySelector(target.replace(/\.([A-Za-z0-9_-]+?)(?:__[A-Za-z0-9_-]{4,})(?=[\s>:\[.]|$)/g, '[class*=\"\$1\"]').replace(/\.([A-Za-z0-9_-]+)/g, '[class*=\"\$1\"]')); } catch (_) {}
+            }
+          }
+          return el;
+        };
+        return JSON.stringify(rows.filter((row) => {
+          const el = resolve(row.target);
+          if (!el) return false;
+          const rect = el.getBoundingClientRect();
+          return el.getClientRects().length > 0 && (rect.width > 0 || rect.height > 0);
+        }).map((row) => row.id));
+      })()" 2>/dev/null)
+      MOBILE_VISIBLE_JSON=$(printf '%s' "$MOBILE_VISIBLE_RAW" | unwrap)
+      RESPONSIVE_IDS=$(printf '%s' "$MOBILE_VISIBLE_JSON" | run_py -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    rows = []
+print(",".join(str(row) for row in rows if row))
+')
+      if [ -n "$RESPONSIVE_IDS" ]; then
+        RESPONSIVE_OUT=$(mktemp "${TMPDIR:-/tmp}/transition-fires-responsive.XXXXXX")
+        mv "$RESPONSIVE_OUT" "${RESPONSIVE_OUT}.json"
+        RESPONSIVE_OUT="${RESPONSIVE_OUT}.json"
+        echo "transition-fires: retrying hidden targets at 375x812 (${RESPONSIVE_IDS})"
+        UI_CLONE_FIRES_RESPONSIVE_RETRY=0 UI_CLONE_FIRES_IDS="$RESPONSIVE_IDS" \
+          VIEW_W=375 VIEW_H=812 WAIT_MS="$WAIT_MS" SETTLE_MS="$SETTLE_MS" \
+          bash "$SCRIPT_DIR/transition-fires-check.sh" \
+          "${SESSION}-responsive" "$URL" "$REF_DIR" --out "$RESPONSIVE_OUT"
+        RESPONSIVE_RC=$?
+        if [ "$RESPONSIVE_RC" -ne 2 ] && [ -s "$RESPONSIVE_OUT" ]; then
+          run_py -m ui_clone.gates.transition_fires \
+            --merge-artifacts "$OUT" "$RESPONSIVE_OUT" "$OUT"
+          RC=$?
+        fi
+        rm -f "$RESPONSIVE_OUT"
+      fi
+    fi
+  fi
+fi
 
 rm -f "$BEFORE_TMP" "$AFTER_TMP" "$OBS_TMP" "$LOAD_TMP" "$REVEAL_TMP"
 exit $RC

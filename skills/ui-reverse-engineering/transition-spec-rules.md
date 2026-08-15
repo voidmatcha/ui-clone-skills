@@ -89,7 +89,15 @@ entry exists.
    satisfy the spec gate.
 5. **Convert GSAP easing to CSS** — write both GSAP name and `cubic-bezier()`.
 6. **Include `simultaneous`** — transitions that co-occur with specific delays.
-7. **Consult `animation-runtime-dump.json`** when present — easing functions, resolved ScrollTrigger pixel offsets, Lenis/IX2 timings live there even when bundle-grep misses them. Phase 0 of `animation-detection.md` writes this file.
+7. **Consult `animation-runtime-dump.json`** when present — Check `animation-runtime-dump.json` `captureStatus` and `scrollAudit` first. Only successful captures with a trustworthy audit can ground runtime motion rows. Easing functions, resolved ScrollTrigger pixel offsets, Lenis/IX2 timings, and scroll-linked computed styles live there even when bundle-grep misses them. Phase 0 of `animation-detection.md` writes this file.
+   When a runtime row was captured at one viewport but captured CSS proves the
+   animated property is scoped by a breakpoint, add an explicit transition-level
+   `"media": "(min-width: ...)"` or `"media": "(max-width: ...)"`. This must be
+   CSS-grounded evidence, not an inference from capture viewport width. The
+   planner must preserve the media guard by exact runtime `sourceId`, and the
+   runtime replay must restore styles it wrote when that media query becomes
+   inactive. Conflicting media guards for one `sourceId` are invalid evidence;
+   omit that runtime replay instead of falling back to an unguarded global curve.
 8. **Consult `state-structure-spec.json`** when a transition depends on DOM/class/content state — page-load splash swaps, sticky threshold class flips, hover class/data-state mutations, accordions, tabs, modals, or click navigation. This file is the compact browser-observed state index; raw `states/**` HTML dumps are fallback evidence for `source-forensics`, not first-pass generation context.
 9. **Run `verification-plan.sh` before finalizing the spec, then run it again after the spec changes.** Plan signals decide which runtime checks must execute; they are not transition proof. In particular, `hasIOReveal` can come from a conservative boolean CSS classifier over `structure.json` plus captured CSS. Map that signal to an evidence-backed `transitions[]` entry only when captured source/frames prove the reveal, otherwise add a structured `skipped[]` reason. Never promote a dispatch hint into a fabricated transition.
 
@@ -105,23 +113,38 @@ $ cat tmp/ref/<c>/transition-spec.json
    and `placeholder` must not be true — the auto-minted floor never satisfies
    the gate on a motion site; you must draft the real spec
  □ COMPLETENESS (enforced by `gate spec` spec-inventory-coverage): every row in
-   `interactions-detected.json`, every `scroll-transitions.json` entry, and every
-   motion construction site in `bundle-extraction.json` maps to a `transitions[]`
-   id OR a `skipped[]` entry `{sourceArtifact, sourceId, reason}`; every true
-   `verification-plan.json` signal class (scroll-scrub, scroll-state-machine,
-   IO-reveal, hover, click) has ≥1 matching entry. An unmapped detection = FAIL
+   `interactions-detected.json`, every `scroll-transitions.json` entry, every
+   motion construction site in `bundle-extraction.json`, and every successful
+   `scrollLinkedStyles[]` runtime row in `animation-runtime-dump.json` maps to a
+   `transitions[]` id OR a `skipped[]` entry `{sourceArtifact, sourceId, reason}`;
+   every true `verification-plan.json` signal class (scroll-scrub,
+   scroll-state-machine, IO-reveal, hover, click) has ≥1 matching entry. An
+   unmapped detection = FAIL. Successful `scrollLinkedStyles[]` rows are mapped or skipped explicitly.
+ □ For each successful `scrollLinkedStyles[]` row with `sourceId` and `selector`,
+   a `transitions[]` entry must include `"sourceArtifact": "animation-runtime-dump.json"` plus the exact `sourceId`, or a
+   `skipped[]` entry with the same `sourceArtifact` and `sourceId` plus a
+   non-empty `reason`. Selector fallback is legacy-only and must be unambiguous.
+   A planner-collapsed all-match site does not rewrite the spec inventory:
+   every original runtime `sourceId` must still be accounted for here. For
+   identical repeated rows, one transition plus structured skips for the remaining original `sourceId` rows is valid when all skipped rows point to the covered equivalent transition. Mixed repeated rows remain indexed per matched element; do not collapse them by selector alone.
+ □ A capture error on a motion-rich reference blocks `gate spec`; rerun or
+   recover the browser session instead of writing a skip for unknown runtime
+   motion.
  □ `verification-plan.sh` was run once before the final inventory pass and once
    after editing the spec; a classifier signal alone never counts as spec proof
  □ Every `target` parses as a CSS selector (querySelector-able — never a
    declaration fragment)
- □ Every `target` names the element whose animated property the runtime probe
-   measures. When a state class is toggled on an ancestor but CSS animates a
-   descendant, target the animated descendant (optionally constrained by the
-   ancestor's pre-trigger state) and record the class owner in the animation
-   metadata. For hover only, an ancestor may be the target when it owns the
-   pointer hit area and contains the animated descendants; declare
-   `animation.measurement: target-and-descendants`. An ancestor without that
-   explicit measurement scope is not motion evidence
+ □ Every non-hover `target` names the element whose animated property the
+   runtime probe measures. When a state class is toggled on an ancestor but CSS
+   animates a descendant, target the animated descendant (optionally constrained
+   by the ancestor's pre-trigger state) and record the class owner in the
+   animation metadata. For hover, keep the pointer hit area in `target` and put
+   the animated descendant selector in `affectedTarget`; the affected match must
+   be contained by the exact activated element. Dispatch and hit testing use
+   `target`, while style, timing, and tight-ROI measurement use `affectedTarget`.
+   Legacy `animation.measurement: target-and-descendants` remains readable, but
+   new evidence should use the explicit selector split. An ancestor without an
+   affected measurement scope is not motion evidence
  □ Each entry has: id, trigger, source_chunk, bundle_branch, target, animation
  □ Each entry has: reference_frames naming existing, non-empty local image/video
    evidence; missing files, empty values, and placeholders such as "none" FAIL

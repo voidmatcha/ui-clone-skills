@@ -139,9 +139,11 @@ ab_open_at_viewport "$SESSION_IMPL" "$IMPL_URL" "$VIEW_W" "$VIEW_H" "$((WAIT_IMP
 # sample and buries the actual scroll-driven trajectory under noise (all 5
 # points exceeded the ceiling on a 14/14-section-PASS clone). Mask the same
 # dynamic families section-compare masks: base media tags + transition-spec
-# entries declared dynamic:true. Both sides get the identical mask, so this
-# cannot hide a one-sided defect.
-DYN_SELECTORS="canvas, video, iframe, nav, [class*=\"slideshow\"], [class*=\"carousel\"], section:has(canvas), [class*=\"playground\"]:has(canvas)"
+# entries declared dynamic:true. Media poster siblings are time-coupled to
+# video readiness too, so mask only images immediately paired with a video;
+# ordinary static images remain fidelity evidence. Both sides get the
+# identical mask, so this cannot hide a one-sided defect.
+DYN_SELECTORS="canvas, video, img:has(+ video), video + img, iframe, nav, [class*=\"slideshow\"], [class*=\"carousel\"], section:has(canvas), [class*=\"playground\"]:has(canvas)"
 if [ -f "$DIR/transition-spec.json" ]; then
   EXTRA_DYN=$(python3 - "$DIR/transition-spec.json" <<'PY' 2>/dev/null || true
 import json, sys
@@ -185,6 +187,41 @@ if [ "$REF_HEIGHT" -le 0 ] && [ "$IMPL_HEIGHT" -le 0 ]; then
   exit 0
 fi
 
+settle_scroll_fraction() {
+  local pct="$1"
+  local ref_range="$REF_HEIGHT"
+  local impl_range="$IMPL_HEIGHT"
+  local _pass
+
+  # The first jump can activate content-visibility/lazy layout and change the
+  # live scroll range. Browser scroll anchoring may then move one side while
+  # leaving the other at the requested offset. Re-read both ranges and apply
+  # the same fraction a second time before capture so the compared frames are
+  # actually phase-aligned.
+  for _pass in 1 2; do
+    if [ "$_pass" -eq 2 ]; then
+      ref_range=$(agent-browser --session "$SESSION_REF" eval \
+        "(() => Math.max(document.documentElement.scrollHeight - window.innerHeight, 0))()" \
+        2>/dev/null | tr -d '\n\r ' || echo "$REF_HEIGHT")
+      impl_range=$(agent-browser --session "$SESSION_IMPL" eval \
+        "(() => Math.max(document.documentElement.scrollHeight - window.innerHeight, 0))()" \
+        2>/dev/null | tr -d '\n\r ' || echo "$IMPL_HEIGHT")
+    fi
+    [[ "$ref_range" =~ ^[0-9]+([.][0-9]+)?$ ]] || ref_range="$REF_HEIGHT"
+    [[ "$impl_range" =~ ^[0-9]+([.][0-9]+)?$ ]] || impl_range="$IMPL_HEIGHT"
+
+    REF_Y=$(awk -v h="$ref_range" -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
+    IMPL_Y=$(awk -v h="$impl_range" -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
+    agent-browser --session "$SESSION_REF" eval \
+      "(() => { window.scrollTo({top: $REF_Y, behavior: 'instant'}); return window.scrollY; })()" \
+      >/dev/null
+    agent-browser --session "$SESSION_IMPL" eval \
+      "(() => { window.scrollTo({top: $IMPL_Y, behavior: 'instant'}); return window.scrollY; })()" \
+      >/dev/null
+    sleep "$(awk -v ms="$WAIT_SCROLL_SETTLE_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
+  done
+}
+
 REPORT="$DIR/transitions/trajectory-result.txt"
 
 STRUCTURAL_ONLY_MODE="${STRUCTURAL_TRAJECTORY_MODE:-$(structural_only_mode)}"
@@ -227,11 +264,7 @@ PY
   } > "$REPORT"
 
   for pct in $TRAJECTORY_POINTS; do
-    REF_Y=$(awk -v h="$REF_HEIGHT"  -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
-    IMPL_Y=$(awk -v h="$IMPL_HEIGHT" -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
-    agent-browser --session "$SESSION_REF"  eval "(() => { window.scrollTo({top: $REF_Y,  behavior: 'instant'}); return window.scrollY; })()" >/dev/null
-    agent-browser --session "$SESSION_IMPL" eval "(() => { window.scrollTo({top: $IMPL_Y, behavior: 'instant'}); return window.scrollY; })()" >/dev/null
-    sleep "$(awk -v ms="$WAIT_SCROLL_SETTLE_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
+    settle_scroll_fraction "$pct"
     agent-browser --session "$SESSION_REF"  eval "$SIGNATURE_JS" > "$SIG_DIR/ref-$pct.json"
     agent-browser --session "$SESSION_IMPL" eval "$SIGNATURE_JS" > "$SIG_DIR/impl-$pct.json"
   done
@@ -347,18 +380,7 @@ FAIL_COUNT=0
 PASS_COUNT=0
 
 for pct in $TRAJECTORY_POINTS; do
-  REF_Y=$(awk -v h="$REF_HEIGHT"  -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
-  IMPL_Y=$(awk -v h="$IMPL_HEIGHT" -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
-
-  # Scroll both, then settle.
-  agent-browser --session "$SESSION_REF"  eval "(() => { window.scrollTo({top: $REF_Y,  behavior: 'instant'}); return window.scrollY; })()" >/dev/null
-  agent-browser --session "$SESSION_IMPL" eval "(() => { window.scrollTo({top: $IMPL_Y, behavior: 'instant'}); return window.scrollY; })()" >/dev/null
-
-  # Settle: scroll-scrub libraries (ScrollTrigger, Lenis, Locomotive) apply
-  # transforms on the next RAF tick after scroll. 600ms is empirically enough
-  # for ease.out-style transitions to fully resolve at the sampled position;
-  # bump WAIT_SCROLL_SETTLE_MS if your target uses long scrub durations.
-  sleep "$(awk -v ms="$WAIT_SCROLL_SETTLE_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
+  settle_scroll_fraction "$pct"
 
   REF_PNG="$OUT_DIR/ref/${pct}.png"
   IMPL_PNG="$OUT_DIR/impl/${pct}.png"

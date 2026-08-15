@@ -116,6 +116,11 @@ def _bash_write_target(cmd: str) -> str | None:
 _ENFORCEMENT_STATE_RE = (
     r"(?i:\.gate-skip-log|\.ui-re-external-browse|\.ui-re-active"
     r"|verify-stamp\.json|pipeline-state\.json"
+    # generation-plan.json carries sourceHashes/generatedAt provenance consumed by
+    # downstream gates. The canonical writer is scripts/extract/generation-plan.sh,
+    # which names the script/ref dir on the command line, not the artifact. Match
+    # the exact basename only, not not-generation-plan.json or .bak siblings.
+    r"|(?<![^/\s'\"])generation-plan\.json(?![^\s|;&<>()'\"])"
     # sections/result.txt(+.json) is the sha256-stamped section verdict the
     # post-implement gate trusts. PATH-QUALIFIED (`sections/result.*`, not a bare
     # `result.txt`) so the real producer — section-compare, which builds the path

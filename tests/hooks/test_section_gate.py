@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ui_clone import claude_continuation as cc
 from ui_clone.hooks._common import mark_ref_session
 
 from ._helpers import (
@@ -19,6 +20,51 @@ from ._helpers import (
 
 class TestSectionGate:
     MODULE = "ui_clone.hooks.section_gate"
+    SESSION_ID = "session-1"
+    CRON_ID = "cron-1"
+
+    def _cron_row(
+        self,
+        tmp_path: Path,
+        session_id: str | None = None,
+        cron_id: str | None = None,
+    ) -> dict[str, object]:
+        session = session_id or self.SESSION_ID
+        receipt = cc.load_receipt(tmp_path, session)
+        assert receipt is not None
+        return {
+            "id": cron_id or self.CRON_ID,
+            "schedule": "* * * * *",
+            "recurring": True,
+            "prompt": f"wake [[{receipt['leaseTag']}]]",
+        }
+
+    def _blocking_stop(
+        self,
+        tmp_path: Path,
+        session_id: str | None = None,
+        session_crons: object = None,
+        include_session_crons: bool = True,
+    ) -> tuple[dict[str, object], Path]:
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+        mark_ref_session(ref_dir, session_id or self.SESSION_ID, source="test")
+        payload: dict[str, object] = {
+            "hook_event_name": "Stop",
+            "session_id": session_id or self.SESSION_ID,
+        }
+        if include_session_crons:
+            payload["session_crons"] = session_crons
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps(payload),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout.strip())
+        assert data.get("decision") == "block"
+        return data, ref_dir
 
     def test_no_tmp_ref_exits_0(self, tmp_path: Path) -> None:
         """No tmp/ref/ directory → exit 0."""
@@ -228,6 +274,169 @@ class TestSectionGate:
         data = json.loads(out)
         assert data.get("decision") == "block"
         assert "reason" in data
+
+    def test_valid_empty_cron_snapshot_pauses_missing_active_job(
+        self, tmp_path: Path
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.mark_active(tmp_path, self.SESSION_ID, self.CRON_ID)
+
+        data, _ = self._blocking_stop(tmp_path, session_crons=[])
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_PAUSED
+        reason = str(data["reason"])
+        assert "continuation scheduled task is paused" in reason
+        assert "UI-RE Gate" in reason
+
+    @pytest.mark.parametrize("session_crons", [None, "unavailable", [{"id": 3}]])
+    def test_absent_or_malformed_cron_snapshot_does_not_pause_active_receipt(
+        self, tmp_path: Path, session_crons: object
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.mark_active(tmp_path, self.SESSION_ID, self.CRON_ID)
+
+        if session_crons is None:
+            self._blocking_stop(tmp_path, include_session_crons=False)
+        else:
+            self._blocking_stop(tmp_path, session_crons=session_crons)
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ACTIVE
+        assert receipt["cronId"] == self.CRON_ID
+
+    def test_exact_matching_cron_snapshot_activates_pending_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        row = self._cron_row(tmp_path)
+
+        data, _ = self._blocking_stop(tmp_path, session_crons=[row])
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ACTIVE
+        assert receipt["cronId"] == self.CRON_ID
+        assert "CronCreate" not in str(data["reason"])
+
+    def test_exact_matching_cron_snapshot_confirms_active_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.mark_active(tmp_path, self.SESSION_ID, self.CRON_ID)
+        row = self._cron_row(tmp_path)
+
+        data, _ = self._blocking_stop(tmp_path, session_crons=[row])
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ACTIVE
+        assert receipt["cronId"] == self.CRON_ID
+        assert "duplicate continuation scheduled tasks" not in str(data["reason"])
+
+    def test_duplicate_matching_cron_snapshot_prefixes_delete_guidance(
+        self, tmp_path: Path
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        row_a = self._cron_row(tmp_path, cron_id="cron-a")
+        row_b = self._cron_row(tmp_path, cron_id="cron-b")
+
+        data, _ = self._blocking_stop(tmp_path, session_crons=[row_a, row_b])
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_PENDING
+        reason = str(data["reason"])
+        assert "duplicate continuation scheduled tasks" in reason
+        assert "CronDelete" in reason
+        assert "UI-RE Gate" in reason
+
+    def test_unrelated_cron_rows_do_not_activate_pending_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        unrelated = {
+            "id": "other-cron",
+            "schedule": "* * * * *",
+            "recurring": True,
+            "prompt": "wake [[UI_RE_CONTINUATION:other]]",
+        }
+
+        data, _ = self._blocking_stop(tmp_path, session_crons=[unrelated])
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_PENDING
+        assert "CronCreate" in str(data["reason"])
+
+    def test_paused_receipt_never_reactivates_from_matching_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.mark_active(tmp_path, self.SESSION_ID, self.CRON_ID)
+        cc.pause(tmp_path, self.SESSION_ID)
+        row = self._cron_row(tmp_path)
+
+        data, _ = self._blocking_stop(tmp_path, session_crons=[row])
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_PAUSED
+        reason = str(data["reason"])
+        assert "paused" in reason
+        assert "CronDelete" in reason
+
+    def test_first_incomplete_stop_without_receipt_prefixes_croncreate_bootstrap(
+        self, tmp_path: Path
+    ) -> None:
+        data, _ = self._blocking_stop(tmp_path, session_crons=[])
+
+        reason = str(data["reason"])
+        assert reason.startswith("⛔ UI-RE continuation lease missing")
+        assert "CronCreate" in reason
+        assert "ui_clone.claude_continuation" in reason
+        assert "UI-RE Gate" in reason
+
+    def test_first_incomplete_stop_with_pending_receipt_prefixes_croncreate_bootstrap(
+        self, tmp_path: Path
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+
+        data, _ = self._blocking_stop(tmp_path, session_crons=[])
+
+        reason = str(data["reason"])
+        assert "continuation lease is pending" in reason
+        assert "CronCreate" in reason
+        assert "UI-RE Gate" in reason
+
+    def test_stop_hook_active_releases_without_recreating_continuation(
+        self, tmp_path: Path
+    ) -> None:
+        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": self.SESSION_ID,
+                    "stop_hook_active": True,
+                    "session_crons": [self._cron_row(tmp_path)],
+                }
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_PENDING
 
     def test_stop_hook_active_releases_even_when_gate_would_block(
         self, tmp_path: Path
@@ -1085,7 +1294,7 @@ class TestSectionGateFullEnforcement:
         assert exit_code == 0
         data = json.loads(output)
         assert data.get("decision") == "block"
-        assert "impl changed after terminal state" in data.get("reason", "")
+        assert "recoverable verify failure" in data.get("reason", "")
 
     def test_section_compare_blocks_when_result_txt_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """current_gate=section-compare with no result.txt → block, even if diff PNGs exist."""
@@ -2365,10 +2574,10 @@ def _canonical_failure_terminal(gate: str) -> dict[str, object]:
     }
 
 
-def test_canonical_nonsection_failure_with_success_section_result_releases(
+def test_legacy_canonical_nonsection_failure_blocks_as_recoverable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An all-PASS section report can coexist with another failed verify gate."""
+    """Legacy canonical verify failures are active rework, not terminal release."""
     from ui_clone.gates.base import CheckResult, Gate
 
     _with_result(tmp_path)
@@ -2385,13 +2594,14 @@ def test_canonical_nonsection_failure_with_success_section_result_releases(
         tmp_path, _canonical_failure_terminal("post-implement")
     )
 
-    assert reason is None
+    assert reason is not None
+    assert "recoverable verify failure" in reason
 
 
-def test_canonical_failure_report_cannot_release_when_live_gate_passes(
+def test_legacy_canonical_failure_report_blocks_when_live_gate_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A writable report is not enough; the declared gate must still fail live."""
+    """A legacy canonical verify failure remains Stop-blocking active work."""
     from ui_clone.gates.base import CheckResult, Gate
 
     _with_result(tmp_path)
@@ -2407,13 +2617,13 @@ def test_canonical_failure_report_cannot_release_when_live_gate_passes(
     )
 
     assert reason is not None
-    assert "canonical" in reason.lower()
+    assert "recoverable verify failure" in reason
 
 
-def test_canonical_section_compare_failure_with_success_result_still_blocks(
+def test_legacy_canonical_section_compare_failure_blocks_as_recoverable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The exception cannot excuse contradictory section-compare evidence."""
+    """The section-compare variant is also recoverable rework."""
     from ui_clone.gates.base import CheckResult, Gate
 
     _with_result(tmp_path)
@@ -2429,7 +2639,7 @@ def test_canonical_section_compare_failure_with_success_result_still_blocks(
     )
 
     assert reason is not None
-    assert "PASS" in reason and "canonical" in reason.lower()
+    assert "recoverable verify failure" in reason
 
 
 def test_success_fraud_detector_is_failtoward_blocking(tmp_path: Path) -> None:

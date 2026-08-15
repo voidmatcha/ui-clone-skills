@@ -26,6 +26,7 @@
 #   MAX_ELEMENTS=40           Cap candidates (hover loop is slow)
 #   PAIR_TOLERANCE=10         Max center-distance for valid pair (px)
 #   HOVER_WAIT=600            ms after hover before capturing style
+#   HOVER_MAX_WAIT=3000       Per-element cap for declared transition settling
 #   RESET_WAIT=200            ms after un-hover before next element
 #
 # Output:
@@ -54,6 +55,7 @@ MIN_SIZE="${MIN_SIZE:-16}"
 MAX_ELEMENTS="${MAX_ELEMENTS:-40}"
 PAIR_TOLERANCE="${PAIR_TOLERANCE:-10}"
 HOVER_WAIT="${HOVER_WAIT:-600}"
+HOVER_MAX_WAIT="${HOVER_MAX_WAIT:-3000}"
 RESET_WAIT="${RESET_WAIT:-200}"
 SWIPER_SETTLE_MS="${SWIPER_SETTLE_MS:-100}"
 
@@ -316,14 +318,19 @@ echo "  ▸ Capturing impl hover states (CDP-level :hover)..."
 
 _HTD_PY=$(mktemp "$TMP_BASE/htd-hover.XXXXXX")
 cat > "$_HTD_PY" << 'PYEOF'
-import json, subprocess, sys, time, os
+import json, math, subprocess, sys, time, os
 
 SESSION  = os.environ["_HTD_SESSION"]
 SRC_FILE = os.environ["_HTD_SRC"]
 DST_FILE = os.environ["_HTD_DST"]
 HOVER_WAIT = float(os.environ.get("HOVER_WAIT", "600")) / 1000
+HOVER_MAX_WAIT = max(
+    HOVER_WAIT,
+    float(os.environ.get("HOVER_MAX_WAIT", "3000")) / 1000,
+)
 RESET_WAIT = float(os.environ.get("RESET_WAIT", "200")) / 1000
 AGENT_TIMEOUT = float(os.environ.get("HTD_AGENT_TIMEOUT", "20"))
+SETTLE_MARGIN = 0.05
 
 VISUAL_PROPS = ['color','backgroundColor','opacity','transform','filter',
                 'borderTopColor','borderBottomColor','textDecorationLine',
@@ -335,6 +342,37 @@ def parse(raw):
     if raw.startswith('"') and raw.endswith('"'):
         return json.loads(json.loads(raw))
     return json.loads(raw)
+
+def css_time_list(value):
+    values = []
+    for token in str(value or "").split(","):
+        token = token.strip().lower()
+        try:
+            if token.endswith("ms"):
+                seconds = float(token[:-2]) / 1000
+            elif token.endswith("s"):
+                seconds = float(token[:-1])
+            else:
+                continue
+        except ValueError:
+            continue
+        if math.isfinite(seconds):
+            values.append(seconds)
+    return values or [0.0]
+
+def declared_settle_wait(element):
+    transition = element.get("trans") or {}
+    durations = [
+        max(0.0, value)
+        for value in css_time_list(transition.get("transitionDuration"))
+    ]
+    delays = css_time_list(transition.get("transitionDelay"))
+    item_count = max(len(durations), len(delays))
+    transition_end = max(
+        max(0.0, durations[index % len(durations)] + delays[index % len(delays)])
+        for index in range(item_count)
+    )
+    return transition_end + SETTLE_MARGIN if transition_end else 0.0
 
 with open(SRC_FILE) as f:
     elements = parse(f.read())
@@ -443,7 +481,9 @@ for i, el in enumerate(elements):
         results.append({"i": i, "miss": True, "reason": "no-hittable-point"})
         continue
     br_mouse(float(point["x"]), float(point["y"]))
-    time.sleep(HOVER_WAIT)
+    required_wait = declared_settle_wait(el)
+    observation_wait = min(max(HOVER_WAIT, required_wait), HOVER_MAX_WAIT)
+    time.sleep(observation_wait)
 
     # Capture style
     cap = br_eval(CAP_JS % (i, prop_lines))
@@ -461,6 +501,11 @@ for i, el in enumerate(elements):
     results.append({
         "i": i,
         "hover": hover_style,
+        "observation": {
+            "wait_ms": round(observation_wait * 1000, 3),
+            "required_ms": round(required_wait * 1000, 3),
+            "settled": observation_wait + 0.001 >= required_wait,
+        },
     })
     if (i + 1) % 5 == 0:
         sys.stdout.write(f"    ✓ {i + 1}/{len(elements)}\n")
@@ -476,7 +521,7 @@ PYEOF
 # Capture impl hover states
 TMP_IMPL_HOVER=$(mktemp "$TMP_BASE/htd-impl-hover.XXXXXX")
 _HTD_SESSION="$IMPL_SESS" _HTD_SRC="$TMP_IMPL" _HTD_DST="$TMP_IMPL_HOVER" \
-  HOVER_WAIT="$HOVER_WAIT" RESET_WAIT="$RESET_WAIT" \
+  HOVER_WAIT="$HOVER_WAIT" HOVER_MAX_WAIT="$HOVER_MAX_WAIT" RESET_WAIT="$RESET_WAIT" \
   python3 "$_HTD_PY"
 
 # ── Step 3: pair on ref via elementFromPoint, capture ref idle + hover ──
@@ -621,19 +666,20 @@ import json, sys
 with open(sys.argv[1]) as f: raw = f.read().strip()
 if raw.startswith('"'): raw = json.loads(raw)
 ref_list = json.loads(raw)
-# write as "elements" list with x,y so the hover-py can iterate
+# Keep the paired transition metadata so hover capture can wait through a
+# reference-only delay instead of sampling its idle state too early.
 out = []
 for r in ref_list:
     if r.get("miss"):
         out.append({"x": -1, "y": -1, "miss": True})
     else:
-        out.append({"x": r["x"], "y": r["y"]})
+        out.append({"x": r["x"], "y": r["y"], "trans": r.get("trans", {})})
 with open(sys.argv[2], "w") as f:
     json.dump(out, f)
 PYEOF
 
 _HTD_SESSION="$REF_SESS" _HTD_SRC="$TMP_REF_PAIRED" _HTD_DST="$TMP_REF_HOVER" \
-  HOVER_WAIT="$HOVER_WAIT" RESET_WAIT="$RESET_WAIT" \
+  HOVER_WAIT="$HOVER_WAIT" HOVER_MAX_WAIT="$HOVER_MAX_WAIT" RESET_WAIT="$RESET_WAIT" \
   python3 "$_HTD_PY"
 
 # ── Step 4: diff ──
@@ -788,6 +834,10 @@ for i, ie in enumerate(impl):
 
     impl_hover_entry = impl_hov_by_i.get(i, {})
     ref_hover_entry = ref_hov_by_i.get(i, {})
+    observations = {
+        "impl": impl_hover_entry.get("observation") or {},
+        "ref": ref_hover_entry.get("observation") or {},
+    }
     ih = impl_hover_entry.get("hover") or {}
     rh = ref_hover_entry.get("hover") or {}
     inactive_sides = []
@@ -810,12 +860,17 @@ for i, ie in enumerate(impl):
             timing_diffs.append((p, iv, rv))
 
     # ── Diff idle→hover delta ──
+    observed_hover_deltas = []
     delta_diffs = []
     for p in VISUAL_PROPS:
         i_idle = ie["idle"].get(p, ""); i_hov = ih.get(p, "")
         r_idle = re["idle"].get(p, ""); r_hov = rh.get(p, "")
         i_changes = changed(i_idle, i_hov)
         r_changes = changed(r_idle, r_hov)
+        if i_changes:
+            observed_hover_deltas.append(("impl", p))
+        if r_changes:
+            observed_hover_deltas.append(("ref", p))
         if r_changes and not i_changes:
             delta_diffs.append((p, "no-change", f"{r_idle}→{r_hov}", "missing-hover-effect"))
         elif i_changes and not r_changes:
@@ -824,15 +879,35 @@ for i, ie in enumerate(impl):
             if changed(i_hov, r_hov):
                 delta_diffs.append((p, f"{i_idle}→{i_hov}", f"{r_idle}→{r_hov}", "different-target"))
 
+    has_hover_delta = bool(observed_hover_deltas)
+    unsettled_sides = [
+        side
+        for side, observation in observations.items()
+        if observation.get("settled") is False
+    ]
     sev = "ok"
     if delta_diffs: sev = "major"
-    if any(p in CRITICAL_TIMING for p, *_ in timing_diffs): sev = "critical"
-    elif timing_diffs and sev != "critical": sev = "major"
+    if unsettled_sides:
+        sev = "critical"
+        row["issues"].append(
+            "hover observation capped before declared transition settled on "
+            + "/".join(unsettled_sides)
+        )
+    elif timing_diffs and has_hover_delta:
+        if any(p in CRITICAL_TIMING for p, *_ in timing_diffs):
+            sev = "critical"
+        elif sev != "critical":
+            sev = "major"
+    elif timing_diffs and sev == "ok":
+        sev = "minor"
+        row["issues"].append("transition timing metadata differs without observed hover delta")
     if any(d[3] == "missing-hover-effect" for d in delta_diffs): sev = "critical"
 
     row["sev"] = sev
     row["timing_diffs"] = timing_diffs
     row["delta_diffs"] = delta_diffs
+    row["observed_hover_deltas"] = observed_hover_deltas
+    row["observations"] = observations
     rows.append(row)
 
 SEV_RANK = {"critical": 4, "unpaired": 3, "major": 2, "minor": 1, "ok": 0}

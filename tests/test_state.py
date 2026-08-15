@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from ui_clone.state import GATE_ORDER, PipelineState
+from ui_clone.state import (
+    GATE_ORDER,
+    PipelineState,
+    is_authoritative_terminal_state,
+    is_recoverable_terminal_state,
+)
 
 # ── GATE_ORDER ──
 
@@ -117,6 +122,20 @@ def test_load_clean_state_has_load_failed_false(tmp_path: Path) -> None:
     )
     state_valid = PipelineState.load(ref_dir)
     assert state_valid.load_failed is False
+
+
+def test_recoverable_terminal_state_requires_failed_canonical_verify() -> None:
+    recoverable = {"status": "failed", "category": "canonical-verify-failed"}
+    assert is_recoverable_terminal_state(recoverable)
+    assert not is_authoritative_terminal_state(recoverable)
+
+    for terminal in (
+        {"status": "incomplete", "category": "canonical-verify-failed"},
+        {"status": "unclonable", "category": "canonical-verify-failed"},
+        {"status": "failed", "category": "hard-cap-fail"},
+    ):
+        assert not is_recoverable_terminal_state(terminal)
+        assert is_authoritative_terminal_state(terminal)
 
 
 def test_mark_failed_after_state_corruption_records_terminal_unclonable(
@@ -559,6 +578,24 @@ def test_mark_terminal_roundtrips_and_clear_removes_state(tmp_path: Path) -> Non
     assert cleared.terminal_state == {}
     raw = json.loads((ref_dir / "pipeline-state.json").read_text(encoding="utf-8"))
     assert "terminalState" not in raw
+
+
+def test_canonical_verify_failed_terminal_category_is_recoverable_only() -> None:
+    from ui_clone.state import (
+        is_authoritative_terminal_state,
+        is_recoverable_terminal_state,
+    )
+
+    canonical = {"status": "failed", "category": "canonical-verify-failed"}
+    generic = {"status": "failed", "category": "explicit-terminal"}
+    unclonable = {"status": "unclonable", "category": "hard-cap-fail"}
+
+    assert is_recoverable_terminal_state(canonical) is True
+    assert is_authoritative_terminal_state(canonical) is False
+    assert is_recoverable_terminal_state(generic) is False
+    assert is_authoritative_terminal_state(generic) is True
+    assert is_recoverable_terminal_state(unclonable) is False
+    assert is_authoritative_terminal_state(unclonable) is True
 
 
 def test_mark_terminal_self_attested_pins_result_sha(tmp_path: Path) -> None:

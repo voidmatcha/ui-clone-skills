@@ -27,6 +27,7 @@ import importlib
 import json
 import os
 import re
+from collections import Counter
 from pathlib import Path
 from typing import cast
 
@@ -70,6 +71,13 @@ MODULE_MATCHER_INTENT: dict[str, set[str]] = {
     "post_verify": _BASH_MATCHER_TOKENS,
     "devtools_errors": _BASH_MATCHER_TOKENS,
     "pre_generate": _WRITE_MATCHER_TOKENS,
+    "claude_continuation": {"Skill", "CronCreate", "CronList", "CronDelete"},
+}
+
+CLAUDE_CONTINUATION_ROUTES: set[tuple[str, str, str | None]] = {
+    ("PreToolUse", "claude_continuation", "Skill"),
+    ("PreToolUse", "claude_continuation", "CronCreate|CronDelete"),
+    ("PostToolUse", "claude_continuation", "CronCreate|CronList|CronDelete"),
 }
 # Tool events whose hooks MUST name a non-empty, in-class matcher. Stop /
 # SessionStart / PostCompact fire on a lifecycle event, not a tool, so they carry
@@ -101,16 +109,22 @@ def _module_for(command: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _routes(manifest: dict) -> dict[str, list[str]]:
+def _routes(
+    manifest: dict,
+    *,
+    exclude: set[tuple[str, str, str | None]] | None = None,
+) -> dict[str, list[str]]:
     """Map each lifecycle event to the ordered list of ui_clone.hooks.* modules
     its commands route to."""
+    exclude = exclude or set()
     out: dict[str, list[str]] = {}
     for event, entries in (manifest.get("hooks") or {}).items():
         mods: list[str] = []
         for entry in entries:
+            matcher = entry.get("matcher")
             for hook in entry.get("hooks", []):
                 mod = _module_for(hook.get("command", ""))
-                if mod:
+                if mod and (event, mod, matcher) not in exclude:
                     mods.append(mod)
         out[event] = mods
     return out
@@ -179,7 +193,7 @@ def test_manifests_match_the_expected_enforcement_topology() -> None:
     # Absolute contract: closes the symmetric-drop / symmetric-add hole that a
     # relative (Claude == Codex) check cannot see, and pins every route
     # including the carved-out PostCompact -> session_resume on Claude.
-    claude = _routes(_load(CLAUDE))
+    claude = _routes(_load(CLAUDE), exclude=CLAUDE_CONTINUATION_ROUTES)
     assert claude == EXPECTED_ROUTES, (
         f"Claude manifest topology drifted from the expected enforcement map.\n"
         f"  expected: {EXPECTED_ROUTES}\n  actual:   {claude}"
@@ -189,7 +203,7 @@ def test_manifests_match_the_expected_enforcement_topology() -> None:
         for event, mods in EXPECTED_ROUTES.items()
         if event not in CLAUDE_ONLY_EVENTS
     }
-    codex = _routes(_load(CODEX))
+    codex = _routes(_load(CODEX), exclude=CLAUDE_CONTINUATION_ROUTES)
     assert codex == expected_codex, (
         f"Codex manifest topology drifted from the expected enforcement map "
         f"(should be the full map minus {sorted(CLAUDE_ONLY_EVENTS)}).\n"
@@ -205,6 +219,26 @@ def test_enforcement_modules_sit_behind_their_matcher_intent() -> None:
         for event, module, matcher in _routed_matchers(_load(path)):
             problem = _matcher_intent_problem(event, module, matcher)
             assert problem is None, f"{path.name}: {problem}"
+
+
+def test_claude_continuation_routes_are_explicitly_claude_only() -> None:
+    claude_routes_list = [
+        route
+        for route in _routed_matchers(_load(CLAUDE))
+        if route[1] == "claude_continuation"
+    ]
+    assert set(claude_routes_list) == CLAUDE_CONTINUATION_ROUTES
+    duplicate_routes = {
+        route: count for route, count in Counter(claude_routes_list).items() if count > 1
+    }
+    assert duplicate_routes == {}, f"duplicate Claude continuation routes: {duplicate_routes}"
+
+    codex_routes = {
+        route
+        for route in _routed_matchers(_load(CODEX))
+        if route[1] == "claude_continuation"
+    }
+    assert codex_routes == set(), "Codex manifest must not register Claude continuations"
 
 
 def test_matcher_intent_check_catches_a_swapped_or_empty_matcher() -> None:
@@ -228,8 +262,8 @@ def test_matcher_intent_check_catches_a_swapped_or_empty_matcher() -> None:
 
 
 def test_shared_events_route_to_identical_module_lists() -> None:
-    claude = _routes(_load(CLAUDE))
-    codex = _routes(_load(CODEX))
+    claude = _routes(_load(CLAUDE), exclude=CLAUDE_CONTINUATION_ROUTES)
+    codex = _routes(_load(CODEX), exclude=CLAUDE_CONTINUATION_ROUTES)
     shared = set(claude) & set(codex)
     assert shared, "no shared lifecycle events between the two manifests"
     for event in sorted(shared):
@@ -239,8 +273,8 @@ def test_shared_events_route_to_identical_module_lists() -> None:
 
 
 def test_event_divergence_limited_to_host_specific_lifecycle() -> None:
-    claude_events = set(_routes(_load(CLAUDE)))
-    codex_events = set(_routes(_load(CODEX)))
+    claude_events = set(_routes(_load(CLAUDE), exclude=CLAUDE_CONTINUATION_ROUTES))
+    codex_events = set(_routes(_load(CODEX), exclude=CLAUDE_CONTINUATION_ROUTES))
     unexpected_claude_only = claude_events - codex_events - CLAUDE_ONLY_EVENTS
     assert not unexpected_claude_only, (
         f"unexpected Claude-only lifecycle events (Codex dropped a route?): "

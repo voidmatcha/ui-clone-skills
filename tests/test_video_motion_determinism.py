@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,103 @@ def _run_compare(out_dir: Path, *, action: str = "splash",
          "http://localhost:9/impl", str(out_dir), action],
         capture_output=True, text=True, timeout=300, env=env,
     )
+
+
+def test_video_motion_rejects_concurrent_writers_for_one_ref(tmp_path: Path) -> None:
+    """Two recorders must never overwrite the same raw videos and frames."""
+    fake_root = tmp_path / "project"
+    lib = fake_root / "scripts" / "verify" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "position-compare.sh").write_text(
+        "dynamic_selectors_from_spec() { printf '%s' ''; }\n",
+        encoding="utf-8",
+    )
+    lock_lib = fake_root / "scripts" / "lib"
+    lock_lib.mkdir()
+    shutil.copy(ROOT / "scripts" / "lib" / "exclusive-lock.sh", lock_lib)
+    compare = fake_root / "scripts" / "verify" / "video-transition-compare.sh"
+    compare.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        'touch "${HOLD_STARTED:?}"\n'
+        'while [ ! -f "${HOLD_RELEASE:?}" ]; do sleep 0.05; done\n'
+        "printf '%s\\n' 'Pass: 1, Fail: 0'\n",
+        encoding="utf-8",
+    )
+    compare.chmod(0o755)
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "verification-plan.json").write_text(
+        '{"signals":{"hasSplash":true}}\n',
+        encoding="utf-8",
+    )
+    started = tmp_path / "started"
+    release = tmp_path / "release"
+    command = [
+        "bash",
+        str(WRAPPER),
+        "https://example.test",
+        "http://127.0.0.1:1",
+        "video-lock-test",
+        str(ref),
+    ]
+    env = os.environ.copy()
+    env.update(
+        {
+            "PLUGIN_ROOT": str(fake_root),
+            "PRE_FILTER": "0",
+            "HOLD_STARTED": str(started),
+            "HOLD_RELEASE": str(release),
+        }
+    )
+    first = subprocess.Popen(
+        command,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not started.exists() and first.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert started.exists(), first.communicate(timeout=2)
+
+        second = subprocess.run(
+            command,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert second.returncode == 2, second.stdout + second.stderr
+        assert "already running for motion artifact dir" in second.stderr
+
+        release.touch()
+        stdout, stderr = first.communicate(timeout=20)
+        assert first.returncode == 0, stdout + stderr
+        assert not (ref / "transitions" / "video-motion" / ".compare.lock").exists()
+    finally:
+        release.touch(exist_ok=True)
+        if first.poll() is None:
+            first.terminate()
+            first.communicate(timeout=10)
+
+
+def test_direct_video_compare_rejects_an_active_output_writer(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    lock = out / ".transition-compare.lock"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    (lock / "token").write_text("existing-owner\n", encoding="utf-8")
+    (lock / "session").write_text("existing-session\n", encoding="utf-8")
+
+    proc = _run_compare(out)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "already running for transition artifact dir" in proc.stderr
+    assert (lock / "token").read_text(encoding="utf-8").strip() == "existing-owner"
 
 
 @needs_ffmpeg

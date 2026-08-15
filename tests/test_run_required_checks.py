@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -146,6 +147,176 @@ def _make_impl_root(path: Path, text: str = "export default function App(){retur
     (path / "src" / "App.tsx").write_text(text, encoding="utf-8")
 
 
+def test_run_required_checks_rejects_a_concurrent_run_for_the_same_ref(
+    tmp_path: Path,
+) -> None:
+    """Concurrent dispatchers corrupt shared artifacts and browser evidence."""
+    root = _project_root()
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+
+    started = tmp_path / "started"
+    release = tmp_path / "release"
+    producer = tmp_path / "hold-check.sh"
+    producer.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        'touch "${HOLD_STARTED:?}"\n'
+        'while [ ! -f "${HOLD_RELEASE:?}" ]; do sleep 0.05; done\n'
+        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        '> "$1/concurrency-hold.json"\n',
+        encoding="utf-8",
+    )
+    producer.chmod(0o755)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "concurrency-hold",
+                        "script": str(producer),
+                        "argsRecipe": "{ref_dir}",
+                        "produces": "concurrency-hold.json",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    command = [
+        "bash",
+        str(root / "scripts" / "verify" / "run-required-checks.sh"),
+        "concurrency-test",
+        "https://example.test",
+        "http://127.0.0.1:1",
+        str(ref),
+    ]
+    env = os.environ.copy()
+    env.update(
+        {
+            "PLUGIN_ROOT": str(root),
+            "PYTHON_BIN": sys.executable,
+            "HOLD_STARTED": str(started),
+            "HOLD_RELEASE": str(release),
+        }
+    )
+    first = subprocess.Popen(
+        command,
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not started.exists() and first.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert started.exists(), first.communicate(timeout=2)
+
+        second = subprocess.run(
+            command,
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert second.returncode == 2, second.stdout + second.stderr
+        assert "already running for ref-dir" in second.stderr
+
+        release.touch()
+        stdout, stderr = first.communicate(timeout=20)
+        assert first.returncode == 0, stdout + stderr
+        assert not (ref / ".run-required-checks.lock").exists()
+    finally:
+        release.touch(exist_ok=True)
+        if first.poll() is None:
+            first.terminate()
+            first.communicate(timeout=10)
+
+
+def test_dispatched_children_cannot_consume_later_dispatch_rows(tmp_path: Path) -> None:
+    """Interactive tools such as ffmpeg must never read the plan loop's stdin."""
+    root = _project_root()
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+
+    drainer = tmp_path / "stdin-drainer.sh"
+    drainer.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        'IFS= read -r stolen || stolen=""\n'
+        'printf "%s" "$stolen" > "$1/stdin-observed.txt"\n'
+        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        '> "$1/stdin-drainer.json"\n',
+        encoding="utf-8",
+    )
+    drainer.chmod(0o755)
+    follower = tmp_path / "follower.sh"
+    follower.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        '> "$1/follower.json"\n',
+        encoding="utf-8",
+    )
+    follower.chmod(0o755)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "stdin-drainer",
+                        "script": str(drainer),
+                        "argsRecipe": "{ref_dir}",
+                        "produces": "stdin-drainer.json",
+                        "severity": "block",
+                    },
+                    {
+                        "id": "follower",
+                        "script": str(follower),
+                        "argsRecipe": "{ref_dir}",
+                        "produces": "follower.json",
+                        "severity": "block",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update({"PLUGIN_ROOT": str(root), "PYTHON_BIN": sys.executable})
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "scripts" / "verify" / "run-required-checks.sh"),
+            "stdin-isolation-test",
+            "https://example.test",
+            "http://127.0.0.1:1",
+            str(ref),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (ref / "stdin-observed.txt").read_text(encoding="utf-8") == ""
+    assert (ref / "follower.json").exists(), proc.stdout + proc.stderr
+
+
 def test_run_required_checks_passes_package_json_to_bundle_impl_coverage(tmp_path: Path) -> None:
     """Dispatcher must pass impl/package.json, not the impl root directory."""
     root = _project_root()
@@ -204,6 +375,66 @@ def test_run_required_checks_passes_package_json_to_bundle_impl_coverage(tmp_pat
     assert sidecar_path(ref, "bundle-impl-coverage").read_text(
         encoding="utf-8"
     ) == compute_check_input_hash(impl, ref, "bundle-impl-coverage")
+
+
+def test_run_required_checks_dry_run_dispatches_splash_lifecycle_recipe(
+    tmp_path: Path,
+) -> None:
+    root = _project_root()
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "splash-lifecycle",
+                        "script": "skills/visual-debug/scripts/splash-lifecycle-check.sh",
+                        "argsRecipe": "{session}-splash {ref_url} {impl_url} {ref_dir}",
+                        "produces": "splash-lifecycle.json",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PLUGIN_ROOT": str(root),
+            "PYTHON_BIN": sys.executable,
+            "UI_CLONE_DISPATCH_DRY": "1",
+        }
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "scripts" / "verify" / "run-required-checks.sh"),
+            "splash-dispatch-test",
+            "https://ref.example.test",
+            "http://127.0.0.1:4173",
+            str(ref),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (
+        "DRY|DISPATCH|splash-lifecycle|"
+        "splash-dispatch-test-"
+    ) in proc.stdout
+    assert "-splash https://ref.example.test http://127.0.0.1:4173 " in proc.stdout
+    assert f" {ref}|splash-lifecycle.json|block" in proc.stdout
 
 
 def test_run_required_checks_rejects_python_bin_below_minimum(tmp_path: Path) -> None:
@@ -2076,9 +2307,9 @@ def test_dispatcher_reaps_owned_sessions_after_each_row() -> None:
     cleanup_call = "cleanup_browser_sessions"
     assert 'bash "$_SCRIPT_DIR/cleanup-sessions.sh" "$SESSION"' in dispatcher
     assert 'agent-browser --session "$SESSION" set viewport' not in dispatcher
-    # The final call is inside the dispatch loop (before `done < .dispatch.txt`).
+    # The final call is inside the dispatch loop (before its run-owned file).
     assert dispatcher.rindex(cleanup_call) < dispatcher.index(
-        'done < "$REF_DIR/.run-required-checks-dispatch.txt"'
+        'done 3< "$DISPATCH_FILE"'
     )
 
 
@@ -2174,6 +2405,156 @@ def test_cleanup_sessions_fails_nonzero_close_when_session_remains(
     assert "race-owned" in proc.stderr
 
 
+def test_cleanup_sessions_bounds_each_hung_close_and_fails_if_registry_remains(
+    tmp_path: Path,
+) -> None:
+    """A hung agent-browser close must not block dispatcher progress forever.
+
+    The cleanup helper should bound every close attempt with the shared
+    process-group timeout wrapper, then still fail closed when the owned session
+    remains registered after the bounded close.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    agent_browser = bin_dir / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"${1:-}\" = session ] && [ \"${2:-}\" = list ]; then\n"
+        "  echo 'Active sessions:'\n"
+        "  echo '  hung-owned'\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"${1:-}\" = --session ] && [ \"${3:-}\" = close ]; then\n"
+        "  sleep 5\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    agent_browser.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["UI_CLONE_SESSION_CLOSE_TIMEOUT_SEC"] = "0.2"
+    env["UI_CLONE_SESSION_SETTLE_SEC"] = "0"
+    cleanup = _project_root() / "scripts" / "verify" / "cleanup-sessions.sh"
+    start = time.monotonic()
+    proc = subprocess.run(
+        ["bash", str(cleanup), "hung"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    elapsed = time.monotonic() - start
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert elapsed < 8
+    assert "close timed out for hung-owned" in proc.stderr
+    assert "session cleanup did not settle for prefix 'hung'" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value"),
+    [
+        ("UI_CLONE_SESSION_CLOSE_TIMEOUT_SEC", "0"),
+        ("UI_CLONE_SESSION_CLOSE_TIMEOUT_SEC", "nan"),
+        ("UI_CLONE_SESSION_CLOSE_TIMEOUT_SEC", "inf"),
+        ("UI_CLONE_SESSION_CLOSE_TIMEOUT_SEC", "1e309"),
+        ("UI_CLONE_SESSION_LIST_TIMEOUT_SEC", "0"),
+        ("UI_CLONE_SESSION_LIST_TIMEOUT_SEC", "nan"),
+        ("UI_CLONE_SESSION_LIST_TIMEOUT_SEC", "inf"),
+        ("UI_CLONE_SESSION_LIST_TIMEOUT_SEC", "1e309"),
+    ],
+)
+def test_cleanup_sessions_rejects_invalid_timeout(
+    tmp_path: Path,
+    env_name: str,
+    value: str,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    agent_browser = bin_dir / "agent-browser"
+    agent_browser.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    agent_browser.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env[env_name] = value
+    cleanup = _project_root() / "scripts" / "verify" / "cleanup-sessions.sh"
+
+    proc = subprocess.run(
+        ["bash", str(cleanup), "badtimeout"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert proc.returncode == 2
+    assert f"{env_name} must be a positive finite number" in proc.stderr
+
+
+def test_cleanup_sessions_bounds_hung_session_list(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    agent_browser = bin_dir / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"${1:-}\" = session ] && [ \"${2:-}\" = list ]; then\n"
+        "  sleep 5\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    agent_browser.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["UI_CLONE_SESSION_LIST_TIMEOUT_SEC"] = "0.2"
+    cleanup = _project_root() / "scripts" / "verify" / "cleanup-sessions.sh"
+    start = time.monotonic()
+
+    proc = subprocess.run(
+        ["bash", str(cleanup), "hung-list"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=4,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert time.monotonic() - start < 4
+    assert "session list failed or timed out after 0.2s" in proc.stderr
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "1e309", "0"])
+def test_run_with_timeout_rejects_non_finite_or_non_positive_timeout(
+    value: str,
+) -> None:
+    wrapper = _project_root() / "scripts" / "lib" / "run_with_timeout.py"
+    proc = subprocess.run(
+        [sys.executable, str(wrapper), value, sys.executable, "-c", "pass"],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert proc.returncode == 125
+    assert "invalid timeout" in proc.stderr
+
+
+def test_run_with_timeout_accepts_positive_decimal_timeout() -> None:
+    wrapper = _project_root() / "scripts" / "lib" / "run_with_timeout.py"
+    proc = subprocess.run(
+        [sys.executable, str(wrapper), "0.2", sys.executable, "-c", "pass"],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 def test_cleanup_sessions_treats_prefix_as_literal(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -2219,6 +2600,179 @@ def test_cleanup_sessions_treats_prefix_as_literal(tmp_path: Path) -> None:
     ]
 
 
+def test_dispatcher_stops_after_owned_session_cleanup_failure(tmp_path: Path) -> None:
+    root = _project_root()
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    bin_dir = tmp_path / "bin"
+    ref.mkdir()
+    bin_dir.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+    state = tmp_path / "sessions"
+
+    first = tmp_path / "first.sh"
+    first.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf '  %s-owned\\n' \"$1\" > \"$STUB_STATE\"\n"
+        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        "> \"$2/first.json\"\n",
+        encoding="utf-8",
+    )
+    first.chmod(0o755)
+    second = tmp_path / "second.sh"
+    second.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        "> \"$1/second.json\"\n",
+        encoding="utf-8",
+    )
+    second.chmod(0o755)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "first",
+                        "script": str(first),
+                        "argsRecipe": "{session} {ref_dir}",
+                        "produces": "first.json",
+                        "severity": "block",
+                    },
+                    {
+                        "id": "second",
+                        "script": str(second),
+                        "argsRecipe": "{ref_dir}",
+                        "produces": "second.json",
+                        "severity": "block",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent_browser = bin_dir / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "if [ \"${1:-}\" = session ] && [ \"${2:-}\" = list ]; then\n"
+        "  if [ -f \"$STUB_STATE\" ]; then\n"
+        "    echo 'Active sessions:'\n"
+        "    cat \"$STUB_STATE\"\n"
+        "  else\n"
+        "    echo 'No active sessions.'\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"${1:-}\" = --session ] && [ \"${3:-}\" = close ]; then\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    agent_browser.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PLUGIN_ROOT": str(root),
+            "PYTHON_BIN": sys.executable,
+            "PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+            "STUB_STATE": str(state),
+            "UI_CLONE_SESSION_CLOSE_TIMEOUT_SEC": "0.2",
+            "UI_CLONE_SESSION_LIST_TIMEOUT_SEC": "0.2",
+            "UI_CLONE_SESSION_SETTLE_SEC": "0",
+        }
+    )
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "scripts" / "verify" / "run-required-checks.sh"),
+            "cleanup-stop-test",
+            "https://example.test",
+            "http://127.0.0.1:1",
+            str(ref),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert (ref / "first.json").exists()
+    assert not (ref / "second.json").exists()
+    assert "owned browser session cleanup failed after first" in proc.stderr
+    assert "DISPATCHER_SETUP_FAILED" in proc.stdout
+
+
+def test_dispatcher_rejects_non_finite_row_timeout(tmp_path: Path) -> None:
+    root = _project_root()
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+    producer = tmp_path / "producer.sh"
+    producer.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        "> \"$1/producer.json\"\n",
+        encoding="utf-8",
+    )
+    producer.chmod(0o755)
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "producer",
+                        "script": str(producer),
+                        "argsRecipe": "ENV:ROW_TIMEOUT_SEC=inf -- {ref_dir}",
+                        "produces": "producer.json",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "PLUGIN_ROOT": str(root),
+            "PYTHON_BIN": sys.executable,
+            "PATH": "/usr/bin:/bin",
+        }
+    )
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "scripts" / "verify" / "run-required-checks.sh"),
+            "invalid-row-timeout",
+            "https://example.test",
+            "http://127.0.0.1:1",
+            str(ref),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert not (ref / "producer.json").exists()
+    assert "invalid row timeout for producer: inf" in proc.stderr
+
+
 def test_dispatcher_gives_browser_sweep_rows_scoped_timeouts() -> None:
     """D20 (loop-nvti-0): frame-compare rows scale with page height; on a
     25k-px page transition-compare/hover-state-compare were killed at the
@@ -2235,6 +2789,28 @@ def test_dispatcher_gives_browser_sweep_rows_scoped_timeouts() -> None:
     heavy_at = dispatcher.index("RUN_REQUIRED_HEAVY_TIMEOUT_SEC")
     env_scan_at = dispatcher.index('ROW_TIMEOUT_SEC=*) row_timeout=')
     assert hover_at < env_scan_at and heavy_at < env_scan_at
+
+
+def test_dispatcher_gives_known_slow_rows_scoped_timeouts() -> None:
+    """Realfood showed these rows timing out at the shared 180s budget.
+
+    They need scoped defaults because they are long-running browser sweeps, but
+    explicit ROW_TIMEOUT_SEC from a generated plan row must still win.
+    """
+    dispatcher = _dispatcher_source()
+    assert "masked-region-static)" in dispatcher
+    assert 'row_timeout="${RUN_REQUIRED_MASKED_STATIC_TIMEOUT_SEC:-420}"' in dispatcher
+    assert "transition-fires)" in dispatcher
+    assert 'row_timeout="${RUN_REQUIRED_TRANSITION_FIRES_TIMEOUT_SEC:-900}"' in dispatcher
+    assert "breakpoint-collision)" in dispatcher
+    assert 'row_timeout="${RUN_REQUIRED_BREAKPOINT_COLLISION_TIMEOUT_SEC:-300}"' in dispatcher
+    env_scan_at = dispatcher.index('ROW_TIMEOUT_SEC=*) row_timeout=')
+    for marker in [
+        "RUN_REQUIRED_MASKED_STATIC_TIMEOUT_SEC",
+        "RUN_REQUIRED_TRANSITION_FIRES_TIMEOUT_SEC",
+        "RUN_REQUIRED_BREAKPOINT_COLLISION_TIMEOUT_SEC",
+    ]:
+        assert dispatcher.index(marker) < env_scan_at
 
 
 def test_section_compare_ref_root_fallback_for_section_map() -> None:

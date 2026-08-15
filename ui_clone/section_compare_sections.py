@@ -619,6 +619,16 @@ def synthesize_ref_sections_from_section_map(
             "childCount": _as_int(section.get("childCount")),
             "hasVisibleMedia": section.get("hasVisibleMedia") is True,
             "visibleMediaCount": _as_int(section.get("visibleMediaCount")),
+            "visibleMediaKinds": (
+                section.get("visibleMediaKinds")
+                if isinstance(section.get("visibleMediaKinds"), list)
+                else []
+            ),
+            "visibleMediaKindCounts": (
+                section.get("visibleMediaKindCounts")
+                if isinstance(section.get("visibleMediaKindCounts"), dict)
+                else {}
+            ),
         }
 
         candidate = choose(section)
@@ -647,6 +657,8 @@ def synthesize_ref_sections_from_section_map(
                 "hasSvgText",
                 "hasVisibleMedia",
                 "visibleMediaCount",
+                "visibleMediaKinds",
+                "visibleMediaKindCounts",
             ):
                 value = candidate.get(key)
                 if value is not None:
@@ -723,6 +735,34 @@ def merge_ref_runtime_sections(
             ):
                 replacement.pop(key, None)
         replacement.update(runtime_row)
+        return replacement
+
+    def merge_runtime_measurements(
+        existing: Section,
+        runtime_row: Section,
+    ) -> Section:
+        replacement = dict(existing)
+        for key in (
+            "rect",
+            "display",
+            "gridCols",
+            "childCount",
+            "clientWidth",
+            "contentBox",
+            "contentGroups",
+            "leftGap",
+            "rightGap",
+            "fingerprint",
+            "textWords",
+            "hasSvgText",
+            "hasVisibleMedia",
+            "visibleMediaCount",
+            "visibleMediaKinds",
+            "visibleMediaKindCounts",
+        ):
+            value = runtime_row.get(key)
+            if value is not None:
+                replacement[key] = value
         return replacement
 
     def fallback_identity_match(candidate: Section, existing: Section) -> bool:
@@ -962,6 +1002,11 @@ def merge_ref_runtime_sections(
                     merged[duplicate_index],
                     runtime_row,
                     replace_identity=True,
+                )
+            else:
+                merged[duplicate_index] = merge_runtime_measurements(
+                    merged[duplicate_index],
+                    runtime_row,
                 )
             continue
         merged.append(dict(runtime_row))

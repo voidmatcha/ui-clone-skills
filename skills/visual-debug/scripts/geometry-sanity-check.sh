@@ -25,6 +25,12 @@ REPO_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}}"
 if [ -z "$REPO_ROOT" ] || [ ! -d "$REPO_ROOT/ui_clone" ]; then
   REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 fi
+if [ ! -f "$REPO_ROOT/scripts/lib/viewport.sh" ]; then
+  echo "geometry-sanity: viewport helper not found under $REPO_ROOT" >&2
+  exit 2
+fi
+# shellcheck source=scripts/lib/viewport.sh
+source "$REPO_ROOT/scripts/lib/viewport.sh"
 if ! command -v agent-browser >/dev/null 2>&1; then
   echo "geometry-sanity: agent-browser not found" >&2
   exit 2
@@ -50,38 +56,18 @@ run_py() { PYTHONPATH="$REPO_ROOT" "$PYBIN" "$@"; }
 # ── Ref geometry + capture viewport (orig-layout.json optional). ─────────
 REF_GEOM_B64=$(run_py - "$REF_DIR" <<'PY'
 import base64, json, os, sys
-from ui_clone.gates.geometry_sanity import parse_viewport, section_anchor_name
+from ui_clone.gates.geometry_sanity import capture_viewport, section_anchor_name
 
 ref = sys.argv[1]
-out = {"docH": None, "vpW": 1280, "vpH": 800, "sections": []}
-has_layout_viewport = False
+vp_w, vp_h = capture_viewport(ref)
+out = {"docH": None, "vpW": vp_w, "vpH": vp_h, "sections": []}
 try:
     ol = json.load(open(os.path.join(ref, "orig-layout.json")))
     if isinstance(ol, dict):
         if isinstance(ol.get("totalHeight"), (int, float)):
             out["docH"] = ol["totalHeight"]
-        if isinstance(ol.get("viewportWidth"), (int, float)) and ol["viewportWidth"] > 0:
-            out["vpW"] = int(ol["viewportWidth"])
-        if isinstance(ol.get("viewportHeight"), (int, float)) and ol["viewportHeight"] > 0:
-            out["vpH"] = int(ol["viewportHeight"])
-        has_layout_viewport = (
-            isinstance(ol.get("viewportWidth"), (int, float))
-            and ol["viewportWidth"] > 0
-            and isinstance(ol.get("viewportHeight"), (int, float))
-            and ol["viewportHeight"] > 0
-        )
 except (OSError, json.JSONDecodeError):
     pass
-if not has_layout_viewport:
-    try:
-        provenance = json.load(
-            open(os.path.join(ref, "sections", "frozen-ref-provenance.json"))
-        )
-        viewport = parse_viewport(provenance.get("viewport"))
-        if viewport:
-            out["vpW"], out["vpH"] = viewport
-    except (OSError, json.JSONDecodeError):
-        pass
 try:
     sm = json.load(open(os.path.join(ref, "section-map.json")))
     secs = sm.get("sections") if isinstance(sm, dict) else sm
@@ -144,9 +130,10 @@ PY
 )
 
 # ── Measure the impl at the capture viewport. ────────────────────────────
-agent-browser --session "$SESSION" set viewport "$VP_W" "$VP_H" >/dev/null 2>&1
-agent-browser --session "$SESSION" navigate "$URL" >/dev/null 2>&1
-sleep 3
+if ! ab_open_at_viewport "$SESSION" "$URL" "$VP_W" "$VP_H" 3; then
+  echo "geometry-sanity: could not establish capture viewport ${VP_W}x${VP_H}" >&2
+  exit 2
+fi
 
 unwrap() { sed 's/^"//;s/"$//' | sed 's/\\"/"/g'; }
 

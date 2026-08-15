@@ -1054,6 +1054,64 @@ def test_video_motion_ansi_colored_splash_failure_not_masked_by_plain_scroll_pas
     )
 
 
+def test_video_motion_calibrated_provisional_arc_is_valid(tmp_path: Path) -> None:
+    """A refcal-rescued strict arc mismatch is diagnostic, not a final failure."""
+    ref = tmp_path / "ref"
+    (ref / "transitions").mkdir(parents=True)
+    _all_known_skip_fires(ref)
+    _spec(ref, "scroll-scrub")
+    (ref / "transitions" / "video-motion-result.txt").write_text(
+        "# video-motion-compare\n"
+        "⚠ provisional arc timing: first-to-last-change duration differs by 114 frames (>18)\n"
+        "▸ Splash strict comparison pending calibration "
+        "(arc=outside-static-bound, ssimSubthresholdRows=162)\n"
+        "✓ arc within the live ref-vs-ref noise floor — arc pass-by-calibration\n"
+        "Pass: \x1b[0;32m259\x1b[0m, Fail: \x1b[0;31m0\x1b[0m\n"
+        "ALL PASS — transition matches original\n"
+        "✅ all 1 mode(s) within SSIM threshold\n"
+        "# video-motion-compare: COMPLETE\n",
+        encoding="utf-8",
+    )
+
+    _run(ref)
+    comp = _component(ref, "transitions/video-motion-result.txt")
+    payload = json.loads((ref / "transition-proof.json").read_text())
+
+    assert comp["valid"] is True, comp
+    assert "259 pass / 0 fail" in comp["note"], comp
+    assert not any(
+        "video-motion-result.txt" in reason for reason in payload["reasons"]
+    ), payload["reasons"]
+
+
+def test_video_motion_provisional_arc_does_not_mask_final_nonzero_fail(
+    tmp_path: Path,
+) -> None:
+    """The neutral provisional marker must not override the final frame tally."""
+    ref = tmp_path / "ref"
+    (ref / "transitions").mkdir(parents=True)
+    _all_known_skip_fires(ref)
+    _spec(ref, "scroll-scrub")
+    (ref / "transitions" / "video-motion-result.txt").write_text(
+        "# video-motion-compare\n"
+        "⚠ provisional arc timing: first-to-last-change duration differs by 114 frames (>18)\n"
+        "Pass: 258, Fail: 1\n"
+        "# video-motion-compare: COMPLETE\n",
+        encoding="utf-8",
+    )
+
+    proc = _run(ref)
+    comp = _component(ref, "transitions/video-motion-result.txt")
+    payload = json.loads((ref / "transition-proof.json").read_text())
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert comp["valid"] is False, comp
+    assert "258 pass / 1 fail" in comp["note"], comp
+    assert any(
+        "video-motion-result.txt" in reason for reason in payload["reasons"]
+    ), payload["reasons"]
+
+
 def test_video_motion_failure_masked_only_for_all_hover_reset_only_specs(
     tmp_path: Path,
 ) -> None:

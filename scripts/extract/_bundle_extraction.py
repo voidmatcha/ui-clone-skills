@@ -321,7 +321,9 @@ _ACTIVE_STATE_SIZE_RE = re.compile(
     r"\s*([A-Za-z_$][\w$]*)\s*\?\s*(\"auto\"|'auto'|\d+)\s*:\s*0\s*\}"
     r"(?:\s*,\s*transition:\{([^{}]*)\})?"
 )
-_CLASSNAME_BEFORE_RE = re.compile(r"className:\s*(?:[\w$]+\(\)\.)?(\w+)")
+_CLASSNAME_BEFORE_RE = re.compile(
+    r"className:\s*(?:(?:[\w$]+\(\)|[\w$]+(?:\.[\w$]+)+)\.)?(\w+)"
+)
 
 
 def _extract_active_state_expansions(
@@ -408,6 +410,21 @@ def _detect_unresolved_libraries(
                 "reason": reason,
                 "source": _find_file_for_offset(file_offsets, hit.start()),
             })
+    framer_hit = re.search(
+        r"scrollYProgress\b.*?(?:\buseScroll\b|framer-motion)|"
+        r"(?:\buseScroll\b|framer-motion).*?scrollYProgress\b",
+        all_text,
+        re.DOTALL,
+    )
+    if framer_hit is not None and not _extract_framer_motion(all_text, file_offsets):
+        out.append({
+            "library": "framer-motion",
+            "reason": (
+                "Framer Motion scroll markers found but deterministic extraction "
+                "resolved zero scroll sites — needs bundle-analyzer LLM extraction"
+            ),
+            "source": _find_file_for_offset(file_offsets, framer_hit.start()),
+        })
     return out
 
 

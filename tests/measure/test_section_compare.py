@@ -324,6 +324,31 @@ def test_section_enumerator_ignores_anonymous_capture_overlays() -> None:
     assert "if (isAnonymousCaptureOverlay(el)) return;" in text
 
 
+def test_section_enumerator_records_visible_media_kinds_for_guard_parity() -> None:
+    enum_js = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "lib"
+        / "enumerate-sections.js"
+    )
+    text = enum_js.read_text(encoding="utf-8")
+
+    assert "visibleMediaKinds" in text
+    assert "visibleMediaKindCounts" in text
+    assert "visibleMedia.map(node => node.tagName.toLowerCase())" in text
+
+    section_compare = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    ).read_text(encoding="utf-8")
+    semantic_start = section_compare.index("IMPL_SEMANTIC_CANDIDATES=")
+    semantic_end = section_compare.index("# section-map.json ground truth", semantic_start)
+    semantic_source = section_compare[semantic_start:semantic_end]
+    assert "visibleMediaKinds" in semantic_source
+    assert "visibleMediaKindCounts" in semantic_source
+
+
 def test_section_compare_script_has_viewport_fanout_wrapper() -> None:
     """Static guard for the opt-in multi-viewport wrapper.
 

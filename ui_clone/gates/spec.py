@@ -6,6 +6,7 @@ rebound onto the Gate class in `ui_clone.gates.__init__`.
 
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import subprocess
@@ -242,6 +243,252 @@ def _runtime_motion_signals(dump: dict[str, Any]) -> list[str]:
         signals.append("Webflow IX2")
 
     return signals
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _observed_normalized_positions(scroll_audit: Any) -> list[float]:
+    if not isinstance(scroll_audit, dict):
+        return []
+    samples = scroll_audit.get("samples")
+    observed: list[Any] = []
+    if isinstance(samples, list):
+        observed = [sample.get("observed") for sample in samples if isinstance(sample, dict)]
+    elif isinstance(samples, dict):
+        value = samples.get("observed")
+        if isinstance(value, list):
+            observed = value
+    else:
+        value = scroll_audit.get("observed")
+        if isinstance(value, list):
+            observed = value
+
+    positions: list[float] = []
+    for sample in observed:
+        value = sample
+        if isinstance(sample, dict):
+            for key in ("normalized", "normalizedY", "progress", "scrollProgress", "yNormalized"):
+                if key in sample:
+                    value = sample[key]
+                    break
+        number = _finite_number(value)
+        if number is not None:
+            positions.append(number)
+    return positions
+
+
+def _has_meaningful_scroll_movement(scroll_audit: Any) -> bool:
+    positions = _observed_normalized_positions(scroll_audit)
+    distinct: list[float] = []
+    tolerance = 0.001
+    for position in positions:
+        if not any(abs(position - existing) <= tolerance for existing in distinct):
+            distinct.append(position)
+    return len(distinct) >= 3
+
+
+def _format_capture_error(capture_error: Any) -> str:
+    if isinstance(capture_error, dict):
+        parts = [
+            f"{key}={value}"
+            for key, value in capture_error.items()
+            if value is not None and str(value).strip()
+        ]
+        return ", ".join(parts) if parts else "{}"
+    return str(capture_error or "").strip() or "unknown"
+
+
+def _check_runtime_capture_integrity(self: Gate) -> CheckResult | None:
+    dump = self._load_json("animation-runtime-dump.json")
+    if not isinstance(dump, dict):
+        return None
+
+    from ui_clone.gates.state_coverage import _is_motion_rich_ref
+
+    is_motion_rich = _is_motion_rich_ref(self.ref_dir)
+    note = str(dump.get("note") or "").strip()
+    if is_motion_rich and note.lower() == "eval returned empty":
+        return CheckResult(
+            "runtime capture integrity",
+            "fail",
+            "animation-runtime-dump.json carries legacy runtime capture failure "
+            "`note: eval returned empty` on a motion-rich reference. Re-run "
+            "runtime extraction before drafting transition-spec.json.",
+        )
+
+    capture_status = dump.get("captureStatus")
+    if capture_status != "ok":
+        if is_motion_rich and capture_status == "error":
+            detail = _format_capture_error(dump.get("captureError"))
+            return CheckResult(
+                "runtime capture integrity",
+                "fail",
+                "animation-runtime-dump.json has `captureStatus: error` on a "
+                f"motion-rich reference; captureError: {detail}. Runtime evidence "
+                "must be captured successfully before the spec gate can trust "
+                "transition coverage.",
+            )
+        return None
+
+    scroll_audit = dump.get("scrollAudit")
+    max_scroll = scroll_audit.get("maxScroll") if isinstance(scroll_audit, dict) else None
+    max_scroll_value = 0.0
+    if isinstance(scroll_audit, dict) and "maxScroll" in scroll_audit:
+        finite_max_scroll = _finite_number(max_scroll)
+        if finite_max_scroll is None:
+            return CheckResult(
+                "runtime capture integrity",
+                "fail",
+                "animation-runtime-dump.json has `captureStatus: ok` but "
+                f"scrollAudit.maxScroll is not a finite numeric value: {max_scroll!r}. "
+                "Re-run runtime capture so scroll extent is measured honestly.",
+            )
+        max_scroll_value = finite_max_scroll
+    if is_motion_rich and not isinstance(scroll_audit, dict):
+        return CheckResult(
+            "runtime capture integrity",
+            "fail",
+            "animation-runtime-dump.json has `captureStatus: ok` on a "
+            "motion-rich reference but no scrollAudit. Re-run runtime capture "
+            "so scroll movement is measured before transition-spec coverage "
+            "is trusted.",
+        )
+    if max_scroll_value <= 0:
+        return None
+    if _has_meaningful_scroll_movement(scroll_audit):
+        return None
+    observed = _observed_normalized_positions(scroll_audit)
+    return CheckResult(
+        "runtime capture integrity",
+        "fail",
+        "animation-runtime-dump.json has `captureStatus: ok` and scrollAudit.maxScroll "
+        f"{max_scroll_value:g}, but fewer than three "
+        f"distinct observed normalized positions were recorded: {observed}. "
+        "Re-run runtime capture so scroll-linked evidence is measured rather "
+        "than inferred.",
+    )
+
+
+def _runtime_scroll_sites(dump: dict[str, Any]) -> list[dict[str, str]]:
+    rows = dump.get("scrollLinkedStyles")
+    if not isinstance(rows, list):
+        return []
+    sites: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("sourceId") or "").strip()
+        selector = str(row.get("selector") or "").strip()
+        if not source_id or not selector:
+            continue
+        key = (source_id, selector)
+        if key in seen:
+            continue
+        seen.add(key)
+        sites.append({"sourceId": source_id, "selector": selector})
+    return sites
+
+
+def _entry_source_matches(entry: Any, source_id: str) -> bool:
+    return (
+        isinstance(entry, dict)
+        and entry.get("sourceArtifact") == "animation-runtime-dump.json"
+        and entry.get("sourceId") == source_id
+    )
+
+
+def _entry_selector(entry: dict[str, Any]) -> str:
+    for key in ("target", "selector"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _runtime_site_covered_by_transition(
+    site: dict[str, str],
+    transitions: list[Any],
+    selector_counts: dict[str, int],
+) -> bool:
+    source_id = site["sourceId"]
+    selector = site["selector"]
+    if any(_entry_source_matches(entry, source_id) for entry in transitions):
+        return True
+    if selector_counts.get(selector) != 1:
+        return False
+    matches = [
+        entry
+        for entry in transitions
+        if isinstance(entry, dict) and _entry_selector(entry) == selector
+    ]
+    return len(matches) == 1
+
+
+def _runtime_site_skipped(site: dict[str, str], skipped: list[Any]) -> bool:
+    source_id = site["sourceId"]
+    return any(
+        _entry_source_matches(entry, source_id)
+        and isinstance(entry, dict)
+        and str(entry.get("reason") or "").strip()
+        for entry in skipped
+    )
+
+
+def _check_runtime_site_spec_coverage(
+    self: Gate,
+    spec: dict[str, Any] | None,
+) -> CheckResult | None:
+    dump = self._load_json("animation-runtime-dump.json")
+    if not isinstance(dump, dict) or dump.get("captureStatus") != "ok":
+        return None
+    sites = _runtime_scroll_sites(dump)
+    if not sites:
+        return None
+
+    transitions = spec.get("transitions") if isinstance(spec, dict) else None
+    transitions = transitions if isinstance(transitions, list) else []
+    skipped = spec.get("skipped") if isinstance(spec, dict) else None
+    skipped = skipped if isinstance(skipped, list) else []
+    selector_counts: dict[str, int] = {}
+    for site in sites:
+        selector_counts[site["selector"]] = selector_counts.get(site["selector"], 0) + 1
+
+    uncovered = [
+        site
+        for site in sites
+        if not _runtime_site_covered_by_transition(site, transitions, selector_counts)
+        and not _runtime_site_skipped(site, skipped)
+    ]
+    if not uncovered:
+        return None
+    details = ", ".join(
+        f"{site['sourceId']} ({site['selector']})" for site in uncovered[:8]
+    )
+    return CheckResult(
+        "spec-runtime-site-coverage",
+        "fail",
+        "transition-spec.json does not cover runtime scroll-linked sites from "
+        f"animation-runtime-dump.json: {details}. Each scrollLinkedStyles row "
+        "with sourceId and selector needs a transition with "
+        "`sourceArtifact: animation-runtime-dump.json` plus exact sourceId, or "
+        "a structured skipped[] entry with the same sourceArtifact/sourceId and "
+        "a nonempty reason. Exact selector fallback is accepted only when a "
+        "single runtime site and a single transition use that selector.",
+    )
 
 
 def _check_runtime_motion_spec_coverage(self: Gate) -> CheckResult | None:
@@ -599,6 +846,9 @@ def gate_spec(self: Gate) -> list[CheckResult]:
 
     # Validate transition-spec structure
     spec = self._load_json("transition-spec.json")
+    runtime_capture_result = _check_runtime_capture_integrity(self)
+    if runtime_capture_result is not None:
+        results.append(runtime_capture_result)
     runtime_motion_result = _check_runtime_motion_spec_coverage(self)
     if runtime_motion_result is not None:
         results.append(runtime_motion_result)
@@ -620,6 +870,9 @@ def gate_spec(self: Gate) -> list[CheckResult]:
                 )
             )
     results.extend(_check_spec_inventory_coverage(self, spec))
+    runtime_site_result = _check_runtime_site_spec_coverage(self, spec)
+    if runtime_site_result is not None:
+        results.append(runtime_site_result)
     results.extend(_check_spec_selectors_present_in_dom(self, spec))
     if spec is not None:
         transitions = spec.get("transitions")

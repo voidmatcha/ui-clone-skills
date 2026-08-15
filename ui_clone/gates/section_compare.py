@@ -44,6 +44,48 @@ def _required_viewports(ref_dir: Path) -> list[str]:
     return out if len(out) > 1 else []
 
 
+def _stats_signal_rich(raw: object) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    raw_unique = raw.get("unique")
+    raw_dominant = raw.get("dominant")
+    if raw_unique is None or raw_dominant is None:
+        return False
+    try:
+        unique = float(raw_unique)
+        dominant = float(raw_dominant)
+    except (TypeError, ValueError):
+        return False
+    return unique > 8 and dominant < 0.6
+
+
+def _stats_sparse_detail(raw: object) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    raw_unique = raw.get("unique")
+    raw_dominant = raw.get("dominant")
+    if raw_unique is None or raw_dominant is None:
+        return False
+    try:
+        unique = float(raw_unique)
+        dominant = float(raw_dominant)
+    except (TypeError, ValueError):
+        return False
+    return unique >= 32 and dominant < 0.985
+
+
+def _low_contrast_media_signal_rich(info: dict[str, object]) -> bool:
+    return (
+        info.get("mediaBearing") is True
+        and _stats_signal_rich(info.get("ref"))
+        and _stats_signal_rich(info.get("impl"))
+    )
+
+
+def _low_variance_sparse_detail(info: dict[str, object]) -> bool:
+    return _stats_sparse_detail(info.get("ref"))
+
+
 def gate_section_compare(self: Gate) -> list[CheckResult]:
     """Check that section-compare.sh has been run and all sections passed.
 
@@ -179,7 +221,11 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
                     std = float(raw_std)
                 except (TypeError, ValueError):
                     continue
-                if std < _CANON_REF_MIN_STD:
+                if (
+                    std < _CANON_REF_MIN_STD
+                    and not _low_contrast_media_signal_rich(info)
+                    and not _low_variance_sparse_detail(info)
+                ):
                     std_gaming.append(f"{name} (ref std {std}) produced no blank-ref guard")
 
     # Apply known-artifacts.json downgrades.

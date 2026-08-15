@@ -137,18 +137,6 @@ ORIG_URL="${1:?Usage: section-compare.sh <orig-url> <impl-url> <session> [output
 IMPL_URL="${2:?Usage: section-compare.sh <orig-url> <impl-url> <session> [output-dir]}"
 SESSION="${3:?Usage: section-compare.sh <orig-url> <impl-url> <session> [output-dir]}"
 DIR="${4:-tmp/ref/visual-debug}"
-# H9 settle derivation (see header note): only when the caller did not pin it.
-_SETTLE_SPEC="$DIR/transition-spec.json"
-if [ ! -f "$_SETTLE_SPEC" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/transition-spec.json" ]; then
-  _SETTLE_SPEC="${REF_ROOT_DIR}/transition-spec.json"
-fi
-if [ -z "$WAIT_SCROLL_SETTLE_USER" ] && [ -f "$_SETTLE_SPEC" ]; then
-  _derived_settle=$(PYTHONPATH="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"     python3 -m ui_clone.section_capture --print-settle "$_SETTLE_SPEC" 2>/dev/null || echo "")
-  case "$_derived_settle" in
-    ''|*[!0-9.]*) : ;; # non-numeric — keep the 0.5 default
-    *) WAIT_SCROLL_SETTLE="$_derived_settle" ;;
-  esac
-fi
 # ⚠️  IMPORTANT: Always pass $4 = absolute path to tmp/ref/<component-name>.
 # The default (tmp/ref/visual-debug) is for standalone runs only.
 # The Stop gate looks for sections/result.txt in the ACTIVE REF_DIR (which is absolute).
@@ -164,6 +152,35 @@ fi
 # Convert to absolute path (if relative, resolve from PWD)
 if [[ "$DIR" != /* ]]; then
   DIR="$(pwd)/$DIR"
+fi
+
+# Direct per-viewport reruns commonly point DIR at
+# <ref>/sections/viewports/<WxH> without going through the fan-out wrapper that
+# exports REF_ROOT_DIR. Infer that canonical ref root so transition-spec,
+# section-map, substitution, and selector config fallbacks remain available.
+if [ -z "${REF_ROOT_DIR:-}" ]; then
+  case "$DIR" in
+    */sections/viewports/*)
+      _viewport_ref_root="${DIR%%/sections/viewports/*}"
+      if [ -d "$_viewport_ref_root" ]; then
+        REF_ROOT_DIR="$_viewport_ref_root"
+        export REF_ROOT_DIR
+      fi
+      ;;
+  esac
+fi
+
+# H9 settle derivation (see header note): only when the caller did not pin it.
+_SETTLE_SPEC="$DIR/transition-spec.json"
+if [ ! -f "$_SETTLE_SPEC" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/transition-spec.json" ]; then
+  _SETTLE_SPEC="${REF_ROOT_DIR}/transition-spec.json"
+fi
+if [ -z "$WAIT_SCROLL_SETTLE_USER" ] && [ -f "$_SETTLE_SPEC" ]; then
+  _derived_settle=$(PYTHONPATH="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"     python3 -m ui_clone.section_capture --print-settle "$_SETTLE_SPEC" 2>/dev/null || echo "")
+  case "$_derived_settle" in
+    ''|*[!0-9.]*) : ;; # non-numeric — keep the 0.5 default
+    *) WAIT_SCROLL_SETTLE="$_derived_settle" ;;
+  esac
 fi
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -1410,6 +1427,26 @@ IMPL_SEMANTIC_CANDIDATES='(() => {
           || Number.parseFloat(style.opacity || "1") === 0) return null;
       return r;
     };
+    const dynamicSelectors = String(window.__UI_RE_DYNAMIC_SELECTORS__ || "")
+      .split(",").map(selector => selector.trim()).filter(Boolean);
+    const isDynamicMasked = node => dynamicSelectors.some(selector => {
+      try { return node.matches(selector); } catch (_error) { return false; }
+    });
+    const visibleMedia = Array.from(
+      el.querySelectorAll("img,video,canvas,iframe,picture,object,embed")
+    ).filter(node => {
+      const mediaRect = node.getBoundingClientRect();
+      if (mediaRect.width <= 0 || mediaRect.height <= 0) return false;
+      const mediaStyle = getComputedStyle(node);
+      return mediaStyle.display !== "none"
+        && (mediaStyle.visibility !== "hidden" || isDynamicMasked(node))
+        && Number.parseFloat(mediaStyle.opacity || "1") > 0;
+    });
+    const visibleMediaKindCounts = visibleMedia.reduce((counts, node) => {
+      const kind = node.tagName.toLowerCase();
+      counts[kind] = (counts[kind] || 0) + 1;
+      return counts;
+    }, {});
     const directBoxes = Array.from(el.children).map(visibleRect).filter(Boolean);
     const contentBox = directBoxes.length ? (() => {
       const left = Math.min(...directBoxes.map(box => box.left));
@@ -1450,6 +1487,10 @@ IMPL_SEMANTIC_CANDIDATES='(() => {
       fingerprint,
       textWords,
       hasSvgText,
+      hasVisibleMedia: visibleMedia.length > 0,
+      visibleMediaCount: visibleMedia.length,
+      visibleMediaKinds: Object.keys(visibleMediaKindCounts).sort(),
+      visibleMediaKindCounts,
       rect: {
         top: Math.round(rect.top + window.scrollY),
         left: Math.round(rect.left),
@@ -1659,13 +1700,20 @@ for i, s in enumerate(sections_sorted):
         "display": s.get("display") or "block",
         "gridCols": s.get("gridCols") or None,
         "childCount": int(s.get("childCount") or 0),
+        "hasVisibleMedia": s.get("hasVisibleMedia") is True,
+        "visibleMediaCount": int(s.get("visibleMediaCount") or 0),
+        "visibleMediaKinds": s.get("visibleMediaKinds") if isinstance(s.get("visibleMediaKinds"), list) else [],
+        "visibleMediaKindCounts": s.get("visibleMediaKindCounts") if isinstance(s.get("visibleMediaKindCounts"), dict) else {},
     }
     # Inherit the live-measured alignment fields the section-map lacks, so the
     # synthesized ref row carries the SAME contentGroups/gaps the impl row
     # enumerates (batch-13 ITEM 3 — keeps alignment-parity's ref side measurable).
     _rt = _runtime_row(sid, cls, y)
     if isinstance(_rt, dict):
-        for _k in ("contentGroups", "clientWidth", "leftGap", "rightGap", "contentBox"):
+        for _k in (
+            "contentGroups", "clientWidth", "leftGap", "rightGap", "contentBox",
+            "hasVisibleMedia", "visibleMediaCount", "visibleMediaKinds", "visibleMediaKindCounts",
+        ):
             _v = _rt.get(_k)
             if _v is not None:
                 row[_k] = _v
@@ -2015,6 +2063,10 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 SUBSTITUTED_COUNT=0
+# Guard-driven STRUCTURAL_ONLY rows are automatic evidence deferrals rather
+# than operator-declared asset substitutions. Track them separately so they
+# stay in the 50% non-structural-evidence denominator below.
+GUARD_STRUCTURAL_COUNT=0
 # UNMEASURED is tracked apart from SKIP. SKIP means "the impl does not have this
 # section"; UNMEASURED means "the REFERENCE crop carried no signal, so neither
 # side was measured". Folding the second into the first produced a 0-FAIL
@@ -2143,9 +2195,11 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   GUARD_ROW=$(awk -F'\t' -v n="$NAME" '$1==n{print; exit}' "$DIR/sections/crop-guards.tsv" 2>/dev/null || true)
   GUARD_REASON=""
   GUARD_POLICY=""
+  GUARD_SOURCE=""
   if [ -n "$GUARD_ROW" ]; then
     GUARD_REASON=$(printf '%s' "$GUARD_ROW" | cut -f2)
     GUARD_POLICY=$(printf '%s' "$GUARD_ROW" | cut -f3)
+    GUARD_SOURCE=$(printf '%s' "$GUARD_ROW" | cut -f4)
   fi
   if [ "$GUARD_POLICY" = "all" ]; then
     UNMEASURED_COUNT=$((UNMEASURED_COUNT + 1))
@@ -2652,9 +2706,25 @@ PY
   # passing it); policy "pass-only" converts pass tiers but keeps fails
   # (a fail on the unmasked remainder is still real evidence).
   if [ -n "$GUARD_ROW" ]; then
+    if [ "$GUARD_POLICY" = "structural-only" ] && [ "$STATUS" = "✅" ] \
+       && { ! is_motion_structural_only_protected "$NAME" \
+            || [ "$GUARD_SOURCE" = "masked-media-motion" ]; }; then
+      # Run strict pixel comparison first. A real failure on the unmasked
+      # remainder must remain a failure; only a pass-tier crop may defer to the
+      # independently required media/structure proofs. Motion-critical media
+      # receives this distinct source only when the plan also declares the
+      # dedicated motion-parity gate; generic STRUCTURAL_ONLY stays blocked.
+      PASS_COUNT=$((PASS_COUNT - 1))
+      NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT - 1))
+      SUBSTITUTED_COUNT=$((SUBSTITUTED_COUNT + 1))
+      GUARD_STRUCTURAL_COUNT=$((GUARD_STRUCTURAL_COUNT + 1))
+      RESULTS="${RESULTS}| ${NAME} | ${AE} | ${AE_PER_MPX} | ${GUARD_SOURCE:-masked-media} | 🔁 STRUCTURAL_ONLY |\n"
+      echo "  ↳ ${NAME}: pass-tier pixel verdict deferred to STRUCTURAL_ONLY — ${GUARD_REASON}"
+      continue
+    fi
     if [ "$STATUS" = "✅" ] || [ "$GUARD_POLICY" = "all" ]; then
       case "$SEV" in
-        ok|minor|pass-by-dssim|pass-by-perceptual|pass-by-ae-floor|pass-by-motion-phase)
+        ok|minor|pass-by-dssim|pass-by-dssim-strict|pass-by-perceptual|pass-by-ae-floor|pass-by-motion-phase)
           PASS_COUNT=$((PASS_COUNT - 1))
           NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT - 1))
           ;;
@@ -2996,7 +3066,7 @@ if [ "$UNMEASURED_COUNT" -gt 0 ]; then
   exit 1
 fi
 
-TOTAL_ROWS=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT + UNMEASURED_COUNT))
+TOTAL_ROWS=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT + UNMEASURED_COUNT + GUARD_STRUCTURAL_COUNT))
 # Template-mode escape valve (Common cheat pattern): when asset-substitution.json
 # declares wholesale wildcard substitution ("*"), the agent has explicitly
 # committed to a design-template clone where copy/imagery are intentionally

@@ -94,6 +94,19 @@ Writes `tmp/ref/<component>/animation-runtime-dump.json`:
 
 ```json
 {
+  "captureStatus": "ok",
+  "captureError": null,
+  "scrollAudit": {
+    "engine": "native",
+    "maxScroll": 2560,
+    "samples": [
+      { "requested": 0, "observed": 0, "method": "native" },
+      { "requested": 0.25, "observed": 0.25, "method": "native" },
+      { "requested": 0.5, "observed": 0.5, "method": "native" },
+      { "requested": 0.75, "observed": 0.75, "method": "native" },
+      { "requested": 1, "observed": 1, "method": "native" }
+    ]
+  },
   "gsap": { "version": "3.12.5", "ticker": "lagSmoothing-on" },
   "scrollTrigger": [
     { "start": 1200, "end": 2400, "scrub": 1, "pin": true,
@@ -104,13 +117,66 @@ Writes `tmp/ref/<component>/animation-runtime-dump.json`:
     { "id": null, "playState": "running", "duration": 800,
       "delay": 0, "easing": "cubic-bezier(0.4, 0, 0.2, 1)", "target": "div#logo" }
   ],
+  "scrollLinkedStyles": [
+    {
+      "sourceId": "runtime-scroll-filter-001",
+      "selector": ".hero-media",
+      "filter": ["filter"],
+      "varies": ["filter"],
+      "byScroll": {
+        "0": {
+          "transform": "none",
+          "opacity": "1",
+          "width": "640px",
+          "height": "480px",
+          "borderRadius": "0px",
+          "filter": "blur(12px) brightness(0.8)"
+        },
+        "0.5": {
+          "transform": "none",
+          "opacity": "1",
+          "width": "640px",
+          "height": "480px",
+          "borderRadius": "0px",
+          "filter": "blur(4px) brightness(1.5)"
+        },
+        "1": {
+          "transform": "none",
+          "opacity": "1",
+          "width": "640px",
+          "height": "480px",
+          "borderRadius": "0px",
+          "filter": "blur(0px) brightness(2)"
+        }
+      },
+      "latched": false
+    }
+  ],
   "lenis": { "duration": 1.2, "easing": "t => Math.min(1, 1.001 - Math.pow(2, -10 * t))", "smoothWheel": true },
   "ix2": { "timelineCount": 12, "timelineKeys": ["e-1","e-2"], "eventCount": 24 },
   "generatedAt": "2026-05-14T20:00:00.000Z"
 }
 ```
 
-Missing runtimes are emitted as `null` (NOT omitted) so downstream code can do a single shape check. Consult this file when authoring `transition-spec.json` (`transition-spec-rules.md`) — easing/threshold values that bundle-grep misses live here.
+Only `captureStatus: "ok"` with a trustworthy `scrollAudit` is usable motion
+evidence. `captureStatus: "error"`, a nonzero wrapper exit, an empty/invalid
+browser response, or a scrollable page without >=3 distinct observed positions
+means rerun or recover the browser session; never interpret as no motion.
+
+Missing runtime families may be `null` only on successful capture. That explicit
+success shape distinguishes "not observed" from "browser capture failed";
+`captureError` records the failure case instead of letting downstream agents
+guess absence.
+
+`scrollLinkedStyles[]` rows must carry stable `sourceId` values so Step 5d and
+Step 7 can cite the same row. A single `blur(px)` runtime curve is replayable,
+and a stable `blur(px) brightness(number)` runtime curve is replayable by the
+selector-scoped linked driver. The driver treats order-changing, extra-function, negative, nonfinite, or mixed compound filters as captured evidence only; they need explicit implementation and verification rather than invented interpolation.
+
+Runtime dump rows stay one `sourceId` per observed site. The planner may collapse identical repeated non-latched runtime curves for the same selector, scroll progress keys, and scope into a generation-plan scrub site with `replay: "all-matches"` plus `sourceIds[]`. Mixed repeated curves stay selector-indexed so element-specific offsets are not smeared across all matches.
+Consult this file when authoring `transition-spec.json`
+(`transition-spec-rules.md`) — easing/threshold values that bundle-grep misses
+live here.
 
 ## Phase A — Idle capture (splash + auto-timers)
 

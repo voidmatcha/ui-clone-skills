@@ -52,6 +52,14 @@ PLAN = {
     "minContentPx": 12.0,
 }
 
+STATE_REVEAL_PROBE = (
+    Path(__file__).resolve().parents[2]
+    / "skills"
+    / "visual-debug"
+    / "scripts"
+    / "state-reveal-proof-check.sh"
+)
+
 
 def _obs(pct, text, box, content, selector=".nav_label_container__okVKb"):  # type: ignore[no-untyped-def]
     return {"selector": selector, "pct": pct, "text": text, "box": box, "content": content}
@@ -83,6 +91,15 @@ def test_active_label_stays_collapsed_fails() -> None:
 def test_active_label_reveals_passes() -> None:
     obs = [_obs(0, "Real Food", 74.0, 74.0), _obs(60, "FAQs", 70.0, 74.0)]
     assert evaluate(PLAN, obs)["status"] == "pass"
+
+
+def test_live_probe_measures_text_descendant_paint_and_container_width() -> None:
+    script = STATE_REVEAL_PROBE.read_text(encoding="utf-8")
+
+    assert "__visibleIdentity.describeTextPaint(el" in script
+    assert "paintOnScreen" in script
+    assert "box: r.width" in script
+    assert "content: el.scrollWidth" in script
 
 
 def test_section_transition_collapse_tolerated_when_same_label_reveals_elsewhere() -> None:

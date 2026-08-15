@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import cast
 
+from ui_clone import claude_continuation as _continuation
 from ui_clone.goal import build_goal_card
 from ui_clone.hooks._common import deferred_checks_blocker as _deferred_checks_blocker
 from ui_clone.hooks._common import find_project_root as _find_project_root
@@ -35,6 +36,7 @@ from ui_clone.state import (
     POST_IMPL_VERIFY_GATES,
     TERMINAL_STATUSES,
     PipelineState,
+    is_recoverable_terminal_state,
 )
 
 _DEFAULT_STALE_DAYS = 3
@@ -475,6 +477,15 @@ def _terminal_state_block_reason(ref_dir: Path, state: PipelineState) -> str | N
     terminal = state.terminal_state
     if not terminal:
         return None
+    if is_recoverable_terminal_state(terminal):
+        return (
+            f"⛔ UI-RE recoverable verify failure for {ref_dir}\n\n"
+            f"pipeline-state.json contains legacy terminalState category "
+            f"{terminal.get('category')!r}, which now means active rework rather "
+            f"than a terminal release. Read verify-report.json and rerun the "
+            f"canonical verify command after patching failures:\n"
+            f"  python -m ui_clone.pipeline <url> <component> <session> verify --json\n"
+        )
     status = str(terminal.get("status") or "").lower()
     if status not in TERMINAL_STATUSES:
         return (
@@ -1321,6 +1332,73 @@ def _coerce_stop_hook_active(value: object) -> bool:
     return bool(value)
 
 
+def _continuation_stop_prefix(
+    project_root: Path,
+    session_id: str,
+    payload: dict[str, object] | None,
+) -> str | None:
+    if not session_id:
+        return None
+    try:
+        receipt = _continuation.load_receipt(project_root, session_id)
+        result: _continuation.ReconcileResult | None = None
+        if payload is not None and "session_crons" in payload:
+            result = _continuation.reconcile_cron_snapshot(
+                project_root,
+                session_id,
+                payload.get("session_crons"),
+            )
+            receipt = result.receipt or _continuation.load_receipt(project_root, session_id)
+    except _continuation.ContinuationError as exc:
+        if "duplicate" in str(exc).lower():
+            return (
+                "⛔ UI-RE duplicate continuation scheduled tasks\n\n"
+                "The Stop payload contains multiple exact continuation lease matches. "
+                "Delete every matching scheduled task with CronDelete, then explicitly "
+                "create exactly one replacement lease. The Stop hook will not choose "
+                "between duplicates silently.\n\n"
+            )
+        return None
+
+    if receipt is None:
+        return (
+            "⛔ UI-RE continuation lease missing\n\n"
+            "This incomplete Stop has no Claude continuation receipt for the current "
+            "session. Bootstrap the lease before treating the session as idle:\n"
+            f"  python -m ui_clone.claude_continuation create-pending --session-id {session_id} "
+            "--cwd . --skill ui-clone-skills:ui-reverse-engineering\n"
+            "Then call CronCreate with the receipt's exact prompt/input and wait for "
+            "the receipt to become active.\n\n"
+        )
+
+    state = receipt.get("state")
+    if state == _continuation.STATE_ACTIVE:
+        return None
+    if state == _continuation.STATE_PENDING:
+        return (
+            "⛔ UI-RE continuation lease is pending\n\n"
+            "The receipt exists, but no active scheduled task is confirmed. Call "
+            "CronCreate using the receipt's exact continuation input; do not assume "
+            "a lease from an unavailable, malformed, or unrelated cron snapshot.\n\n"
+        )
+    if state == _continuation.STATE_PAUSED:
+        return (
+            "⛔ UI-RE continuation scheduled task is paused\n\n"
+            "A valid session_crons snapshot did not confirm the active job, or the "
+            "receipt was already paused. Do not recreate it from the Stop hook. "
+            "Resume only after explicit user intent; delete any stale owned task "
+            "with CronDelete.\n\n"
+        )
+    if result is not None and result.status == "absent":
+        return (
+            "⛔ UI-RE continuation lease absent\n\n"
+            "The valid session_crons snapshot has no matching active continuation "
+            "task. Create a new lease explicitly with CronCreate before relying on "
+            "automatic interactive continuation.\n\n"
+        )
+    return None
+
+
 def main() -> None:
     project_root = _find_project_root()
     search_root = project_root / "tmp" / "ref"
@@ -1441,6 +1519,13 @@ def main() -> None:
     for ref_dir in active_dirs:
         block_reason = _enforce_ref_dir(ref_dir)
         if block_reason:
+            prefix = _continuation_stop_prefix(
+                project_root,
+                stop_scope_session_id,
+                payload,
+            )
+            if prefix:
+                block_reason = f"{prefix}{block_reason}"
             _emit_block(block_reason)
             sys.exit(0)
 

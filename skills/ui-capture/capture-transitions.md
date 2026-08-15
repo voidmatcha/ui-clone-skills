@@ -204,6 +204,14 @@ python3 scripts/extract/capture-region-artifacts.py \
 The bridge uses the current `agent-browser screenshot [selector] [path]`
 interface. It writes explicit `artifacts.idle` and
 `artifacts.active` paths plus `capture-region-artifacts-summary.json`.
+When a hover rule is activated on an ancestor but changes a descendant, keep
+the pointer hit area in `target` and record the changed descendant in
+`affectedTarget`. The bridge marks the exact activation element first, then
+accepts only affected matches contained by that element. Pointer dispatch and
+activation geometry stay on `target`; computed styles, transition parameters,
+and the tight comparison crop come from `affectedTarget`. A missing contained
+affected element is a capture failure, not permission to measure an unrelated
+match elsewhere in the document.
 Successfully observed pairs also replace auto-placeholder hover stubs in
 `transition-spec.json` with live-capture provenance, the actual reference
 frames, and measured property/duration/easing values. A region the bridge

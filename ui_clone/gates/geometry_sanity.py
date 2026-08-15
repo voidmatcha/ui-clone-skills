@@ -15,7 +15,9 @@ MAJOR sections (>= min_section_px) are judged so chrome-strip noise is ignored.
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 DOCH_FAIL_PCT_DEFAULT = 15.0
 DOCH_WARN_PCT_DEFAULT = 10.0
@@ -28,6 +30,7 @@ DOCH_FAIL_PX_DEFAULT = 800.0
 SECTION_FAIL_PCT_DEFAULT = 25.0
 SECTION_WARN_PCT_DEFAULT = 16.0
 MIN_SECTION_PX_DEFAULT = 200.0
+NUMERIC_TYPES = (int, float)
 
 
 def parse_viewport(value: object) -> tuple[int, int] | None:
@@ -37,6 +40,55 @@ def parse_viewport(value: object) -> tuple[int, int] | None:
         return None
     width, height = (int(part) for part in match.groups())
     return (width, height) if width > 0 and height > 0 else None
+
+
+def _viewport_pair(value: object) -> tuple[int, int] | None:
+    if isinstance(value, dict):
+        width = value.get("w", value.get("width"))
+        height = value.get("h", value.get("height"))
+        if isinstance(width, NUMERIC_TYPES) and isinstance(height, NUMERIC_TYPES):
+            width, height = int(width), int(height)
+            return (width, height) if width > 0 and height > 0 else None
+    return parse_viewport(value)
+
+
+def capture_viewport(ref_dir: str | Path) -> tuple[int, int]:
+    """Resolve the viewport used by the frozen capture artifacts."""
+    ref_path = Path(ref_dir)
+
+    try:
+        layout = json.loads((ref_path / "orig-layout.json").read_text(encoding="utf-8"))
+        pair = _viewport_pair(
+            {"w": layout.get("viewportWidth"), "h": layout.get("viewportHeight")}
+        )
+        if pair:
+            return pair
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    try:
+        context = json.loads(
+            (ref_path / "container-context.json").read_text(encoding="utf-8")
+        )
+        pair = _viewport_pair(context.get("viewport"))
+        if pair:
+            return pair
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    try:
+        provenance = json.loads(
+            (ref_path / "sections" / "frozen-ref-provenance.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        pair = _viewport_pair(provenance.get("viewport"))
+        if pair:
+            return pair
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    return (1280, 800)
 
 
 def section_anchor_name(section: dict) -> str | None:
@@ -104,7 +156,7 @@ def resolve_impl_height(
     if (
         is_sticky
         and ref_is_range
-        and isinstance(sticky_range_h, int | float)
+        and isinstance(sticky_range_h, NUMERIC_TYPES)
         and sticky_range_h > 0
     ):
         return float(sticky_range_h)
@@ -149,10 +201,10 @@ def evaluate(
     for sec in sections:
         ref_h = sec.get("refH")
         impl_h = sec.get("implH")
-        if not isinstance(ref_h, int | float) or ref_h < min_section_px:
+        if not isinstance(ref_h, NUMERIC_TYPES) or ref_h < min_section_px:
             continue  # minor strip — not a geometry-drift signal
         row = {"name": str(sec.get("name", "")), "refH": ref_h, "implH": impl_h}
-        if isinstance(impl_h, int | float) and impl_h > 0:
+        if isinstance(impl_h, NUMERIC_TYPES) and impl_h > 0:
             pct = _pct_off(float(ref_h), float(impl_h))
             row["pctOff"] = round(pct, 1)
             row["status"] = _band(pct, section_warn_pct, section_fail_pct)

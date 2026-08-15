@@ -452,6 +452,112 @@ def test_spec_implementation_coverage_accepts_imported_generated_ref_css_hover(
     assert artifact["withMotion"] == 1
 
 
+def test_spec_implementation_coverage_accepts_minified_descendant_hover_rule(
+    tmp_path: Path,
+) -> None:
+    """A minified rule after another closing brace remains executable evidence.
+
+    CSS bundles commonly concatenate rules without newlines. The activation
+    selector may own ``:hover`` while a descendant ``affectedTarget`` owns the
+    transition, so the scanner must recognize the rule after a ``}`` boundary.
+    """
+    import subprocess
+
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src" / "ref-css").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "nav-dot-hover",
+                        "trigger": "hover",
+                        "type": "css-hover",
+                        "target": ".nav-dot-button",
+                        "affectedTarget": ".nav-dot-button .nav-dot",
+                        "animation": {
+                            "type": "css-hover",
+                            "property": "backgroundColor",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (impl / "src" / "App.tsx").write_text(
+        'import "./ref-css/page.css";\n'
+        "export function App() {\n"
+        '  return <button className="nav-dot-button"><span className="nav-dot" /></button>;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    (impl / "src" / "ref-css" / "page.css").write_text(
+        ".nav-dot-button .nav-dot{transition:background-color .15s}"
+        ".nav-dot-button:hover .nav-dot{background-color:#fff6}",
+        encoding="utf-8",
+    )
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "spec-implementation-coverage.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl / "src")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["triggerStatic"] == 0
+
+
+def test_spec_implementation_coverage_accepts_plain_imported_css_hover_selector(
+    tmp_path: Path,
+) -> None:
+    """Plain CSS selectors ending in :hover are executable hover evidence."""
+    import subprocess
+
+    comp = tmp_path / "comp"
+    impl = tmp_path / "impl"
+    (impl / "src" / "styles").mkdir(parents=True)
+    comp.mkdir()
+    (comp / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{
+            "id": "nav-button-hover",
+            "trigger": "hover",
+            "type": "css-hover",
+            "selector": ".nav .button",
+        }]
+    }))
+    (impl / "src" / "App.tsx").write_text(
+        'import "./styles/page.css";\n'
+        "export function App() {\n"
+        "  return <nav className=\"nav\"><button className=\"button\">Docs</button></nav>;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (impl / "src" / "styles" / "page.css").write_text(
+        ".nav .button:hover { transition: transform 160ms ease; transform: translateY(-2px); }\n",
+        encoding="utf-8",
+    )
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "spec-implementation-coverage.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(comp), str(impl / "src")],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((comp / "spec-implementation-coverage.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["withMotion"] == 1
+
+
 def test_spec_implementation_coverage_rejects_unimported_css_hover(
     tmp_path: Path,
 ) -> None:

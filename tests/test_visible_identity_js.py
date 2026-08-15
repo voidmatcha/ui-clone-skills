@@ -117,6 +117,26 @@ ok(vi.isRendered(rec({ hitTest: "blocked" })) === false, "hit blocked hidden");
 ok(vi.isRendered(rec({ hitTest: null })) === true, "hit null not hidden");
 ok(vi.isRendered(rec({ hitTest: "descendant" })) === true, "hit descendant ok");
 ok(typeof vi.ancestorClipped === "function", "ancestorClipped exported");
+
+// state-reveal geometry wrappers may delegate glyph paint to a nested span.
+// Selection follows direct text-node ownership, not paintability, so an
+// invisible text owner is still selected and rejected by paintsText downstream.
+function textNode(value, parent) {
+  return { nodeType: 3, nodeValue: value, parentElement: parent };
+}
+function elem(children) {
+  return { nodeType: 1, childNodes: children || [] };
+}
+var PAINT_LEAF = elem();
+PAINT_LEAF.childNodes = [textNode("Resources", PAINT_LEAF)];
+var PAINT_WRAP = elem([elem([PAINT_LEAF])]);
+ok(typeof vi.textPaintTarget === "function", "textPaintTarget exported");
+ok(typeof vi.describeTextPaint === "function", "describeTextPaint exported");
+ok(vi.textPaintTarget(PAINT_WRAP) === PAINT_LEAF, "nested text owner selected");
+PAINT_LEAF.colorAlpha = 0;
+ok(vi.textPaintTarget(PAINT_WRAP) === PAINT_LEAF, "transparent text owner is not bypassed");
+var EMPTY_TEXT_WRAP = elem();
+ok(vi.textPaintTarget(EMPTY_TEXT_WRAP) === EMPTY_TEXT_WRAP, "no-text wrapper falls back to itself");
 function ancestorClip(overflowX, overflowY, parentRect, targetRect) {
   const savedDocument = global.document;
   const savedGetComputedStyle = global.getComputedStyle;

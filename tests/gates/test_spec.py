@@ -40,6 +40,47 @@ def _write_webm(path: Path) -> None:
     )
 
 
+def _write_spec_gate_fixture(
+    ref: Path,
+    *,
+    bundle_map: dict[str, Any] | None = None,
+    transition_spec: dict[str, Any] | None = None,
+    runtime_dump: dict[str, Any] | None = None,
+) -> None:
+    ref.mkdir()
+    (ref / "bundle-map.json").write_text(json.dumps(bundle_map or {"chunks": ["fixture.js"]}))
+    bundles = ref / "bundles"
+    bundles.mkdir()
+    (bundles / "fixture.js").write_text("// fixture bundle")
+    (ref / "external-sdks.json").write_text(json.dumps({"sdks": []}))
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "requiredChecks": []})
+    )
+    verify = ref / "verify"
+    verify.mkdir()
+    _write_png(verify / "runtime.png")
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            transition_spec
+            or {
+                "transitions": [
+                    {
+                        "id": "fixture-runtime-scroll",
+                        "trigger": "scroll",
+                        "source_chunk": "fixture.js",
+                        "bundle_branch": "runtime observed",
+                        "target": ".fixture",
+                        "animation": {"type": "scroll-scrub"},
+                        "reference_frames": ["verify/runtime.png"],
+                    }
+                ]
+            }
+        )
+    )
+    if runtime_dump is not None:
+        (ref / "animation-runtime-dump.json").write_text(json.dumps(runtime_dump))
+
+
 def test_gate_spec_fails_when_transition_spec_missing(tmp_path: Path) -> None:
     """gate_spec must fail when transition-spec.json is absent."""
     ref = tmp_path / "ref"
@@ -117,6 +158,520 @@ def test_gate_spec_points_to_runtime_dump_when_motion_exists_but_spec_empty(
         r.label == "runtime motion transition-spec coverage"
         and "Framer" in r.message
         and "Webflow IX2" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_fails_motion_rich_runtime_capture_error_first(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"], "libraries": ["gsap", "ScrollTrigger"]},
+        transition_spec={"transitions": []},
+        runtime_dump={
+            "captureStatus": "error",
+            "captureError": {"name": "EvalError", "message": "page closed"},
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert failures[0].label == "runtime capture integrity"
+    assert "captureError" in failures[0].message
+    assert "page closed" in failures[0].message
+
+
+def test_gate_spec_fails_motion_rich_legacy_empty_runtime_capture(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"], "libraries": ["framer-motion"]},
+        runtime_dump={"note": "eval returned empty"},
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "runtime capture integrity"
+        and "eval returned empty" in r.message
+        and "animation-runtime-dump.json" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_allows_measured_static_runtime_capture(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"]},
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "engine": "native",
+                "maxScroll": 0,
+                "samples": {"requested": [0, 0.5, 1], "observed": [0, 0, 0]},
+            },
+            "scrollLinkedStyles": [],
+        },
+    )
+
+    integrity = [r for r in Gate(ref).gate_spec() if r.label == "runtime capture integrity"]
+
+    assert integrity == []
+
+
+def test_gate_spec_keeps_legacy_runtime_dump_without_failure_marker_compatible(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"], "libraries": ["gsap"]},
+        runtime_dump={"scrollTrigger": []},
+    )
+
+    integrity = [r for r in Gate(ref).gate_spec() if r.label == "runtime capture integrity"]
+
+    assert integrity == []
+
+
+def test_gate_spec_fails_motion_rich_ok_capture_with_immobile_scroll_audit(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"], "libraries": ["gsap"]},
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "engine": "native",
+                "maxScroll": 1200,
+                "samples": {
+                    "requested": [0, 0.25, 0.5, 0.75, 1],
+                    "observed": [0, 0.00001, 0.00002, 0.00002, 0.00001],
+                },
+            },
+            "scrollLinkedStyles": [],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "runtime capture integrity"
+        and "observed normalized positions" in r.message
+        and "maxScroll" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_fails_new_format_ok_capture_with_positive_static_scroll_audit(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"]},
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "engine": "native",
+                "maxScroll": 1200,
+                "samples": {
+                    "requested": [0, 0.25, 0.5, 0.75, 1],
+                    "observed": [0, 0, 0.00001, 0.00001, 0],
+                },
+            },
+            "scrollLinkedStyles": [],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "runtime capture integrity"
+        and "observed normalized positions" in r.message
+        and "maxScroll" in r.message
+        for r in failures
+    ), failures
+
+
+@pytest.mark.parametrize("max_scroll", ["not-a-number", "NaN", "Infinity"])
+def test_gate_spec_fails_new_format_ok_capture_with_malformed_max_scroll(
+    tmp_path: Path,
+    max_scroll: str,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"]},
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "engine": "native",
+                "maxScroll": max_scroll,
+                "samples": {"observed": [0, 0.5, 1]},
+            },
+            "scrollLinkedStyles": [],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "runtime capture integrity"
+        and "maxScroll" in r.message
+        and "finite numeric" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_fails_new_format_ok_capture_with_nonfinite_observed_positions(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"]},
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "engine": "native",
+                "maxScroll": 1200,
+                "samples": {"observed": ["NaN", "NaN", "NaN"]},
+            },
+            "scrollLinkedStyles": [],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "runtime capture integrity"
+        and "observed normalized positions" in r.message
+        and "[]" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_accepts_runtime_audit_producer_sample_objects(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"]},
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "engine": "native",
+                "maxScroll": 18429,
+                "samples": [
+                    {"requested": 0, "observed": 0, "method": "native"},
+                    {"requested": 0.05, "observed": 0.04998, "method": "native"},
+                    {"requested": 0.1, "observed": 0.10002, "method": "native"},
+                    {"requested": 0.15, "observed": 0.15001, "method": "native"},
+                ],
+            },
+            "scrollLinkedStyles": [],
+        },
+    )
+
+    integrity = [r for r in Gate(ref).gate_spec() if r.label == "runtime capture integrity"]
+
+    assert integrity == []
+
+
+def test_gate_spec_fails_runtime_audit_sample_objects_without_distinct_observed(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"]},
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "engine": "native",
+                "maxScroll": 18429,
+                "samples": [
+                    {"requested": 0, "observed": "NaN", "method": "native"},
+                    {"requested": 0.25, "observed": 0, "method": "native"},
+                    {"requested": 0.5, "observed": 0.00001, "method": "native"},
+                    {"requested": 0.75, "observed": "Infinity", "method": "native"},
+                ],
+            },
+            "scrollLinkedStyles": [],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "runtime capture integrity"
+        and "observed normalized positions" in r.message
+        and "[0.0, 1e-05]" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_ignores_raw_numeric_runtime_audit_sample_list(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"]},
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "engine": "native",
+                "maxScroll": 18429,
+                "samples": [0, 0.5, 1],
+            },
+            "scrollLinkedStyles": [],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "runtime capture integrity"
+        and "observed normalized positions" in r.message
+        and "[]" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_fails_motion_rich_ok_capture_missing_scroll_audit(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        bundle_map={"chunks": ["fixture.js"], "libraries": ["gsap"]},
+        runtime_dump={"captureStatus": "ok", "scrollLinkedStyles": []},
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "runtime capture integrity"
+        and "no scrollAudit" in r.message
+        and "motion-rich" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_accepts_covered_runtime_scroll_linked_site(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        transition_spec={
+            "transitions": [
+                {
+                    "id": "hero-runtime-scroll",
+                    "trigger": "scroll",
+                    "source_chunk": "fixture.js",
+                    "sourceArtifact": "animation-runtime-dump.json",
+                    "sourceId": "runtime-scroll-hero",
+                    "bundle_branch": "runtime observed",
+                    "target": ".hero",
+                    "animation": {"type": "scroll-scrub"},
+                    "reference_frames": ["verify/runtime.png"],
+                }
+            ]
+        },
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {
+                "maxScroll": 900,
+                "samples": {"observed": [0, 0.5, 1]},
+            },
+            "scrollLinkedStyles": [
+                {"sourceId": "runtime-scroll-hero", "selector": ".hero", "varies": ["transform"]}
+            ],
+        },
+    )
+
+    coverage = [r for r in Gate(ref).gate_spec() if r.label == "spec-runtime-site-coverage"]
+
+    assert coverage == []
+
+
+def test_gate_spec_accepts_unambiguous_runtime_site_selector_fallback(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        transition_spec={
+            "transitions": [
+                {
+                    "id": "legacy-hero-scroll",
+                    "trigger": "scroll",
+                    "source_chunk": "fixture.js",
+                    "bundle_branch": "runtime observed before source ids",
+                    "target": ".hero",
+                    "animation": {"type": "scroll-scrub"},
+                    "reference_frames": ["verify/runtime.png"],
+                }
+            ]
+        },
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {"maxScroll": 900, "samples": {"observed": [0, 0.5, 1]}},
+            "scrollLinkedStyles": [
+                {"sourceId": "runtime-scroll-hero", "selector": ".hero", "varies": ["transform"]}
+            ],
+        },
+    )
+
+    coverage = [r for r in Gate(ref).gate_spec() if r.label == "spec-runtime-site-coverage"]
+
+    assert coverage == []
+
+
+def test_gate_spec_rejects_selector_fallback_for_duplicate_runtime_selectors(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        transition_spec={
+            "transitions": [
+                {
+                    "id": "legacy-hero-scroll",
+                    "trigger": "scroll",
+                    "source_chunk": "fixture.js",
+                    "bundle_branch": "runtime observed before source ids",
+                    "target": ".hero",
+                    "animation": {"type": "scroll-scrub"},
+                    "reference_frames": ["verify/runtime.png"],
+                }
+            ]
+        },
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {"maxScroll": 900, "samples": {"observed": [0, 0.5, 1]}},
+            "scrollLinkedStyles": [
+                {"sourceId": "runtime-scroll-hero-a", "selector": ".hero", "varies": ["transform"]},
+                {"sourceId": "runtime-scroll-hero-b", "selector": ".hero", "varies": ["opacity"]},
+            ],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "spec-runtime-site-coverage"
+        and "runtime-scroll-hero-a" in r.message
+        and "runtime-scroll-hero-b" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_rejects_selector_fallback_for_duplicate_transition_targets(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        transition_spec={
+            "transitions": [
+                {
+                    "id": "legacy-hero-scroll-a",
+                    "trigger": "scroll",
+                    "source_chunk": "fixture.js",
+                    "bundle_branch": "runtime observed before source ids",
+                    "target": ".hero",
+                    "animation": {"type": "scroll-scrub"},
+                    "reference_frames": ["verify/runtime.png"],
+                },
+                {
+                    "id": "legacy-hero-scroll-b",
+                    "trigger": "scroll",
+                    "source_chunk": "fixture.js",
+                    "bundle_branch": "runtime observed before source ids",
+                    "target": ".hero",
+                    "animation": {"type": "scroll-scrub"},
+                    "reference_frames": ["verify/runtime.png"],
+                },
+            ]
+        },
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {"maxScroll": 900, "samples": {"observed": [0, 0.5, 1]}},
+            "scrollLinkedStyles": [
+                {"sourceId": "runtime-scroll-hero", "selector": ".hero", "varies": ["transform"]}
+            ],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "spec-runtime-site-coverage"
+        and "runtime-scroll-hero" in r.message
+        and ".hero" in r.message
+        for r in failures
+    ), failures
+
+
+def test_gate_spec_accepts_skipped_runtime_scroll_linked_site(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        transition_spec={
+            "transitions": [
+                {
+                    "id": "other-scroll",
+                    "trigger": "scroll",
+                    "source_chunk": "fixture.js",
+                    "bundle_branch": "runtime observed",
+                    "target": ".other",
+                    "animation": {"type": "scroll-scrub"},
+                    "reference_frames": ["verify/runtime.png"],
+                }
+            ],
+            "skipped": [
+                {
+                    "sourceArtifact": "animation-runtime-dump.json",
+                    "sourceId": "runtime-scroll-hero",
+                    "reason": "virtualized by sticky native scroll only",
+                }
+            ],
+        },
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {"maxScroll": 900, "samples": {"observed": [0, 0.5, 1]}},
+            "scrollLinkedStyles": [
+                {"sourceId": "runtime-scroll-hero", "selector": ".hero", "varies": ["transform"]}
+            ],
+        },
+    )
+
+    coverage = [r for r in Gate(ref).gate_spec() if r.label == "spec-runtime-site-coverage"]
+
+    assert coverage == []
+
+
+def test_gate_spec_fails_uncovered_runtime_scroll_linked_site(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_spec_gate_fixture(
+        ref,
+        runtime_dump={
+            "captureStatus": "ok",
+            "scrollAudit": {"maxScroll": 900, "samples": {"observed": [0, 0.5, 1]}},
+            "scrollLinkedStyles": [
+                {"sourceId": "runtime-scroll-hero", "selector": ".hero", "varies": ["transform"]},
+                {"selector": ".legacy-no-source-id", "varies": ["opacity"]},
+            ],
+            "animations": [{"selector": ".non-scroll", "sourceId": "runtime-non-scroll"}],
+        },
+    )
+
+    failures = [r for r in Gate(ref).gate_spec() if r.status == "fail"]
+
+    assert any(
+        r.label == "spec-runtime-site-coverage"
+        and "runtime-scroll-hero" in r.message
+        and ".hero" in r.message
+        and "legacy-no-source-id" not in r.message
+        and "runtime-non-scroll" not in r.message
         for r in failures
     ), failures
 

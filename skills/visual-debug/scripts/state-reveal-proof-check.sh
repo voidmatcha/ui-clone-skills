@@ -101,14 +101,26 @@ print(
         // Full pixel-truth record via the shared collector: color +
         // effectiveBgColor (contrast / white-on-white), checkVisibility, clip /
         // filter / ancestor-clip / hit-test (batch-7 ITEM 1), merged with the
-        // reveal-specific box/content/pct fields.
-        const base = __visibleIdentity.describe(el, s, 0, [], vpW, vpH);
+        // reveal-specific box/content/pct fields. Width belongs to the declared
+        // reveal container, while paint truth belongs to its actual text-bearing
+        // descendant when CSS overrides inherited colour on that child.
+        const base = __visibleIdentity.describeTextPaint(el, s, 0, [], vpW, vpH);
+        const paintRect = base.rect || {};
+        const paintOnScreen = (
+          Number(paintRect.left || 0) + Number(paintRect.width || 0) > 0 &&
+          Number(paintRect.left || 0) < vpW &&
+          Number(paintRect.top || 0) + Number(paintRect.height || 0) > 0 &&
+          Number(paintRect.top || 0) < vpH
+        );
         out.push(Object.assign(base, {
           pct: pct,
           text: String(el.innerText || "").split(String.fromCharCode(10)).join(" ").trim().slice(0, 40),
           box: r.width,
           content: el.scrollWidth,
-          onScreen: (r.right > 0 && r.left < vpW && r.bottom > 0 && r.top < vpH),
+          onScreen: (
+            r.right > 0 && r.left < vpW && r.bottom > 0 && r.top < vpH &&
+            paintOnScreen
+          ),
         }));
       });
     });

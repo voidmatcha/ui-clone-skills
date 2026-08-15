@@ -17,6 +17,8 @@
 - `tmp/ref/<component>/styles.json` + `tmp/ref/<component>/css/variables.txt` — design tokens
 - `tmp/ref/<component>/signature-effects-candidates.json` — deterministic signature-effect candidates
 - `tmp/ref/<component>/animations-detected.json` — animation candidates
+- `tmp/ref/<component>/animation-runtime-dump.json` — canonical runtime motion provenance for scroll-linked styles and runtime-only animation params
+- `tmp/ref/<component>/states/scroll/trajectory.json` — optional/supporting scroll-state trajectory evidence
 - `tmp/ref/<component>/transition-spec.json` — transitions
 - `tmp/ref/<component>/element-roles.json`, `element-groups.json`, `layout-decisions.json`, `component-map.json` — Step 6c audit
 - `tmp/ref/<component>/asset-substitution.json` + `font-parity.json` — substitution declarations
@@ -46,13 +48,58 @@ Inspect `css/variables.txt` and `styles.json`. Extract semantic names for repeat
 
 ### 3. Library wiring per-component
 
-For each `componentList` entry, add `wires: []` with concrete library hooks the impl should use. Examples:
+For each `componentList` entry, add `wires: []` with concrete implementation
+wiring the impl should use. Non-motion wire strings remain allowed for ordinary
+component wiring, but any motion-like wire must be structured and grounded in
+forensic evidence. Do not emit motion-like strings such as `"useScroll"` or
+`"gsap.timeline + ScrollTrigger"` because downstream implementation cannot trace
+them to a captured row.
 
-- Hero with scroll-driven parallax → `["useScroll", "useTransform"]` (Framer Motion) or `["gsap.timeline + ScrollTrigger"]`
-- Footer with rotating cards → `["useEffect with setInterval"]` (vanilla React, no library)
-- IntroAnimation coordinator → `["AnimatePresence", "motion.div initial/animate"]`
+```json
+{
+  "name": "Hero",
+  "matchedSection": "hero",
+  "selector": "section.hero",
+  "path": "components/Hero.tsx",
+  "wires": [
+    {
+      "kind": "motion",
+      "library": "framer-motion",
+      "hooks": ["useScroll", "useTransform"],
+      "trigger": "scroll",
+      "selector": ".hero-media",
+      "replay": "all-matches",
+      "media": "(min-width: 581px)",
+      "sourceArtifact": "animation-runtime-dump.json",
+      "sourceId": "runtime-scroll-filter-001",
+      "sourceIds": ["runtime-scroll-filter-001", "runtime-scroll-filter-002"]
+    },
+    "useEffect with setInterval"
+  ]
+}
+```
 
 Only attach wires the detected library supports — never invent a hook from a library that wasn't installed.
+Runtime wire sourceId+selector must match the same `scrollLinkedStyles[]` row in
+`animation-runtime-dump.json`. Motion wires may cite only gate-approved
+forensic artifacts such as `animation-runtime-dump.json`,
+`transition-spec.json`, `bundle-extraction.json`, `animations-detected.json`,
+`scroll-engine.json`, `sticky-elements.json`, `scroll-state-machine.json`,
+`signature-effects-candidates.json`, or `states/scroll/trajectory.json`.
+Never cite `generation-plan.json`, `extracted.json`, or self-authored notes as
+motion evidence.
+
+When the deterministic planner has collapsed identical repeated non-latched
+curves, carry `replay: "all-matches"` and the complete `sourceIds` list into
+the motion wire. When repeated rows have mixed curves, mixed curves must stay selector-indexed so the implementation can address each matched element separately.
+
+If `transition-spec.json` attaches a CSS-grounded `media` query to a runtime
+scroll transition, preserve that exact string on the corresponding generation
+plan wire by exact runtime `sourceId`. Do not guess media guards from capture
+viewport width. Runtime replay must skip inactive media queries and restore
+inline styles it previously wrote so the underlying responsive CSS can apply.
+If one runtime `sourceId` has conflicting media guards, omit its replay instead
+of converting a viewport-specific curve into an unguarded global curve.
 
 ### 4. Signature effects
 
@@ -136,5 +183,11 @@ After writing back, the main agent or delegated worker MUST verify:
 5. Every `tokens.colors`/`spacing`/etc. value is grep-able in `css/variables.txt` or `styles.json`
 6. Every `signatureEffects[].component` path is a valid impl target (e.g. `components/ui/<Name>.tsx`)
 7. `python -m ui_clone.gate tmp/ref/<component> pre-generate` reports no `generation-plan provenance` failure
+8. Every structured motion wire has a gate-approved `sourceArtifact` and
+   non-empty `sourceId`; runtime dump and transition spec wires match the
+   same-row selector/sourceId where those schemas support row matching, while
+   other gate-approved artifacts require exact `sourceId` presence
+9. Current `provenance.sourceHashes` includes the runtime dump hash for
+   `animation-runtime-dump.json` when the file exists
 
 If any verification fails, re-run enrichment with the failure as feedback.

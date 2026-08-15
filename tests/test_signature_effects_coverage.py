@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -310,4 +312,113 @@ def test_scroll_scrub_scale_with_idiomatic_impl_passes(tmp_path: Path) -> None:
     proc = _run(ref, impl)
     art = json.loads((ref / "signature-effects-coverage.json").read_text())
     assert proc.returncode == 0, art
+    assert art["status"] == "pass"
+
+
+def test_scroll_scrub_scale_with_same_file_handrolled_runtime_passes(tmp_path: Path) -> None:
+    """A same-file scroll listener that writes a runtime scale transform is real
+    coverage even without Framer Motion."""
+    ref, impl = _scaffold_scrub(tmp_path)
+    (impl / "src" / "HeroZoom.ts").write_text(
+        "const hero = document.querySelector('.hero-zoom');\n"
+        "window.addEventListener('scroll', () => {\n"
+        "  const progress = Math.min(1, window.scrollY / 600);\n"
+        "  const value = 0.9 + progress * 0.2;\n"
+        "  hero.style.setProperty('transform', `scale(${value})`);\n"
+        "});\n",
+        encoding="utf-8",
+    )
+    proc = _run(ref, impl)
+    art = json.loads((ref / "signature-effects-coverage.json").read_text())
+    assert proc.returncode == 0, art
+    assert art["status"] == "pass"
+
+
+def test_scroll_scrub_scale_split_handrolled_tokens_across_files_fails(tmp_path: Path) -> None:
+    """A scroll listener in one file and an unrelated scale transform in another
+    file must stay fail-closed."""
+    ref, impl = _scaffold_scrub(tmp_path)
+    (impl / "src" / "ScrollBinding.ts").write_text(
+        "window.addEventListener('scroll', () => console.log(window.scrollY));\n",
+        encoding="utf-8",
+    )
+    (impl / "src" / "ScaleWrite.ts").write_text(
+        "const el = document.querySelector('.logo');\n"
+        "el.style.setProperty('transform', `scale(${value})`);\n",
+        encoding="utf-8",
+    )
+    proc = _run(ref, impl)
+    art = json.loads((ref / "signature-effects-coverage.json").read_text())
+    assert proc.returncode == 1, art
+    assert art["status"] == "fail"
+    assert "scroll-scrub-scale" in {m["name"] for m in art["missing"]}
+
+
+def test_scroll_scrub_scale_same_file_disconnected_listener_and_write_fails(
+    tmp_path: Path,
+) -> None:
+    """Same-file tokens are not enough: the scale write must be reachable from
+    the scroll listener callback or handler."""
+    ref, impl = _scaffold_scrub(tmp_path)
+    (impl / "src" / "HeroZoom.ts").write_text(
+        "window.addEventListener('scroll', () => console.log(window.scrollY));\n"
+        "const hero = document.querySelector('.hero-zoom');\n"
+        "hero.style.setProperty('transform', `scale(${value})`);\n",
+        encoding="utf-8",
+    )
+    proc = _run(ref, impl)
+    art = json.loads((ref / "signature-effects-coverage.json").read_text())
+    assert proc.returncode == 1, art
+    assert art["status"] == "fail"
+    assert "scroll-scrub-scale" in {m["name"] for m in art["missing"]}
+
+
+def test_scroll_scrub_scale_named_scroll_handler_call_chain_passes(tmp_path: Path) -> None:
+    """The emitted-style call chain is valid coverage:
+    addEventListener -> schedule -> requestAnimationFrame(apply) -> applySite."""
+    ref, impl = _scaffold_scrub(tmp_path)
+    (impl / "src" / "HeroZoom.ts").write_text(
+        "function applySite(site) {\n"
+        "  site.el.style.setProperty('transform', `scale(${site.scale})`);\n"
+        "}\n"
+        "function apply() {\n"
+        "  applySite({ el: document.querySelector('.hero'), scale: 1.1 });\n"
+        "}\n"
+        "function schedule() {\n"
+        "  requestAnimationFrame(apply);\n"
+        "}\n"
+        "window.addEventListener('scroll', schedule);\n",
+        encoding="utf-8",
+    )
+    proc = _run(ref, impl)
+    art = json.loads((ref / "signature-effects-coverage.json").read_text())
+    assert proc.returncode == 0, art
+    assert art["status"] == "pass"
+
+
+def test_handrolled_scale_gate_runs_with_system_python(tmp_path: Path) -> None:
+    """The shell gate must run with the host's python3, not only uv's newer
+    interpreter, because required-check dispatch invokes the script directly."""
+    system_python = shutil.which("python3", path=os.defpath)
+    assert system_python is not None
+
+    ref, impl = _scaffold_scrub(tmp_path)
+    (impl / "src" / "HeroZoom.ts").write_text(
+        "const hero = document.querySelector('.hero-zoom');\n"
+        "window.addEventListener('scroll', () => {\n"
+        "  hero.style.setProperty('transform', `scale(${window.scrollY})`);\n"
+        "});\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join((str(Path(system_python).parent), os.defpath))
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl / "src")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    art = json.loads((ref / "signature-effects-coverage.json").read_text())
     assert art["status"] == "pass"

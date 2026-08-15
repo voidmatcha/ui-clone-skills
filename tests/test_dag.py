@@ -60,6 +60,11 @@ def test_every_generation_plan_source_invalidates_generation_plan(
     assert "generation-plan.json" in stale_set(source)
 
 
+def test_animation_runtime_dump_is_generation_plan_source() -> None:
+    assert "animation-runtime-dump.json" in GENERATION_PLAN_SOURCES
+    assert "generation-plan.json" in stale_set("animation-runtime-dump.json")
+
+
 def test_media_inventories_invalidate_canonical_downstream_artifacts() -> None:
     assert "required-media.json" in GENERATION_PLAN_SOURCES
     runtime_dependents = stale_set("runtime-media.json")
@@ -288,7 +293,16 @@ def test_conftest_fixture_covers_all_deps_artifacts(ref_dir_with_artifacts: Path
     for targets in DEPS.values():
         all_artifacts.update(targets)
 
-    missing = [name for name in all_artifacts if not (ref_dir_with_artifacts / name).exists()]
+    optional_generation_inputs = {
+        "animation-runtime-dump.json",
+        "states/splash/contract.json",
+    }
+    missing = [
+        name
+        for name in all_artifacts
+        if name not in optional_generation_inputs
+        and not (ref_dir_with_artifacts / name).exists()
+    ]
     assert not missing, (
         f"conftest ref_dir_with_artifacts fixture is missing DEPS artifacts: {missing}"
     )

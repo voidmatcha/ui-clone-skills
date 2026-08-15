@@ -661,6 +661,55 @@ def test_ref_visibility_visible_everywhere_has_no_hidden() -> None:
     assert out["capturedViewports"] == [375, 1280]
 
 
+def test_ref_visibility_ignores_near_transparent_timer_duplicate() -> None:
+    # A timer crossfade can briefly leave the outgoing label in layout with a
+    # tiny non-zero opacity. It is not materially rendered and must not inflate
+    # the live-ref cardinality expected from a settled single-label impl.
+    outgoing = _rich(SEL, 0, {"text-align": "center"}, opacity=0.0006)
+    incoming = _rich(SEL, 1, {"text-align": "center"}, opacity=1.0)
+    vis = build_ref_viewport_visibility([outgoing, incoming], [SEL], [1280])
+
+    rendered = vis["renderedByViewport"][SEL]["1280"]
+    assert rendered["count"] == 1
+
+    ref = [_entry(SEL, 0, {"text-align": "center"})]
+    impl = [_rich(SEL, 0, {"text-align": "center"}, opacity=1.0)]
+    result = evaluate(
+        ref,
+        impl,
+        ["text-align"],
+        ref_hidden_viewports=vis["hiddenViewports"],
+        ref_measured_viewports=vis["capturedViewports"],
+        ref_rendered=vis["renderedByViewport"],
+    )
+    assert result["status"] == "pass", result
+
+
+def test_ref_visibility_keeps_two_materially_visible_timer_labels() -> None:
+    outgoing = _rich(SEL, 0, {"text-align": "center"}, opacity=0.5)
+    incoming = _rich(SEL, 1, {"text-align": "center"}, opacity=1.0)
+    vis = build_ref_viewport_visibility([outgoing, incoming], [SEL], [1280])
+
+    rendered = vis["renderedByViewport"][SEL]["1280"]
+    assert rendered["count"] == 2
+
+    ref = [_entry(SEL, 0, {"text-align": "center"})]
+    impl = [_rich(SEL, 0, {"text-align": "center"}, opacity=1.0)]
+    result = evaluate(
+        ref,
+        impl,
+        ["text-align"],
+        ref_hidden_viewports=vis["hiddenViewports"],
+        ref_measured_viewports=vis["capturedViewports"],
+        ref_rendered=vis["renderedByViewport"],
+    )
+    assert result["status"] == "fail", result
+    assert any(
+        (row.get("reason") or "").startswith("impl element absent")
+        for row in result["rows"]
+    ), result
+
+
 def test_ref_visibility_drives_ref_vs_ref_self_pass() -> None:
     # KEYSTONE: the ref hides SEL at 375 and shows it at 1280. Probing the LIVE
     # REF as the impl yields the SAME 0-visible bucket at 375. Feeding the

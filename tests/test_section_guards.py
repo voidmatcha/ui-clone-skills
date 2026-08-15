@@ -19,6 +19,7 @@ loop-9 crops (tmp/ref/realfood-e2e-9 is a read-only corpus):
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,82 @@ from ui_clone.section_guards import (  # noqa: E402
 
 def _row(text: str = "eat real food join the movement", children: int = 2) -> dict:
     return {"textWords": text, "childCount": children, "rect": {"top": 100, "height": 850}}
+
+
+def _masked_media_row(**overrides: object) -> dict:
+    row: dict[str, object] = {
+        "tag": "section",
+        "display": "block",
+        "textWords": "",
+        "fingerprint": "",
+        "hasSvgText": False,
+        "contentGroups": [],
+        "childCount": 1,
+        "visibleMediaCount": 1,
+        "visibleMediaKinds": ["video"],
+        "visibleMediaKindCounts": {"video": 1},
+        "rect": {"x": 10, "y": 20, "width": 800, "height": 450},
+        "contentBox": {"x": 10, "y": 20, "width": 800, "height": 450, "boxCount": 1},
+    }
+    row.update(overrides)
+    return row
+
+
+def _plan(check_ids: list[str]) -> dict:
+    return {
+        "schemaVersion": 1,
+        "requiredChecks": [
+            {"id": check_id, "severity": "block", "minTier": "standard"} for check_id in check_ids
+        ],
+    }
+
+
+def _build_masked_media_sections_dir(
+    tmp_path: Path,
+    *,
+    mask_pct: float = 99.5,
+    ref_row: dict | None = None,
+    impl_row: dict | None = None,
+    score: float = 0.99,
+    plan_checks: list[str] | None = None,
+    mask_tag: str | None = "video",
+    viewport: bool = False,
+) -> Path:
+    ref_dir = tmp_path / "ref"
+    d = (
+        ref_dir / "sections" / "viewports" / "375x812" / "sections"
+        if viewport
+        else ref_dir / "sections"
+    )
+    (d / "ref").mkdir(parents=True)
+    (d / "impl").mkdir(parents=True)
+    shutil.copy(FIXTURES / "footer-2-flat-ref.png", d / "ref" / "masked-hero.png")
+    shutil.copy(FIXTURES / "footer-2-flat-impl.png", d / "impl" / "masked-hero.png")
+    if plan_checks is not None:
+        (ref_dir / "verification-plan.json").write_text(json.dumps(_plan(plan_checks)))
+    matches = [
+        {
+            "name": "masked-hero",
+            "score": score,
+            "ref": ref_row or _masked_media_row(),
+            "impl": impl_row or _masked_media_row(),
+        }
+    ]
+    (d / "matches.json").write_text(json.dumps(matches), encoding="utf-8")
+    (d / "mask-coverage.json").write_text(json.dumps({"masked-hero": mask_pct}))
+    mask_elements = []
+    if mask_tag is not None:
+        mask_elements.append(
+            {
+                "tag": mask_tag,
+                "left": 10,
+                "top": 20,
+                "width": 800,
+                "height": 450,
+            }
+        )
+    (d / "mask-elements.json").write_text(json.dumps(mask_elements), encoding="utf-8")
+    return d
 
 
 # ── crop_stats on the archived defect crops ────────────────────────────
@@ -85,6 +162,22 @@ def test_blank_ref_guard_applies_to_all_tiers() -> None:
     assert policy == "all"
 
 
+def test_masked_crop_preserves_fail_tier_before_blank_ref_guard() -> None:
+    ref = {"mean": 0.0, "std": 0.0, "unique": 1, "dominant": 1.0}
+    impl = {"mean": 1.0, "std": 0.0, "unique": 1, "dominant": 1.0}
+
+    reason, policy = guard_reason(
+        ref,
+        impl,
+        content_bearing=True,
+        media_bearing=True,
+        mask_pct=100.0,
+    )
+
+    assert reason is not None and "masked:" in reason
+    assert policy == "pass-only"
+
+
 def test_symmetric_near_black_is_unmeasured() -> None:
     """(b) both sides near-black on a content-bearing section is absence of
     evidence, not a pass."""
@@ -92,6 +185,50 @@ def test_symmetric_near_black_is_unmeasured() -> None:
     reason, policy = guard_reason(dict(side), dict(side), content_bearing=True, mask_pct=0.0)
     assert reason is not None
     assert policy == "all"
+
+
+def test_low_contrast_signal_rich_media_is_measured() -> None:
+    ref = {"mean": 0.0533, "std": 0.0406, "unique": 38, "dominant": 0.2829}
+    impl = {"mean": 0.0533, "std": 0.0406, "unique": 38, "dominant": 0.2829}
+
+    reason, _ = guard_reason(
+        ref,
+        impl,
+        content_bearing=True,
+        media_bearing=True,
+        mask_pct=0.0,
+    )
+
+    assert reason is None
+
+
+def test_low_contrast_signal_poor_media_remains_unmeasured() -> None:
+    side = {"mean": 0.02, "std": 0.03, "unique": 12, "dominant": 0.9}
+
+    reason, policy = guard_reason(
+        dict(side),
+        dict(side),
+        content_bearing=True,
+        media_bearing=True,
+        mask_pct=0.0,
+    )
+
+    assert reason is not None
+    assert policy == "all"
+
+
+def test_low_variance_sparse_detail_is_measured() -> None:
+    ref = {"mean": 0.9765, "std": 0.0274, "unique": 147, "dominant": 0.9698}
+    impl = {"mean": 0.9765, "std": 0.0274, "unique": 145, "dominant": 0.9698}
+
+    reason, _ = guard_reason(
+        ref,
+        impl,
+        content_bearing=True,
+        mask_pct=0.0,
+    )
+
+    assert reason is None
 
 
 def test_mask_majority_blocks_ok_verdicts() -> None:
@@ -115,13 +252,9 @@ def test_is_content_bearing() -> None:
     assert is_content_bearing({"textWords": "", "childCount": 0, "hasSvgText": True})
     assert is_content_bearing({"textWords": "", "childCount": 1, "hasVisibleMedia": True})
     assert is_content_bearing({"textWords": "", "childCount": 1, "visibleMediaCount": 1})
-    assert is_content_bearing(
-        {"textWords": "", "childCount": 1, "contentBox": {"boxCount": 2}}
-    )
+    assert is_content_bearing({"textWords": "", "childCount": 1, "contentBox": {"boxCount": 2}})
     assert not is_content_bearing({"textWords": "", "childCount": 1})
-    assert not is_content_bearing(
-        {"textWords": "", "childCount": 1, "contentBox": {"boxCount": 1}}
-    )
+    assert not is_content_bearing({"textWords": "", "childCount": 1, "contentBox": {"boxCount": 1}})
     assert not is_content_bearing({"textWords": "", "fingerprint": "", "childCount": 0})
 
 
@@ -149,7 +282,10 @@ def test_cli_writes_guards_artifacts(tmp_path: Path) -> None:
     d = _build_sections_dir(tmp_path)
     proc = subprocess.run(
         [sys.executable, "-m", "ui_clone.section_guards", str(d)],
-        capture_output=True, text=True, timeout=60, cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(ROOT),
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     guards = json.loads((d / "crop-guards.json").read_text(encoding="utf-8"))
@@ -199,6 +335,7 @@ def test_evaluate_sections_guards_single_child_visible_media_row(tmp_path: Path)
 
     panel = guards["sections"]["media-panel"]
     assert panel["contentBearing"] is True
+    assert panel["mediaBearing"] is True
     assert panel["reason"] is not None
 
 
@@ -223,6 +360,340 @@ def test_evaluate_sections_guards_single_child_multi_box_row(tmp_path: Path) -> 
     assert panel["reason"] is not None
 
 
+def test_fully_masked_media_only_section_defers_to_structural_policy(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        plan_checks=[
+            "required-media-coverage",
+            "video-play-proof",
+            "video-motion-compare",
+            "hero-composite-check",
+        ],
+    )
+
+    guards = evaluate_sections_dir(d)
+
+    panel = guards["sections"]["masked-hero"]
+    assert panel["policy"] == "structural-only"
+    assert "fully-masked-media-only" in panel["reason"]
+    assert panel["source"] == "masked-media-motion"
+    assert panel["maskedMediaOnly"]["maskPct"] == 99.5
+    assert panel["maskedMediaOnly"]["matchScore"] == 0.99
+
+
+def test_fully_masked_media_only_rejects_994_percent_mask(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        mask_pct=99.4,
+        plan_checks=["required-media-coverage", "video-play-proof"],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["reason"] is not None
+    assert "masked:" in panel["reason"]
+
+
+def test_fully_masked_media_only_rejects_text_overlay(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        ref_row=_masked_media_row(textWords="Watch the film"),
+        plan_checks=["required-media-coverage", "video-play-proof"],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["reason"] is not None
+    assert "masked:" in panel["reason"]
+
+
+def test_fully_masked_media_only_rejects_geometry_mismatch(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        impl_row=_masked_media_row(rect={"x": 10, "y": 20, "width": 850, "height": 450}),
+        plan_checks=["required-media-coverage", "video-play-proof"],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["reason"] is not None
+    assert "masked:" in panel["reason"]
+
+
+def test_fully_masked_media_only_requires_plan_declared_live_proof(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        plan_checks=["required-media-coverage", "hero-composite-check"],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["reason"] is not None
+    assert "masked:" in panel["reason"]
+
+
+def test_fully_masked_video_requires_video_play_proof_not_unrelated_frame_proof(
+    tmp_path: Path,
+) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        plan_checks=[
+            "required-media-coverage",
+            "runtime-frame-proof",
+            "hero-composite-check",
+        ],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["maskedMediaOnly"]["maskedMediaKinds"] == ["video"]
+    assert panel["maskedMediaOnly"]["rejectReason"] == (
+        "video-play-proof not declared as block for video mask"
+    )
+
+
+def test_fully_masked_video_requires_motion_parity_proof(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        plan_checks=[
+            "required-media-coverage",
+            "video-play-proof",
+            "hero-composite-check",
+        ],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["maskedMediaOnly"]["rejectReason"] == (
+        "video-motion-compare not declared as block for masked media motion"
+    )
+
+
+def test_fully_masked_video_rejects_impl_static_image(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        impl_row=_masked_media_row(
+            visibleMediaKinds=["img"],
+            visibleMediaKindCounts={"img": 1},
+        ),
+        plan_checks=[
+            "required-media-coverage",
+            "video-play-proof",
+            "hero-composite-check",
+        ],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["maskedMediaOnly"]["rejectReason"] == (
+        "visible media kind mismatch (video != img)"
+    )
+
+
+def test_fully_masked_media_rejects_different_kind_multiplicity(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        ref_row=_masked_media_row(
+            visibleMediaCount=3,
+            visibleMediaKinds=["img", "video"],
+            visibleMediaKindCounts={"img": 1, "video": 2},
+        ),
+        impl_row=_masked_media_row(
+            visibleMediaCount=3,
+            visibleMediaKinds=["img", "video"],
+            visibleMediaKindCounts={"img": 2, "video": 1},
+        ),
+        plan_checks=[
+            "required-media-coverage",
+            "video-play-proof",
+            "video-motion-compare",
+            "hero-composite-check",
+        ],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["maskedMediaOnly"]["rejectReason"] == (
+        "visible media kind counts mismatch "
+        "(img:1,video:2 != img:2,video:1)"
+    )
+
+
+def test_fully_masked_media_requires_recognized_media_to_cover_the_section(
+    tmp_path: Path,
+) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        mask_tag="div",
+        plan_checks=[
+            "required-media-coverage",
+            "video-play-proof",
+            "hero-composite-check",
+        ],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["maskedMediaOnly"]["maskedMediaKinds"] == []
+    assert panel["maskedMediaOnly"]["recognizedMediaMaskPct"] == 0.0
+
+
+def test_fully_masked_canvas_defers_only_with_runtime_frame_proof(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        mask_tag="canvas",
+        ref_row=_masked_media_row(
+            visibleMediaKinds=["canvas"],
+            visibleMediaKindCounts={"canvas": 1},
+        ),
+        impl_row=_masked_media_row(
+            visibleMediaKinds=["canvas"],
+            visibleMediaKindCounts={"canvas": 1},
+        ),
+        plan_checks=[
+            "required-media-coverage",
+            "runtime-frame-proof",
+            "video-motion-compare",
+            "geometry-sanity",
+        ],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "structural-only"
+    assert panel["maskedMediaOnly"]["maskedMediaKinds"] == ["canvas"]
+    assert panel["maskedMediaOnly"]["requiredLiveMediaProofs"] == ["runtime-frame-proof"]
+
+
+def test_fully_masked_media_only_requires_plan_declared_structural_anchor(
+    tmp_path: Path,
+) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        plan_checks=["required-media-coverage", "video-play-proof"],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["reason"] is not None
+    assert "masked:" in panel["reason"]
+
+
+def test_fully_masked_media_only_requires_observed_structure(tmp_path: Path) -> None:
+    ref_row = _masked_media_row()
+    impl_row = _masked_media_row()
+    ref_row.pop("tag")
+    impl_row.pop("tag")
+    ref_row.pop("rect")
+    impl_row.pop("rect")
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        ref_row=ref_row,
+        impl_row=impl_row,
+        plan_checks=[
+            "required-media-coverage",
+            "video-play-proof",
+            "video-motion-compare",
+            "hero-composite-check",
+        ],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["reason"] is not None
+    assert "masked:" in panel["reason"]
+
+
+def test_fully_masked_deferral_thresholds_are_not_operator_tunable() -> None:
+    env = os.environ.copy()
+    env.update(
+        {
+            "UI_CLONE_FULLY_MASKED_MEDIA_MIN_PCT": "0",
+            "UI_CLONE_FULLY_MASKED_MEDIA_MIN_SCORE": "0",
+            "UI_CLONE_SECTION_GEOM_REL_TOL": "100",
+            "UI_CLONE_SECTION_GEOM_ABS_TOL": "100000",
+        }
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json; import ui_clone.section_guards as g; "
+                "print(json.dumps([g.FULLY_MASKED_MEDIA_MIN_PCT, "
+                "g.FULLY_MASKED_MEDIA_MIN_SCORE, g.GEOM_REL_TOL, g.GEOM_ABS_TOL]))"
+            ),
+        ],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout) == [99.5, 0.98, 0.01, 2.0]
+
+
+def test_fully_masked_media_only_requires_verification_plan(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(tmp_path)
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["reason"] is not None
+    assert "masked:" in panel["reason"]
+
+
+def test_fully_masked_media_does_not_bind_unrelated_ancestor_plan(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(tmp_path / "component")
+    (tmp_path / "verification-plan.json").write_text(
+        json.dumps(
+            _plan(
+                [
+                    "required-media-coverage",
+                    "video-play-proof",
+                    "hero-composite-check",
+                ]
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "pass-only"
+    assert panel["maskedMediaOnly"]["declaredBlockChecks"] == []
+
+
+def test_fully_masked_media_finds_canonical_viewport_plan(tmp_path: Path) -> None:
+    d = _build_masked_media_sections_dir(
+        tmp_path,
+        viewport=True,
+        plan_checks=[
+            "required-media-coverage",
+            "video-play-proof",
+            "video-motion-compare",
+            "hero-composite-check",
+        ],
+    )
+
+    panel = evaluate_sections_dir(d)["sections"]["masked-hero"]
+
+    assert panel["policy"] == "structural-only"
+
+
 def test_section_compare_guard_run_is_mandatory() -> None:
     """Review-1 MAJOR 2 lock: the guards invocation in section-compare.sh
     must not be soft-failed (`|| true`) — a crash must inject a blocking
@@ -230,10 +701,8 @@ def test_section_compare_guard_run_is_mandatory() -> None:
     script = ROOT / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
     text = script.read_text(encoding="utf-8")
     guard_call_idx = text.index("ui_clone.section_guards")
-    window = text[guard_call_idx - 400: guard_call_idx + 400]
-    assert "|| true" not in window, (
-        "section_guards execution must be mandatory — no soft-fail"
-    )
+    window = text[guard_call_idx - 400 : guard_call_idx + 400]
+    assert "|| true" not in window, "section_guards execution must be mandatory — no soft-fail"
     assert "GUARDS_FAILED" in text
     assert "crop-guard evaluation failed" in text
 
@@ -245,6 +714,39 @@ def test_section_compare_applies_all_policy_before_black_detector() -> None:
     guard_idx = text.index('if [ "$GUARD_POLICY" = "all" ]')
     black_idx = text.index("all-black/blank-impl detector")
     assert guard_idx < black_idx
+
+
+def test_section_compare_applies_structural_policy_only_after_pixel_verdict() -> None:
+    script = ROOT / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+    structural_idx = text.index('if [ "$GUARD_POLICY" = "structural-only" ]')
+    all_idx = text.index('if [ "$GUARD_POLICY" = "all" ]')
+    black_idx = text.index("all-black/blank-impl detector")
+    verdict_idx = text.index("# Crop-evidence guard conversion")
+    assert all_idx < black_idx < verdict_idx < structural_idx
+
+
+def test_section_compare_guard_structural_policy_preserves_fail_and_motion_protection() -> None:
+    script = ROOT / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+    structural_idx = text.index('if [ "$GUARD_POLICY" = "structural-only" ]')
+    generic_guard_idx = text.index('    if [ "$STATUS" = "✅" ]', structural_idx)
+    window = text[structural_idx:generic_guard_idx]
+    assert '[ "$STATUS" = "✅" ]' in window
+    assert "is_motion_structural_only_protected" in window
+    assert '"$GUARD_SOURCE" = "masked-media-motion"' in window
+    assert "FAIL_COUNT=$((FAIL_COUNT - 1))" not in window
+
+
+def test_guard_structural_rows_remain_in_non_structural_evidence_denominator() -> None:
+    script = ROOT / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "GUARD_STRUCTURAL_COUNT=0" in text
+    assert "GUARD_STRUCTURAL_COUNT=$((GUARD_STRUCTURAL_COUNT + 1))" in text
+    assert (
+        "TOTAL_ROWS=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT + UNMEASURED_COUNT + "
+        "GUARD_STRUCTURAL_COUNT))"
+    ) in text
 
 
 def test_section_compare_evaluates_current_crop_manifest_not_ref_glob() -> None:

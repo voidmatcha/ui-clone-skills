@@ -21,6 +21,7 @@ Plus script-wiring locks for the media mask + distribution path.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -106,6 +107,45 @@ def test_arc_calibrated_passes_cold_ref_warm_impl(tmp_path: Path) -> None:
     # args: ref_fc ref_lc ref_total impl_fc impl_lc impl_total cal_fc cal_lc cal_total defmax margin
     r = _arc_cal("1 372 500 1 331 500 1 331 500 18 20")
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_arc_calibrated_rejects_extreme_refcal_noise() -> None:
+    # Realfood-observed class: ref arc 156, impl arc 48, refcal arc 383.
+    # The huge 227-frame ref-vs-refcal noise is not a usable calibration floor.
+    r = _arc_cal("1 157 500 1 49 500 1 384 500 18 20")
+    assert r.returncode != 0, r.stdout + r.stderr
+
+
+def test_arc_calibrated_rejects_degenerate_refcal_nearer_false_pass() -> None:
+    # Fable-observed degenerate class: ref arc 156, impl arc 8, refcal arc 4.
+    # Impl is near the broken refcal arc, but ref/refcal disagree too much for
+    # the refcal-nearer branch to be trusted.
+    r = _arc_cal("1 157 500 1 9 500 1 5 500 18 20")
+    assert r.returncode != 0, r.stdout + r.stderr
+
+
+def test_arc_calibrated_rejects_short_ref_zero_refcal_false_pass() -> None:
+    # Fable-observed short-ref class: ref arc 50, impl arc 5, refcal arc 0.
+    # A zero-motion refcal must not become the nearer reference.
+    r = _arc_cal("1 51 500 1 6 500 1 1 500 18 20")
+    assert r.returncode != 0, r.stdout + r.stderr
+
+
+def test_arc_calibrated_late_refcal_cannot_clamp_too_long_impl_to_pass() -> None:
+    # A late refcal first-change leaves only 50 common frames. The direct
+    # ref-vs-impl comparison must still see raw arcs 50 vs 300, not both clamp
+    # to the late refcal's remaining budget.
+    r = _arc_cal("1 51 500 1 301 500 450 500 500 18 20")
+    assert r.returncode != 0, r.stdout + r.stderr
+
+
+def test_arc_calibrated_extreme_noise_stops_at_ordinary_tolerance_boundary() -> None:
+    # Ordinary tolerance is defmax + margin = 38. Extreme refcal noise must not
+    # widen that final boundary a second time.
+    at_boundary = _arc_cal("1 157 500 1 195 500 1 384 500 18 20")
+    beyond_boundary = _arc_cal("1 157 500 1 196 500 1 384 500 18 20")
+    assert at_boundary.returncode == 0, at_boundary.stdout + at_boundary.stderr
+    assert beyond_boundary.returncode != 0, beyond_boundary.stdout + beyond_boundary.stderr
 
 
 def test_arc_calibrated_fails_wrong_timeline(tmp_path: Path) -> None:
@@ -199,3 +239,63 @@ def test_script_gates_distribution_on_arc_timing() -> None:
     """A wrong timeline must fail on arc and never reach the SSIM calibration."""
     body = SCRIPT.read_text(encoding="utf-8")
     assert "ARC_VERDICT_FAIL" in body, "distribution path must be gated on arc timing passing"
+
+
+def test_calibratable_arc_mismatch_is_not_emitted_as_a_final_failure() -> None:
+    """A strict splash mismatch is provisional until refcal re-verdicts it.
+
+    ``video-motion-compare.sh`` copies the comparator's stdout verbatim into
+    ``video-motion-result.txt``.  A calibrated run can therefore end in
+    ``ALL PASS`` while an earlier ``❌``/``FAIL`` diagnostic still makes the
+    text-artifact gate reject it.  The provisional branch must keep its arc
+    metrics without using final-failure tokens; non-calibratable and calibrated
+    failures remain authoritative later in the script.
+    """
+    body = SCRIPT.read_text(encoding="utf-8")
+    strict_arc = body.split("  ARC_VERDICT_FAIL=0", 1)[1].split("  # Phase-jitter allowance", 1)[0]
+    calibration_entry = body.split('  if [[ "$SPLASH_CAL_ELIGIBLE" -eq 1', 1)[1].split(
+        "    _VTC_REPO_ROOT=", 1
+    )[0]
+    final_verdict = body.split("# ── Phase 5: Output results ──", 1)[1]
+
+    assert "ARC_VERDICT_OUTPUT" in strict_arc
+    assert "⚠ provisional arc timing:" in strict_arc
+    assert "strict comparison pending calibration" in calibration_entry
+    assert "arc=FAIL" not in calibration_entry
+    assert "strict verdict failed" not in calibration_entry
+    assert 'echo -e "${RED}${FAIL} FAIL' in final_verdict
+    assert "exit 1" in final_verdict
+
+
+def test_calibrated_pass_neutralizes_only_provisional_strict_ssim_rows() -> None:
+    """The nested result artifact must agree with its final calibrated tally."""
+    body = SCRIPT.read_text(encoding="utf-8")
+    calibration_outcome = body.split("    # Recombine FAIL", 1)[1].split(
+        "    # Suspect impl recording", 1
+    )[0]
+    match = re.search(
+        r'^    if \[\[ "\$FAIL" -eq 0 \]\]; then\n.*?^    fi$',
+        calibration_outcome,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match, "a fully calibrated pass must finalize provisional SSIM rows"
+    finalizer = match.group(0)
+
+    provisional_row = r"| f-000001 | 0.876471 | ❌ |\n"
+    passed = _bash(
+        f"RESULTS='{provisional_row}'; FAIL=0\n"
+        f"{finalizer}\n"
+        "printf '%b' \"$RESULTS\""
+    )
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    assert "0.876471" in passed.stdout
+    assert "⚠ provisional strict SSIM" in passed.stdout
+    assert "❌" not in passed.stdout
+
+    failed = _bash(
+        f"RESULTS='{provisional_row}'; FAIL=1\n"
+        f"{finalizer}\n"
+        "printf '%b' \"$RESULTS\""
+    )
+    assert failed.returncode == 0, failed.stdout + failed.stderr
+    assert "❌" in failed.stdout, "a true final failure must retain its strict row marker"

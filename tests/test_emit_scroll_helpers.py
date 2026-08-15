@@ -93,6 +93,39 @@ def test_emits_smoothscroll_with_real_lenis_config(tmp_path: Path) -> None:
     assert "lenis.destroy()" in t, "must clean up on unmount"
 
 
+def test_smoothscroll_dispatches_ui_clone_scroll_event(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "smoothScroll": {
+                    "required": True,
+                    "library": "lenis",
+                    "config": {"lerp": 0.1},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    t = (impl / "src" / "lib" / "SmoothScroll.tsx").read_text(encoding="utf-8")
+    assert 'const notifyScroll = () => window.dispatchEvent(new Event("ui-clone-scroll"));' in t
+    assert 'lenis.on("scroll", notifyScroll);' in t
+    assert 'lenis.off("scroll", notifyScroll);' in t
+    assert "lenis.destroy()" in t
+
+
 def test_smoothscroll_honors_capture_flag(tmp_path: Path) -> None:
     """gen-H2: section_capture sets window.__UI_CLONE_CAPTURE__ before forcing
     native scrollTo to crop exact ref frames. If the emitted SmoothScroll drives
@@ -286,6 +319,61 @@ def test_scrollscrub_drops_pixel_domain_input_bands(tmp_path: Path) -> None:
     sites = json.loads(dt.split("scrollScrubSites: ScrubSite[] = ", 1)[1].rsplit(";", 1)[0])
     assert "opacity" not in sites[0], "pixel-domain input range must be dropped"
     assert sites[0]["scale"] == [[0.0, 1.0], [0.9, 1.0]]
+
+
+def test_scrollscrub_drops_generic_blur_bands_but_keeps_valid_generic_band(
+    tmp_path: Path,
+) -> None:
+    """Generic ScrollScrub has no blur prop/style, so blur is linked-driver only."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "smoothScroll": {"required": False, "config": {}},
+                "scrollScrub": {
+                    "required": True,
+                    "library": "framer-motion",
+                    "sites": [
+                        {
+                            "offset": '["start end","end start"]',
+                            "transforms": [
+                                {
+                                    "input": "[0,1]",
+                                    "output": "[0,20]",
+                                    "property": "blur",
+                                },
+                                {
+                                    "input": "[0,1]",
+                                    "output": "[0.9,1]",
+                                    "property": "scale",
+                                },
+                            ],
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    dt = (impl / "src" / "lib" / "scrollScrubSites.ts").read_text(encoding="utf-8")
+    sites = json.loads(
+        dt.split("scrollScrubSites: ScrubSite[] = ", 1)[1].rsplit(";", 1)[0]
+    )
+    assert "blur" not in sites[0]
+    assert sites[0]["scale"] == [[0.0, 1.0], [0.9, 1.0]]
+    assert not (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").exists()
 
 
 def test_scrub_site_spring_params_override_invented_constants(tmp_path: Path) -> None:
@@ -979,6 +1067,198 @@ def test_document_progress_driver_drops_pixel_domain_input_bands(
     assert '"top"' not in scrub_keys
 
 
+def test_document_progress_driver_emits_supported_blur_band(tmp_path: Path) -> None:
+    """Selector-scoped runtime blur bands must serialize and set filter only as blur(px)."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": True, "library": "framer-motion"},
+                "scrollScrub": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": ".hero-art",
+                            "selectorIndex": 0,
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "blur",
+                                    "input": "[0, 0.5, 1]",
+                                    "output": "[20, 8.5, 0]",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    sites = json.loads(
+        payload.split("scrollLinkedStyleSites: ScrollLinkedStyleSite[] = ", 1)[1]
+        .rsplit(";", 1)[0]
+    )
+    assert sites[0]["bands"]["blur"] == [[0.0, 0.5, 1.0], [20.0, 8.5, 0.0]]
+    assert "brightness" not in sites[0]["bands"]
+
+    source = (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert 'if (bands.blur) set("filter", `blur(${value("blur")}px)`);' in source
+    assert 'set("filter"' in source
+
+
+def test_document_progress_driver_emits_blur_brightness_filter(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": True, "library": "framer-motion"},
+                "scrollScrub": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": ".hero-art",
+                            "selectorIndex": 0,
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "blur",
+                                    "input": "[0, 1]",
+                                    "output": "[0, 12]",
+                                },
+                                {
+                                    "property": "brightness",
+                                    "input": "[0, 1]",
+                                    "output": "[1, 0.25]",
+                                },
+                            ],
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    source = (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").read_text(
+        encoding="utf-8"
+    )
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    sites = json.loads(
+        payload.split("scrollLinkedStyleSites: ScrollLinkedStyleSite[] = ", 1)[1]
+        .rsplit(";", 1)[0]
+    )
+
+    assert sites[0]["bands"]["blur"] == [[0.0, 1.0], [0.0, 12.0]]
+    assert sites[0]["bands"]["brightness"] == [[0.0, 1.0], [1.0, 0.25]]
+    assert (
+        'set("filter", `blur(${value("blur")}px) brightness(${value("brightness")})`)'
+        in source
+    )
+
+
+def test_document_progress_driver_drops_implausible_blur_bands(tmp_path: Path) -> None:
+    """Negative and huge blur bands are not plausible runtime replay targets."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": True, "library": "framer-motion"},
+                "scrollScrub": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": ".negative",
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "blur",
+                                    "input": "[0, 1]",
+                                    "output": "[0, -1]",
+                                }
+                            ],
+                        },
+                        {
+                            "selector": ".huge",
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "blur",
+                                    "input": "[0, 1]",
+                                    "output": "[0, 240]",
+                                }
+                            ],
+                        },
+                        {
+                            "selector": ".opacity",
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "opacity",
+                                    "input": "[0, 1]",
+                                    "output": "[0, 1]",
+                                }
+                            ],
+                        },
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    sites = json.loads(
+        payload.split("scrollLinkedStyleSites: ScrollLinkedStyleSite[] = ", 1)[1]
+        .rsplit(";", 1)[0]
+    )
+    assert [site["selector"] for site in sites] == [".opacity"]
+    assert sites[0]["bands"]["opacity"] == [[0.0, 1.0], [0.0, 1.0]]
+
+
 def test_emits_raw_pixel_scroll_state_machine_driver(tmp_path: Path) -> None:
     """scrollStateMachine sites are real-target raw scrollY style bands.
 
@@ -1229,6 +1509,59 @@ def test_emits_target_offset_progress_for_runtime_sampled_sites(
     assert "site.units" in source
 
 
+def test_emits_vw_width_unit_for_runtime_sampled_sites(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": False},
+                "scrollScrub": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": ".n28-panel",
+                            "selectorIndex": 0,
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "width",
+                                    "input": "[0, 0.5, 1]",
+                                    "output": "[80, 90, 100]",
+                                    "unit": "vw",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    source = (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").read_text(
+        encoding="utf-8"
+    )
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    assert '"units": {"width": "vw"}' in payload
+    assert 'const length = (name: string) => `${value(name)}${units[name] ?? "px"}`;' in source
+    assert 'set("width", length("width"))' in source
+
+
 def test_scroll_linked_style_driver_indexes_matching_scope_before_descendants(
     tmp_path: Path,
 ) -> None:
@@ -1290,10 +1623,155 @@ def test_scroll_linked_style_driver_indexes_matching_scope_before_descendants(
         encoding="utf-8"
     )
     assert "root instanceof Element && root.matches(selector)" in source
-    assert "return [root, ...descendants]" in source
-    assert "selectScopedCandidate(root, site.selector, site.selectorIndex)" in source
+    assert "const candidates =" in source
+    assert "? [root, ...descendants]" in source
+    assert "selectScopedCandidates(root, site.selector, site.selectorIndex, site.replay)" in source
     assert f'"selector": "{selector}", "selectorIndex": 0' in payload
     assert f'"selector": "{selector}", "selectorIndex": 1' in payload
+
+
+def test_scroll_linked_driver_replays_all_matching_elements_and_custom_event(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": True, "library": "framer-motion"},
+                "scrollScrub": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": "span.disintegrating_char",
+                            "replay": "all-matches",
+                            "sourceIds": ["char-0", "char-1", "char-2"],
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "opacity",
+                                    "input": "[0, 1]",
+                                    "output": "[1, 0]",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    source = (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").read_text(
+        encoding="utf-8"
+    )
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    sites = json.loads(
+        payload.split("scrollLinkedStyleSites: ScrollLinkedStyleSite[] = ", 1)[1]
+        .rsplit(";", 1)[0]
+    )
+
+    assert sites[0]["replay"] == "all-matches"
+    assert sites[0]["sourceIds"] == ["char-0", "char-1", "char-2"]
+    assert "selectScopedCandidates(root, site.selector, site.selectorIndex, site.replay)" in source
+    assert "for (const target of targets)" in source
+    assert 'window.addEventListener("ui-clone-scroll", schedule as EventListener)' in source
+    assert 'window.removeEventListener("ui-clone-scroll", schedule as EventListener)' in source
+
+
+def test_scroll_linked_driver_respects_media_with_property_ownership(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    (impl / "src").mkdir(parents=True)
+    (ref / "generation-plan.json").write_text(
+        json.dumps(
+            {
+                "scrollDriven": {"required": True, "library": "framer-motion"},
+                "scrollScrub": {
+                    "required": True,
+                    "sites": [
+                        {
+                            "selector": ".hero-video",
+                            "selectorIndex": 0,
+                            "media": "(min-width: 581px)",
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "width",
+                                    "unit": "vw",
+                                    "input": "[0, 1]",
+                                    "output": "[80, 100]",
+                                }
+                            ],
+                        },
+                        {
+                            "selector": ".hero-video",
+                            "selectorIndex": 0,
+                            "media": "(max-width: 580px)",
+                            "progressSource": "document-progress",
+                            "transforms": [
+                                {
+                                    "property": "width",
+                                    "unit": "vw",
+                                    "input": "[0, 1]",
+                                    "output": "[100, 90]",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    source = (impl / "src" / "lib" / "ScrollLinkedStyleDriver.tsx").read_text(
+        encoding="utf-8"
+    )
+    payload = (impl / "src" / "lib" / "scrollLinkedStyleSites.ts").read_text(
+        encoding="utf-8"
+    )
+    sites = json.loads(
+        payload.split("scrollLinkedStyleSites: ScrollLinkedStyleSite[] = ", 1)[1]
+        .rsplit(";", 1)[0]
+    )
+
+    assert sites[0]["media"] == "(min-width: 581px)"
+    assert sites[1]["media"] == "(max-width: 580px)"
+    assert "media?: string;" in payload
+    assert "window.matchMedia(media).matches" in source
+    assert "rememberBandStyles" in source
+    assert "noteActiveBandProperties" in source
+    assert "restoreInactiveBandStyles" in source
+    assert "style.removeProperty(property)" in source
+    assert "restoreAllBandStyles(originalStyles)" in source
+    assert "if (!mediaMatches(site.media)) continue;" in source
+    assert source.index("restoreInactiveBandStyles(originalStyles, activeProperties)") < source.index(
+        "for (const application of applications)"
+    )
 
 
 def test_emits_scroll_latch_driver_from_plan_latch_sites(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ runtime state measured around its driven trigger, decide whether the
 transition actually FIRED.
 
 FIX-NOT-LOOSEN: a PASS requires a MEASURED runtime delta on the target
-(opacity / transform / rect / scroll-progress / currentTime / canvas-pixels)
+(opacity / transform / width / rect / scroll-progress / currentTime / canvas-pixels)
 in the expected direction. It can NOT be earned by a class name or a
 ``transition-`` token — that is exactly the hole the static name-match coverage
 gate left open, where an unimplemented scroll-reveal "passed" because the class
@@ -45,7 +45,7 @@ _EXPECTED = {
     "reveal": "opacity/transform advances when scrolled into view",
     "splash": "opacity/transform changes from initial to settled state on load",
     "sticky": "position: sticky pins at the declared top across the sticky range",
-    "scrub": "transform/position varies across the scroll range",
+    "scrub": "declared style/position varies across the scroll range",
     "smooth-scroll": "page position advances under scroll (engine wrapper translates)",
     "carousel": "slide transform/offset changes over time",
     "timer": "time-driven visual state changes while the target is visible",
@@ -162,6 +162,12 @@ def classify(entry: dict) -> str:
     if ("webgl" in blob or "canvas" in blob
             or "webgl" in eid or "canvas" in eid or "canvas" in etgt):
         return "webgl"
+    if (
+        "scroll-linked-style" in blob
+        or "scroll linked style" in blob
+        or "scroll_linked_style" in blob
+    ):
+        return "scrub"
     if "scrub" in blob or "progress" in blob or scrub_flag or "parallax" in blob or "parallax" in eid:
         return "scrub"
     # D17b (loop-nvti-0): a SCROLL-driven state machine (scroll position selects
@@ -646,7 +652,12 @@ def _text_digest_changed(before: dict, after: dict) -> bool:
     return str(b) != str(a)
 
 
-def _samples_vary(samples: list, prop: str = "", decl_blob: str = "") -> bool:
+def _samples_vary(
+    samples: list,
+    prop: str = "",
+    decl_blob: str = "",
+    filter_decl_blob: str = "",
+) -> bool:
     # Scrub fires by animating transform/opacity across the scroll range.
     # Deliberately NOT viewport `top`: getBoundingClientRect().top moves on
     # ANY page scroll, so counting it would PASS an unimplemented scrub on
@@ -664,6 +675,8 @@ def _samples_vary(samples: list, prop: str = "", decl_blob: str = "") -> bool:
     # so neither loosens the `top` exclusion above.
     f_sig = str(first.get("childSig") or "")
     f_w = _f(first.get("width"))
+    f_h = _f(first.get("height"))
+    declares_height = "height" in prop
     # Fix L (loop-e2e-6): word-reveal scrubs swap classes that change computed
     # COLOR only (dimmed -> highlight; opacity stays 1). The color series is a
     # separate field and counts ONLY when the spec declares a color-family
@@ -671,6 +684,8 @@ def _samples_vary(samples: list, prop: str = "", decl_blob: str = "") -> bool:
     # color shifts could otherwise false-pass a dead scrub).
     declares_color = any(k in prop for k in ("color", "fill", "stroke"))
     f_csig = str(first.get("childColorSig") or "")
+    declares_filter = "filter" in prop or "filter" in filter_decl_blob
+    f_filter = str(first.get("filter") or "").replace(" ", "").lower()
     # L-MEA-2 (loop-ebpb-0): a scroll-driven CLASS TOGGLE (a fixed header that
     # gains a shadow class once scrollY>0, animating box-shadow) mutates the
     # target's className string while transform/opacity/childSig/width all stay
@@ -701,6 +716,7 @@ def _samples_vary(samples: list, prop: str = "", decl_blob: str = "") -> bool:
                 return True
         sig = str(s.get("childSig") or "")
         w = _f(s.get("width"))
+        h = _f(s.get("height"))
         csig = str(s.get("childColorSig") or "")
         # Anti-bypass (codex review): childSig/width variation counts only
         # when the page actually ADVANCED between the samples — a load-time
@@ -712,8 +728,20 @@ def _samples_vary(samples: list, prop: str = "", decl_blob: str = "") -> bool:
             return True
         if advanced and f_w is not None and w is not None and abs(w - f_w) > 1.0:
             return True
+        if (
+            advanced
+            and declares_height
+            and f_h is not None
+            and h is not None
+            and abs(h - f_h) > 1.0
+        ):
+            return True
         if advanced and declares_color and f_csig and csig and csig != f_csig:
             return True
+        if advanced and declares_filter:
+            sample_filter = str(s.get("filter") or "").replace(" ", "").lower()
+            if f_filter and sample_filter and sample_filter != f_filter:
+                return True
         cls_tokens = set(str(s.get("cls") or "").split())
         # C3: the class/state/toggle keyword gate is too weak on its own —
         # "state" appears in ordinary ids (hero-paragraph-state-machine), so a
@@ -1080,10 +1108,13 @@ def decide(
             # anti-bypass contract.
             anim = entry.get("animation")
             anim_txt = ""
+            filter_decl_txt = ""
             if isinstance(anim, dict):
                 anim_txt = " ".join(
-                    str(anim.get(k, "")) for k in ("property", "from", "to")
+                    str(anim.get(k, ""))
+                    for k in ("property", "changedProperties", "from", "to")
                 )
+                filter_decl_txt = anim_txt.lower()
             scrub_blob = " ".join([
                 _anim_prop(entry),
                 str(entry.get("id", "")),
@@ -1092,7 +1123,12 @@ def decide(
                 str(entry.get("bundle_branch", "")),
                 anim_txt,
             ]).lower()
-            varied = _samples_vary(samples, _anim_prop(entry), scrub_blob)
+            varied = _samples_vary(
+                samples,
+                _anim_prop(entry),
+                scrub_blob,
+                filter_decl_txt,
+            )
             wheel = any(bool(s.get("wheelDriven")) for s in samples)
             if not varied and wheel:
                 # Wheel re-probe drove the engine directly. If the element
@@ -1462,6 +1498,51 @@ def evaluate(spec: dict, observations: dict, asset_sub: dict,
     }
 
 
+def merge_viewport_artifacts(base: dict, overrides: list[dict]) -> dict:
+    """Replace same-id verdicts measured at a viewport where the target renders.
+
+    Responsive components can be intentionally ``display:none`` at the default
+    desktop viewport. Their scoped retry is authoritative for only those ids;
+    desktop verdicts for every other transition remain untouched.
+    """
+    merged = dict(base or {})
+    entries = [dict(row) for row in (base or {}).get("entries", []) if isinstance(row, dict)]
+    positions = {
+        str(row.get("id", "")): index
+        for index, row in enumerate(entries)
+        if str(row.get("id", ""))
+    }
+    for artifact in overrides:
+        for row in (artifact or {}).get("entries", []):
+            if not isinstance(row, dict):
+                continue
+            entry_id = str(row.get("id", ""))
+            if entry_id in positions:
+                entries[positions[entry_id]] = dict(row)
+
+    fired = sum(1 for row in entries if row.get("status") in ("pass", "degraded"))
+    known = sum(1 for row in entries if row.get("status") == "known-skip")
+    failed = sum(1 for row in entries if row.get("status") == "fail")
+    unmeasurable = sum(1 for row in entries if row.get("status") == "unmeasurable")
+    merged.update(
+        {
+            "status": "fail" if failed else "pass",
+            "total": len(entries),
+            "fired": fired,
+            "known_skip": known,
+            "failed": failed,
+            "unmeasurable": unmeasurable,
+            "unmeasurableIds": [
+                str(row.get("id", ""))
+                for row in entries
+                if row.get("status") == "unmeasurable"
+            ],
+            "entries": entries,
+        }
+    )
+    return merged
+
+
 def exit_ok(artifact: dict) -> bool:
     """Exit 0 only when no spec entry failed to fire (known-skips allowed)."""
     return int(artifact.get("failed", 0)) == 0
@@ -1502,6 +1583,21 @@ def _load(path: str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--merge-artifacts":
+        if len(argv) != 4:
+            sys.stderr.write(
+                "usage: python -m ui_clone.gates.transition_fires "
+                "--merge-artifacts <base.json> <override.json> <out.json>\n"
+            )
+            return 2
+        base_path, override_path, out_path = argv[1:]
+        artifact = merge_viewport_artifacts(
+            _load(base_path),
+            [_load(override_path)],
+        )
+        Path(out_path).write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+        print(summary_line(artifact))
+        return 0 if exit_ok(artifact) else 1
     impl_url = ""
     if "--impl-url" in argv:
         i = argv.index("--impl-url")

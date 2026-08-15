@@ -10,11 +10,15 @@ point and the rule families stay independently testable / readable.
 
 from __future__ import annotations
 
+import hashlib
+import importlib
 import json
 import os
+import re
+import shlex
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from ui_clone.hooks._common import (
     extract_tool_command,
@@ -55,6 +59,31 @@ from .static_mirror import (
     _static_server_violation,
     _whole_document_html_snapshot_violation,
 )
+
+_CONTINUATION_RECEIPT_DIR = ".ui-re-continuation"
+_CONTINUATION_SKILL = "ui-clone-skills:ui-reverse-engineering"
+_CONTINUATION_HOST = "claude-code"
+_CONTINUATION_STATES = {
+    "pending",
+    "active",
+    "paused",
+    "complete",
+    "terminal",
+    "unsupported",
+}
+_CONTINUATION_FINAL_STATES = {"complete", "terminal", "unsupported"}
+_CONTINUATION_TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_CONTINUATION_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_CONTINUATION_CONTROL_SUBCOMMANDS = {
+    "create-pending",
+    "bind-ref",
+    "mark-unsupported",
+    "pause",
+    "status",
+}
 
 
 def _emit_block(reason: str) -> None:
@@ -97,6 +126,203 @@ def _mark_ui_re_session(
     ref_dir = target_ref_dir_for_ui_re_command(cmd, project_root, cwd=payload_cwd)
     if ref_dir is not None:
         mark_ref_session(ref_dir, session_id, source="pre_bash")
+
+
+def _continuation_token_ok(token: str) -> bool:
+    return (
+        isinstance(token, str)
+        and bool(token)
+        and token not in {".", ".."}
+        and (
+            _CONTINUATION_UUID_RE.fullmatch(token) is not None
+            or _CONTINUATION_TOKEN_RE.fullmatch(token) is not None
+        )
+    )
+
+
+def _continuation_receipt_path(project_root: Path, session_id: str) -> Path | None:
+    if not _continuation_token_ok(session_id):
+        return None
+    return project_root / _CONTINUATION_RECEIPT_DIR / f"{session_id}.json"
+
+
+def _continuation_lease_tag(project_root: Path, session_id: str) -> str:
+    digest = hashlib.sha256(f"{project_root.resolve()}\0{session_id}".encode()).hexdigest()[
+        :24
+    ]
+    return f"UI_RE_CONTINUATION:{digest}"
+
+
+def _continuation_ref_safe(ref_dir: object) -> str | None:
+    if ref_dir is None:
+        return None
+    if not isinstance(ref_dir, str) or not ref_dir:
+        return None
+    path = Path(ref_dir)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return path.as_posix()
+
+
+def _validate_continuation_receipt(
+    raw: object, project_root: Path, session_id: str
+) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    if (
+        raw.get("schemaVersion") != 1
+        or raw.get("host") != _CONTINUATION_HOST
+        or raw.get("skill") != _CONTINUATION_SKILL
+        or raw.get("sessionId") != session_id
+        or raw.get("state") not in _CONTINUATION_STATES
+        or raw.get("leaseTag") != _continuation_lease_tag(project_root, session_id)
+    ):
+        return None
+    if _continuation_ref_safe(raw.get("refDir")) != raw.get("refDir"):
+        return None
+    return dict(raw)
+
+
+def _load_continuation_receipt(
+    project_root: Path, session_id: str
+) -> tuple[dict[str, Any] | None, bool]:
+    path = _continuation_receipt_path(project_root, session_id)
+    if path is None:
+        return None, False
+    try:
+        continuation = importlib.import_module("ui_clone.claude_continuation")
+    except ImportError:
+        continuation = None
+    if continuation is not None:
+        try:
+            receipt = continuation.load_receipt(project_root, session_id)
+        except Exception:
+            return None, path.exists()
+        return receipt, receipt is None and path.exists()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, False
+    except (json.JSONDecodeError, OSError):
+        return None, True
+    receipt = _validate_continuation_receipt(raw, project_root, session_id)
+    return receipt, receipt is None
+
+
+def _relative_continuation_ref(project_root: Path, ref_dir: Path) -> str | None:
+    try:
+        rel = ref_dir.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return None
+    return _continuation_ref_safe(rel)
+
+
+def _bind_continuation_ref(
+    project_root: Path, session_id: str, receipt: dict[str, Any], ref_dir: Path
+) -> str | None:
+    if receipt.get("state") in _CONTINUATION_FINAL_STATES:
+        return None
+    rel = _relative_continuation_ref(project_root, ref_dir)
+    if rel is None:
+        return (
+            "⛔ UI-RE continuation bind failed: the targeted ref is outside "
+            "the project, so this session cannot safely bind continuation "
+            "state. Run the continuation status control command and restart "
+            "the pipeline from a project-local tmp/ref/<component> path."
+        )
+    existing = receipt.get("refDir")
+    if existing is not None and existing != rel:
+        return (
+            "⛔ UI-RE continuation ref mismatch: this session is already "
+            f"bound to `{existing}`, but the command targets `{rel}`. Continue "
+            "the bound ref, pause this continuation, or create a separate "
+            "continuation receipt for the other ref before running UI-RE work."
+        )
+    if existing == rel:
+        return None
+    try:
+        continuation = importlib.import_module("ui_clone.claude_continuation")
+    except ImportError:
+        continuation = None
+    if continuation is not None:
+        try:
+            continuation.bind_ref(project_root, session_id, ref_dir)
+        except Exception as exc:
+            return (
+                "⛔ UI-RE continuation bind failed: the receipt could not be "
+                f"bound to `{rel}` ({exc}). Run "
+                "`python -m ui_clone.claude_continuation status ...` to inspect "
+                "the receipt, then repair or pause it before UI-RE work."
+            )
+        return None
+    next_receipt = dict(receipt)
+    next_receipt["refDir"] = rel
+    path = _continuation_receipt_path(project_root, session_id)
+    if path is None:
+        return (
+            "⛔ UI-RE continuation bind failed: the session id cannot map to a "
+            "safe receipt path. Repair the continuation receipt before UI-RE work."
+        )
+    try:
+        path.write_text(
+            json.dumps(next_receipt, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return (
+            "⛔ UI-RE continuation bind failed: the receipt could not be "
+            f"updated with `{rel}` ({exc}). Fix receipt permissions or pause "
+            "the continuation before UI-RE work."
+        )
+    return None
+
+
+def _is_continuation_control_command(cmd: str) -> bool:
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    if len(tokens) < 4:
+        return False
+    executable = tokens[0].rsplit("/", 1)[-1]
+    return (
+        executable in {"python", "python3"}
+        and tokens[1] == "-m"
+        and tokens[2] == "ui_clone.claude_continuation"
+        and tokens[3] in _CONTINUATION_CONTROL_SUBCOMMANDS
+    )
+
+
+def _guard_claude_continuation(
+    cmd: str, project_root: Path, session_id: str, payload_cwd: Path | None
+) -> str | None:
+    if not session_id or _is_continuation_control_command(cmd):
+        return None
+    target_ref = target_ref_dir_for_ui_re_command(cmd, project_root, cwd=payload_cwd)
+    if target_ref is None:
+        return None
+    receipt, invalid = _load_continuation_receipt(project_root, session_id)
+    if invalid:
+        return (
+            "⛔ UI-RE continuation receipt invalid/corrupt for this session. "
+            f"The receipt at `{_continuation_receipt_path(project_root, session_id)}` "
+            "could not be validated, so this UI-RE command is fail-closed and "
+            "the existing receipt is preserved. Fix by running the continuation "
+            "control CLI (`python -m ui_clone.claude_continuation status ...`) "
+            "or by creating a fresh valid receipt before pipeline work."
+        )
+    if receipt is None:
+        return None
+    state = receipt.get("state")
+    if state == "pending":
+        return (
+            "⛔ UI-RE continuation is pending for this Claude session. Activate "
+            "the scheduled Cron continuation first; do not start UI-RE pipeline "
+            "work from the pre-activation tab. Allowed control commands are "
+            "`python -m ui_clone.claude_continuation create-pending`, "
+            "`bind-ref`, `mark-unsupported`, `pause`, and `status`."
+        )
+    return _bind_continuation_ref(project_root, session_id, receipt, target_ref)
 
 
 def _guard_whole_document_mirror(cmd: str) -> str | None:
@@ -468,6 +694,12 @@ def main() -> None:
     payload_cwd = _resolve_payload_cwd(data)
     project_root = find_project_root()
     session_id = session_id_from_payload(data)
+
+    reason = _guard_claude_continuation(cmd, project_root, session_id, payload_cwd)
+    if reason is not None:
+        _emit_block(reason)
+        sys.exit(0)
+
     _mark_ui_re_session(cmd, project_root, session_id, payload_cwd)
     # Off-pipeline clone detection: remember external agent-browser browsing
     # so pre_generate can recognize clone-shaped work without a ref dir.

@@ -207,6 +207,28 @@ def test_extract_framer_minified_scroll_scrub(tmp_path: Path) -> None:
     assert scale_t["output"] == "[.9,1,1,1]"  # band straddling 1.0 = the zoom
 
 
+def test_parse_bundles_flags_unresolved_framer_scroll_gap(tmp_path: Path) -> None:
+    """Turbopack can preserve Framer hook names while moving the options object
+    away from the hook call. If deterministic extraction resolves zero scroll
+    sites despite strong scroll markers, Step 5d must dispatch the
+    bundle-analyzer instead of treating the bundle as fully parsed."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "page.js").write_text(
+        'let r={target:M,offset:["start start","end start"]};'
+        'let{scrollYProgress:B}=(0,tK.useScroll)(r);'
+        'let G=(0,tW.useTransform)(B,a,n);'
+        'return(0,n.jsx)(m.P.div,{style:{width:G}});',
+        encoding="utf-8",
+    )
+    plan = mod.parse_bundles(tmp_path)
+    assert "framerMotion" not in plan["extractions"]
+    gap = next(u for u in plan["unresolved"] if u["library"] == "framer-motion")
+    assert gap["source"] == "bundles/page.js"
+    assert "bundle-analyzer" in gap["reason"]
+
+
 def test_hover_size_expansion_extracted(tmp_path: Path) -> None:
     """Loop-9 regression class (item 6b): the nav pill label expansion
     (initial:{width:0} → animate:{width:active?"auto":0}, spring) lived only
@@ -278,6 +300,27 @@ def test_active_state_expansion_extracted(tmp_path: Path) -> None:
     assert entry["property"] == "width"
     assert entry["stateFlag"] == "a"
     assert entry["to"] == "auto"
+    assert entry["resolvedClassName"] == "nav_label_container__okVKb"
+
+
+def test_active_state_expansion_extracts_dotted_css_module_token(
+    tmp_path: Path,
+) -> None:
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "nav.js").write_text(
+        '(0,n.jsx)(c.P.span,{className:iL.default.label_container,'
+        'style:{color:"#111"},layout:!0,transition:{type:"spring"},'
+        'initial:{width:0},animate:{width:a?"auto":0}});'
+        'let iL={default:{label_container:"nav_label_container__okVKb"}};',
+        encoding="utf-8",
+    )
+    plan = mod.parse_bundles(tmp_path)
+    active = plan["extractions"].get("activeStateExpansions")
+    assert active, plan["extractions"].keys()
+    entry = active[0]
+    assert entry["classToken"] == "label_container"
     assert entry["resolvedClassName"] == "nav_label_container__okVKb"
 
 

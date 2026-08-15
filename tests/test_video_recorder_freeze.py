@@ -34,7 +34,7 @@ echo "$@" >> "$AB_CALL_LOG"
 # proceeds past the anchored splash window in the stubbed environment
 case "$*" in
   *"hovered: el.matches"*) echo '{"found":true,"selector":".x","matchIndex":1,"matchCount":2,"hovered":true,"pointerReachable":true,"rect":{"x":40,"y":30,"width":40,"height":30}}' ;;
-  *"const matches = Array.from(document.querySelectorAll"*) echo '{"found":true,"matchIndex":1,"matchCount":2,"rect":{"x":40,"y":30,"width":40,"height":30}}' ;;
+  *"const matches = Array.from(document.querySelectorAll"*) echo '{"found":true,"matchIndex":1,"matchCount":2,"scrollState":{"scrollY":0},"rect":{"x":40,"y":30,"width":40,"height":30}}' ;;
   *"performance.now() - epoch"*) echo '"0.100000"' ;;
   *readyState*) echo true ;;
 esac

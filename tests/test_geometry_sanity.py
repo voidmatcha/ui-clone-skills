@@ -1,17 +1,50 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from ui_clone.gates.geometry_sanity import evaluate, parse_viewport, section_anchor_name
+from ui_clone.gates.geometry_sanity import (
+    capture_viewport,
+    evaluate,
+    parse_viewport,
+    section_anchor_name,
+)
 
 
 def test_parse_viewport_reads_frozen_capture_shape() -> None:
     assert parse_viewport("1440x900") == (1440, 900)
     assert parse_viewport("bad") is None
+
+
+def test_capture_viewport_falls_back_to_container_context(tmp_path: Path) -> None:
+    (tmp_path / "container-context.json").write_text(
+        json.dumps({"viewport": {"w": 1440, "h": 900}}),
+        encoding="utf-8",
+    )
+
+    assert capture_viewport(tmp_path) == (1440, 900)
+
+
+def test_capture_viewport_prefers_original_context_over_reused_section_viewport(
+    tmp_path: Path,
+) -> None:
+    """Section reuse must not rewrite the viewport behind section-map pixels."""
+    (tmp_path / "container-context.json").write_text(
+        json.dumps({"viewport": {"w": 1440, "h": 900}}),
+        encoding="utf-8",
+    )
+    sections = tmp_path / "sections"
+    sections.mkdir()
+    (sections / "frozen-ref-provenance.json").write_text(
+        json.dumps({"mode": "frozen-ref-reuse", "viewport": "1920x1080"}),
+        encoding="utf-8",
+    )
+
+    assert capture_viewport(tmp_path) == (1440, 900)
 
 
 def test_geometry_sanity_imports_under_macos_system_python() -> None:
@@ -27,6 +60,33 @@ def test_geometry_sanity_imports_under_macos_system_python() -> None:
             host_python,
             "-c",
             "import importlib; importlib.import_module('ui_clone.gates.geometry_sanity')",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_capture_viewport_runs_under_macos_system_python(tmp_path: Path) -> None:
+    host_python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else shutil.which("python3")
+    if not host_python:
+        pytest.skip("python3 not available")
+    (tmp_path / "container-context.json").write_text(
+        json.dumps({"viewport": {"w": 1440, "h": 900}}),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            host_python,
+            "-c",
+            (
+                "from ui_clone.gates.geometry_sanity import capture_viewport, evaluate; "
+                f"assert capture_viewport({str(tmp_path)!r}) == (1440, 900); "
+                "assert evaluate(100, 100, [])['status'] == 'pass'"
+            ),
         ],
         capture_output=True,
         text=True,
@@ -244,6 +304,27 @@ def test_probe_uses_semantic_landmarks_and_explicit_anchor_presence() -> None:
     assert "document.querySelectorAll(sec.tag)" in script
     assert "anchorFound: Boolean(el)" in script
     assert 'if "anchorFound" in m' in script
+
+
+def test_geometry_probe_opens_then_asserts_the_capture_viewport() -> None:
+    """Viewport setup must happen after the browser session exists.
+
+    ``set viewport`` against a not-yet-opened agent-browser session can be
+    silently discarded.  The subsequent navigation then inherits an unrelated
+    viewport and turns vh-authored section heights into false geometry drift.
+    Use the shared helper, which opens first and asserts ``innerWidth`` before
+    the probe is allowed to measure.
+    """
+    script = Path("skills/visual-debug/scripts/geometry-sanity-check.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'source "$REPO_ROOT/scripts/lib/viewport.sh"' in script
+    assert 'ab_open_at_viewport "$SESSION" "$URL" "$VP_W" "$VP_H" 3' in script
+    assert (
+        'agent-browser --session "$SESSION" set viewport "$VP_W" "$VP_H"'
+        not in script
+    )
 
 
 def test_geometry_sanity_is_strict_and_status_required() -> None:

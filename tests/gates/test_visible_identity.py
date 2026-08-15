@@ -17,6 +17,10 @@ thresholds. Tested in isolation here.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
+import ui_clone.gates.visible_identity as visible_identity
 from ui_clone.gates.visible_identity import (
     BG_IMAGE_COVERAGE_FLOOR,
     DEFAULT_MARGIN_PX,
@@ -302,6 +306,27 @@ def test_white_on_white_does_not_paint_text() -> None:
     rec = _rec(color=[255, 255, 255], effectiveBgColor=[255, 255, 255])
     assert paints_text(rec) is False
     assert is_visible(rec, viewport=VP) is False
+
+
+def test_rgb_list_and_tuple_inputs_are_python39_compatible() -> None:
+    list_rec = _rec(color=[255, 255, 255], effectiveBgColor=[255, 255, 255])
+    tuple_rec = _rec(color=(255, 255, 255), effectiveBgColor=(255, 255, 255))
+
+    assert paints_text(list_rec) is False
+    assert paints_text(tuple_rec) is False
+
+    tree = ast.parse(Path(visible_identity.__file__).read_text(encoding="utf-8"))
+    pep604_isinstance_args = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "isinstance"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.BinOp)
+        and isinstance(node.args[1].op, ast.BitOr)
+    ]
+    assert pep604_isinstance_args == []
 
 
 def test_low_alpha_text_does_not_paint() -> None:

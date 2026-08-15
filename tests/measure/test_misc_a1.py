@@ -17,6 +17,11 @@ from ._helpers import (
 def _write_runtime_rollup_fixture(ref: Path, runtime_frame: dict) -> None:
     ref.mkdir(parents=True, exist_ok=True)
     (ref / "no-signals-justified.txt").write_text("test fixture")
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "requiredChecks": [
+            {"id": "runtime-frame-proof", "produces": "runtime-frame-proof.json"},
+        ],
+    }))
     for name in [
         "lottie-runtime.json",
         "runtime-image-validity.json",
@@ -1332,6 +1337,11 @@ def test_runtime_proof_rollup_all_skip_when_truly_absent(tmp_path: Path) -> None
     # universal anchors) OR a no-signals-justified.txt marker. Provide
     # the marker for this "truly absent" scenario.
     (ref / "no-signals-justified.txt").write_text("test fixture: no signals on this site")
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "requiredChecks": [
+            {"id": "hero-composite-check", "produces": "hero-composite.json"},
+        ],
+    }))
     # Write every source artifact with status=skip and a valid measurement
     # payload (skip reasons that match the validator's accepted skip cases).
     for name in [
@@ -1492,6 +1502,11 @@ def test_runtime_proof_rollup_accepts_hero_kinds_absent_from_ref_and_impl(tmp_pa
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "no-signals-justified.txt").write_text("test fixture")
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "requiredChecks": [
+            {"id": "hero-composite-check", "produces": "hero-composite.json"},
+        ],
+    }))
     for name in [
         "lottie-runtime.json", "runtime-image-validity.json",
         "blank-viewport.json",
@@ -1938,6 +1953,353 @@ def test_duration_easing_grounding_ignores_reference_css_mirrors(
         "src/ref-css/globals.css",
         "src/reference.css",
     }
+
+
+def test_duration_easing_grounding_ignores_ts_type_and_expression_tokens(
+    tmp_path: Path,
+) -> None:
+    """TS syntax around easing props is not authored easing evidence."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "card", "duration": 200, "easing": "ease-out"},
+        ],
+    }))
+    (impl / "src" / "Card.tsx").write_text(
+        "type MotionConfig = { easing: string };\n"
+        "const activeCurve = 'ease-out';\n"
+        "const fallbackCurve = 'linear';\n"
+        "const durationTuple = [0.2, 0.6] as const;\n"
+        "export function Card({ active }: { active: boolean }) {\n"
+        "  return <motion.div transition={{\n"
+        "    duration: durationTuple[0],\n"
+        "    ease: active ? activeCurve : fallbackCurve,\n"
+        "    easing: string,\n"
+        "  }} style={{ transitionTimingFunction: 'unmeasuredCurve' }} />;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "duration-easing-grounding-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env={**os.environ, "DURATION_GROUNDING_MAX_INVENTED": "0"},
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "duration-easing-grounding.json").read_text())
+    assert artifact["status"] == "fail", artifact
+    assert artifact["inventedEasings"] == ["unmeasuredcurve"]
+    assert "unmeasuredcurve" in artifact["implEasings"]
+    assert "active" not in artifact["implEasings"]
+    assert "activecurve" not in artifact["implEasings"]
+    assert "fallbackcurve" not in artifact["implEasings"]
+    assert "string" not in artifact["implEasings"]
+
+
+def test_duration_easing_grounding_resolves_ternary_branch_easing_consts(
+    tmp_path: Path,
+) -> None:
+    """Ternary conditions are syntax, but branch consts are easing evidence."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "card", "duration": 200, "easing": "ease-out"},
+        ],
+    }))
+    (impl / "src" / "Card.tsx").write_text(
+        "const groundedCurve = 'ease-out';\n"
+        "const wildCurve = 'wildCurve';\n"
+        "const curveTuple = ['linear', 'strayCurve'] as const;\n"
+        "export function Card({ active, disabled }: "
+        "{ active: boolean; disabled: boolean }) {\n"
+        "  return <motion.div transition={{\n"
+        "    ease: active ? groundedCurve : wildCurve,\n"
+        "    easing: disabled ? curveTuple[0] : curveTuple[1],\n"
+        "  }} />;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "duration-easing-grounding-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env={**os.environ, "DURATION_GROUNDING_MAX_INVENTED": "0"},
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "duration-easing-grounding.json").read_text())
+    assert artifact["status"] == "fail", artifact
+    assert artifact["inventedEasings"] == ["straycurve", "wildcurve"]
+    assert "ease-out" in artifact["matchedEasings"]
+    assert "linear" in artifact["matchedEasings"]
+    assert "active" not in artifact["implEasings"]
+    assert "disabled" not in artifact["implEasings"]
+
+
+def test_duration_easing_grounding_stops_at_same_line_neighbor_properties(
+    tmp_path: Path,
+) -> None:
+    """Same-line object properties after easing are not easing values."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "card", "duration": 200, "easing": "ease-out"},
+        ],
+    }))
+    (impl / "src" / "Card.tsx").write_text(
+        "const groundedCurve = 'ease-out';\n"
+        "const wildCurve = 'wildCurve';\n"
+        "export function Card({ active }: { active: boolean }) {\n"
+        "  return <motion.div transition={{ duration: 800, "
+        "easing: active ? groundedCurve : wildCurve, fill: 'forwards' }} "
+        "style={{ transitionTimingFunction: 'ease, ease', "
+        "transitionDelay: '0s, 0s', cursor: 'pointer' }} />;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "duration-easing-grounding-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env={**os.environ, "DURATION_GROUNDING_MAX_INVENTED": "0"},
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "duration-easing-grounding.json").read_text())
+    assert artifact["status"] == "fail", artifact
+    assert artifact["inventedEasings"] == ["wildcurve"]
+    assert "ease" in artifact["matchedEasings"]
+    assert "ease-out" in artifact["matchedEasings"]
+    assert "0s, 0s" not in artifact["implEasings"]
+    assert "ease, ease" not in artifact["implEasings"]
+    assert "forwards" not in artifact["implEasings"]
+    assert "pointer" not in artifact["implEasings"]
+
+
+def test_duration_easing_grounding_reads_kebab_case_css_in_js_templates(
+    tmp_path: Path,
+) -> None:
+    """Styled-component templates still contain authored CSS timing values."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "card", "duration": 200, "easing": "ease-out"},
+        ],
+    }))
+    (impl / "src" / "Card.tsx").write_text(
+        "const Card = styled.div`\n"
+        "  transition-timing-function: phantomCurve;\n"
+        "  animation-timing-function: anotherCurve;\n"
+        "`;\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "duration-easing-grounding-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env={**os.environ, "DURATION_GROUNDING_MAX_INVENTED": "0"},
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "duration-easing-grounding.json").read_text())
+    assert artifact["status"] == "fail", artifact
+    assert artifact["inventedEasings"] == ["anothercurve", "phantomcurve"]
+
+
+def test_duration_easing_grounding_resolves_css_in_js_template_interpolation(
+    tmp_path: Path,
+) -> None:
+    """Template interpolation syntax is not itself an authored easing."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "card", "duration": 200, "easing": "ease-out"},
+        ],
+    }))
+    (impl / "src" / "Card.tsx").write_text(
+        "const curve = 'ease-out';\n"
+        "const Curve = 'inventedCurve';\n"
+        "const Card = styled.div`\n"
+        "  transition-timing-function: ${curve};\n"
+        "  animation-timing-function: ${runtimeCurve};\n"
+        "`;\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "duration-easing-grounding-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env={**os.environ, "DURATION_GROUNDING_MAX_INVENTED": "0"},
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "duration-easing-grounding.json").read_text())
+    assert artifact["status"] == "pass", artifact
+    assert artifact["implEasings"] == ["ease-out"]
+    assert "${curve}" not in artifact["implEasings"]
+    assert "${runtimecurve}" not in artifact["implEasings"]
+
+
+def test_duration_easing_grounding_ignores_quoted_condition_and_member_keys(
+    tmp_path: Path,
+) -> None:
+    """Quoted comparison operands and lookup keys are syntax, not easings."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "card", "duration": 200, "easing": "ease-out"},
+        ],
+    }))
+    (impl / "src" / "Card.tsx").write_text(
+        "const curveByMode = { active: 'ease-out' } as const;\n"
+        "export function Card({ mode }: { mode: string }) {\n"
+        "  return <motion.div transition={{\n"
+        "    ease: mode === 'active' ? 'ease-out' : curveByMode['active'],\n"
+        "  }} />;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "duration-easing-grounding-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env={**os.environ, "DURATION_GROUNDING_MAX_INVENTED": "0"},
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "duration-easing-grounding.json").read_text())
+    assert artifact["status"] == "pass", artifact
+    assert artifact["implEasings"] == ["ease-out"]
+    assert "active" not in artifact["implEasings"]
+
+
+def test_duration_easing_grounding_resolves_js_identifiers_case_sensitively(
+    tmp_path: Path,
+) -> None:
+    """Distinct JavaScript identifiers must not overwrite each other."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [
+            {"id": "card", "duration": 200, "easing": "ease-out"},
+        ],
+    }))
+    (impl / "src" / "Card.tsx").write_text(
+        "const curve = 'ease-out';\n"
+        "const Curve = 'inventedCurve';\n"
+        "const curveTuple = ['linear'] as const;\n"
+        "const CurveTuple = ['inventedTupleCurve'] as const;\n"
+        "export function Card({ active }: { active: boolean }) {\n"
+        "  return <motion.div transition={{\n"
+        "    ease: active ? curve : curveTuple[0],\n"
+        "  }} />;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "duration-easing-grounding-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env={**os.environ, "DURATION_GROUNDING_MAX_INVENTED": "0"},
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "duration-easing-grounding.json").read_text())
+    assert artifact["status"] == "pass", artifact
+    assert artifact["implEasings"] == ["ease-out", "linear"]
+    assert "inventedcurve" not in artifact["implEasings"]
+    assert "inventedtuplecurve" not in artifact["implEasings"]
 
 
 

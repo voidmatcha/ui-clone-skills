@@ -530,6 +530,82 @@ def _run_crop(image_path: Path, rect: dict[str, object], clip_top: float) -> Non
     )
 
 
+def _live_section_rect_js(identity: dict[str, object], expected_top: float) -> str:
+    payload = json.dumps(
+        {
+            "id": identity.get("id") or identity.get("elementId"),
+            "tag": identity.get("tag") or identity.get("tagName"),
+            "className": identity.get("className") or identity.get("classes"),
+            "text": identity.get("text") or identity.get("fingerprint") or identity.get("name"),
+            "expectedTop": expected_top,
+        }
+    )
+    return f"""(() => {{
+  const identity = {payload};
+  const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+  const tag = norm(identity.tag).toLowerCase();
+  const id = norm(identity.id);
+  const classes = norm(identity.className).split(" ").filter(Boolean);
+  const needle = norm(identity.text).toLowerCase().slice(0, 160);
+  const selector = tag ? tag : "*";
+  const nodes = Array.from(document.querySelectorAll(selector));
+  const candidates = [];
+  for (const node of nodes) {{
+    const rect = node.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+    const nodeId = norm(node.id);
+    const classList = Array.from(node.classList || []);
+    const idMatch = !!id && nodeId === id;
+    const classMatch = classes.length > 0 && classes.every((cls) => classList.includes(cls));
+    const textMatch = !!needle && norm(node.textContent).toLowerCase().includes(needle);
+    if (!idMatch && !classMatch && !textMatch) continue;
+    let score = 0;
+    if (idMatch) score += 100;
+    if (classMatch) score += 50 + classes.length;
+    if (textMatch) score += 20;
+    if (tag && node.tagName.toLowerCase() === tag) score += 5;
+    const documentTop = rect.top + window.scrollY;
+    candidates.push({{
+      top: rect.top,
+      left: rect.left,
+      width: rect.width,
+      height: rect.height,
+      documentTop,
+      score,
+      distance: Math.abs(documentTop - Number(identity.expectedTop || 0))
+    }});
+  }}
+  candidates.sort((a, b) => (b.score - a.score) || (a.distance - b.distance));
+  const best = candidates[0] || null;
+  return JSON.stringify(best);
+}})()"""
+
+
+def _resolve_live_section_rect(
+    session: str,
+    identity: dict[str, object] | None,
+    expected_top: float,
+) -> dict[str, object] | None:
+    if not identity:
+        return None
+    data = _unwrap_eval_json(
+        _run_agent_eval_text(session, _live_section_rect_js(identity, expected_top))
+    )
+    if not isinstance(data, dict):
+        return None
+    width = _as_float(data.get("width"))
+    height = _as_float(data.get("height"))
+    if width <= 0 or height <= 0:
+        return None
+    return {
+        "top": _as_float(data.get("top")),
+        "left": _as_float(data.get("left")),
+        "width": width,
+        "height": height,
+        "documentTop": _as_float(data.get("documentTop")),
+    }
+
+
 def _capture_one(
     *,
     session: str,
@@ -542,6 +618,7 @@ def _capture_one(
     finish_js: str,
     skip_finish: bool,
     wait_scroll_settle: float,
+    identity: dict[str, object] | None = None,
     forced_scroll_y: float | None = None,
 ) -> dict[str, Any] | None:
     top = _as_float(rect.get("top"))
@@ -575,7 +652,9 @@ def _capture_one(
         scroll_y = max(0.0, top - 50.0)
         pinned = False
 
-    def _settle_and_shoot(target_y: float, output_path: Path) -> tuple[dict[str, Any] | None, float]:
+    def _settle_and_shoot(
+        target_y: float, output_path: Path
+    ) -> tuple[dict[str, Any] | None, float, dict[str, Any]]:
         # Kill Lenis/smooth-scroll first so the forced scroll is not reverted to
         # actualY=0 during settle (loop-15 cross-impl scroll-mapping class).
         _run_agent_eval(session, _disable_smooth_scroll_js())
@@ -588,22 +667,35 @@ def _capture_one(
             _run_agent_eval(session, finish_js)
             conf = _unwrap_eval_json(_run_agent_eval_text(session, _settle_js()))
         time.sleep(max(0.2, wait_scroll_settle))
-        # clip from the ACTUAL post-settle position — the request may have
-        # clamped at maxScroll (legacy fixed clip_top=50 cropped the wrong
-        # band for every section whose top sits past maxScroll).
-        post = _scroll_metrics(session, scroller_selector)
-        actual_y = post["y"] if post is not None else target_y
         # V-1: assert the session viewport immediately before the shot.
         expect_w_raw = (os.environ.get("SECTION_CAPTURE_VIEW_W") or "").strip()
         if expect_w_raw.isdigit():
             _ensure_viewport(session, int(expect_w_raw))
+        # Clip from the ACTUAL position after the viewport assertion. A viewport
+        # repair can itself reflow the page and clamp scrollY, so measuring
+        # before `_ensure_viewport` would pair a fresh live rect with stale
+        # scroll metrics.
+        post = _scroll_metrics(session, scroller_selector)
+        actual_y = post["y"] if post is not None else target_y
+        planned_crop_top = top - actual_y
+        live_rect = _resolve_live_section_rect(session, identity, top)
+        crop_rect = live_rect if live_rect is not None else rect
+        crop_top = _as_float(crop_rect.get("top")) if live_rect is not None else planned_crop_top
+        crop_meta: dict[str, Any] = {
+            "plannedCropTop": planned_crop_top,
+            "liveRectResolved": live_rect is not None,
+        }
+        if live_rect is not None:
+            crop_meta["liveCropRect"] = live_rect
+            crop_meta["cropDriftPx"] = crop_top - planned_crop_top
         _run_screenshot(session, output_path)
-        _run_crop(output_path, rect, top - actual_y)
-        return conf, actual_y
+        _run_crop(output_path, crop_rect, crop_top)
+        return conf, actual_y, crop_meta
 
     output_path = section_dir / side / f"{name}.png"
-    confidence, actual_y = _settle_and_shoot(scroll_y, output_path)
+    confidence, actual_y, crop_meta = _settle_and_shoot(scroll_y, output_path)
     meta: dict[str, Any] = dict(confidence or {})
+    meta.update(crop_meta)
     # Record the scroll position used so the frozen-ref capture can hand it to a
     # later impl capture for scroll-scrub determinism (see capture_matched_sections).
     meta["actualY"] = actual_y
@@ -623,8 +715,9 @@ def _capture_one(
         max_scroll = max(0.0, metrics["sh"] - metrics["vh"])
         intersects_bottom_view = top + height > max_scroll
         if uniq is not None and uniq <= flat_max and intersects_bottom_view:
-            retry_conf, retry_y = _settle_and_shoot(max_scroll, output_path)
+            retry_conf, retry_y, crop_meta = _settle_and_shoot(max_scroll, output_path)
             meta = dict(retry_conf or {})
+            meta.update(crop_meta)
             meta["actualY"] = retry_y
             meta["flatRecapture"] = True
             meta["flatRecaptureUniqueBefore"] = uniq
@@ -640,12 +733,20 @@ def _capture_one(
     # three crops on the same band). Ref pass only (forced impl reuses the result).
     if forced_scroll_y is None and pinned and metrics is not None:
         max_scroll = max(0.0, metrics["sh"] - metrics["vh"])
-        if top < max_scroll - 1.0 and _crop_is_blank(output_path):
+        flat_max = int(_as_float(os.environ.get("SECTION_CAPTURE_FLAT_RETRY_MAX_COLORS"), 4.0))
+        uniq = crop_unique_colors(output_path)
+        is_content_free = _crop_is_blank(output_path) or (
+            uniq is not None and uniq <= flat_max
+        )
+        if top < max_scroll - 1.0 and is_content_free:
             top_aligned = min(max_scroll, max(0.0, top - 50.0))
-            retry_conf, retry_y = _settle_and_shoot(top_aligned, output_path)
+            retry_conf, retry_y, crop_meta = _settle_and_shoot(top_aligned, output_path)
             meta = dict(retry_conf or {})
+            meta.update(crop_meta)
             meta["actualY"] = retry_y
             meta["topAlignedRetry"] = True
+            if uniq is not None:
+                meta["topAlignedRetryUniqueBefore"] = uniq
 
     return meta if meta else confidence
 
@@ -724,6 +825,7 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
                     finish_js=finish_js,
                     skip_finish=skip_finish,
                     wait_scroll_settle=wait_scroll_settle,
+                    identity=ref,
                 )
                 if conf is not None:
                     confidence_map.setdefault(name, {})["ref"] = conf
@@ -745,6 +847,7 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
                     finish_js=finish_js,
                     skip_finish=skip_finish,
                     wait_scroll_settle=wait_scroll_settle,
+                    identity=impl,
                     forced_scroll_y=(forced_positions.get(name) if reuse_frozen_ref else None),
                 )
                 if conf is not None:
@@ -817,6 +920,7 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
                 finish_js=finish_js,
                 skip_finish=skip_finish,
                 wait_scroll_settle=wait_scroll_settle,
+                identity=ref,
             )
             sys.stdout.write(f"  ◇ calib {name}\n")
             sys.stdout.flush()

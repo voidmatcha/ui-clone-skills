@@ -554,6 +554,8 @@ def test_synthesize_ref_sections_preserves_visible_media_evidence() -> None:
                 "childCount": 1,
                 "hasVisibleMedia": True,
                 "visibleMediaCount": 1,
+                "visibleMediaKinds": ["video"],
+                "visibleMediaKindCounts": {"video": 1},
             }
         ]
     }
@@ -567,6 +569,57 @@ def test_synthesize_ref_sections_preserves_visible_media_evidence() -> None:
     assert synthesized[0]["childCount"] == 1
     assert synthesized[0]["hasVisibleMedia"] is True
     assert synthesized[0]["visibleMediaCount"] == 1
+    assert synthesized[0]["visibleMediaKinds"] == ["video"]
+    assert synthesized[0]["visibleMediaKindCounts"] == {"video": 1}
+
+
+def test_synthesize_ref_enriches_semantic_candidate_with_runtime_media_kinds() -> None:
+    section_map = {
+        "sections": [
+            {
+                "index": 1,
+                "tag": "div",
+                "id": "hero-video",
+                "className": "hero-video",
+                "top": 680,
+                "left": 0,
+                "width": 1440,
+                "height": 810,
+                "childCount": 2,
+                "hasVisibleMedia": True,
+                "visibleMediaCount": 5,
+            }
+        ]
+    }
+    semantic_candidate = {
+        "index": 55,
+        "tag": "div",
+        "id": "hero-video",
+        "className": "hero-video",
+        "rect": {"top": 503, "left": 0, "width": 375, "height": 610},
+        "childCount": 2,
+        "hasVisibleMedia": True,
+        "visibleMediaCount": 5,
+    }
+    runtime_row = {
+        **semantic_candidate,
+        "index": 2,
+        "visibleMediaCount": 1,
+        "visibleMediaKinds": ["video"],
+        "visibleMediaKindCounts": {"video": 1},
+    }
+
+    synthesized = synthesize_ref_sections_from_section_map(
+        section_map,
+        [semantic_candidate],
+        active_view_width=375,
+        runtime_sections=[runtime_row],
+    )
+
+    assert synthesized[0]["id"] == "hero-video"
+    assert synthesized[0]["visibleMediaCount"] == 1
+    assert synthesized[0]["visibleMediaKinds"] == ["video"]
+    assert synthesized[0]["visibleMediaKindCounts"] == {"video": 1}
 
 
 def test_synthesize_ref_sections_excludes_closed_offscreen_drawer() -> None:

@@ -1129,6 +1129,50 @@
     };
   }
 
+  // A declared reveal target is often an overflow-hidden geometry wrapper while
+  // a nested span owns the actual glyphs and may override inherited colour.
+  // Select by DOM text ownership only — never by whether a candidate currently
+  // paints — so transparent/opacity:0/font-size:0 descendants still reach the
+  // existing fail-closed paint predicates.
+  function textPaintTarget(el) {
+    var owners = [];
+    var seen = [];
+
+    function visit(node, depth) {
+      var children = node && node.childNodes ? node.childNodes : [];
+      for (var i = 0; i < children.length; i++) {
+        var child = children[i];
+        if (child && child.nodeType === 3) {
+          var text = String(child.nodeValue || "").trim();
+          var owner = child.parentElement || node;
+          if (!text || !owner) continue;
+          var found = seen.indexOf(owner);
+          if (found < 0) {
+            seen.push(owner);
+            owners.push({ el: owner, chars: text.length, depth: depth });
+          } else {
+            owners[found].chars += text.length;
+            if (depth > owners[found].depth) owners[found].depth = depth;
+          }
+        } else if (child && child.nodeType === 1) {
+          visit(child, depth + 1);
+        }
+      }
+    }
+
+    visit(el, 0);
+    if (!owners.length) return el;
+    owners.sort(function (a, b) {
+      if (b.chars !== a.chars) return b.chars - a.chars;
+      return b.depth - a.depth;
+    });
+    return owners[0].el;
+  }
+
+  function describeTextPaint(el, selector, index, extraProps, vpW, vpH) {
+    return describe(textPaintTarget(el), selector, index, extraProps, vpW, vpH);
+  }
+
   return {
     MIN_AREA_PX2: MIN_AREA_PX2,
     MIN_FONT_PX: MIN_FONT_PX,
@@ -1167,5 +1211,7 @@
     ancestorClipped: ancestorClipped,
     collect: collect,
     describe: describe,
+    textPaintTarget: textPaintTarget,
+    describeTextPaint: describeTextPaint,
   };
 });

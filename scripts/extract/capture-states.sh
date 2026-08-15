@@ -58,49 +58,152 @@ STATES_SESSION="${SESSION}-states"
 if [ "$REUSE_SESSION" = "true" ]; then
   STATES_SESSION="$SESSION"
 fi
+CAPTURE_MODE="pre-navigation"
+if [ "$REUSE_SESSION" = "true" ]; then
+  CAPTURE_MODE="reuse-session"
+fi
 
 OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/splash"
 mkdir -p "$OUTDIR"
-
-# Open page in the derived session unless reusing the caller's session.
-if [ "$REUSE_SESSION" = "false" ]; then
-  if ! agent-browser --session "$STATES_SESSION" open "$URL" >/dev/null 2>&1; then
-    echo "capture-states: agent-browser open failed for $URL (session=$STATES_SESSION)" >&2
-    exit 2
-  fi
-  sleep 2  # open --wait is not a supported flag; settle explicitly
-fi
+INIT_SCRIPT=""
+RESPONSE_TMP=""
+trap 'rm -f "${INIT_SCRIPT:-}" "${RESPONSE_TMP:-}"' EXIT
 
 # In-page state-hash poller. Single eval — no CLI round-trip per poll.
 # djb2 hash over a composite of: html/body class + scroll lock + full-screen
 # overlay presence + DOM length + computed-style fingerprint of top-3
 # above-the-fold elements.
+# shellcheck disable=SC2016 # JavaScript template literals are intentionally shell-literal.
 EVAL_JS='(async () => {
   const states = [];
+  while (!document.documentElement || !document.body) {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  }
   const startedAt = performance.now();
   let lastHash = null;
   let lastChangeAt = startedAt;
 
+  const cssEscape = (value) => {
+    const raw = String(value || "");
+    if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(raw);
+    return raw.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char.codePointAt(0).toString(16)} `);
+  };
+
+  const cssString = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+
+  const nthOfTypePath = (el) => {
+    const parts = [];
+    let cur = el;
+    while (
+      cur &&
+      cur.nodeType === Node.ELEMENT_NODE &&
+      cur !== document.body &&
+      cur !== document.documentElement
+    ) {
+      if (parts.length >= 8) return null;
+      const tag = cur.localName;
+      if (!tag || !cur.parentElement) break;
+      const siblings = Array.from(cur.parentElement.children).filter((sibling) => (
+        sibling.localName === tag
+      ));
+      parts.unshift(`${tag}:nth-of-type(${siblings.indexOf(cur) + 1})`);
+      cur = cur.parentElement;
+    }
+    return parts.length ? `body > ${parts.join(" > ")}` : null;
+  };
+
+  const selectorFor = (el) => {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
+    const tag = el.localName || "element";
+    if (el.id) return `#${cssEscape(el.id)}`;
+    const classes = (el.getAttribute("class") || "").trim().split(/\s+/).filter(Boolean);
+    if (classes.length) return `${tag}.${classes.slice(0, 3).map(cssEscape).join(".")}`;
+    for (const attr of ["data-testid", "data-test", "data-cy", "aria-label", "name", "role"]) {
+      const value = el.getAttribute(attr);
+      if (value) return `${tag}[${attr}="${cssString(value)}"]`;
+    }
+    return nthOfTypePath(el);
+  };
+
+  const identityFor = (el) => {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
+    const tag = el.localName || "element";
+    if (el.id) return `#${cssEscape(el.id)}`;
+    for (const attr of ["data-testid", "data-test", "data-cy", "aria-label", "name", "role"]) {
+      const value = el.getAttribute(attr);
+      if (value) return `${tag}[${attr}="${cssString(value)}"]`;
+    }
+    return nthOfTypePath(el);
+  };
+
   const detectFullScreenOverlay = () => {
     const vw = window.innerWidth, vh = window.innerHeight;
     const candidates = document.querySelectorAll("body *");
-    let count = 0;
+    let best = null;
     for (const el of candidates) {
       try {
         const r = el.getBoundingClientRect();
-        if (r.width >= vw * 0.95 && r.height >= vh * 0.95) {
-          const cs = getComputedStyle(el);
-          if (cs.position === "fixed" || cs.position === "absolute") {
-            const z = parseInt(cs.zIndex || "0", 10) || 0;
-            if (z > 10 && cs.opacity !== "0" && cs.visibility !== "hidden" && cs.display !== "none") {
-              count++;
-            }
-          }
+        const visibleWidth = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+        const visibleHeight = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        const viewportCoverage = Math.min(1, (visibleWidth * visibleHeight) / Math.max(vw * vh, 1));
+        const coversViewport = viewportCoverage >= 0.75;
+        if (!coversViewport) continue;
+        const cs = getComputedStyle(el);
+        const z = parseInt(cs.zIndex || "0", 10) || 0;
+        const opacity = Number.parseFloat(cs.opacity || "1");
+        if (cs.position === "sticky") continue;
+        if (
+          (cs.position === "fixed" || (cs.position === "absolute" && z >= 10)) &&
+          opacity > 0.05 &&
+          cs.visibility !== "hidden" &&
+          cs.display !== "none"
+        ) {
+          const candidate = {
+            selector: selectorFor(el),
+            identity: identityFor(el),
+            coverage: Math.round(viewportCoverage * 1000) / 1000,
+            visible: true,
+            opacity: cs.opacity,
+            position: cs.position,
+            zIndex: z,
+          };
+          if (!best || candidate.coverage > best.coverage) best = candidate;
         }
       } catch (e) {}
-      if (count > 0) break;
     }
-    return count;
+    return best || { selector: null, identity: null, coverage: 0, visible: false, opacity: "0" };
+  };
+
+  const animationEvidence = () => {
+    const samples = [];
+    let runningCount = 0;
+    for (const animation of document.getAnimations()) {
+      const target = animation.effect && animation.effect.target;
+      const timing = animation.effect && animation.effect.getTiming ? animation.effect.getTiming() : {};
+      if (animation.playState === "running") runningCount++;
+      if (samples.length < 8) {
+        samples.push({
+          selector: selectorFor(target),
+          playState: animation.playState,
+          currentTime: Math.round(Number(animation.currentTime || 0)),
+          duration: Number.isFinite(Number(timing.duration)) ? Number(timing.duration) : timing.duration,
+          delay: Number(timing.delay || 0),
+        });
+      }
+    }
+    return { activeCount: document.getAnimations().length, runningCount, samples };
+  };
+
+  const mediaFingerprint = () => {
+    const videos = Array.from(document.querySelectorAll("video, audio")).slice(0, 6).map((el) => ({
+      selector: selectorFor(el),
+      src: el.currentSrc || el.src || "",
+      currentTime: Math.round(Number(el.currentTime || 0) * 1000) / 1000,
+      paused: Boolean(el.paused),
+      readyState: Number(el.readyState || 0),
+    }));
+    const raw = JSON.stringify(videos);
+    return { videos, hash: String(cheapHash(raw)) };
   };
 
   const fingerprintTopElements = () => {
@@ -130,12 +233,18 @@ EVAL_JS='(async () => {
   const computeState = () => {
     const html = document.documentElement;
     const body = document.body || { className: "", outerHTML: "" };
+    const overlay = detectFullScreenOverlay();
+    const animations = animationEvidence();
+    const media = mediaFingerprint();
     const composite = [
       html.className || "",
       body.className || "",
       getComputedStyle(html).overflow,
       body.style ? getComputedStyle(body).overflow : "",
-      detectFullScreenOverlay(),
+      JSON.stringify(overlay),
+      animations.activeCount,
+      animations.runningCount,
+      media.hash,
       (body.outerHTML || "").length,
       fingerprintTopElements(),
     ].join("|");
@@ -145,6 +254,17 @@ EVAL_JS='(async () => {
       bodyClass: body.className || "",
       htmlClass: html.className || "",
       domLength: (body.outerHTML || "").length,
+      overlay,
+      animationEvidence: animations,
+      motionEvidence: {
+        changed: false,
+        signals: [
+          overlay.visible ? "fullscreen-overlay" : "",
+          animations.activeCount > 0 ? "active-animation" : "",
+          media.videos.length > 0 ? "media" : "",
+        ].filter(Boolean),
+      },
+      mediaFingerprint: media,
       fullHTML: document.documentElement.outerHTML,
     };
   };
@@ -158,6 +278,10 @@ EVAL_JS='(async () => {
     htmlClass: initial.htmlClass,
     compositeDigest: initial.compositeDigest,
     domLength: initial.domLength,
+    overlay: initial.overlay,
+    animationEvidence: initial.animationEvidence,
+    motionEvidence: initial.motionEvidence,
+    mediaFingerprint: initial.mediaFingerprint,
     fullHTML: initial.fullHTML,  // always full for 0ms bookend
     bookend: "0ms",
   });
@@ -178,6 +302,13 @@ EVAL_JS='(async () => {
         htmlClass: cur.htmlClass,
         compositeDigest: cur.compositeDigest,
         domLength: cur.domLength,
+        overlay: cur.overlay,
+        animationEvidence: cur.animationEvidence,
+        motionEvidence: {
+          changed: true,
+          signals: cur.motionEvidence.signals,
+        },
+        mediaFingerprint: cur.mediaFingerprint,
         fullHTML: includeFullHTML ? cur.fullHTML : null,
         structuralDelta: includeFullHTML,
       });
@@ -198,6 +329,13 @@ EVAL_JS='(async () => {
     htmlClass: final.htmlClass,
     compositeDigest: final.compositeDigest,
     domLength: final.domLength,
+    overlay: final.overlay,
+    animationEvidence: final.animationEvidence,
+    motionEvidence: {
+      changed: states.length > 1,
+      signals: final.motionEvidence.signals,
+    },
+    mediaFingerprint: final.mediaFingerprint,
     fullHTML: final.fullHTML,  // always full for settled bookend
     bookend: "settled",
   };
@@ -227,7 +365,22 @@ EVAL_JS='(async () => {
   };
 })();'
 
-RESPONSE_RAW="$(agent-browser --session "$STATES_SESSION" eval --json "$EVAL_JS" 2>&1)" || {
+RUN_EVAL_JS="$EVAL_JS"
+
+# Open page in the derived session unless reusing the caller's session. The
+# default path installs the sampler before navigation so short first-load
+# splashes cannot complete during a post-open settle delay.
+if [ "$REUSE_SESSION" = "false" ]; then
+  INIT_SCRIPT="$(mktemp -t capture-states-init.XXXX.js)"
+  printf '%s\n' "window.__UI_CLONE_SPLASH_CAPTURE__ = $EVAL_JS" > "$INIT_SCRIPT"
+  if ! agent-browser --session "$STATES_SESSION" --init-script "$INIT_SCRIPT" open "$URL" >/dev/null 2>&1; then
+    echo "capture-states: agent-browser open failed for $URL (session=$STATES_SESSION)" >&2
+    exit 2
+  fi
+  RUN_EVAL_JS='(async () => await window.__UI_CLONE_SPLASH_CAPTURE__)()'
+fi
+
+RESPONSE_RAW="$(agent-browser --session "$STATES_SESSION" eval --json "$RUN_EVAL_JS" 2>&1)" || {
   echo "capture-states: agent-browser eval failed (session=$STATES_SESSION)" >&2
   echo "$RESPONSE_RAW" >&2
   exit 3
@@ -239,14 +392,14 @@ RESPONSE_RAW="$(agent-browser --session "$STATES_SESSION" eval --json "$EVAL_JS"
 # env-var size limits.
 RESPONSE_TMP="$(mktemp -t capture-states-resp.XXXX)"
 printf '%s' "$RESPONSE_RAW" > "$RESPONSE_TMP"
-trap 'rm -f "$RESPONSE_TMP"' EXIT
-python3 - "$OUTDIR" "$RESPONSE_TMP" <<'PY'
+python3 - "$OUTDIR" "$RESPONSE_TMP" "$CAPTURE_MODE" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 outdir = Path(sys.argv[1])
 raw = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
+capture_mode = sys.argv[3]
 
 # agent-browser may wrap the eval result in a JSON envelope; try both.
 try:
@@ -285,6 +438,7 @@ if not isinstance(parsed, dict) or "states" not in parsed:
 states = parsed.get("states", [])
 summary = {
     "checked": True,
+    "captureMode": capture_mode,
     "durationMs": parsed.get("durationMs", 0),
     "polls": parsed.get("polls", len(states)),
     "timedOut": parsed.get("timedOut", False),
@@ -325,6 +479,169 @@ for s in states:
         json.dumps({"ts_ms": ts, "outerHTML": html}, ensure_ascii=False),
         encoding="utf-8",
     )
+
+def _num(value, default=0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _unique(values):
+    seen = set()
+    out = []
+    for value in values:
+        if value in (None, "") or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _overlay_identity(overlay):
+    if not isinstance(overlay, dict):
+        return None
+    return overlay.get("identity") or overlay.get("selector")
+
+
+def _splash_contract(states, capture_mode, summary):
+    first = states[0] if states else {}
+    last = states[-1] if states else {}
+    overlay_observations = [
+        (index, state, state.get("overlay"))
+        for index, state in enumerate(states)
+        if isinstance(state.get("overlay"), dict)
+    ]
+    visible_observations = [
+        observation
+        for observation in overlay_observations
+        if observation[2].get("visible") and _num(observation[2].get("coverage")) > 0
+    ]
+    first_visible = visible_observations[0] if visible_observations else None
+    primary_identity = _overlay_identity(first_visible[2]) if first_visible else None
+    primary_visible = [
+        observation
+        for observation in visible_observations
+        if _overlay_identity(observation[2]) == primary_identity
+    ]
+    max_overlay = max(
+        (observation[2] for observation in primary_visible),
+        key=lambda overlay: _num(overlay.get("coverage")),
+        default={},
+    )
+    exit_observation = None
+    if first_visible:
+        for observation in overlay_observations:
+            index, _, overlay = observation
+            if index <= first_visible[0]:
+                continue
+            if not overlay.get("visible") or _overlay_identity(overlay) != primary_identity:
+                exit_observation = observation
+                break
+    primary_phases = {
+        json.dumps(
+            {
+                "coverage": observation[2].get("coverage"),
+                "opacity": observation[2].get("opacity"),
+                "position": observation[2].get("position"),
+                "zIndex": observation[2].get("zIndex"),
+            },
+            sort_keys=True,
+        )
+        for observation in primary_visible
+    }
+    overlay_phase_changed = len(primary_phases) > 1
+    animations = [
+        s.get("animationEvidence")
+        for s in states
+        if isinstance(s.get("animationEvidence"), dict)
+    ]
+    max_active_count = max((_num(a.get("activeCount")) for a in animations), default=0)
+    max_running_count = max((_num(a.get("runningCount")) for a in animations), default=0)
+    animation_samples = []
+    for evidence in animations:
+        samples = evidence.get("samples")
+        if isinstance(samples, list):
+            animation_samples.extend(sample for sample in samples if isinstance(sample, dict))
+    media_entries = [
+        s.get("mediaFingerprint")
+        for s in states
+        if isinstance(s.get("mediaFingerprint"), dict)
+    ]
+    media_hashes = _unique(m.get("hash") for m in media_entries)
+    motion_signals = []
+    for state in states:
+        evidence = state.get("motionEvidence")
+        if isinstance(evidence, dict) and isinstance(evidence.get("signals"), list):
+            motion_signals.extend(str(signal) for signal in evidence["signals"] if signal)
+    from_ms = first_visible[1].get("ts_ms") if first_visible else None
+    to_ms = exit_observation[1].get("ts_ms") if exit_observation else None
+    duration_ms = (
+        int(to_ms) - int(from_ms)
+        if isinstance(from_ms, int) and isinstance(to_ms, int) and to_ms >= from_ms
+        else None
+    )
+    detected = bool(len(states) > 1 and first_visible and exit_observation)
+    timed_out = bool(summary.get("timedOut"))
+    reason = summary.get("reason")
+    authoritative_negative = bool(
+        capture_mode == "pre-navigation"
+        and not detected
+        and not first_visible
+        and len(states) == 1
+        and not timed_out
+    )
+    return {
+        "schemaVersion": 1,
+        "captureMode": capture_mode,
+        "detected": detected,
+        "overlay": {
+            "selector": max_overlay.get("selector"),
+            "identity": _overlay_identity(max_overlay),
+            "maxCoverage": _num(max_overlay.get("coverage")),
+            "everVisible": first_visible is not None,
+            "exitObserved": exit_observation is not None,
+            "phaseChanged": overlay_phase_changed,
+            "initial": first.get("overlay") if isinstance(first.get("overlay"), dict) else {},
+            "settled": last.get("overlay") if isinstance(last.get("overlay"), dict) else {},
+        },
+        "capture": {
+            "stateCount": len(states),
+            "timedOut": timed_out,
+            "reason": reason,
+            "authoritativeNegative": authoritative_negative,
+        },
+        "activeAnimation": {
+            "maxActiveCount": int(max_active_count),
+            "maxRunningCount": int(max_running_count),
+            "samples": animation_samples[:12],
+        },
+        "motionEvidence": {
+            "changed": bool(detected or (first.get("hash") != last.get("hash"))),
+            "signals": _unique(motion_signals),
+        },
+        "mediaFingerprint": {
+            "hashes": media_hashes,
+            "initial": first.get("mediaFingerprint") if isinstance(first.get("mediaFingerprint"), dict) else {},
+            "settled": last.get("mediaFingerprint") if isinstance(last.get("mediaFingerprint"), dict) else {},
+        },
+        "exitTiming": {
+            "fromMs": from_ms,
+            "toMs": to_ms,
+            "durationMs": duration_ms,
+            "source": "states/splash/trajectory.json",
+        },
+        "bookends": [
+            "states/splash/0ms.json",
+            "states/splash/settled.json",
+        ],
+    }
+
+
+(outdir / "contract.json").write_text(
+    json.dumps(_splash_contract(states, capture_mode, summary), ensure_ascii=False, indent=2),
+    encoding="utf-8",
+)
 
 print(f"capture-states: wrote {len(trajectory)} transition(s) to {outdir}/", file=sys.stderr)
 PY

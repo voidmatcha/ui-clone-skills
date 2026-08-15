@@ -118,13 +118,15 @@
   // stays stable regardless of DOM mutation, so each scroll-progress curve
   // stays intact and every fraction where the node is present is kept.
   const nodeIds = new WeakMap();
-  const observedMotionNodes = new WeakSet();
+  const observedMotionNodes = new Set();
   let nodeCounter = 0;
+  const STYLE_FILTER = ["transform", "opacity", "width", "height", "borderRadius", "filter"];
   const sampleInlineMotion = () => {
-    const all = document.querySelectorAll("*");
+    const candidates = new Set();
+    for (const el of document.querySelectorAll("[style]")) candidates.add(el);
+    for (const el of observedMotionNodes) candidates.add(el);
     const out = {};
-    for (let i = 0; i < all.length; i++) {
-      const el = all[i];
+    for (const el of candidates) {
       const s = el.style;
       if (!s) continue;
       const t = (s.transform !== "" && s.transform != null) ? s.transform : null;
@@ -132,12 +134,22 @@
       const w = s.width || null;
       const h = s.height || null;
       const br = s.borderRadius || null;
-      const activeMotion = (t != null && t !== "none") || o != null || w != null || h != null || br != null;
+      const f = s.filter || null;
+      const activeMotion = (t != null && t !== "none") || o != null || w != null || h != null || br != null || f != null;
       if (activeMotion) observedMotionNodes.add(el);
       if (!activeMotion && !observedMotionNodes.has(el)) continue;
       let id = nodeIds.get(el);
       if (id === undefined) { id = "n" + (nodeCounter++); nodeIds.set(el, id); }
-      out[id] = { sel: elSelector(el), transform: t, opacity: o, width: w, height: h, borderRadius: br };
+      out[id] = {
+        sourceId: id,
+        sel: elSelector(el),
+        transform: t,
+        opacity: o,
+        width: w,
+        height: h,
+        borderRadius: br,
+        filter: f,
+      };
     }
     return out;
   };
@@ -146,7 +158,7 @@
   // Denser near the top: pinned scroll-scrub sections (eBay grid) complete
   // within the first ~10-20% of page scroll, so [0,.25,.5,.75,1] alone would
   // sample only the settled endpoints and miss the intra-section curve.
-  let positions = [0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.45, 0.6, 0.75, 1.0];
+  let positions = [0, 0.05, 0.1, 0.2, 0.35, 0.55, 0.75, 1];
   const stMap = new Map();
   const waMap = new Map();
   const framerFrames = {};
@@ -160,16 +172,84 @@
   // stops changing and record the settled frame instead. Stable frames cost
   // two short polls, less than the fixed wait this replaced.
   const SETTLE_POLL_MS = 120;
-  const SETTLE_MAX_POLLS = 8;
+  const SETTLE_MAX_POLLS = 3;
+  const MAX_ADAPTIVE_POSITIONS = 24;
   const frameSignature = frame => JSON.stringify(
     Object.entries(frame || {}).map(([id, rec]) => [
-      id, rec.sel, rec.transform, rec.opacity, rec.width, rec.height, rec.borderRadius,
+      id, rec.sel, rec.transform, rec.opacity, rec.width, rec.height, rec.borderRadius, rec.filter,
     ]),
   );
 
-  const capturePosition = async (pos, sink) => {
-    const max = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
-    window.scrollTo({ top: pos * max, behavior: "instant" });
+  const detectScrollEngine = () => {
+    const lenis = window.lenis || window.__lenis || null;
+    if (lenis && typeof lenis.scrollTo === "function") {
+      return {
+        name: "lenis",
+        drive: (top) => lenis.scrollTo(top, { immediate: true, force: true, duration: 0 }),
+        read: () => Number(lenis.scroll ?? lenis.animatedScroll ?? window.scrollY ?? 0),
+      };
+    }
+    const smootherFactory = window.ScrollSmoother || window.gsap?.core?.globals?.()?.ScrollSmoother;
+    const smoother = smootherFactory?.get?.() || window.ScrollSmoother?.get?.() || window.__scrollSmoother || null;
+    if (smoother && (typeof smoother.scrollTo === "function" || typeof smoother.scrollTop === "function")) {
+      return {
+        name: "ScrollSmoother",
+        drive: (top) => {
+          if (typeof smoother.scrollTo === "function") return smoother.scrollTo(top, false);
+          return smoother.scrollTop(top);
+        },
+        read: () => Number(
+          typeof smoother.scrollTop === "function" ? smoother.scrollTop() : window.scrollY ?? 0,
+        ),
+      };
+    }
+    return {
+      name: "native",
+      drive: (top) => window.scrollTo({ top, behavior: "instant" }),
+      read: () => Number(window.scrollY ?? window.pageYOffset ?? 0),
+    };
+  };
+
+  const scrollEngine = detectScrollEngine();
+  const scrollAudit = {
+    engine: scrollEngine.name,
+    maxScroll: Math.max(document.documentElement.scrollHeight - window.innerHeight, 0),
+    samples: [],
+  };
+  const observedScrollPositions = new Set();
+  let scrollEngineDriveError = null;
+
+  const driveScroll = async (requested, audit) => {
+    const max = scrollAudit.maxScroll;
+    const target = requested * max;
+    let method = scrollEngine.name;
+    try {
+      scrollEngine.drive(target);
+    } catch (e) {
+      if (scrollEngine.name !== "native" && !scrollEngineDriveError) {
+        scrollEngineDriveError = {
+          kind: "scroll-engine-drive-failed",
+          message: `${scrollEngine.name} drive failed: ${e && e.message ? e.message : String(e)}`,
+        };
+      }
+      method = "native-fallback";
+      window.scrollTo({ top: target, behavior: "instant" });
+    }
+    await new Promise(r => setTimeout(r, SETTLE_POLL_MS));
+    const observedPx = Math.max(0, Number.isFinite(scrollEngine.read()) ? scrollEngine.read() : Number(window.scrollY ?? 0));
+    const observed = max > 0 ? Math.round((observedPx / max) * 1000000) / 1000000 : 0;
+    if (audit) {
+      scrollAudit.samples.push({
+        requested,
+        observed,
+        method,
+      });
+    }
+    observedScrollPositions.add(Math.round(observedPx));
+  };
+
+  const capturePosition = async (pos, sink, audit = true) => {
+    await driveScroll(pos, audit);
     let settledFrame = {};
     let previousSignature = null;
     for (let poll = 0; poll < SETTLE_MAX_POLLS; poll++) {
@@ -205,24 +285,29 @@
   // Coarse document fractions can cross an entire short scrub section with one
   // interior sample. Subdivide only intervals whose inline-motion snapshot
   // changed, preserving curve shape without paying a full 40-frame page walk.
-  const adaptivePositions = [];
+  const changedIntervals = [];
   for (let index = 1; index < positions.length; index++) {
     const left = positions[index - 1];
     const right = positions[index];
     if (frameSignature(framerFrames[left]) === frameSignature(framerFrames[right])) {
       continue;
     }
-    const span = right - left;
-    for (const fraction of [0.25, 0.5, 0.75]) {
+    changedIntervals.push([left, right]);
+  }
+  const adaptivePositions = [];
+  for (const fraction of [0.5, 0.25, 0.75]) {
+    for (const [left, right] of changedIntervals) {
+      if (adaptivePositions.length >= MAX_ADAPTIVE_POSITIONS) break;
       adaptivePositions.push(
-        Math.round((left + span * fraction) * 1000000) / 1000000,
+        Math.round((left + (right - left) * fraction) * 1000000) / 1000000,
       );
     }
+    if (adaptivePositions.length >= MAX_ADAPTIVE_POSITIONS) break;
   }
-  for (const pos of adaptivePositions.slice(0, 24)) {
+  for (const pos of adaptivePositions.slice(0, MAX_ADAPTIVE_POSITIONS)) {
     await capturePosition(pos);
   }
-  positions = [...new Set([...positions, ...adaptivePositions.slice(0, 24)])]
+  positions = [...new Set([...positions, ...adaptivePositions.slice(0, MAX_ADAPTIVE_POSITIONS)])]
     .sort((a, b) => a - b);
 
   // Return sweep: revisit every offset on the way back up. A scroll-linked
@@ -232,11 +317,15 @@
   // half-applied, so the two must be told apart before the plan is built.
   const returnFrames = {};
   for (const pos of [...positions].reverse()) {
-    await capturePosition(pos, returnFrames);
+    await capturePosition(pos, returnFrames, false);
   }
 
   // Restore original scroll so downstream operations are not stuck at bottom.
-  window.scrollTo({ top: origScroll, behavior: "instant" });
+  try {
+    scrollEngine.drive(origScroll);
+  } catch (_e) {
+    window.scrollTo({ top: origScroll, behavior: "instant" });
+  }
 
   const scrollTrigger = stEverPresent ? [...stMap.values()].slice(0, 50) : null;
   const webAnimations = waEverPresent ? [...waMap.values()].slice(0, 50) : null;
@@ -253,14 +342,21 @@
     const rows = [];
     for (const k of keys) {
       const byScroll = {};
-      const seen = { transform: new Set(), opacity: new Set(), width: new Set(), height: new Set(), borderRadius: new Set() };
+      const seen = { transform: new Set(), opacity: new Set(), width: new Set(), height: new Set(), borderRadius: new Set(), filter: new Set() };
       let sel = null;
       for (const pos of positions) {
         const rec = framerFrames[pos] ? framerFrames[pos][k] : null;
         if (!rec) continue;
         if (!sel) sel = rec.sel;
-        byScroll[pos] = { transform: rec.transform, opacity: rec.opacity, width: rec.width, height: rec.height, borderRadius: rec.borderRadius };
-        for (const p of ["transform", "opacity", "width", "height", "borderRadius"]) {
+        byScroll[pos] = {
+          transform: rec.transform,
+          opacity: rec.opacity,
+          width: rec.width,
+          height: rec.height,
+          borderRadius: rec.borderRadius,
+          filter: rec.filter,
+        };
+        for (const p of STYLE_FILTER) {
           seen[p].add(rec[p] == null ? "__ui_clone_reset__" : String(rec[p]));
         }
       }
@@ -276,11 +372,24 @@
         if (!down || !up) continue;
         if (varies.some(p => String(down[p]) !== String(up[p]))) { latched = true; break; }
       }
-      rows.push({ selector: sel, varies, byScroll, latched });
+      rows.push({ sourceId: k, selector: sel, filter: varies, varies, byScroll, latched });
     }
     return rows.slice(0, 30);
   })();
   const scrollLinkedEverPresent = scrollLinkedStyles.length > 0;
+  let captureStatus = "ok";
+  let captureError = null;
+  if (scrollEngineDriveError) {
+    captureStatus = "error";
+    captureError = scrollEngineDriveError;
+  } else if (scrollAudit.maxScroll > 0 && observedScrollPositions.size < 3) {
+    captureStatus = "error";
+    captureError = {
+      kind: "scroll-not-moving",
+      message: "Runtime scroll capture could not observe at least three distinct scroll positions on a scrollable page.",
+      observedPositions: observedScrollPositions.size,
+    };
+  }
 
   // ── Globals (scroll-position-independent) ──
   const gsap = safe(() => {
@@ -369,6 +478,8 @@
   });
 
   return JSON.stringify({
+    captureStatus,
+    captureError,
     gsap,
     scrollTrigger,
     webAnimations,
@@ -378,6 +489,7 @@
     gsapTimelines,
     scrollLinkedStyles: scrollLinkedEverPresent ? scrollLinkedStyles : null,
     scrolledPositions: positions,
+    scrollAudit,
     viewport: {
       width: typeof window.innerWidth === "number" ? window.innerWidth : null,
       height: typeof window.innerHeight === "number" ? window.innerHeight : null,
