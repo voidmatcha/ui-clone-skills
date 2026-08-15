@@ -348,7 +348,7 @@ Background sessions are useful when the terminal may close, but they change owne
 1. The Claude `UserPromptSubmit` hook matches only an exact-start `/ui-clone-skills:ui-reverse-engineering` slash command and does not affect prose mentions, `$` Codex syntax, partial prefixes, or unrelated skills.
 2. The fallback Claude `PreToolUse:Skill` hook matches only `ui-clone-skills:ui-reverse-engineering` and does not affect unrelated skills.
 3. Skill activation creates `running` with no CronCreate context, and ordinary pipeline commands remain allowed in `running`.
-4. The first incomplete Stop is the only path from `running` to `arming`; it emits the exact `recurring: false`, `durable: false` create input and blocks only once.
+4. The first incomplete Stop is the only path from `running` to `arming`; it emits the exact `recurring: false`, `durable: false` create input and blocks only once. A pre-generation gate that passes while Stop is inspecting it may advance `pipeline-state.json`, but cannot release Stop without an implementation and canonical completion evidence.
 5. Successful structured `CronCreate` moves `arming` to `armed`; malformed or failed create output never advances state, and a duplicate matching row fails closed.
 6. The exact immutable tagged wake prompt moves `armed` to `running` and clears the auto-deleted cron ID. A prose mention, wrong tag, altered prompt, or wake observed from another state performs no pipeline work.
 7. Empty `session_crons` after an exact wake is normal auto-deletion, while empty `session_crons` observed from `armed` without that wake marks the receipt paused.

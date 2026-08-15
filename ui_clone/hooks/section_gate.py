@@ -774,6 +774,19 @@ def _block_reason_for_gate(gate_name: str, ref_dir: Path, gate_result: dict[str,
     )
 
 
+def _pre_generation_transition_block_reason(passed_gate: str, ref_dir: Path) -> str:
+    return (
+        f"⛔ UI-RE Gate: {passed_gate} passed during this Stop, but the clone is "
+        "still pre-generation\n\n"
+        "No implementation exists and canonical completion evidence is absent. "
+        "A per-gate PASS may advance pipeline-state.json, but it must never "
+        "release the Stop hook as if the clone were complete.\n\n"
+        "Continue from the newly persisted pipeline state:\n"
+        f"  python -m ui_clone.goal {ref_dir}\n\n"
+        f"{build_goal_card(ref_dir)}"
+    )
+
+
 def _section_compare_block_reason(ref_dir: Path, gate_result: dict[str, object]) -> str:
     failures: list[dict[str, str]] = cast(list[dict[str, str]], gate_result.get("failures", []))
     fail_count = cast(int, gate_result.get("fail_count", len(failures)))
@@ -1316,8 +1329,14 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     gate_result = _run_gate(ref_dir, current_gate)
     if not gate_result.get("passed", True):
         return _block_reason_for_gate(current_gate, ref_dir, gate_result)
-    # Per-gate PASS does NOT release the Stop hook on its own — verify
-    # stamp is the canonical "agent finished cleanly" signal.
+    # A pre-generation gate can pass while the producer is between writing its
+    # artifacts and persisting the next cursor. _enforce_verify_stamp returns
+    # None without an impl by design, so delegating to it here would turn that
+    # brief extraction -> bundle transition into a false completion release.
+    # Per-gate PASS only advances pipeline state; it is never Stop evidence.
+    impl_dir = _resolve_impl_dir(ref_dir)
+    if impl_dir is None or not impl_dir.is_dir():
+        return _pre_generation_transition_block_reason(current_gate, ref_dir)
     return stamp_enforcer(ref_dir)
 
 

@@ -312,6 +312,29 @@ class TestSectionGate:
         cc.bind_ref(tmp_path, self.SESSION_ID, ref_dir)
         return ref_dir
 
+    def _write_passing_extraction_artifacts(self, ref_dir: Path) -> None:
+        payloads: dict[str, object] = {
+            "structure.json": {"tag": "body", "children": []},
+            "head.json": {"title": "Fixture"},
+            "styles.json": {"body": {"display": "block"}},
+            "fonts.json": {"fonts": ["system-ui"]},
+            "visible-images.json": {"images": []},
+            "inline-svgs.json": [],
+            "body-state.json": {"className": ""},
+            "design-bundles.json": {"bundles": []},
+        }
+        for filename, payload in payloads.items():
+            (ref_dir / filename).write_text(
+                json.dumps(payload, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        css_dir = ref_dir / "css"
+        css_dir.mkdir()
+        (css_dir / "variables.txt").write_text(
+            ":root { --fixture-color: #fff; }\n",
+            encoding="utf-8",
+        )
+
     def test_valid_empty_cron_snapshot_pauses_missing_armed_job(
         self, tmp_path: Path
     ) -> None:
@@ -504,6 +527,45 @@ class TestSectionGate:
         assert "continuation one-shot is arming" in reason
         assert '"recurring": false' in reason
         assert '"durable": false' in reason
+
+    def test_markerless_bound_passing_gate_during_state_transition_still_arms(
+        self, tmp_path: Path
+    ) -> None:
+        ref_dir = self._markerless_bound_incomplete_ref(tmp_path)
+        self._write_passing_extraction_artifacts(ref_dir)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": self.SESSION_ID,
+                    "session_crons": [],
+                }
+            ),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_CLONE_HOOK_HOST": "claude",
+            },
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip(), (
+            "a passing pre-generation gate must not release Stop before "
+            "pipeline-state.json advances"
+        )
+        data = json.loads(result.stdout.strip())
+        assert data.get("decision") == "block"
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ARMING
+        state = section_gate.PipelineState.load(ref_dir)
+        assert state.current_gate == "bundle"
+        assert "extraction" in state.completed_steps
+        reason = str(data["reason"])
+        assert "continuation one-shot is arming" in reason
+        assert "pipeline-state.json" in reason
+        assert "extraction" in reason
 
     def test_markerless_bound_incomplete_ref_is_not_a_codex_activation_path(
         self, tmp_path: Path

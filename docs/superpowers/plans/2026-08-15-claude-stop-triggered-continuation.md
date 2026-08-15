@@ -854,7 +854,7 @@ Dispatch one read-only spec-compliance reviewer against the approved design and 
 bash install.sh
 ```
 
-Expected: Claude plugin `ui-clone-skills@voidmatcha` installs at `0.7.33`, the cache delivery probe finds the continuation hook files, the Codex projection and merged hooks verify, and the install marker points to this worktree. The patch version is required because the first live acceptance exposed a markerless bound-ref Stop gap after `0.7.32` had already entered Claude's immutable cache.
+Expected: Claude plugin `ui-clone-skills@voidmatcha` installs at `0.7.34`, the cache delivery probe finds the continuation hook files, the Codex projection and merged hooks verify, and the install marker points to this worktree. The patch version is required because live acceptance first exposed a markerless bound-ref Stop gap after `0.7.32`, then exposed an extraction-to-bundle state-transition release after `0.7.33`; each prior version had already entered Claude's immutable cache.
 
 - [ ] **Step 4: Start fresh ordinary Claude and Codex tabs through Purplemux**
 
@@ -889,7 +889,7 @@ Required Claude evidence:
 ```text
 activation receipt state=running, schemaVersion=2, cronId absent
 CronList before incomplete Stop: no owned continuation job
-first incomplete Stop receipt state=arming
+first incomplete Stop receipt state=arming, including when its current pre-generation gate passes while the Stop hook is running
 CronCreate input recurring=false and durable=false
 PostToolUse receipt state=armed with exactly one cronId
 one tagged wake only

@@ -1,6 +1,6 @@
 {
   "name": "ui-clone-cli",
-  "version": "0.7.33",
+  "version": "0.7.34",
   "description": "Agent-readable CLI for ui-clone-skills pipeline, gates, and terminal state.",
   "license": "Apache-2.0",
   "bin": {
