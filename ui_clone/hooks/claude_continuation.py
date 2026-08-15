@@ -11,6 +11,7 @@ from ui_clone import claude_continuation as cc
 _SCHEDULE = "* * * * *"
 _EVENT_PRE = "PreToolUse"
 _EVENT_POST = "PostToolUse"
+_EVENT_USER_PROMPT = "UserPromptSubmit"
 
 
 def _emit_context(event: str, message: str) -> str:
@@ -57,16 +58,30 @@ def _tagged(receipt: Mapping[str, Any], value: object) -> bool:
 
 def _bootstrap_prompt(receipt: Mapping[str, Any], session_id: str) -> str:
     tag = receipt["leaseTag"]
+    status_command = (
+        f"python -m ui_clone.claude_continuation status --session-id {session_id} --cwd . --json"
+    )
     return (
         f"[[{tag}]]\n"
         "Claude UI reverse-engineering continuation lease bootstrap.\n"
         "This scheduled task is session-scoped and non-durable. On wake-up, first run: "
-        "python -m ui_clone.claude_continuation status "
-        f"--session-id {session_id} --cwd . --json.\n"
+        f"{status_command}.\n"
+        "Parse that JSON receipt; load exactly one bound refDir from the receipt, validate "
+        "that it is a non-empty relative path with no .. components, and reject missing, "
+        "ambiguous, absolute, or escaping refs. Treat the loaded receipt refDir as "
+        "<bound-ref>; do not use any other ref.\n"
         "If the receipt is pending, paused, complete, terminal, or unsupported, do not start "
         "pipeline work; delete the owned task when the receipt says it is paused or final.\n"
-        "If the receipt is active and has a bound refDir, run the canonical goal check, then "
-        "pipeline status/next/report for that ref and continue only the required UI clone step."
+        "Only if the receipt state is active, run the canonical goal --check-done command: "
+        "python -m ui_clone.goal <bound-ref> --check-done.\n"
+        "If complete, delete the owned scheduled task and report the verify-stamp evidence.\n"
+        "If terminal or authority is required, delete the owned scheduled task and report the "
+        "blocker.\n"
+        "If incomplete, read these in order before acting: "
+        "python -m ui_clone.pipeline <bound-ref> status --json; "
+        "python -m ui_clone.pipeline <bound-ref> next --json; "
+        "python -m ui_clone.pipeline <bound-ref> report --for-llm.\n"
+        "Execute the reported next required action while preserving normal gates."
     )
 
 
@@ -88,6 +103,30 @@ def _skill_name(tool_input: Mapping[str, object]) -> str | None:
         value = tool_input.get(key)
         if isinstance(value, str):
             return value
+    return None
+
+
+def _is_ui_re_user_prompt(value: str) -> bool:
+    slash = f"/{cc.UI_RE_SKILL}"
+    if value == slash or (value.startswith(slash) and value[len(slash)].isspace()):
+        return True
+    command_xml = (
+        f"<command-message>{cc.UI_RE_SKILL}</command-message>\n"
+        f"<command-name>/{cc.UI_RE_SKILL}</command-name>"
+    )
+    if not value.startswith(command_xml):
+        return False
+    tail = value[len(command_xml) :]
+    return tail == "" or tail.startswith("\n<command-args>")
+
+
+def _user_prompt(payload: Mapping[str, object]) -> str | None:
+    prompt = payload.get("prompt")
+    if isinstance(prompt, str):
+        return prompt
+    legacy = payload.get("user_prompt")
+    if isinstance(legacy, str):
+        return legacy
     return None
 
 
@@ -139,13 +178,26 @@ def _is_exact_croncreate(
     return dict(tool_input) == _cron_create_input(receipt, session_id)
 
 
-def _pre_skill(project_root: Path, session_id: str, tool_input: Mapping[str, object]) -> str | None:
-    if _skill_name(tool_input) != cc.UI_RE_SKILL:
-        return None
+def _request_cron(project_root: Path, session_id: str, event: str) -> str | None:
     receipt = cc.create_pending(project_root, session_id, cc.UI_RE_SKILL)
     if receipt.get("state") == cc.STATE_ACTIVE:
         return None
-    return _emit_context(_EVENT_PRE, _create_context(receipt, session_id))
+    return _emit_context(event, _create_context(receipt, session_id))
+
+
+def _pre_skill(project_root: Path, session_id: str, tool_input: Mapping[str, object]) -> str | None:
+    if _skill_name(tool_input) != cc.UI_RE_SKILL:
+        return None
+    return _request_cron(project_root, session_id, _EVENT_PRE)
+
+
+def _userprompt_skill(
+    project_root: Path, session_id: str, payload: Mapping[str, object]
+) -> str | None:
+    prompt = _user_prompt(payload)
+    if prompt is None or not _is_ui_re_user_prompt(prompt):
+        return None
+    return _request_cron(project_root, session_id, _EVENT_USER_PROMPT)
 
 
 def _pre_croncreate(
@@ -212,7 +264,12 @@ def _post_cronlist(project_root: Path, session_id: str, tool_response: object) -
         )
     if result.status == "unavailable":
         return None
-    if result.status in {cc.STATE_PAUSED, cc.STATE_COMPLETE, cc.STATE_TERMINAL, cc.STATE_UNSUPPORTED}:
+    if result.status in {
+        cc.STATE_PAUSED,
+        cc.STATE_COMPLETE,
+        cc.STATE_TERMINAL,
+        cc.STATE_UNSUPPORTED,
+    }:
         return None
     return _emit_context(_EVENT_POST, _unsupported_context(result.reason or result.status))
 
@@ -221,10 +278,18 @@ def _post_crondelete(
     project_root: Path,
     session_id: str,
     tool_input: Mapping[str, object],
+    tool_response: object,
 ) -> str | None:
     receipt = _receipt(project_root, session_id)
     if receipt is None or tool_input.get("id") != receipt.get("cronId"):
         return None
+    if not (isinstance(tool_response, dict) and tool_response == {"ok": True}):
+        detail = tool_response if isinstance(tool_response, dict) else {"response": tool_response}
+        return _emit_context(
+            _EVENT_POST,
+            "CronDelete did not return the supported successful response; "
+            f"receipt left unchanged: {_json_block(detail)}",
+        )
     cc.owned_delete_outcome(project_root, session_id)
     return None
 
@@ -233,9 +298,13 @@ def _handle(payload: dict[str, object], project_root: Path) -> str | None:
     session_id = _require_str(payload, "session_id")
     _require_str(payload, "cwd")
     event = _require_str(payload, "hook_event_name")
+    root = Path(project_root).resolve()
+
+    if event == _EVENT_USER_PROMPT:
+        return _userprompt_skill(root, session_id, payload)
+
     tool = _require_str(payload, "tool_name")
     tool_input = _require_dict(payload, "tool_input")
-    root = Path(project_root).resolve()
 
     if event == _EVENT_PRE and tool == "Skill":
         return _pre_skill(root, session_id, tool_input)
@@ -252,7 +321,7 @@ def _handle(payload: dict[str, object], project_root: Path) -> str | None:
         if tool == "CronList":
             return _post_cronlist(root, session_id, tool_response)
         if tool == "CronDelete":
-            return _post_crondelete(root, session_id, tool_input)
+            return _post_crondelete(root, session_id, tool_input, tool_response)
     return None
 
 
@@ -274,7 +343,7 @@ def main() -> None:
             raise cc.ContinuationError("hook payload must be an object")
         cwd = payload.get("cwd")
         project_root = Path(cwd).resolve() if isinstance(cwd, str) and cwd else Path.cwd()
-        output = _handle(payload, project_root)
+        output = handle(payload, project_root)
     except (json.JSONDecodeError, cc.ContinuationError) as exc:
         output = _emit_context(_EVENT_PRE, str(exc))
     if output:

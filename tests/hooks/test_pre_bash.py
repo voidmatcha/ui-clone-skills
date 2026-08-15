@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import cast
 
@@ -72,6 +73,16 @@ def _read_continuation_receipt(project: Path, session_id: str) -> dict[str, obje
 
 def _pipeline_run_command(component: str = "target-ref") -> str:
     return f"python -m ui_clone.pipeline https://example.com {component} sess run"
+
+
+def _sitecustomize_pythonpath(tmp_path: Path, source: str) -> str:
+    site_dir = tmp_path / "sitecustomize-shim"
+    site_dir.mkdir()
+    (site_dir / "sitecustomize.py").write_text(source, encoding="utf-8")
+    current = os.environ.get("PYTHONPATH")
+    if current:
+        return f"{site_dir}{os.pathsep}{current}"
+    return str(site_dir)
 
 
 class TestPreBash:
@@ -197,6 +208,105 @@ class TestPreBash:
             "tmp/ref/target-ref"
         )
         assert ref_touched_by_session(tmp_path / "tmp" / "ref" / "target-ref", session_id)
+
+    def test_continuation_core_import_failure_fails_closed_preserves_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        make_search_root(tmp_path)
+        session_id = "claude-session"
+        receipt_path = _write_continuation_receipt(tmp_path, session_id, state="active")
+        before = receipt_path.read_text(encoding="utf-8")
+        pythonpath = _sitecustomize_pythonpath(
+            tmp_path,
+            """
+import importlib
+
+_real_import_module = importlib.import_module
+
+def _blocked_import_module(name, package=None):
+    if name == "ui_clone.claude_continuation":
+        raise ImportError("forced continuation import failure")
+    return _real_import_module(name, package)
+
+importlib.import_module = _blocked_import_module
+""",
+        )
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                _pipeline_run_command("target-ref"), session_id, tmp_path
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path), "PYTHONPATH": pythonpath},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "continuation" in reason.lower()
+        assert "unavailable" in reason.lower()
+        assert "repair" in reason.lower() or "pause" in reason.lower()
+        assert receipt_path.read_text(encoding="utf-8") == before
+        assert not ref_touched_by_session(tmp_path / "tmp" / "ref" / "target-ref", session_id)
+
+    def test_continuation_core_bind_import_failure_fails_closed_preserves_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        make_search_root(tmp_path)
+        session_id = "claude-session"
+        receipt_path = _write_continuation_receipt(tmp_path, session_id, state="active")
+        before = receipt_path.read_text(encoding="utf-8")
+        pythonpath = _sitecustomize_pythonpath(
+            tmp_path,
+            """
+import importlib
+import json
+
+_real_import_module = importlib.import_module
+_continuation_imports = 0
+
+class _ContinuationCore:
+    @staticmethod
+    def load_receipt(project_root, session_id):
+        path = project_root / ".ui-re-continuation" / f"{session_id}.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+def _stub_import_module(name, package=None):
+    global _continuation_imports
+    if name == "ui_clone.claude_continuation":
+        _continuation_imports += 1
+        if _continuation_imports == 1:
+            return _ContinuationCore
+        raise ImportError("forced continuation bind import failure")
+    return _real_import_module(name, package)
+
+importlib.import_module = _stub_import_module
+""",
+        )
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                _pipeline_run_command("target-ref"), session_id, tmp_path
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path), "PYTHONPATH": pythonpath},
+        )
+
+        assert result.returncode == 0
+        out = result.stdout.strip()
+        assert out, f"expected deny payload, got empty. stderr: {result.stderr}"
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "continuation" in reason.lower()
+        assert "bind" in reason.lower()
+        assert "unavailable" in reason.lower()
+        assert "repair" in reason.lower() or "pause" in reason.lower()
+        assert receipt_path.read_text(encoding="utf-8") == before
+        assert not ref_touched_by_session(tmp_path / "tmp" / "ref" / "target-ref", session_id)
 
     def test_continuation_active_bound_to_different_ref_fails_closed(
         self, tmp_path: Path

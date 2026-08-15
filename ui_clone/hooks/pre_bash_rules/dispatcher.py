@@ -10,7 +10,6 @@ point and the rule families stay independently testable / readable.
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import os
@@ -61,16 +60,6 @@ from .static_mirror import (
 )
 
 _CONTINUATION_RECEIPT_DIR = ".ui-re-continuation"
-_CONTINUATION_SKILL = "ui-clone-skills:ui-reverse-engineering"
-_CONTINUATION_HOST = "claude-code"
-_CONTINUATION_STATES = {
-    "pending",
-    "active",
-    "paused",
-    "complete",
-    "terminal",
-    "unsupported",
-}
 _CONTINUATION_FINAL_STATES = {"complete", "terminal", "unsupported"}
 _CONTINUATION_TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _CONTINUATION_UUID_RE = re.compile(
@@ -146,13 +135,6 @@ def _continuation_receipt_path(project_root: Path, session_id: str) -> Path | No
     return project_root / _CONTINUATION_RECEIPT_DIR / f"{session_id}.json"
 
 
-def _continuation_lease_tag(project_root: Path, session_id: str) -> str:
-    digest = hashlib.sha256(f"{project_root.resolve()}\0{session_id}".encode()).hexdigest()[
-        :24
-    ]
-    return f"UI_RE_CONTINUATION:{digest}"
-
-
 def _continuation_ref_safe(ref_dir: object) -> str | None:
     if ref_dir is None:
         return None
@@ -164,25 +146,6 @@ def _continuation_ref_safe(ref_dir: object) -> str | None:
     return path.as_posix()
 
 
-def _validate_continuation_receipt(
-    raw: object, project_root: Path, session_id: str
-) -> dict[str, Any] | None:
-    if not isinstance(raw, dict):
-        return None
-    if (
-        raw.get("schemaVersion") != 1
-        or raw.get("host") != _CONTINUATION_HOST
-        or raw.get("skill") != _CONTINUATION_SKILL
-        or raw.get("sessionId") != session_id
-        or raw.get("state") not in _CONTINUATION_STATES
-        or raw.get("leaseTag") != _continuation_lease_tag(project_root, session_id)
-    ):
-        return None
-    if _continuation_ref_safe(raw.get("refDir")) != raw.get("refDir"):
-        return None
-    return dict(raw)
-
-
 def _load_continuation_receipt(
     project_root: Path, session_id: str
 ) -> tuple[dict[str, Any] | None, bool]:
@@ -192,21 +155,12 @@ def _load_continuation_receipt(
     try:
         continuation = importlib.import_module("ui_clone.claude_continuation")
     except ImportError:
-        continuation = None
-    if continuation is not None:
-        try:
-            receipt = continuation.load_receipt(project_root, session_id)
-        except Exception:
-            return None, path.exists()
-        return receipt, receipt is None and path.exists()
+        return None, path.exists()
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None, False
-    except (json.JSONDecodeError, OSError):
-        return None, True
-    receipt = _validate_continuation_receipt(raw, project_root, session_id)
-    return receipt, receipt is None
+        receipt = continuation.load_receipt(project_root, session_id)
+    except Exception:
+        return None, path.exists()
+    return receipt, receipt is None and path.exists()
 
 
 def _relative_continuation_ref(project_root: Path, ref_dir: Path) -> str | None:
@@ -243,36 +197,21 @@ def _bind_continuation_ref(
     try:
         continuation = importlib.import_module("ui_clone.claude_continuation")
     except ImportError:
-        continuation = None
-    if continuation is not None:
-        try:
-            continuation.bind_ref(project_root, session_id, ref_dir)
-        except Exception as exc:
-            return (
-                "⛔ UI-RE continuation bind failed: the receipt could not be "
-                f"bound to `{rel}` ({exc}). Run "
-                "`python -m ui_clone.claude_continuation status ...` to inspect "
-                "the receipt, then repair or pause it before UI-RE work."
-            )
-        return None
-    next_receipt = dict(receipt)
-    next_receipt["refDir"] = rel
-    path = _continuation_receipt_path(project_root, session_id)
-    if path is None:
         return (
-            "⛔ UI-RE continuation bind failed: the session id cannot map to a "
-            "safe receipt path. Repair the continuation receipt before UI-RE work."
+            "⛔ UI-RE continuation bind unavailable: the continuation core "
+            "could not be imported, so the Pre-Bash hook cannot safely bind "
+            f"this session to `{rel}`. Repair the continuation CLI import path "
+            "or pause this continuation before UI-RE work; the existing "
+            "receipt was preserved."
         )
     try:
-        path.write_text(
-            json.dumps(next_receipt, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except OSError as exc:
+        continuation.bind_ref(project_root, session_id, ref_dir)
+    except Exception as exc:
         return (
             "⛔ UI-RE continuation bind failed: the receipt could not be "
-            f"updated with `{rel}` ({exc}). Fix receipt permissions or pause "
-            "the continuation before UI-RE work."
+            f"bound to `{rel}` ({exc}). Run "
+            "`python -m ui_clone.claude_continuation status ...` to inspect "
+            "the receipt, then repair or pause it before UI-RE work."
         )
     return None
 
@@ -304,12 +243,14 @@ def _guard_claude_continuation(
     receipt, invalid = _load_continuation_receipt(project_root, session_id)
     if invalid:
         return (
-            "⛔ UI-RE continuation receipt invalid/corrupt for this session. "
+            "⛔ UI-RE continuation receipt invalid/corrupt or core unavailable "
+            "for this session. "
             f"The receipt at `{_continuation_receipt_path(project_root, session_id)}` "
             "could not be validated, so this UI-RE command is fail-closed and "
             "the existing receipt is preserved. Fix by running the continuation "
             "control CLI (`python -m ui_clone.claude_continuation status ...`) "
-            "or by creating a fresh valid receipt before pipeline work."
+            "to repair or pause it, or by creating a fresh valid receipt before "
+            "pipeline work."
         )
     if receipt is None:
         return None

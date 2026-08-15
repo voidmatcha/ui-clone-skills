@@ -8,9 +8,10 @@ from typing import Any, cast
 
 import pytest
 
-from tests.hooks._helpers import run_hook
 from ui_clone import claude_continuation as cc
 from ui_clone.hooks import claude_continuation as hook
+
+from ._helpers import run_hook
 
 MODULE = "ui_clone.hooks.claude_continuation"
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +43,25 @@ def payload(
     return data
 
 
+def user_prompt_payload(
+    *,
+    project: Path,
+    prompt: object | None = None,
+    user_prompt: object | None = None,
+    session_id: str = SESSION,
+) -> dict[str, object]:
+    data: dict[str, object] = {
+        "session_id": session_id,
+        "cwd": str(project),
+        "hook_event_name": "UserPromptSubmit",
+    }
+    if prompt is not None:
+        data["prompt"] = prompt
+    if user_prompt is not None:
+        data["user_prompt"] = user_prompt
+    return data
+
+
 def run_adapter(project: Path, data: dict[str, object]) -> str:
     result = run_hook(MODULE, stdin_data=json.dumps(data), env={"CLAUDE_PROJECT_DIR": str(project)})
     assert result.returncode == 0, result.stderr
@@ -64,6 +84,19 @@ def context(stdout: str) -> str:
     parsed = cast(dict[str, Any], json.loads(stdout))
     hook_output = cast(dict[str, Any], parsed["hookSpecificOutput"])
     return cast(str, hook_output["additionalContext"])
+
+
+def hook_event_name(stdout: str) -> str:
+    parsed = cast(dict[str, Any], json.loads(stdout))
+    hook_output = cast(dict[str, Any], parsed["hookSpecificOutput"])
+    return cast(str, hook_output["hookEventName"])
+
+
+def croncreate_input_from_context(stdout: str) -> dict[str, object]:
+    ctx = context(stdout)
+    start = ctx.index("{")
+    value, _ = json.JSONDecoder().raw_decode(ctx[start:])
+    return cast(dict[str, object], value)
 
 
 def cron_input(receipt: dict[str, object]) -> dict[str, object]:
@@ -104,6 +137,148 @@ def test_matching_skill_creates_pending_receipt_and_requests_cron(tmp_path: Path
     assert '"recurring": true' in ctx
     assert '"durable": false' in ctx
     assert f"[[{receipt['leaseTag']}]]" in ctx
+
+
+def test_userprompt_raw_slash_skill_creates_pending_receipt_and_requests_cron(
+    tmp_path: Path,
+) -> None:
+    out = run_adapter(
+        tmp_path,
+        user_prompt_payload(
+            project=tmp_path,
+            prompt="/ui-clone-skills:ui-reverse-engineering https://realfood.gov/",
+        ),
+    )
+
+    receipt = cc.load_receipt(tmp_path, SESSION)
+    assert receipt is not None
+    assert receipt["state"] == cc.STATE_PENDING
+    assert hook_event_name(out) == "UserPromptSubmit"
+    ctx = context(out)
+    assert "CronCreate" in ctx
+    assert croncreate_input_from_context(out) == cron_input(receipt)
+
+
+def test_userprompt_command_xml_skill_creates_pending_from_legacy_user_prompt(
+    tmp_path: Path,
+) -> None:
+    out = run_adapter(
+        tmp_path,
+        user_prompt_payload(
+            project=tmp_path,
+            user_prompt=(
+                "<command-message>ui-clone-skills:ui-reverse-engineering</command-message>\n"
+                "<command-name>/ui-clone-skills:ui-reverse-engineering</command-name>\n"
+                "<command-args>https://realfood.gov/</command-args>"
+            ),
+        ),
+    )
+
+    receipt = cc.load_receipt(tmp_path, SESSION)
+    assert receipt is not None
+    assert receipt["state"] == cc.STATE_PENDING
+    assert hook_event_name(out) == "UserPromptSubmit"
+    assert croncreate_input_from_context(out) == cron_input(receipt)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "please run /ui-clone-skills:ui-reverse-engineering https://realfood.gov/",
+        "$ui-clone-skills:ui-reverse-engineering https://realfood.gov/",
+        "/ui-clone-skills:ui-reverse-engineerings https://realfood.gov/",
+        "/ui-clone-skills:visual-debug https://realfood.gov/",
+        " /ui-clone-skills:ui-reverse-engineering https://realfood.gov/",
+        "<command-name>/ui-clone-skills:ui-reverse-engineering</command-name>",
+        "",
+    ],
+)
+def test_userprompt_non_exact_skill_invocations_are_noops(
+    tmp_path: Path,
+    prompt: str,
+) -> None:
+    out = run_adapter(tmp_path, user_prompt_payload(project=tmp_path, prompt=prompt))
+
+    assert out == ""
+    assert cc.load_receipt(tmp_path, SESSION) is None
+
+
+def test_userprompt_missing_or_invalid_prompt_is_noop(tmp_path: Path) -> None:
+    assert run_adapter(tmp_path, user_prompt_payload(project=tmp_path)) == ""
+    assert run_adapter(tmp_path, user_prompt_payload(project=tmp_path, prompt={"bad": True})) == ""
+    assert cc.load_receipt(tmp_path, SESSION) is None
+
+
+def test_userprompt_malformed_payload_error_preserves_hook_event_name(tmp_path: Path) -> None:
+    result = run_hook(
+        MODULE,
+        stdin_data=json.dumps(
+            {
+                "session_id": "../../../bad",
+                "cwd": str(tmp_path),
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": f"/{cc.UI_RE_SKILL} https://realfood.gov/",
+            }
+        ),
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+
+    assert result.returncode == 0
+    out = result.stdout.strip()
+    assert hook_event_name(out) == "UserPromptSubmit"
+    assert "invalid session id" in context(out)
+
+
+def test_malformed_json_error_defaults_to_pretooluse_hook_event(tmp_path: Path) -> None:
+    result = run_hook(
+        MODULE,
+        stdin_data="{not json",
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+
+    assert result.returncode == 0
+    out = result.stdout.strip()
+    assert hook_event_name(out) == "PreToolUse"
+    assert "Expecting property name" in context(out)
+
+
+def test_skill_croncreate_prompt_loads_bound_ref_then_runs_canonical_sequence(
+    tmp_path: Path,
+) -> None:
+    out = run_adapter(
+        tmp_path,
+        payload(
+            project=tmp_path,
+            event="PreToolUse",
+            tool="Skill",
+            tool_input={"skill": cc.UI_RE_SKILL},
+        ),
+    )
+
+    actual_input = croncreate_input_from_context(out)
+    prompt = cast(str, actual_input["prompt"])
+    assert actual_input == {
+        "cron": "* * * * *",
+        "prompt": prompt,
+        "recurring": True,
+        "durable": False,
+    }
+    assert "load exactly one bound refDir from the receipt" in prompt
+    assert "Treat the loaded receipt refDir as <bound-ref>" in prompt
+    assert "python -m ui_clone.goal <bound-ref> --check-done" in prompt
+    assert "python -m ui_clone.pipeline <bound-ref> status --json" in prompt
+    assert "python -m ui_clone.pipeline <bound-ref> next --json" in prompt
+    assert "python -m ui_clone.pipeline <bound-ref> report --for-llm" in prompt
+    assert prompt.index("python -m ui_clone.goal <bound-ref> --check-done") < prompt.index(
+        "python -m ui_clone.pipeline <bound-ref> status --json"
+    )
+    assert prompt.index("python -m ui_clone.pipeline <bound-ref> status --json") < prompt.index(
+        "python -m ui_clone.pipeline <bound-ref> next --json"
+    )
+    assert prompt.index("python -m ui_clone.pipeline <bound-ref> next --json") < prompt.index(
+        "python -m ui_clone.pipeline <bound-ref> report --for-llm"
+    )
+    assert "pipeline status/next/report" not in prompt
 
 
 def test_shim_allows_continuation_bootstrap_before_tmp_ref_exists(tmp_path: Path) -> None:
@@ -392,7 +567,9 @@ def test_crondelete_owned_success_classifies_outcome(
     assert calls == [(tmp_path.resolve(), SESSION)]
 
 
-def test_crondelete_unowned_success_is_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_crondelete_unowned_success_is_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
     cc.mark_active(tmp_path, SESSION, CRON_ID)
 
@@ -439,6 +616,39 @@ def test_post_crondelete_missing_response_does_not_classify(
     assert out is not None
     assert "missing required field: tool_response" in context(out)
     assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ACTIVE  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("tool_response", "expected_context"),
+    [
+        ({"error": "CronDelete failed"}, "CronDelete failed"),
+        ({}, "supported successful response"),
+    ],
+)
+def test_post_crondelete_unsuccessful_response_keeps_receipt_active(
+    tmp_path: Path,
+    tool_response: dict[str, object],
+    expected_context: str,
+) -> None:
+    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+    cc.mark_active(tmp_path, SESSION, CRON_ID)
+
+    out = run_adapter(
+        tmp_path,
+        payload(
+            project=tmp_path,
+            event="PostToolUse",
+            tool="CronDelete",
+            tool_input={"id": CRON_ID},
+            tool_response=tool_response,
+        ),
+    )
+
+    current = cc.load_receipt(tmp_path, SESSION)
+    assert current is not None
+    assert current["state"] == cc.STATE_ACTIVE
+    assert current["cronId"] == CRON_ID
+    assert expected_context in context(out)
 
 
 def test_pre_crondelete_paused_job_self_delete_guidance(tmp_path: Path) -> None:

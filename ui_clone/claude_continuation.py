@@ -530,6 +530,11 @@ def owned_delete_outcome(project: Path, session_id: str) -> dict[str, Any]:
     current = load_receipt(project, session_id)
     if current is None:
         raise ContinuationError("missing receipt")
+    current_state = _validate_state(current.get("state"))
+    if current_state not in {STATE_PENDING, STATE_ACTIVE}:
+        raise ContinuationError(f"cannot mark delete outcome from {current_state}")
+    if current.get("refDir") is None:
+        return _set_delete_state(project, session_id, STATE_PAUSED)
     ref_dir = _ref_path(project, current)
     try:
         result = subprocess.run(
@@ -551,6 +556,13 @@ def owned_delete_outcome(project: Path, session_id: str) -> dict[str, Any]:
             STATE_COMPLETE,
             outcome="canonical goal --check-done passed",
         )
+    if result.returncode == 1:
+        return _set_delete_state(
+            project,
+            session_id,
+            STATE_PAUSED,
+            goalReturnCode=result.returncode,
+        )
     try:
         terminal = _terminal_state(ref_dir)
     except OSError as exc:
@@ -568,12 +580,7 @@ def owned_delete_outcome(project: Path, session_id: str) -> dict[str, Any]:
                 "reason": (result.stderr or result.stdout or "goal --check-done aborted").strip(),
             },
         )
-    return _set_delete_state(
-        project,
-        session_id,
-        STATE_PAUSED,
-        goalReturnCode=result.returncode,
-    )
+    raise ContinuationError(f"unexpected goal --check-done return code: {result.returncode}")
 
 
 def _print_json(payload: object) -> None:
@@ -623,12 +630,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "status":
             loaded = load_receipt(args.cwd, args.session_id)
             receipt = loaded if loaded is not None else {"state": None}
+            _print_json(receipt)
+            return 0
         else:
             parser.error("unknown command")
     except ContinuationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    _print_json(receipt)
     return 0
 
 

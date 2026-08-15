@@ -75,6 +75,7 @@ MODULE_MATCHER_INTENT: dict[str, set[str]] = {
 }
 
 CLAUDE_CONTINUATION_ROUTES: set[tuple[str, str, str | None]] = {
+    ("UserPromptSubmit", "claude_continuation", None),
     ("PreToolUse", "claude_continuation", "Skill"),
     ("PreToolUse", "claude_continuation", "CronCreate|CronDelete"),
     ("PostToolUse", "claude_continuation", "CronCreate|CronList|CronDelete"),
@@ -120,13 +121,25 @@ def _routes(
     out: dict[str, list[str]] = {}
     for event, entries in (manifest.get("hooks") or {}).items():
         mods: list[str] = []
+        hook_count = 0
+        routed_count = 0
+        excluded_count = 0
         for entry in entries:
             matcher = entry.get("matcher")
             for hook in entry.get("hooks", []):
+                hook_count += 1
                 mod = _module_for(hook.get("command", ""))
-                if mod and (event, mod, matcher) not in exclude:
+                if not mod:
+                    continue
+                routed_count += 1
+                if (event, mod, matcher) in exclude:
+                    excluded_count += 1
+                else:
                     mods.append(mod)
-        out[event] = mods
+        if routed_count > 0 and routed_count == excluded_count and hook_count == routed_count:
+            continue
+        else:
+            out[event] = mods
     return out
 
 
@@ -184,9 +197,9 @@ def test_both_manifests_are_valid_json_objects() -> None:
     for path in (CLAUDE, CODEX):
         assert path.is_file(), f"{path} is missing"
         data = _load(path)
-        assert isinstance(data, dict) and isinstance(
-            data.get("hooks"), dict
-        ), f"{path} missing a dict 'hooks' key"
+        assert isinstance(data, dict) and isinstance(data.get("hooks"), dict), (
+            f"{path} missing a dict 'hooks' key"
+        )
 
 
 def test_manifests_match_the_expected_enforcement_topology() -> None:
@@ -199,9 +212,7 @@ def test_manifests_match_the_expected_enforcement_topology() -> None:
         f"  expected: {EXPECTED_ROUTES}\n  actual:   {claude}"
     )
     expected_codex = {
-        event: mods
-        for event, mods in EXPECTED_ROUTES.items()
-        if event not in CLAUDE_ONLY_EVENTS
+        event: mods for event, mods in EXPECTED_ROUTES.items() if event not in CLAUDE_ONLY_EVENTS
     }
     codex = _routes(_load(CODEX), exclude=CLAUDE_CONTINUATION_ROUTES)
     assert codex == expected_codex, (
@@ -223,9 +234,7 @@ def test_enforcement_modules_sit_behind_their_matcher_intent() -> None:
 
 def test_claude_continuation_routes_are_explicitly_claude_only() -> None:
     claude_routes_list = [
-        route
-        for route in _routed_matchers(_load(CLAUDE))
-        if route[1] == "claude_continuation"
+        route for route in _routed_matchers(_load(CLAUDE)) if route[1] == "claude_continuation"
     ]
     assert set(claude_routes_list) == CLAUDE_CONTINUATION_ROUTES
     duplicate_routes = {
@@ -234,11 +243,36 @@ def test_claude_continuation_routes_are_explicitly_claude_only() -> None:
     assert duplicate_routes == {}, f"duplicate Claude continuation routes: {duplicate_routes}"
 
     codex_routes = {
-        route
-        for route in _routed_matchers(_load(CODEX))
-        if route[1] == "claude_continuation"
+        route for route in _routed_matchers(_load(CODEX)) if route[1] == "claude_continuation"
     }
     assert codex_routes == set(), "Codex manifest must not register Claude continuations"
+
+
+def test_routes_omit_only_events_whose_hooks_are_all_explicitly_excluded() -> None:
+    manifest = {
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "command": (
+                                'bash "/tmp/plugin/hooks/shim.sh" '
+                                "ui_clone.hooks.claude_continuation"
+                            )
+                        }
+                    ]
+                }
+            ],
+            "PreToolUse": [{"matcher": "Bash", "hooks": []}],
+            "PostToolUse": [{"matcher": "Bash", "hooks": [{"command": "echo no shim"}]}],
+        }
+    }
+
+    routes = _routes(manifest, exclude=CLAUDE_CONTINUATION_ROUTES)
+
+    assert "UserPromptSubmit" not in routes
+    assert routes["PreToolUse"] == []
+    assert routes["PostToolUse"] == []
 
 
 def test_matcher_intent_check_catches_a_swapped_or_empty_matcher() -> None:
@@ -329,9 +363,7 @@ def test_plugin_manifest_version_triple_synchronized() -> None:
     # release-tier shell guard in pre-push-security.sh / pre-push-guard.sh; this
     # is deliberately not a duplicate of that wider check.
     claude_v = _load(ROOT / ".claude-plugin" / "plugin.json")["version"]
-    market_v = _load(ROOT / ".claude-plugin" / "marketplace.json")["plugins"][0][
-        "version"
-    ]
+    market_v = _load(ROOT / ".claude-plugin" / "marketplace.json")["plugins"][0]["version"]
     codex_v = _load(ROOT / ".codex-plugin" / "plugin.json")["version"]
     assert claude_v == market_v == codex_v, (
         f"plugin-version triple desync: claude-plugin={claude_v} "

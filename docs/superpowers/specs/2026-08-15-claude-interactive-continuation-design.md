@@ -75,7 +75,7 @@ The display layer only launches and displays the ordinary Claude process. Purple
 
 The shared skill and pipeline continue to define *what* constitutes progress and completion. Claude-specific behavior lives behind Claude's hook manifest:
 
-1. `hooks/hooks.json` registers Claude-only hook events for the `Skill`, `CronCreate`, `CronList`, and `CronDelete` tool lifecycle.
+1. `hooks/hooks.json` registers Claude-only hook events for direct prompt submission, `Skill`, `CronCreate`, `CronList`, and `CronDelete` lifecycles.
 2. A Claude continuation hook module owns lease bootstrap, validation, and operational receipts.
 3. Existing shared gates continue to run for Claude and Codex. The Codex manifest receives no continuation hooks.
 4. `section_gate.py` may read Claude's `session_crons` payload as an optional capability signal, but its canonical gate decisions remain host-neutral.
@@ -86,7 +86,7 @@ This keeps the three public skills equivalent across hosts while allowing the Cl
 
 The implementation is intentionally limited to the Claude host adapter and operational state around it:
 
-- `hooks/hooks.json`: add the Claude-only `Skill` and Cron lifecycle routes.
+- `hooks/hooks.json`: add the Claude-only direct prompt, `Skill`, and Cron lifecycle routes.
 - `.gitignore`: ignore `.ui-re-continuation/` operational receipts.
 - `ui_clone/claude_continuation.py`: own receipt validation, atomic storage, state transitions, prompt construction, and the operator CLI.
 - `ui_clone/hooks/claude_continuation.py`: adapt Claude hook payloads to the core state machine.
@@ -103,11 +103,12 @@ One hook module, `ui_clone.hooks.claude_continuation`, dispatches by `hook_event
 
 | Hook event | Matcher | Responsibility |
 | --- | --- | --- |
-| `PreToolUse` | `Skill` | Detect the exact UI reverse-engineering skill and create an idempotent pending receipt. |
+| `UserPromptSubmit` | none | Detect a direct slash-command invocation of the exact UI reverse-engineering skill and create an idempotent pending receipt before Claude decides whether to call a tool. |
+| `PreToolUse` | `Skill` | Fallback for programmatic skill-tool invocations that expose the exact UI reverse-engineering skill identity. |
 | `PreToolUse` | `CronCreate|CronDelete` | Validate only continuation-owned create/delete operations; unrelated cron operations are no-ops. |
 | `PostToolUse` | `CronCreate|CronList|CronDelete` | Reconcile successful tool results with the receipt state machine. |
 
-The adapter reads the documented common fields `session_id`, `cwd`, `hook_event_name`, `tool_name`, and `tool_input`. `PostToolUse` additionally requires `tool_response` and `tool_use_id`. A missing or wrong-typed required field produces no state transition and returns narrow corrective context; it never fabricates success.
+The adapter reads the documented common fields `session_id`, `cwd`, and `hook_event_name`. `UserPromptSubmit` additionally reads `prompt`; missing or non-string prompt content is a no-op that creates no receipt. Tool lifecycle hooks read `tool_name` and `tool_input`; `PostToolUse` additionally requires `tool_response` and `tool_use_id`. A missing or wrong-typed common or required tool field produces no state transition and returns narrow corrective context; it never fabricates success.
 
 The accepted continuation `CronCreate` input is exact:
 
@@ -130,13 +131,23 @@ The accepted continuation `CronCreate` input is exact:
 
 If `CronCreate` returns no supported structured ID, the receipt remains `pending` and additional context requires one `CronList` call. If that list also cannot yield exactly one matching structured row, registration fails closed and the adapter instructs Claude to mark the capability `unsupported`; pipeline work does not silently proceed under an assumed lease.
 
-The manifest parity test separates shared enforcement routes from this intentional host adapter. It adds an exact `CLAUDE_CONTINUATION_ROUTES` tuple set for the event, module, and matcher triples above, adds the continuation module's matcher-intent tokens, filters those tuples before comparing the existing shared topology, and asserts that the Codex manifest contains none of them. `CLAUDE_ONLY_EVENTS = {"PostCompact"}` remains unchanged because this is a tool-route difference, not a lifecycle event that Codex lacks.
+The manifest parity test separates shared enforcement routes from this intentional host adapter. It adds an exact `CLAUDE_CONTINUATION_ROUTES` tuple set for the event, module, and matcher triples above, adds the continuation module's matcher-intent tokens, filters those tuples before comparing the existing shared topology, and asserts that the Codex manifest contains none of them. `UserPromptSubmit` is a Claude-only lifecycle event for this adapter and is registered only in `hooks/hooks.json`.
 
 ## Lease Bootstrap
 
-### Primary path: Skill invocation
+### Primary path: direct slash-command invocation
 
-The actual Claude invocation surface calls the `Skill` tool with `skill: "ui-clone-skills:ui-reverse-engineering"`. A Claude-only `PreToolUse:Skill` hook detects that exact skill identity and creates a pending lease receipt scoped to the current session. It adds context requiring Claude to establish the continuation lease before substantive pipeline work.
+Live Claude Code sessions deliver a direct slash command as a `UserPromptSubmit` event, not necessarily as a `PreToolUse:Skill` call. The primary Claude activation route therefore inspects the submitted prompt before tool selection. It matches only an exact start token:
+
+```text
+/ui-clone-skills:ui-reverse-engineering
+```
+
+The token must be followed by whitespace or the end of the prompt. Prose mentions, shell-style `$ui-clone-skills:ui-reverse-engineering`, partial prefixes, and other skill names are no-ops. A match creates a pending lease receipt scoped to the current session and adds context requiring Claude to establish the continuation lease before substantive pipeline work.
+
+### Fallback path: Skill tool invocation
+
+Some Claude or compatibility surfaces may still call the `Skill` tool with `skill: "ui-clone-skills:ui-reverse-engineering"`. A Claude-only `PreToolUse:Skill` hook keeps that path idempotent and uses the same receipt bootstrap logic. It is not the primary route for ordinary interactive slash commands.
 
 The required bootstrap sequence is:
 
@@ -148,7 +159,7 @@ The required bootstrap sequence is:
 
 A pre-Bash guard blocks the first pipeline-start command while a supported Claude session still has a pending, unregistered lease. It permits an explicit `unsupported` receipt when the host genuinely lacks scheduled-task tools; unsupported hosts retain the current one-nudge Stop behavior instead of entering a broken enforcement loop.
 
-The guard permits the receipt control CLI itself and does not apply to `active`, `paused`, `complete`, `terminal`, or `unsupported` receipts. A fresh Skill invocation may replace `paused` with a new `pending` lease only because that invocation is an explicit user request.
+The guard permits the receipt control CLI itself and does not apply to `active`, `paused`, `complete`, `terminal`, or `unsupported` receipts. A fresh direct slash command or fallback Skill-tool invocation may replace `paused` with a new `pending` lease only because that invocation is an explicit user request.
 
 ### Fallback path: active run without a lease
 
@@ -169,7 +180,7 @@ The lease needs a small operational receipt because cron creation is a host tool
   "state": "active",
   "leaseTag": "UI_RE_CONTINUATION:<opaque-run-id>",
   "cronId": "cron-opaque-id",
-  "refDir": "tmp/ref/realfood-main",
+  "refDir": "tmp/ref/<component>",
   "createdAt": "2026-08-15T00:00:00Z",
   "updatedAt": "2026-08-15T00:00:00Z"
 }
@@ -195,9 +206,9 @@ State transitions are deliberately narrow:
 
 | Trigger | Allowed current state | Next state |
 | --- | --- | --- |
-| Matching `PreToolUse:Skill` | no receipt | `pending` |
-| Matching `PreToolUse:Skill` | `active` | unchanged |
-| Matching `PreToolUse:Skill` | `paused` | `pending`, because the invocation is explicit user intent |
+| Matching `UserPromptSubmit` slash command or fallback `PreToolUse:Skill` | no receipt | `pending` |
+| Matching `UserPromptSubmit` slash command or fallback `PreToolUse:Skill` | `active` | unchanged |
+| Matching `UserPromptSubmit` slash command or fallback `PreToolUse:Skill` | `paused` | `pending`, because the invocation is explicit user intent |
 | Successful `CronCreate` or one exact CronList match | `pending` | `active` with the validated cron ID |
 | Successful owned `CronDelete` and canonical goal passes | `active` or `pending` | `complete` |
 | Successful owned `CronDelete` and `goal --check-done` aborts (`2`) | `active` or `pending` | `terminal` |
@@ -310,20 +321,21 @@ Background sessions are useful when the terminal may close, but they change owne
 
 ### Unit and contract tests
 
-1. The Claude Skill hook matches only `ui-clone-skills:ui-reverse-engineering` and does not affect unrelated skills.
-2. Lease registration is idempotent by session and tag; duplicate matching jobs fail closed until all are deleted and one is explicitly recreated.
-3. Pipeline start is blocked for `pending` supported leases and allowed for `active`, `paused`, or explicitly `unsupported` receipts according to policy.
-4. A Stop payload with a matching `session_crons` entry does not request a duplicate lease.
-5. A first incomplete Stop without a lease includes bootstrap guidance; `stop_hook_active: true` still releases.
-6. `CronDelete` produces `complete` only when `goal --check-done` passes, `terminal`
+1. The Claude `UserPromptSubmit` hook matches only an exact-start `/ui-clone-skills:ui-reverse-engineering` slash command and does not affect prose mentions, `$` Codex syntax, partial prefixes, or unrelated skills.
+2. The fallback Claude `PreToolUse:Skill` hook matches only `ui-clone-skills:ui-reverse-engineering` and does not affect unrelated skills.
+3. Lease registration is idempotent by session and tag; duplicate matching jobs fail closed until all are deleted and one is explicitly recreated.
+4. Pipeline start is blocked for `pending` supported leases and allowed for `active`, `paused`, or explicitly `unsupported` receipts according to policy.
+5. A Stop payload with a matching `session_crons` entry does not request a duplicate lease.
+6. A first incomplete Stop without a lease includes bootstrap guidance; `stop_hook_active: true` still releases.
+7. `CronDelete` produces `complete` only when `goal --check-done` passes, `terminal`
    only when it returns abort (`2`), and `paused` for an explicit incomplete delete.
-7. A canonical verify failure leaves the lease active, blocks a normal Stop, and
+8. A canonical verify failure leaves the lease active, blocks a normal Stop, and
    remains discoverable through `verify-report.json`; a hard-cap/unclonable
    failure still terminalizes.
-8. Claude-only manifest changes do not alter the Codex hook manifest or shared gate routing.
-9. Receipt paths, tags, and prompt arguments reject traversal and arbitrary prompt interpolation.
-10. Absent, malformed, empty, one-match, no-match, and duplicate `session_crons` snapshots exercise their distinct unavailable, absent, active, paused, and failure outcomes.
-11. Supported and unsupported `tool_response` shapes prove that no free-form cron ID is inferred and no failed tool call advances state.
+9. Claude-only manifest changes do not alter the Codex hook manifest or shared gate routing.
+10. Receipt paths, tags, and prompt arguments reject traversal and arbitrary prompt interpolation.
+11. Absent, malformed, empty, one-match, no-match, and duplicate `session_crons` snapshots exercise their distinct unavailable, absent, active, paused, and failure outcomes.
+12. Supported and unsupported `tool_response` shapes prove that no free-form cron ID is inferred and no failed tool call advances state.
 
 ### Interactive acceptance
 

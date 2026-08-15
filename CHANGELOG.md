@@ -4,6 +4,26 @@
 
 ### Fixed
 
+- Interactive Claude clone runs now acquire a host-owned continuation lease
+  before reference capture. A blocked Stop hook can resume the same ordinary
+  session until canonical completion, while Codex keeps its native goal-driven
+  lifecycle and receives no Claude-only Cron hooks.
+- Claude direct slash-command activation now uses a Claude-only
+  `UserPromptSubmit` continuation route. Live interactive sessions may deliver
+  `/ui-clone-skills:ui-reverse-engineering ...` as command prompt content
+  without a `Skill` tool call, so exact-start slash matching is now the primary
+  lease bootstrap path; `PreToolUse:Skill` remains a fallback for tool-based
+  activation, and prose mentions, Codex `$...` syntax, partial prefixes, and
+  other skills remain no-ops.
+- Canonical verification failures now remain recoverable for implementation
+  rework instead of closing the run. Legacy `canonical-verify-failed` state is
+  normalized across status, generation guards, Stop handling, and continuation;
+  explicit hard-cap and unclonable outcomes remain terminal.
+- Transition-spec validation now resolves every referenced local media artifact
+  and fingerprints accepted media recursively, so renamed, missing, stale, or
+  mutated frames invalidate the capture inventory before generation. Direct
+  writes to `generation-plan.json` are also blocked outside its canonical
+  generator.
 - Bundle-literal `scrollY` pixel ranges now remain an explicit
   `scroll-state-machine` input domain through extraction and generation. The
   selector-scoped runtime writes `top` directly to the fixed target instead of

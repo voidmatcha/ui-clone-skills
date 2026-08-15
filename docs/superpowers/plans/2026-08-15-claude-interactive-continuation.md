@@ -6,7 +6,7 @@
 boundaries with one session-scoped Cron lease, and keep both Claude and Codex in
 active rework after a recoverable canonical verify failure.
 
-**Architecture:** A host-neutral core module stores one validated, atomic receipt per Claude session and owns all state transitions. A Claude-only hook adapter translates `Skill` and Cron lifecycle payloads into that state machine; the existing Bash and Stop gates only enforce or reconcile the receipt around the existing pipeline goal. The implementation is installed as a versioned local plugin, then accepted in fresh Claude and Codex Purplemux tabs from separate external run directories.
+**Architecture:** A host-neutral core module stores one validated, atomic receipt per Claude session and owns all state transitions. A Claude-only hook adapter translates direct `UserPromptSubmit` slash commands, fallback `Skill` tool calls, and Cron lifecycle payloads into that state machine; the existing Bash and Stop gates only enforce or reconcile the receipt around the existing pipeline goal. The implementation is installed as a versioned local plugin, then accepted in fresh Claude and Codex Purplemux tabs from separate external run directories.
 
 **Tech Stack:** Python 3.9, Claude Code hook JSON, pytest, Ruff, mypy, Bash install tooling, Purplemux CLI.
 
@@ -27,9 +27,9 @@ active rework after a recoverable canonical verify failure.
   tests so renamed reference frames invalidate and fail the compact required check.
 - Modify `ui_clone/hooks/pre_bash_rules/bash_write.py` and tests so direct
   generation-plan provenance rewrites are blocked.
-- Modify `hooks/hooks.json` and `tests/test_hook_manifest_parity.py` for the exact Claude-only routes.
+- Modify `hooks/hooks.json` and `tests/test_hook_manifest_parity.py` for the exact Claude-only `UserPromptSubmit` and tool lifecycle routes.
 - Modify `.gitignore` so operational receipts never become source or verification inputs.
-- Modify the six synchronized version files to release the new Claude cache content as `0.7.30`.
+- Modify the six synchronized version files to release the new Claude cache content under a fresh version, because Claude caches plugin content by version.
 
 ### Task 1: Build the receipt state machine and CLI
 
@@ -123,19 +123,28 @@ uv run mypy ui_clone/claude_continuation.py
 
 Expected: all commands exit `0`.
 
-### Task 2: Adapt Claude Skill and Cron tool payloads
+### Task 2: Adapt Claude prompt, Skill, and Cron payloads
 
 **Files:**
 - Create: `ui_clone/hooks/claude_continuation.py`
 - Create: `tests/hooks/test_claude_continuation.py`
 
-- [ ] **Step 1: Write failing Skill and Cron hook tests**
+- [ ] **Step 1: Write failing direct slash-command, Skill fallback, and Cron hook tests**
 
 ```python
-def test_matching_skill_creates_pending_receipt_and_requests_cron(tmp_path: Path) -> None:
+def test_user_prompt_slash_command_creates_pending_receipt_and_requests_cron(tmp_path: Path) -> None:
+    result = run_hook(tmp_path, event="UserPromptSubmit", prompt=(
+        "/ui-clone-skills:ui-reverse-engineering https://example.com/"
+    ))
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "CronCreate" in context
+    assert load_receipt(tmp_path, SESSION_ID)["state"] == "pending"
+
+
+def test_skill_tool_fallback_creates_pending_receipt_and_requests_cron(tmp_path: Path) -> None:
     result = run_hook(tmp_path, event="PreToolUse", tool="Skill", tool_input={
         "skill": "ui-clone-skills:ui-reverse-engineering",
-        "args": "https://realfood.gov/",
+        "args": "https://example.com/",
     })
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "CronCreate" in context
@@ -148,7 +157,7 @@ def test_failed_or_unstructured_create_never_activates(tmp_path: Path) -> None:
     assert load_receipt(tmp_path, SESSION_ID)["state"] == "pending"
 ```
 
-Also cover unrelated skills/crons as no-ops, exact create input validation, CronList recovery, owned/unowned delete, missing required payload fields, and successful delete classification.
+Also cover direct slash-command near misses as no-ops: prose mentions, `$ui-clone-skills:ui-reverse-engineering`, partial prefixes, and other skills. Cover unrelated skills/crons as no-ops, exact create input validation, CronList recovery, owned/unowned delete, missing required payload fields, and successful delete classification.
 
 - [ ] **Step 2: Run the hook module and record RED**
 
@@ -160,7 +169,7 @@ Expected: collection fails because the hook module does not exist.
 
 Implement `handle(payload: dict[str, object], project_root: Path) -> str | None` as the pure adapter entry and `main() -> None` as the stdin/stdout shell entry.
 
-Read `session_id`, `cwd`, `hook_event_name`, `tool_name`, and `tool_input`; PostToolUse additionally requires `tool_response` and `tool_use_id`. Emit Claude `hookSpecificOutput.additionalContext` for bootstrap or correction. Validate continuation-owned `CronCreate` and `CronDelete`; do not block or mutate unrelated cron operations. PostToolUse success is the only create/delete transition surface.
+Read `session_id`, `cwd`, and `hook_event_name` for every event. For `UserPromptSubmit`, read `prompt` and match only the exact-start `/ui-clone-skills:ui-reverse-engineering` token followed by whitespace or end-of-prompt. For tool lifecycle hooks, read `tool_name` and `tool_input`; PostToolUse additionally requires `tool_response` and `tool_use_id`. Emit Claude `hookSpecificOutput.additionalContext` for bootstrap or correction. Validate continuation-owned `CronCreate` and `CronDelete`; do not block or mutate unrelated cron operations. PostToolUse success is the only create/delete transition surface.
 
 - [ ] **Step 4: Run the hook tests and static checks**
 
@@ -182,21 +191,22 @@ Expected: all commands exit `0`.
 
 ```python
 CLAUDE_CONTINUATION_ROUTES = {
+    ("UserPromptSubmit", "claude_continuation", None),
     ("PreToolUse", "claude_continuation", "Skill"),
     ("PreToolUse", "claude_continuation", "CronCreate|CronDelete"),
     ("PostToolUse", "claude_continuation", "CronCreate|CronList|CronDelete"),
 }
 ```
 
-Filter these tuples before comparing the existing shared topology, add the four matcher-intent tokens, and assert no continuation route appears in `hooks/codex-hooks.json`.
+Filter these tuples before comparing the existing shared topology, pin the no-matcher `UserPromptSubmit` lifecycle route, retain the tool matcher-intent tokens for the Cron and Skill routes, and assert no continuation route appears in `hooks/codex-hooks.json`.
 
 - [ ] **Step 2: Run the parity test and confirm RED**
 
 Run: `uv run python -m pytest tests/test_hook_manifest_parity.py -q`
 
-Expected: the Claude manifest lacks all three required tuples.
+Expected: the Claude manifest lacks the required direct prompt route and tool-route tuples.
 
-- [ ] **Step 3: Add the three hook entries to `hooks/hooks.json`**
+- [ ] **Step 3: Add the four hook entries to `hooks/hooks.json`**
 
 Every command must use the existing root fallback expression and route through:
 
@@ -381,11 +391,11 @@ Expected: all commands exit `0`.
 - Modify: `ui_clone/__init__.py`
 - Review: all files changed in Tasks 1-5
 
-- [ ] **Step 1: Bump all six synchronized versions from `0.7.29` to `0.7.30`**
+- [ ] **Step 1: Bump all six synchronized versions to one fresh cache version**
 
-Run: `rg -n '0\.7\.(29|30)' .claude-plugin .codex-plugin pyproject.toml package.json ui_clone/__init__.py`
+Run: `bash scripts/ci/pre-push-security.sh`
 
-Expected: all six authoritative version fields are `0.7.30`; no authoritative field remains `0.7.29`.
+Expected: all six authoritative version fields match the same new version so Claude installs a fresh per-version cache.
 
 - [ ] **Step 2: Run the focused implementation suite**
 
@@ -431,19 +441,25 @@ Stage the continuation modules, tests, manifests, ignore rule, version files, an
 
 Run: `./install.sh --yes --no-deps`
 
-Expected: Claude cache delivery, Claude plugin enablement, Codex projection, Codex hook merge, and the hook delivery probe all pass for version `0.7.30`.
+Expected: Claude cache delivery, Claude plugin enablement, Codex projection, Codex hook merge, and the hook delivery probe all pass for the freshly synchronized version.
 
 - [ ] **Step 2: Verify delivery by content, not plugin-list presence alone**
 
 ```bash
 claude plugin list | rg 'ui-clone-skills@voidmatcha'
 codex plugin list | rg 'ui-clone-skills@local.*installed'
-rg -n 'CronCreate\|CronDelete|CronCreate\|CronList\|CronDelete' \
-  ~/.claude/plugins/cache/voidmatcha/ui-clone-skills/0.7.30/hooks/hooks.json
-test -f ~/.claude/plugins/cache/voidmatcha/ui-clone-skills/0.7.30/ui_clone/claude_continuation.py
+CLAUDE_UI_RE_VERSION="$(python - <<'PY'
+import tomllib
+from pathlib import Path
+print(tomllib.loads(Path('pyproject.toml').read_text())['project']['version'])
+PY
+)"
+rg -n 'UserPromptSubmit|CronCreate\|CronDelete|CronCreate\|CronList\|CronDelete' \
+  "$HOME/.claude/plugins/cache/voidmatcha/ui-clone-skills/$CLAUDE_UI_RE_VERSION/hooks/hooks.json"
+test -f "$HOME/.claude/plugins/cache/voidmatcha/ui-clone-skills/$CLAUDE_UI_RE_VERSION/ui_clone/claude_continuation.py"
 ```
 
-Expected: the installed Claude cache contains the exact new routes and core module.
+Expected: the installed Claude cache contains the exact direct prompt route, Cron routes, and core module.
 
 ### Task 8: Recoverably clean the old runs and launch fresh Purplemux sessions
 
@@ -453,37 +469,38 @@ Expected: the installed Claude cache contains the exact new routes and core modu
 - [ ] **Step 1: Re-resolve live ownership before cleanup**
 
 List Purplemux tabs and processes, then prove the old Claude and Codex tabs point
-at their respective `realfood-*-20260815` run directories. Close only those two
+at their respective `<site>-<host>-<date>` run directories. Close only those two
 exact tabs; do not touch unrelated Purplemux tabs.
 
 - [ ] **Step 2: Move only validated old temporary clone artifacts to Trash**
 
 After checking each resolved path is neither empty nor broad, use `/usr/bin/trash`
-for the exact old Claude and Codex `tmp` directories. Skip
-`/Users/yongjae/tmp/ref/realfood` unless current ownership/timestamps still prove
-it belongs to one of these runs.
+for the exact old Claude and Codex `tmp` directories. Skip any legacy scratch
+reference unless current ownership and timestamps still prove that it belongs to
+one of these runs.
 
 ```text
-/Users/yongjae/Documents/ui-clone-runs/realfood-claude-20260815/tmp
-/Users/yongjae/Documents/ui-clone-runs/realfood-codex-20260815/tmp
-/Users/yongjae/tmp/ref/realfood
+<run-root>/<site>-claude-<date>/tmp
+<run-root>/<site>-codex-<date>/tmp
+<legacy-scratch-root>/ref/<site>
 ```
 
 Skip the third path unless current ownership/timestamps still identify it as one
-of the old Realfood artifacts. Verify each selected path is absent afterward and
+of the old site artifacts. Verify each selected path is absent afterward and
 report that it is recoverable from Trash.
 
 - [ ] **Step 3: Create unique external run directories and Purplemux tabs**
 
-Use workspace `ws-hfYbst`, two unique external run directories, and new terminal
-tabs named `realfood-claude-continuation` and `realfood-codex-continuation`.
+Use the selected Purplemux workspace, two unique external run directories, and
+new terminal tabs named `<site>-claude-continuation` and
+`<site>-codex-continuation`.
 
 - [ ] **Step 4: Start ordinary interactive Claude and Codex with clean skill requests**
 
 Start exactly `claude`, wait for its input prompt, then send only:
 
 ```text
-/ui-clone-skills:ui-reverse-engineering https://realfood.gov/
+/ui-clone-skills:ui-reverse-engineering https://example.com/
 ```
 
 Do not use `-p`, `--resume`, a handoff prompt, cmux, or synthetic supervisor instructions.
@@ -492,7 +509,7 @@ Start exactly `codex --yolo` in the Codex run directory, wait for its input
 prompt, then send only:
 
 ```text
-$ui-clone-skills:ui-reverse-engineering https://realfood.gov/
+$ui-clone-skills:ui-reverse-engineering https://example.com/
 ```
 
 Do not use cmux, `codex exec`, a handoff prompt, or a synthetic supervisor.
@@ -500,7 +517,9 @@ Do not use cmux, `codex exec`, a handoff prompt, or a synthetic supervisor.
 - [ ] **Step 5: Verify fresh activation and continuation bootstrap**
 
 Capture both tab outputs. Assert both plain skill invocations are visible and both
-fresh run directories create a new `tmp/ref`; additionally prove exactly one
-Claude Cron lease and an `active` `.ui-re-continuation/<session-id>.json`. Stop
-monitoring once these start-of-run receipts are proven; canonical clone completion
-remains owned by the launched interactive sessions.
+fresh run directories create a new `tmp/ref`; additionally prove the Claude
+transcript records the slash command as `UserPromptSubmit` command content, exactly
+one Claude Cron lease exists, and an `active`
+`.ui-re-continuation/<session-id>.json` exists. Stop monitoring once these
+start-of-run receipts are proven; canonical clone completion remains owned by the
+launched interactive sessions.

@@ -367,6 +367,53 @@ def test_owned_delete_outcome_uses_goal_before_terminal_or_pause(
     assert abort["terminalState"]["category"] == "goal-abort"
 
 
+@pytest.mark.parametrize("initial_state", [cc.STATE_PENDING, cc.STATE_ACTIVE])
+def test_owned_delete_outcome_without_bound_ref_pauses_incomplete_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initial_state: str,
+) -> None:
+    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+    if initial_state == cc.STATE_ACTIVE:
+        cc.mark_active(tmp_path, SESSION, CRON_ID)
+    before = read_raw(tmp_path)
+
+    def fail_if_called(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"goal should not run without a bound ref: {cmd}")
+
+    monkeypatch.setattr(cc.subprocess, "run", fail_if_called)
+
+    paused = cc.owned_delete_outcome(tmp_path, SESSION)
+
+    assert before["state"] == initial_state
+    assert paused["state"] == cc.STATE_PAUSED
+    assert "terminalState" not in paused
+    assert "refDir" not in paused
+
+
+@pytest.mark.parametrize("final_state", [cc.STATE_COMPLETE, cc.STATE_TERMINAL])
+def test_owned_delete_outcome_without_bound_ref_preserves_final_receipts(
+    tmp_path: Path,
+    final_state: str,
+) -> None:
+    pending = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+    if final_state == cc.STATE_COMPLETE:
+        before = cc._replace_state(tmp_path, SESSION, pending, cc.STATE_COMPLETE)
+    else:
+        before = cc._replace_state(
+            tmp_path,
+            SESSION,
+            pending,
+            cc.STATE_TERMINAL,
+            terminalState={"status": "failed", "category": "manual"},
+        )
+
+    with pytest.raises(cc.ContinuationError, match=f"cannot mark delete outcome from {final_state}"):
+        cc.owned_delete_outcome(tmp_path, SESSION)
+
+    assert read_raw(tmp_path) == before
+
+
 def test_owned_delete_outcome_pauses_on_goal_rc1_with_legacy_canonical_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -383,6 +430,39 @@ def test_owned_delete_outcome_pauses_on_goal_rc1_with_legacy_canonical_failure(
                     "status": "failed",
                     "category": "canonical-verify-failed",
                     "reason": "verify failed",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cc.subprocess,
+        "run",
+        lambda cmd, **_: subprocess.CompletedProcess(cmd, 1, stdout="INCOMPLETE", stderr=""),
+    )
+
+    paused = cc.owned_delete_outcome(tmp_path, SESSION)
+
+    assert paused["state"] == cc.STATE_PAUSED
+    assert "terminalState" not in paused
+
+
+def test_owned_delete_outcome_pauses_on_goal_rc1_with_explicit_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = tmp_path / "tmp" / "ref" / "demo"
+    ref.mkdir(parents=True)
+    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+    cc.mark_active(tmp_path, SESSION, CRON_ID)
+    cc.bind_ref(tmp_path, SESSION, ref)
+    (ref / "pipeline-state.json").write_text(
+        json.dumps(
+            {
+                "component": "demo",
+                "terminalState": {
+                    "status": "incomplete",
+                    "category": "manual-incomplete",
+                    "reason": "explicit pause/incomplete",
                 },
             }
         ),
@@ -446,7 +526,7 @@ def test_owned_delete_outcome_preserves_receipt_when_terminal_state_read_fails(
     monkeypatch.setattr(
         cc.subprocess,
         "run",
-        lambda cmd, **_: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="INCOMPLETE"),
+        lambda cmd, **_: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="ABORT"),
     )
     monkeypatch.setattr(
         cc.PipelineState,
@@ -475,7 +555,7 @@ def test_owned_delete_outcome_preserves_receipt_when_pipeline_state_load_failed(
         "run",
         lambda cmd, **_: subprocess.CompletedProcess(
             cmd,
-            1,
+            2,
             stdout="INCOMPLETE",
             stderr="pipeline-state.json is corrupt and quarantined",
         ),
@@ -545,6 +625,8 @@ def test_cli_verbs_status_and_validation_errors(tmp_path: Path) -> None:
         check=False,
     )
     assert create.returncode == 0, create.stderr
+    assert create.stdout == ""
+    assert create.stderr == ""
 
     status = subprocess.run(
         module + ["status", "--session-id", SESSION, "--cwd", str(tmp_path), "--json"],
@@ -554,6 +636,7 @@ def test_cli_verbs_status_and_validation_errors(tmp_path: Path) -> None:
     )
     assert status.returncode == 0
     assert json.loads(status.stdout)["state"] == cc.STATE_PENDING
+    assert status.stderr == ""
 
     bind = subprocess.run(
         module + ["bind-ref", "--session-id", SESSION, "--cwd", str(tmp_path), "--ref-dir", str(tmp_path / "ref")],
@@ -562,6 +645,70 @@ def test_cli_verbs_status_and_validation_errors(tmp_path: Path) -> None:
         check=False,
     )
     assert bind.returncode == 0
+    assert bind.stdout == ""
+    assert bind.stderr == ""
+
+    unsupported_session = "unsupported-session"
+    unsupported_create = subprocess.run(
+        module + [
+            "create-pending",
+            "--session-id",
+            unsupported_session,
+            "--cwd",
+            str(tmp_path),
+            "--skill",
+            cc.UI_RE_SKILL,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert unsupported_create.returncode == 0, unsupported_create.stderr
+    assert unsupported_create.stdout == ""
+    unsupported = subprocess.run(
+        module + [
+            "mark-unsupported",
+            "--session-id",
+            unsupported_session,
+            "--cwd",
+            str(tmp_path),
+            "--reason",
+            "CronCreate unavailable",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert unsupported.returncode == 0, unsupported.stderr
+    assert unsupported.stdout == ""
+    assert unsupported.stderr == ""
+
+    pause_session = "pause-session"
+    pause_create = subprocess.run(
+        module + [
+            "create-pending",
+            "--session-id",
+            pause_session,
+            "--cwd",
+            str(tmp_path),
+            "--skill",
+            cc.UI_RE_SKILL,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert pause_create.returncode == 0, pause_create.stderr
+    assert pause_create.stdout == ""
+    pause = subprocess.run(
+        module + ["pause", "--session-id", pause_session, "--cwd", str(tmp_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert pause.returncode == 0, pause.stderr
+    assert pause.stdout == ""
+    assert pause.stderr == ""
 
     invalid = subprocess.run(
         module + ["pause", "--session-id", "../bad", "--cwd", str(tmp_path)],
@@ -570,3 +717,5 @@ def test_cli_verbs_status_and_validation_errors(tmp_path: Path) -> None:
         check=False,
     )
     assert invalid.returncode == 2
+    assert invalid.stdout == ""
+    assert "invalid session id" in invalid.stderr
