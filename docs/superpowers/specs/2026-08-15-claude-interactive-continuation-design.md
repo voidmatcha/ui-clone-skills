@@ -1,14 +1,16 @@
-# Claude Interactive Continuation Lease
+# Claude Stop-Triggered Continuation Lease
 
 ## Problem
 
 UI reverse-engineering runs are long, gate-driven tasks. Codex currently tends to keep one active task open until the run reaches its terminal objective, but Claude Code can finish an assistant turn while the UI-clone pipeline is still incomplete. The existing `Stop` hook can block that first premature stop and return an actionable reason. On the resulting continuation, Claude Code sends `stop_hook_active: true`; blocking again can create repeated Stop-hook churn and eventually hits the host's consecutive-block cap. The hook therefore releases the second stop, which can leave an ordinary interactive Claude session idle with no valid `verify-stamp.json`.
 
-The two hosts must not be forced into one supervisor model. The current Codex Realfood run uses one long active task and the repository's `goal --check-done` completion contract; it does not need another wake-up loop. Claude needs only a session-native way to enqueue another turn after it becomes idle.
+The two hosts must not be forced into one supervisor model. The current Codex Realfood run uses one long active task and the repository's `goal --check-done` completion contract; it does not need another wake-up loop. Claude needs only a session-native way to enqueue another turn after it actually crosses an incomplete Stop boundary.
+
+The first implementation armed a recurring one-minute task when the skill was invoked. Live acceptance disproved its key assumption: Claude Code can consider the model idle while a background Bash pipeline is still alive, so the recurring task injected visible scheduled turns during legitimate work. The ownership checks prevented duplicate pipeline commands, but they could not prevent wake churn because the cron already existed. Increasing the interval would only reduce the symptom. The lease must therefore be edge-triggered by an incomplete Stop, not level-triggered by elapsed time throughout the run.
 
 ## Decision
 
-Add a Claude Code-only, session-scoped continuation lease backed by Claude's `CronCreate`, `CronList`, and `CronDelete` tools. The lease is a wake-up mechanism, not a second goal system. Every scheduled turn delegates completion and next-step decisions to the existing UI-clone CLI:
+Add a Claude Code-only, session-scoped continuation lease backed by Claude's `CronCreate`, `CronList`, and `CronDelete` tools. Skill activation records a running receipt but creates no scheduled task. Only the first incomplete `Stop` arms one non-durable, non-recurring task for the next minute boundary. The one-shot auto-deletes when it fires, and its exact tagged `UserPromptSubmit` event moves the receipt back to running before any pipeline action. The lease is a turn-boundary wake-up mechanism, not a poller and not a second goal system. Every wake-up turn delegates completion and next-step decisions to the existing UI-clone CLI:
 
 - `python -m ui_clone.goal <ref-dir> --check-done`
 - `python -m ui_clone.pipeline ... status --json`
@@ -28,6 +30,7 @@ Display backends remain unchanged.
 5. Allow an explicit user pause and stop automatically on completion or an
    authoritative abort, while keeping ordinary canonical verify failures in
    active rework.
+6. Keep zero scheduled continuation jobs while Claude is actively working, including while a foreground or background pipeline owner is still attached to the current turn.
 
 ## Non-goals
 
@@ -42,9 +45,9 @@ Display backends remain unchanged.
 ## Terminology
 
 - **Domain goal**: the repository-owned `ui_clone.goal` completion contract. This remains the source of truth for both hosts.
-- **Continuation lease**: one recurring, session-scoped Claude scheduled task that wakes an idle interactive session and checks the domain goal.
+- **Continuation lease**: one session receipt plus, only after an incomplete Stop, at most one session-scoped one-shot Claude scheduled task.
 - **Lease tag**: a stable identifier derived from the Claude session ID and project-local run identity. It is included in the scheduled prompt and used for idempotent lookup and deletion.
-- **Wake-up turn**: the user-like scheduled prompt that Claude Code enqueues only when the session is idle.
+- **Wake-up turn**: the user-like prompt produced by the armed one-shot after the preceding assistant turn has ended.
 
 ## Architecture
 
@@ -55,18 +58,21 @@ interactive Claude session
         v
 Claude-only hook adapter
         |
-        | requires one session continuation lease
+        | records running receipt; creates no cron
         v
-CronCreate(recurring, session-scoped, non-durable)
+normal pipeline work
         |
-        | fires only when the session is idle
+        | incomplete Stop
         v
-UI-clone goal oracle
-   |            |                 |
-   | done       | incomplete      | terminal / authority required
-   v            v                 v
-CronDelete   status/next/report  CronDelete
-complete     execute next work   report blocker
+Stop hook blocks once and requests exact CronCreate
+        |
+        | recurring=false, session-scoped, non-durable
+        v
+armed one-shot -> current turn ends -> one-shot fires and auto-deletes
+        |
+        | exact tagged UserPromptSubmit transitions armed -> running
+        v
+UI-clone goal oracle -> status/next/report -> normal pipeline work
 ```
 
 The display layer only launches and displays the ordinary Claude process. Purplemux, cmux, tmux, and a plain terminal all behave the same because none of them receives pipeline decisions or synthetic keystrokes.
@@ -76,7 +82,7 @@ The display layer only launches and displays the ordinary Claude process. Purple
 The shared skill and pipeline continue to define *what* constitutes progress and completion. Claude-specific behavior lives behind Claude's hook manifest:
 
 1. `hooks/hooks.json` registers Claude-only hook events for direct prompt submission, `Skill`, `CronCreate`, `CronList`, and `CronDelete` lifecycles.
-2. A Claude continuation hook module owns lease bootstrap, validation, and operational receipts.
+2. A Claude continuation hook module owns run activation, Stop-triggered arming, wake validation, and operational receipts.
 3. Existing shared gates continue to run for Claude and Codex. The Codex manifest receives no continuation hooks.
 4. `section_gate.py` may read Claude's `session_crons` payload as an optional capability signal, but its canonical gate decisions remain host-neutral.
 
@@ -90,8 +96,8 @@ The implementation is intentionally limited to the Claude host adapter and opera
 - `.gitignore`: ignore `.ui-re-continuation/` operational receipts.
 - `ui_clone/claude_continuation.py`: own receipt validation, atomic storage, state transitions, prompt construction, and the operator CLI.
 - `ui_clone/hooks/claude_continuation.py`: adapt Claude hook payloads to the core state machine.
-- `ui_clone/hooks/pre_bash_rules/dispatcher.py`: enforce the pending-lease guard and bind the first resolved ref directory.
-- `ui_clone/hooks/section_gate.py`: reconcile an incomplete Stop payload with an optional, valid `session_crons` snapshot.
+- `ui_clone/hooks/pre_bash_rules/dispatcher.py`: bind the first resolved ref directory and prevent substantive work while a Stop-triggered create or manual-resume delete is unresolved.
+- `ui_clone/hooks/section_gate.py`: classify incomplete Stop boundaries, request exactly one one-shot, and reconcile an optional, valid `session_crons` snapshot.
 - `tests/test_claude_continuation.py` and `tests/hooks/test_claude_continuation.py`: cover the core state machine and Claude payload adapter.
 - `tests/test_hook_manifest_parity.py`: ratchet the new routes as an explicit Claude-only tool surface.
 
@@ -103,37 +109,39 @@ One hook module, `ui_clone.hooks.claude_continuation`, dispatches by `hook_event
 
 | Hook event | Matcher | Responsibility |
 | --- | --- | --- |
-| `UserPromptSubmit` | none | Detect a direct slash-command invocation of the exact UI reverse-engineering skill and create an idempotent pending receipt before Claude decides whether to call a tool. |
+| `UserPromptSubmit` | none | Detect the exact UI reverse-engineering slash command, the exact tagged one-shot wake prompt, or a manual prompt that arrives while a one-shot is armed. |
 | `PreToolUse` | `Skill` | Fallback for programmatic skill-tool invocations that expose the exact UI reverse-engineering skill identity. |
-| `PreToolUse` | `CronCreate|CronDelete` | Validate only continuation-owned create/delete operations; unrelated cron operations are no-ops. |
+| `PreToolUse` | `CronCreate|CronDelete` | Validate only the exact Stop-triggered one-shot create or an owned manual-resume delete; unrelated cron operations are no-ops. |
 | `PostToolUse` | `CronCreate|CronList|CronDelete` | Reconcile successful tool results with the receipt state machine. |
 
 The adapter reads the documented common fields `session_id`, `cwd`, and `hook_event_name`. `UserPromptSubmit` additionally reads `prompt`; missing or non-string prompt content is a no-op that creates no receipt. Tool lifecycle hooks read `tool_name` and `tool_input`; `PostToolUse` additionally requires `tool_response` and `tool_use_id`. A missing or wrong-typed common or required tool field produces no state transition and returns narrow corrective context; it never fabricates success.
 
-The accepted continuation `CronCreate` input is exact:
+The accepted continuation `CronCreate` input is exact and may be issued only while the receipt is `arming`:
 
 ```json
 {
   "cron": "* * * * *",
   "prompt": "<immutable continuation prompt containing the exact lease tag>",
-  "recurring": true,
+  "recurring": false,
   "durable": false
 }
 ```
 
+An ordinary interactive Claude Code v2.1.233 capability probe established the required host behavior: the exact `recurring: false` input returned one structured job ID, fired once at the next minute boundary, and then `CronList` returned `No scheduled jobs`. The task auto-deleted before its wake-up turn inspected the scheduler. The design therefore does not require a self-delete call on the normal wake path.
+
 `CronDelete` accepts a continuation transition only when `tool_input.id` is a validated string equal to the receipt's `cronId`. Other deletions remain outside this feature. `CronList` is not bound on `PreToolUse` because it is read-only; its successful `PostToolUse` output is used only for reconciliation.
 
-`PostToolUse` runs only after a successful tool call. A failed create therefore leaves `pending`; a failed delete leaves the prior state unchanged and the normal tool error remains visible to Claude. Cron IDs are never recovered with a free-form text regex. The result normalizer accepts only:
+`PostToolUse` runs only after a successful tool call. A failed create therefore leaves `arming`; a failed manual-resume delete leaves `canceling`; the normal tool error remains visible to Claude. Cron IDs are never recovered with a free-form text regex. The result normalizer accepts only:
 
 1. `tool_response.id` as a validated cron ID,
 2. `tool_response.cron.id` as a validated cron ID, or
 3. exactly one structured CronList row from a top-level response list or `tool_response.crons` list whose complete prompt contains the exact delimited lease tag.
 
-If `CronCreate` returns no supported structured ID, the receipt remains `pending` and additional context requires one `CronList` call. If that list also cannot yield exactly one matching structured row, registration fails closed and the adapter instructs Claude to mark the capability `unsupported`; pipeline work does not silently proceed under an assumed lease.
+If `CronCreate` returns no supported structured ID, the receipt remains `arming` and additional context requires one `CronList` call. If that list also cannot yield exactly one matching structured row, registration fails closed and the adapter instructs Claude to mark the capability `unsupported`; the Stop boundary may release, but no automatic continuation is claimed.
 
 The manifest parity test separates shared enforcement routes from this intentional host adapter. It adds an exact `CLAUDE_CONTINUATION_ROUTES` tuple set for the event, module, and matcher triples above, adds the continuation module's matcher-intent tokens, filters those tuples before comparing the existing shared topology, and asserts that the Codex manifest contains none of them. `UserPromptSubmit` is a Claude-only lifecycle event for this adapter and is registered only in `hooks/hooks.json`.
 
-## Lease Bootstrap
+## Run Activation
 
 ### Primary path: direct slash-command invocation
 
@@ -143,29 +151,30 @@ Live Claude Code sessions deliver a direct slash command as a `UserPromptSubmit`
 /ui-clone-skills:ui-reverse-engineering
 ```
 
-The token must be followed by whitespace or the end of the prompt. Prose mentions, shell-style `$ui-clone-skills:ui-reverse-engineering`, partial prefixes, and other skill names are no-ops. A match creates a pending lease receipt scoped to the current session and adds context requiring Claude to establish the continuation lease before substantive pipeline work.
+The token must be followed by whitespace or the end of the prompt. Prose mentions, shell-style `$ui-clone-skills:ui-reverse-engineering`, partial prefixes, and other skill names are no-ops. A match creates a `running` receipt scoped to the current session. It does not create a cron and does not delay substantive pipeline work.
 
 ### Fallback path: Skill tool invocation
 
-Some Claude or compatibility surfaces may still call the `Skill` tool with `skill: "ui-clone-skills:ui-reverse-engineering"`. A Claude-only `PreToolUse:Skill` hook keeps that path idempotent and uses the same receipt bootstrap logic. It is not the primary route for ordinary interactive slash commands.
+Some Claude or compatibility surfaces may still call the `Skill` tool with `skill: "ui-clone-skills:ui-reverse-engineering"`. A Claude-only `PreToolUse:Skill` hook keeps that path idempotent and uses the same receipt activation logic. It is not the primary route for ordinary interactive slash commands.
 
-The required bootstrap sequence is:
+The required activation and Stop sequence is:
 
-1. Resolve `CronCreate` if it is deferred.
-2. Create exactly one recurring one-minute scheduled prompt with the generated lease tag.
-3. Keep the task session-scoped and non-durable.
-4. Let the Claude-only `PostToolUse:CronCreate` hook record the returned cron ID and mark the pending receipt active.
-5. Proceed with the normal UI reverse-engineering skill.
+1. Create or reuse one `running` receipt for the explicit skill invocation.
+2. Proceed with the normal UI reverse-engineering skill while no continuation cron exists.
+3. On the first incomplete `Stop`, atomically move `running` to `arming`, block once, and require the exact non-recurring `CronCreate` input.
+4. Let `PostToolUse:CronCreate` record the structured job ID and move `arming` to `armed`.
+5. End the current assistant turn without starting more pipeline work.
+6. When the one-shot fires and auto-deletes, accept only the exact immutable tagged wake prompt and atomically move `armed` back to `running` before checking the goal.
 
-A pre-Bash guard blocks the first pipeline-start command while a supported Claude session still has a pending, unregistered lease. It permits an explicit `unsupported` receipt when the host genuinely lacks scheduled-task tools; unsupported hosts retain the current one-nudge Stop behavior instead of entering a broken enforcement loop.
+A pre-Bash guard permits normal pipeline work in `running`. It blocks continuation-owned substantive commands in `arming`, `armed`, `canceling`, or `paused`, where work must wait for the scheduler transition or explicit reactivation. It permits an explicit `unsupported` receipt when the host genuinely lacks scheduled-task tools; unsupported hosts retain the current one-nudge Stop behavior instead of entering a broken enforcement loop.
 
-The guard permits the receipt control CLI itself and does not apply to `active`, `paused`, `complete`, `terminal`, or `unsupported` receipts. A fresh direct slash command or fallback Skill-tool invocation may replace `paused` with a new `pending` lease only because that invocation is an explicit user request.
+The guard permits the receipt control CLI and unrelated Bash. It does not block continuation-owned pipeline work in `running`, `complete`, `terminal`, or `unsupported`. A fresh direct slash command or fallback Skill-tool invocation may replace `paused` with a new `running` receipt only because that invocation is an explicit user request.
 
 ### Fallback path: active run without a lease
 
-Natural-language or legacy activation may reach an active UI-clone run without the Skill hook receipt. On the first incomplete `Stop` event, `section_gate.py` checks the optional `session_crons` list. If no matching lease exists, the block reason first requires lease creation, then gives the normal gate failure and next action. This is a recovery path, not the primary bootstrap.
+Natural-language or legacy activation may reach an active UI-clone run without the Skill hook receipt. On the first incomplete `Stop` event, `section_gate.py` creates a `running` receipt, binds the one unambiguous ref, moves it to `arming`, and returns the same exact one-shot request before the normal gate failure and next action. This is a recovery path, not the primary activation route.
 
-When `stop_hook_active` is true, the hook still releases the stop. It never uses repeated blocking as the continuation mechanism.
+When `stop_hook_active` is true, the hook still releases the stop. An `armed` receipt proves the one-shot exists. An `arming` receipt at that second boundary proves registration was not established; the hook must not claim automatic continuation and leaves a precise unsupported or paused receipt for explicit recovery. It never uses repeated blocking as the continuation mechanism.
 
 ## Operational Receipt
 
@@ -173,11 +182,11 @@ The lease needs a small operational receipt because cron creation is a host tool
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "host": "claude-code",
   "sessionId": "fe87fc97-d23a-496e-b13a-5ca5ab651f0d",
   "skill": "ui-clone-skills:ui-reverse-engineering",
-  "state": "active",
+  "state": "armed",
   "leaseTag": "UI_RE_CONTINUATION:<opaque-run-id>",
   "cronId": "cron-opaque-id",
   "refDir": "tmp/ref/<component>",
@@ -186,35 +195,40 @@ The lease needs a small operational receipt because cron creation is a host tool
 }
 ```
 
-Allowed states are `pending`, `active`, `paused`, `complete`, `terminal`, and `unsupported`. Writes are atomic. The receipt is operational evidence only: it cannot make an incomplete pipeline complete and is not part of the canonical verify-stamp fingerprint.
+Allowed states are `running`, `arming`, `armed`, `canceling`, `paused`, `complete`, `terminal`, and `unsupported`. `cronId` is present only while one exact scheduler row must still exist (`armed` or `canceling`). A `running` receipt has no continuation cron. Writes are atomic. The receipt is operational evidence only: it cannot make an incomplete pipeline complete and is not part of the canonical verify-stamp fingerprint.
 
 The session ID is validated as a UUID or a conservative `[A-Za-z0-9._-]` token before it becomes a filename. `ui_clone.claude_continuation` writes a same-directory temporary file with mode `0600`, flushes it, and replaces the receipt with `os.replace`; readers reject invalid JSON, a mismatched `sessionId`, unknown states, and path traversal. The `.ui-re-continuation/` directory is Git-ignored and excluded from verification input discovery.
 
 Hooks call the core functions directly. The matching operator and test surface is:
 
 ```text
-python -m ui_clone.claude_continuation create-pending --session-id ID --cwd DIR --skill NAME
+python -m ui_clone.claude_continuation activate --session-id ID --cwd DIR --skill NAME
 python -m ui_clone.claude_continuation bind-ref --session-id ID --cwd DIR --ref-dir REF
+python -m ui_clone.claude_continuation arm --session-id ID --cwd DIR
 python -m ui_clone.claude_continuation mark-unsupported --session-id ID --cwd DIR --reason TEXT
 python -m ui_clone.claude_continuation pause --session-id ID --cwd DIR
 python -m ui_clone.claude_continuation status --session-id ID --cwd DIR --json
 ```
 
-`pause` is receipt-only repair and does not pretend to delete a scheduler job. The normal interactive pause sequence is `CronDelete` followed by its successful PostToolUse transition. If a still-present job encounters a `paused` receipt, its prompt must delete itself without performing pipeline work. No CLI verb can set `complete`; only a successful canonical `goal --check-done` evaluation can do that.
+`pause` may directly pause `running`, where no scheduler job exists. Pausing `armed` requires `CronDelete` followed by its successful PostToolUse transition. `canceling` is reserved for manual resume; its successful delete always returns to `running`, after which a changed user intent may pause without a scheduler job. Receipt-only repair never pretends a scheduler job was deleted. No CLI verb can set `complete`; only a successful canonical `goal --check-done` evaluation can do that.
 
 State transitions are deliberately narrow:
 
 | Trigger | Allowed current state | Next state |
 | --- | --- | --- |
-| Matching `UserPromptSubmit` slash command or fallback `PreToolUse:Skill` | no receipt | `pending` |
-| Matching `UserPromptSubmit` slash command or fallback `PreToolUse:Skill` | `active` | unchanged |
-| Matching `UserPromptSubmit` slash command or fallback `PreToolUse:Skill` | `paused` | `pending`, because the invocation is explicit user intent |
-| Successful `CronCreate` or one exact CronList match | `pending` | `active` with the validated cron ID |
-| Successful owned `CronDelete` and canonical goal passes | `active` or `pending` | `complete` |
-| Successful owned `CronDelete` and `goal --check-done` aborts (`2`) | `active` or `pending` | `terminal` |
-| Successful owned `CronDelete` while incomplete | `active` or `pending` | `paused` |
-| Valid cron snapshot proves the owned job absent | `active` | `paused` |
-| `mark-unsupported` with a recorded capability reason | `pending` | `unsupported` |
+| Matching skill activation | no receipt or `paused` | `running` with no cron |
+| Matching skill activation | `running` | unchanged |
+| First incomplete `Stop` | `running` | `arming` and one exact create request |
+| Successful `CronCreate` or one exact CronList match | `arming` | `armed` with the validated cron ID |
+| Exact immutable tagged wake prompt | `armed` | `running`, clearing the auto-deleted cron ID |
+| Manual user prompt before the one-shot fires | `armed` | `canceling` and one exact delete request |
+| Successful owned `CronDelete` after manual resume | `canceling` | `running` |
+| Explicit pause with no job | `running` | `paused` |
+| Successful owned `CronDelete` for explicit pause | `armed` | `paused` |
+| Canonical goal passes | `running`, `arming`, or wake-transitioned `running` | `complete` |
+| `goal --check-done` aborts (`2`) | `running`, `arming`, or wake-transitioned `running` | `terminal` |
+| Valid cron snapshot proves the owned job absent without an exact wake prompt | `armed` or `canceling` | `paused` |
+| `mark-unsupported` with a recorded capability reason | `arming` | `unsupported` |
 
 `complete` and `terminal` are immutable within the session. A `paused` receipt is never reactivated by list reconciliation, Stop fallback, or a scheduled prompt. Invalid transitions are rejected and leave the prior receipt intact.
 
@@ -230,62 +244,66 @@ The Stop hook may receive the documented optional snapshot shape:
     {
       "id": "cron-001",
       "schedule": "* * * * *",
-      "recurring": true,
+      "recurring": false,
       "prompt": "... [[UI_RE_CONTINUATION:<opaque-run-id>]] ..."
     }
   ]
 }
 ```
 
-Absent `session_crons` and a non-list value mean the capability is unavailable, not an empty list. An actual empty list is a valid snapshot proving that no session cron exists. Rows missing a validated `id`, string `schedule`, boolean `recurring`, or string `prompt` are malformed and ignored; a non-empty snapshot in which every row is malformed is unavailable rather than proof of absence. A matching row must have `recurring: true`, the expected one-minute schedule, and either the receipt's exact `cronId` or the full delimited tag `[[UI_RE_CONTINUATION:<opaque-run-id>]]` in its prompt. Arbitrary prompt substrings never establish ownership.
+Absent `session_crons` and a non-list value mean the capability is unavailable, not an empty list. An actual empty list is a valid snapshot proving that no session cron exists. Rows missing a validated `id`, string `schedule`, boolean `recurring`, or string `prompt` are malformed and ignored; a non-empty snapshot in which every row is malformed is unavailable rather than proof of absence. A matching row must have `recurring: false`, the expected next-minute schedule, and either the receipt's exact `cronId` or the full delimited tag `[[UI_RE_CONTINUATION:<opaque-run-id>]]` in its prompt. Arbitrary prompt substrings never establish ownership.
 
-One exact matching row can activate a pending receipt or confirm an active one. Multiple matching rows are a duplicate-lease failure and are never collapsed by choosing one silently. With a valid snapshot, an `active` receipt whose job is absent becomes `paused`; this treats UI deletion as user intent and prevents automatic recreation. A `paused` receipt never becomes active through reconciliation, even if a stale job is still visible: that job must be deleted. An unavailable snapshot causes no state change.
+One exact matching row can move `arming` to `armed` or confirm `armed`/`canceling`. Multiple matching rows are a duplicate-lease failure and are never collapsed by choosing one silently. With a valid snapshot, an `armed` or `canceling` receipt whose job is absent becomes `paused` unless the exact immutable wake prompt is the current event; that prompt is positive evidence that auto-deletion occurred and instead moves `armed` to `running`. A `paused` receipt never becomes running through reconciliation. An unavailable snapshot causes no state change.
 
 ## Scheduled Prompt Contract
 
 Every wake-up prompt follows the same deterministic contract:
 
 1. Identify itself using the lease tag.
-2. Resolve exactly one active ref directory bound to the current session. Zero or multiple matches fail closed.
-3. Run `goal --check-done` before doing any new work.
-4. If complete, delete the matching cron job, mark the receipt `complete`, and report canonical completion evidence.
-5. If `goal --check-done` returns `2` for a hard-cap/unclonable abort, delete the
-   job, mark the receipt `terminal`, and report the terminal cause. A normal
+2. Let the `UserPromptSubmit` hook prove exact prompt equality, require `armed`, atomically move to `running`, and clear the cron ID that the host already auto-deleted.
+3. Resolve exactly one active ref directory bound to the current session. Zero or multiple matches fail closed.
+4. Run `goal --check-done` before doing any new work.
+5. If complete, mark the receipt `complete` and report canonical completion evidence.
+6. If `goal --check-done` returns `2` for a hard-cap/unclonable abort, mark the
+   receipt `terminal` and report the terminal cause. A normal
    canonical verify failure returns `1`, remains incomplete, and must continue.
-6. If user authority, credentials, or an irreversible decision are required, delete the job, mark it `paused`, and state the blocker.
-7. If incomplete, read `status --json`, `next --json`, and `report --for-llm`, then execute the next required action. A status-only summary is not a valid scheduled turn.
-8. Preserve all normal gates, fail counts, iteration caps, and verification requirements. The lease never bypasses or resets them.
+7. If user authority, credentials, or an irreversible decision are required, mark the receipt `paused` and state the blocker.
+8. If incomplete, read `status --json`, `next --json`, and `report --for-llm`, then execute the next required action. If an exact pipeline owner is already alive, attach to or wait on that owner instead of starting a duplicate or ending with a status-only summary.
+9. Preserve all normal gates, fail counts, iteration caps, and verification requirements. The lease never bypasses or resets them.
 
-The one-minute schedule is a wake-up latency, not a polling load. Claude scheduled tasks run only while the session is active and idle. If a due time passes while Claude is busy, the host enqueues one run when it next becomes idle rather than building a backlog.
+The next-minute schedule is a one-shot wake latency, not a polling interval. No continuation task exists before an incomplete Stop or after the one-shot fires. Background work can still outlive an assistant turn, so a wake that finds an exact live owner must wait on it; it must not create another pipeline owner.
 
 ## Stop-hook Interaction
 
 The Stop hook retains its existing safety role:
 
-- First incomplete stop: block once with the concrete gate reason and next action. If the lease is missing, require bootstrap in the same reason.
-- Continuation-generated stop (`stop_hook_active: true`): release immediately to avoid consecutive-block churn.
-- Idle session with active lease: the next scheduled prompt re-enters the same session and checks the domain goal.
-- Completed or authoritative-abort run: allow stop and ensure the lease is removed.
+- First incomplete stop from `running`: move to `arming`, block once with the exact one-shot create request, then include the concrete gate reason and next action.
+- Successful create: move to `armed`, tell Claude to end the turn immediately, and perform no further pipeline work in that turn.
+- Continuation-generated stop (`stop_hook_active: true`): release immediately to avoid consecutive-block churn. Only `armed` proves automatic continuation; unresolved `arming` is reported honestly.
+- Completed or authoritative-abort run: allow stop and mark the receipt final. No scheduler deletion is needed in `running` because no job exists.
 
-The lease therefore owns *when to wake up*; the Stop hook and pipeline own *whether stopping is valid*.
+The Stop edge owns *when to arm*; the one-shot owns one wake; the pipeline owns *whether stopping is valid*.
 
 ## Pause, Resume, and Session Lifecycle
 
-- The user can pause through the normal Claude task UI or a small continuation control command. `CronDelete` marks an incomplete lease `paused`, preventing automatic recreation.
+- The user can pause through the normal Claude task UI or a small continuation control command. `running` pauses directly because it has no cron; `armed` pauses only after a successful owned `CronDelete`. `canceling` has one meaning—manual resume—and its delete returns to `running` before any later pause.
+- An ordinary manual prompt that arrives while `armed` is an explicit resume, not a wake. Its `UserPromptSubmit` transition moves to `canceling`, requires the exact owned `CronDelete`, and only the successful delete moves back to `running`. If the one-shot fires during that race, the exact wake prompt observes `canceling` and performs no pipeline work.
 - A paused lease resumes only through an explicit user request or a fresh skill invocation.
 - Closing Claude stops session-scoped scheduled execution. No external daemon remains.
-- Resuming the same Claude session may restore its unexpired scheduled task. `SessionStart` and `session_resume.py` re-bind the WIP context. If a valid cron snapshot proves the receipt's active job is missing, the receipt becomes `paused`; repair requires the next explicit continuation or fresh skill invocation.
+- Resuming the same Claude session may restore an unexpired armed one-shot. `SessionStart` and `session_resume.py` re-bind the WIP context. If a valid cron snapshot proves an `armed` or `canceling` job is missing without the exact wake prompt, the receipt becomes `paused`; repair requires the next explicit continuation or fresh skill invocation.
 - Starting a new conversation does not inherit the old lease automatically. The new session must deliberately adopt the active ref.
-- User interrupts are respected. Stop hooks do not run on an interrupt, and a documented pause action must remove the scheduled job if the user wants the still-open session to remain idle.
+- User interrupts are respected. Stop hooks do not run on an interrupt, so an interrupt from `running` leaves no latent scheduler job. A documented pause action must remove a job only if the user interrupts during the brief `armed` or `canceling` window.
+- Already-running schema-v1 recurring leases are not migrated in place. They remain owned by the Claude process and plugin version that created them and disappear when that session closes or completes its existing delete path. Schema v2 applies to fresh skill activation after installation; acceptance must use a fresh session.
 
 ## Failure Handling
 
 The design fails closed without trapping the user:
 
-- Missing `CronCreate`: record `unsupported`, retain existing Stop semantics, and explain that automatic interactive continuation is unavailable.
+- Missing `CronCreate`: move `arming` to `unsupported`, retain existing Stop semantics, and explain that automatic interactive continuation is unavailable.
 - Malformed or duplicate cron: reject registration and require deletion of every continuation-owned duplicate before an explicit recreation; never choose one job silently.
 - Missing or ambiguous ref binding: delete the lease and report the ambiguity instead of choosing a run.
-- Stale cron ID: reconcile with `CronList`. If a valid list proves the job is absent, mark the receipt `paused` and require explicit reactivation; do not guess whether the host lost the job or the user deleted it intentionally.
+- Stale cron ID: reconcile with `CronList`. If a valid list proves an `armed` or `canceling` job is absent without the exact wake prompt, mark the receipt `paused` and require explicit reactivation; do not guess whether the host lost the job or the user deleted it intentionally.
+- Wake/manual-resume race: serialize receipt transitions under the existing per-session file lock. Exact wake wins only from `armed`; manual resume wins by moving `armed` to `canceling`. A wake observed from `canceling` is a no-op, so both event orders preserve one pipeline owner.
 - Canonical verify failure: keep `verify-report.json`, logs, and the non-zero
   command result, but do not mint a Stop-releasing terminal state. Continue from
   the current gate and surface the report through `status` / `next` /
@@ -305,6 +323,10 @@ This is suitable for CI and headless harnesses, but it replaces the normal inter
 
 Claude enforces a consecutive Stop-block cap, and this repository already observed hours of churn from repeated blocking. The re-entrancy guard remains.
 
+### Activation-time recurring cron
+
+Live acceptance showed that Claude may enqueue recurring tasks while a background Bash owner is still alive. Ownership checks prevented duplicate commands but could not remove visible scheduled-turn churn. A longer interval merely trades noise for recovery latency. The design therefore creates no cron at activation and arms one non-recurring task only at an incomplete Stop boundary.
+
 ### Purplemux or cmux key injection
 
 Synthetic input couples correctness to a display backend, focus, pane identity, and terminal timing. Display backends do not decide pipeline progress.
@@ -323,31 +345,37 @@ Background sessions are useful when the terminal may close, but they change owne
 
 1. The Claude `UserPromptSubmit` hook matches only an exact-start `/ui-clone-skills:ui-reverse-engineering` slash command and does not affect prose mentions, `$` Codex syntax, partial prefixes, or unrelated skills.
 2. The fallback Claude `PreToolUse:Skill` hook matches only `ui-clone-skills:ui-reverse-engineering` and does not affect unrelated skills.
-3. Lease registration is idempotent by session and tag; duplicate matching jobs fail closed until all are deleted and one is explicitly recreated.
-4. Pipeline start is blocked for `pending` supported leases and allowed for `active`, `paused`, or explicitly `unsupported` receipts according to policy.
-5. A Stop payload with a matching `session_crons` entry does not request a duplicate lease.
-6. A first incomplete Stop without a lease includes bootstrap guidance; `stop_hook_active: true` still releases.
-7. `CronDelete` produces `complete` only when `goal --check-done` passes, `terminal`
-   only when it returns abort (`2`), and `paused` for an explicit incomplete delete.
-8. A canonical verify failure leaves the lease active, blocks a normal Stop, and
+3. Skill activation creates `running` with no CronCreate context, and ordinary pipeline commands remain allowed in `running`.
+4. The first incomplete Stop is the only path from `running` to `arming`; it emits the exact `recurring: false`, `durable: false` create input and blocks only once.
+5. Successful structured `CronCreate` moves `arming` to `armed`; malformed or failed create output never advances state, and a duplicate matching row fails closed.
+6. The exact immutable tagged wake prompt moves `armed` to `running` and clears the auto-deleted cron ID. A prose mention, wrong tag, altered prompt, or wake observed from another state performs no pipeline work.
+7. Empty `session_crons` after an exact wake is normal auto-deletion, while empty `session_crons` observed from `armed` without that wake marks the receipt paused.
+8. A manual prompt from `armed` moves to `canceling`, requires the exact owned `CronDelete`, and successful deletion returns to `running`; a racing wake from `canceling` is a no-op.
+9. Continuation-owned substantive Bash is blocked in `arming`, `armed`, `canceling`, and `paused`, but allowed in `running` and explicitly `unsupported` according to policy; unrelated Bash and receipt control remain unaffected.
+10. `stop_hook_active: true` still releases. `armed` proves automatic continuation; unresolved `arming` is never reported as protected.
+11. A canonical verify failure leaves the receipt running, blocks a normal Stop, and
    remains discoverable through `verify-report.json`; a hard-cap/unclonable
    failure still terminalizes.
-9. Claude-only manifest changes do not alter the Codex hook manifest or shared gate routing.
-10. Receipt paths, tags, and prompt arguments reject traversal and arbitrary prompt interpolation.
-11. Absent, malformed, empty, one-match, no-match, and duplicate `session_crons` snapshots exercise their distinct unavailable, absent, active, paused, and failure outcomes.
-12. Supported and unsupported `tool_response` shapes prove that no free-form cron ID is inferred and no failed tool call advances state.
+12. Claude-only manifest changes do not alter the Codex hook manifest or shared gate routing.
+13. Receipt paths, tags, and prompt arguments reject traversal and arbitrary prompt interpolation.
+14. Absent, malformed, empty, one-match, no-match, and duplicate `session_crons` snapshots exercise their distinct unavailable, absent, armed, paused, and failure outcomes.
+15. Supported and unsupported `tool_response` shapes prove that no free-form cron ID is inferred and no failed tool call advances state.
+16. Schema-v1 active recurring receipts are not silently reinterpreted as schema-v2 one-shots.
 
 ### Interactive acceptance
 
 1. Start ordinary interactive `claude` in a fresh fixture directory.
 2. Invoke `/ui-clone-skills:ui-reverse-engineering <fixture-url>`.
-3. Verify exactly one tagged session cron and one active receipt exist before pipeline work advances.
-4. Force an incomplete assistant stop and observe the existing one-time Stop block.
-5. Allow the next stop; within one schedule interval, verify a scheduled prompt runs in the same session ID.
-6. Verify the wake-up turn reads the pipeline CLI and executes the reported next action.
-7. Make the fixture canonically complete; verify the cron is deleted and the receipt becomes `complete`.
-8. Pause an incomplete fixture; verify no later wake-up occurs.
-9. Run the existing Codex hook parity and pipeline suites to prove Codex behavior is unchanged.
+3. Verify the receipt is `running`, no session cron exists, and pipeline work advances normally.
+4. Keep a background pipeline owner alive long enough to cross a minute boundary and verify no scheduled turn appears before Stop.
+5. Force an incomplete assistant stop and verify the Stop hook requests exactly one non-recurring, non-durable one-shot.
+6. Verify the structured create result moves the receipt to `armed`, then allow the current turn to end.
+7. Within one minute boundary, verify exactly one tagged prompt runs in the same session ID, the receipt returns to `running`, and `CronList` contains no owned job.
+8. Verify the wake-up turn reads the pipeline CLI and executes or waits on exactly one reported next action.
+9. Arm another one-shot, submit a manual prompt before it fires, and verify owned deletion prevents the stale wake from doing pipeline work.
+10. Make the fixture canonically complete and verify the receipt becomes `complete` with no scheduler job.
+11. Pause an incomplete fixture in both `running` and `armed`; verify no later wake-up performs work.
+12. Run the existing Codex hook parity and pipeline suites to prove Codex behavior is unchanged.
 
 ## Compatibility
 
@@ -365,9 +393,11 @@ Background sessions are useful when the terminal may close, but they change owne
 ## Stop Condition
 
 Implementation is complete only when ordinary interactive Claude can invoke the
-skill, establish exactly one session-scoped continuation lease, survive an
-incomplete turn boundary, resume the same session while idle, continue after a
-recoverable canonical verify failure, and remove the lease on canonical
-completion, hard-cap/unclonable abort, or explicit pause. An ordinary interactive
+skill, perform active work with zero continuation crons, arm exactly one
+session-scoped one-shot only at an incomplete Stop, resume the same session once,
+continue after a recoverable canonical verify failure, and retain no scheduler
+job on wake, canonical completion, hard-cap/unclonable abort, or explicit pause.
+A background pipeline that crosses a minute boundary before Stop must produce no
+scheduled turn. An ordinary interactive
 Codex run must likewise remain blocked from ending after a recoverable verify
 failure. Repository CI and security gates must pass.

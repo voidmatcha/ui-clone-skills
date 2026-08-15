@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 from typing import cast
 
+import pytest
+
+from ui_clone import claude_continuation as cc
 from ui_clone.hooks._common import ref_touched_by_session
 
 from ._helpers import (
@@ -36,32 +39,54 @@ def _continuation_receipt_path(project: Path, session_id: str) -> Path:
     return project / ".ui-re-continuation" / f"{session_id}.json"
 
 
-def _write_continuation_receipt(
+def _setup_continuation_receipt(
     project: Path,
     session_id: str,
     *,
     state: str,
-    ref_dir: str | None = None,
-) -> Path:
-    import hashlib
-
-    path = _continuation_receipt_path(project, session_id)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    payload: dict[str, object] = {
-        "schemaVersion": 1,
-        "host": "claude-code",
-        "sessionId": session_id,
-        "skill": "ui-clone-skills:ui-reverse-engineering",
-        "state": state,
-        "leaseTag": "UI_RE_CONTINUATION:"
-        + hashlib.sha256(f"{project.resolve()}\0{session_id}".encode()).hexdigest()[:24],
-        "createdAt": "2026-08-15T00:00:00Z",
-        "updatedAt": "2026-08-15T00:00:00Z",
-    }
+    ref_dir: Path | None = None,
+) -> dict[str, object]:
+    receipt = cc.activate(project, session_id, cc.UI_RE_SKILL)
+    if state == cc.STATE_COMPLETE:
+        return cc._replace_state(
+            project,
+            session_id,
+            receipt,
+            cc.STATE_COMPLETE,
+            outcome="canonical goal --check-done passed",
+        )
+    if state == cc.STATE_TERMINAL:
+        return cc._replace_state(
+            project,
+            session_id,
+            receipt,
+            cc.STATE_TERMINAL,
+            terminalState={"status": "aborted", "category": "goal-abort"},
+        )
+    if state == cc.STATE_PAUSED:
+        return cc.pause(project, session_id)
     if ref_dir is not None:
-        payload["refDir"] = ref_dir
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return path
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        receipt = cc.bind_ref(project, session_id, ref_dir)
+    if state == cc.STATE_RUNNING:
+        return receipt
+    if ref_dir is None:
+        raise AssertionError(f"{state} test receipt requires a ref")
+    receipt = cc.arm(project, session_id)
+    if state == cc.STATE_ARMING:
+        return receipt
+    if state == cc.STATE_UNSUPPORTED:
+        return cc.mark_unsupported(
+            project,
+            session_id,
+            "CronCreate unavailable",
+        )
+    receipt = cc.mark_armed(project, session_id, "cron-owned")
+    if state == cc.STATE_ARMED:
+        return receipt
+    if state == cc.STATE_CANCELING:
+        return cc.begin_manual_resume(project, session_id)
+    raise AssertionError(f"unsupported test receipt state: {state}")
 
 
 def _read_continuation_receipt(project: Path, session_id: str) -> dict[str, object]:
@@ -159,18 +184,32 @@ class TestPreBash:
         assert result.returncode == 0
         assert ref_touched_by_session(ref_dir, session_id)
 
-    def test_continuation_pending_blocks_ui_re_execution_without_binding(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        "state",
+        [
+            cc.STATE_ARMING,
+            cc.STATE_ARMED,
+            cc.STATE_CANCELING,
+            cc.STATE_PAUSED,
+        ],
+    )
+    def test_continuation_scheduler_states_block_owned_pipeline_commands(
+        self, tmp_path: Path, state: str
     ) -> None:
-        """A pending Claude continuation receipt must activate cron first."""
         make_search_root(tmp_path)
-        session_id = "claude-session"
-        _write_continuation_receipt(tmp_path, session_id, state="pending")
+        session_id = f"session-{state}"
+        bound_ref = tmp_path / "tmp" / "ref" / f"target-{state}"
+        _setup_continuation_receipt(
+            tmp_path,
+            session_id,
+            state=state,
+            ref_dir=None if state == cc.STATE_PAUSED else bound_ref,
+        )
 
         result = run_hook(
             self.MODULE,
             stdin_data=_bash_input_with_session(
-                _pipeline_run_command("target-ref"), session_id, tmp_path
+                _pipeline_run_command(f"target-{state}"), session_id, tmp_path
             ),
             env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
         )
@@ -182,17 +221,57 @@ class TestPreBash:
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         reason = data["hookSpecificOutput"]["permissionDecisionReason"]
         assert "continuation" in reason.lower()
-        assert "cron" in reason.lower()
-        assert "create-pending" in reason
-        assert "refDir" not in _read_continuation_receipt(tmp_path, session_id)
-        assert not ref_touched_by_session(tmp_path / "tmp" / "ref" / "target-ref", session_id)
+        assert state in reason
+        assert not ref_touched_by_session(
+            tmp_path / "tmp" / "ref" / f"target-{state}",
+            session_id,
+        )
 
-    def test_continuation_active_binds_first_resolved_ref_and_allows(
+    @pytest.mark.parametrize(
+        "state",
+        [
+            cc.STATE_RUNNING,
+            cc.STATE_UNSUPPORTED,
+            cc.STATE_COMPLETE,
+            cc.STATE_TERMINAL,
+        ],
+    )
+    def test_non_scheduler_states_do_not_block_owned_pipeline_commands(
+        self, tmp_path: Path, state: str
+    ) -> None:
+        make_search_root(tmp_path)
+        session_id = f"session-{state}"
+        target_ref = tmp_path / "tmp" / "ref" / f"target-{state}"
+        _setup_continuation_receipt(
+            tmp_path,
+            session_id,
+            state=state,
+            ref_dir=target_ref if state == cc.STATE_UNSUPPORTED else None,
+        )
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                _pipeline_run_command(f"target-{state}"),
+                session_id,
+                tmp_path,
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+
+        assert result.returncode == 0
+        assert "continuation" not in result.stdout.lower()
+
+    def test_continuation_running_binds_first_resolved_ref_and_allows(
         self, tmp_path: Path
     ) -> None:
         make_search_root(tmp_path)
         session_id = "claude-session"
-        _write_continuation_receipt(tmp_path, session_id, state="active")
+        _setup_continuation_receipt(
+            tmp_path,
+            session_id,
+            state=cc.STATE_RUNNING,
+        )
 
         result = run_hook(
             self.MODULE,
@@ -214,7 +293,12 @@ class TestPreBash:
     ) -> None:
         make_search_root(tmp_path)
         session_id = "claude-session"
-        receipt_path = _write_continuation_receipt(tmp_path, session_id, state="active")
+        _setup_continuation_receipt(
+            tmp_path,
+            session_id,
+            state=cc.STATE_RUNNING,
+        )
+        receipt_path = cc.receipt_path(tmp_path, session_id)
         before = receipt_path.read_text(encoding="utf-8")
         pythonpath = _sitecustomize_pythonpath(
             tmp_path,
@@ -257,7 +341,12 @@ importlib.import_module = _blocked_import_module
     ) -> None:
         make_search_root(tmp_path)
         session_id = "claude-session"
-        receipt_path = _write_continuation_receipt(tmp_path, session_id, state="active")
+        _setup_continuation_receipt(
+            tmp_path,
+            session_id,
+            state=cc.STATE_RUNNING,
+        )
+        receipt_path = cc.receipt_path(tmp_path, session_id)
         before = receipt_path.read_text(encoding="utf-8")
         pythonpath = _sitecustomize_pythonpath(
             tmp_path,
@@ -308,13 +397,16 @@ importlib.import_module = _stub_import_module
         assert receipt_path.read_text(encoding="utf-8") == before
         assert not ref_touched_by_session(tmp_path / "tmp" / "ref" / "target-ref", session_id)
 
-    def test_continuation_active_bound_to_different_ref_fails_closed(
+    def test_continuation_running_bound_to_different_ref_fails_closed(
         self, tmp_path: Path
     ) -> None:
         make_search_root(tmp_path)
         session_id = "claude-session"
-        _write_continuation_receipt(
-            tmp_path, session_id, state="active", ref_dir="tmp/ref/ref-a"
+        _setup_continuation_receipt(
+            tmp_path,
+            session_id,
+            state=cc.STATE_RUNNING,
+            ref_dir=tmp_path / "tmp" / "ref" / "ref-a",
         )
 
         result = run_hook(
@@ -337,52 +429,40 @@ importlib.import_module = _stub_import_module
         assert _read_continuation_receipt(tmp_path, session_id)["refDir"] == "tmp/ref/ref-a"
         assert not ref_touched_by_session(tmp_path / "tmp" / "ref" / "ref-b", session_id)
 
-    def test_continuation_paused_and_unsupported_do_not_deny(
-        self, tmp_path: Path
-    ) -> None:
-        make_search_root(tmp_path)
-        for state in ("paused", "unsupported"):
-            session_id = f"session-{state}"
-            _write_continuation_receipt(tmp_path, session_id, state=state)
-
-            result = run_hook(
-                self.MODULE,
-                stdin_data=_bash_input_with_session(
-                    _pipeline_run_command(f"target-{state}"), session_id, tmp_path
-                ),
-                env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
-            )
-
-            assert result.returncode == 0
-            assert result.stdout.strip() == ""
-
-    def test_continuation_control_commands_are_always_allowed(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        "subcommand",
+        ["activate", "bind-ref", "arm", "mark-unsupported", "pause", "status"],
+    )
+    def test_schema_v2_continuation_control_commands_are_always_allowed(
+        self, tmp_path: Path, subcommand: str
     ) -> None:
         make_search_root(tmp_path)
         session_id = "claude-session"
         _continuation_receipt_path(tmp_path, session_id).parent.mkdir(parents=True)
         _continuation_receipt_path(tmp_path, session_id).write_text("{not-json", encoding="utf-8")
 
-        for subcommand in ("create-pending", "bind-ref", "mark-unsupported", "pause", "status"):
-            result = run_hook(
-                self.MODULE,
-                stdin_data=_bash_input_with_session(
-                    f"python -m ui_clone.claude_continuation {subcommand}",
-                    session_id,
-                    tmp_path,
-                ),
-                env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
-            )
+        result = run_hook(
+            self.MODULE,
+            stdin_data=_bash_input_with_session(
+                f"python -m ui_clone.claude_continuation {subcommand}",
+                session_id,
+                tmp_path,
+            ),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
 
-            assert result.returncode == 0
-            assert result.stdout.strip() == ""
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
 
     def test_continuation_ignores_other_session_and_missing_session(
         self, tmp_path: Path
     ) -> None:
         make_search_root(tmp_path)
-        _write_continuation_receipt(tmp_path, "other-session", state="pending")
+        _setup_continuation_receipt(
+            tmp_path,
+            "other-session",
+            state=cc.STATE_PAUSED,
+        )
 
         no_session = run_hook(
             self.MODULE,

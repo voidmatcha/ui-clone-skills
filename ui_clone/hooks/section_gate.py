@@ -1336,12 +1336,34 @@ def _continuation_stop_prefix(
     project_root: Path,
     session_id: str,
     payload: dict[str, object] | None,
+    ref_dir: Path,
 ) -> str | None:
     if not session_id:
         return None
     try:
         receipt = _continuation.load_receipt(project_root, session_id)
-        result: _continuation.ReconcileResult | None = None
+        if receipt is None:
+            if _continuation.receipt_path(project_root, session_id).exists():
+                return (
+                    "⛔ UI-RE continuation receipt is invalid\n\n"
+                    "The session receipt exists but cannot be validated. Do not create a "
+                    "scheduled task from untrusted state. Repair or remove the invalid receipt, "
+                    "then reactivate the skill explicitly.\n\n"
+                )
+            receipt = _continuation.activate(
+                project_root,
+                session_id,
+                _continuation.UI_RE_SKILL,
+            )
+        if receipt.get("state") in {
+            _continuation.STATE_COMPLETE,
+            _continuation.STATE_TERMINAL,
+            _continuation.STATE_UNSUPPORTED,
+        }:
+            return None
+        receipt = _continuation.bind_ref(project_root, session_id, ref_dir)
+        if receipt["state"] == _continuation.STATE_RUNNING:
+            receipt = _continuation.arm(project_root, session_id)
         if payload is not None and "session_crons" in payload:
             result = _continuation.reconcile_cron_snapshot(
                 project_root,
@@ -1349,54 +1371,87 @@ def _continuation_stop_prefix(
                 payload.get("session_crons"),
             )
             receipt = result.receipt or _continuation.load_receipt(project_root, session_id)
+            if receipt is None:
+                raise _continuation.ContinuationError(
+                    "receipt disappeared during cron reconciliation"
+                )
     except _continuation.ContinuationError as exc:
         if "duplicate" in str(exc).lower():
             return (
                 "⛔ UI-RE duplicate continuation scheduled tasks\n\n"
-                "The Stop payload contains multiple exact continuation lease matches. "
+                "The Stop payload contains multiple exact continuation receipt matches. "
                 "Delete every matching scheduled task with CronDelete, then explicitly "
-                "create exactly one replacement lease. The Stop hook will not choose "
+                "create exactly one replacement one-shot. The Stop hook will not choose "
                 "between duplicates silently.\n\n"
             )
-        return None
-
-    if receipt is None:
         return (
-            "⛔ UI-RE continuation lease missing\n\n"
-            "This incomplete Stop has no Claude continuation receipt for the current "
-            "session. Bootstrap the lease before treating the session as idle:\n"
-            f"  python -m ui_clone.claude_continuation create-pending --session-id {session_id} "
-            "--cwd . --skill ui-clone-skills:ui-reverse-engineering\n"
-            "Then call CronCreate with the receipt's exact prompt/input and wait for "
-            "the receipt to become active.\n\n"
+            "⛔ UI-RE continuation state could not be armed\n\n"
+            f"{exc}. Do not create or infer a scheduled task from this state. Resolve the "
+            "receipt/ref binding, then reactivate the skill explicitly.\n\n"
         )
 
     state = receipt.get("state")
-    if state == _continuation.STATE_ACTIVE:
-        return None
-    if state == _continuation.STATE_PENDING:
+    if state == _continuation.STATE_ARMING:
+        create_input = json.dumps(
+            _continuation.cron_create_input(receipt),
+            sort_keys=True,
+        )
         return (
-            "⛔ UI-RE continuation lease is pending\n\n"
-            "The receipt exists, but no active scheduled task is confirmed. Call "
-            "CronCreate using the receipt's exact continuation input; do not assume "
-            "a lease from an unavailable, malformed, or unrelated cron snapshot.\n\n"
+            "⛔ UI-RE continuation one-shot is arming\n\n"
+            "Call CronCreate exactly once with this input:\n"
+            f"  {create_input}\n"
+            "After a successful create, end the current assistant turn immediately. "
+            "Perform no more pipeline work in this turn.\n\n"
+        )
+    if state == _continuation.STATE_ARMED:
+        return (
+            "⏸ UI-RE continuation one-shot is armed\n\n"
+            "The owned one-shot already exists. You must end the current assistant turn "
+            "immediately and perform no more pipeline work in this turn.\n\n"
+        )
+    if state == _continuation.STATE_CANCELING:
+        cron_id = receipt.get("cronId")
+        delete_input = json.dumps({"id": cron_id}, sort_keys=True)
+        return (
+            "⏸ UI-RE continuation one-shot deletion is pending\n\n"
+            f"Finish the owned CronDelete with this exact input: {delete_input}. "
+            "Do not resume pipeline work until the successful delete returns the "
+            "receipt to running.\n\n"
         )
     if state == _continuation.STATE_PAUSED:
         return (
-            "⛔ UI-RE continuation scheduled task is paused\n\n"
-            "A valid session_crons snapshot did not confirm the active job, or the "
-            "receipt was already paused. Do not recreate it from the Stop hook. "
-            "Resume only after explicit user intent; delete any stale owned task "
-            "with CronDelete.\n\n"
-        )
-    if result is not None and result.status == "absent":
-        return (
-            "⛔ UI-RE continuation lease absent\n\n"
-            "The valid session_crons snapshot has no matching active continuation "
-            "task. Create a new lease explicitly with CronCreate before relying on "
-            "automatic interactive continuation.\n\n"
+            "⏸ UI-RE continuation one-shot is paused\n\n"
+            "Automatic continuation is not active. Do not recreate it from the Stop "
+            "hook. Finish any required owned CronDelete, then resume only through an "
+            "explicit user request or fresh skill invocation.\n\n"
         )
     return None
+
+
+def _refresh_continuation_final(
+    project_root: Path,
+    session_id: str,
+    ref_dir: Path,
+) -> None:
+    if not session_id:
+        return
+    try:
+        receipt = _continuation.load_receipt(project_root, session_id)
+        if receipt is None or receipt.get("state") not in {
+            _continuation.STATE_RUNNING,
+            _continuation.STATE_ARMING,
+        }:
+            return
+        project = project_root.resolve()
+        try:
+            expected_ref = ref_dir.resolve().relative_to(project).as_posix()
+        except ValueError:
+            return
+        if receipt.get("refDir") != expected_ref:
+            return
+        _continuation.refresh_goal_state(project_root, session_id)
+    except _continuation.ContinuationError:
+        return
 
 
 def main() -> None:
@@ -1523,11 +1578,17 @@ def main() -> None:
                 project_root,
                 stop_scope_session_id,
                 payload,
+                ref_dir,
             )
             if prefix:
                 block_reason = f"{prefix}{block_reason}"
             _emit_block(block_reason)
             sys.exit(0)
+        _refresh_continuation_final(
+            project_root,
+            stop_scope_session_id,
+            ref_dir,
+        )
 
     sys.exit(0)
 

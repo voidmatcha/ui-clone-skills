@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
 from ui_clone import claude_continuation as cc
+from ui_clone.hooks import section_gate
 from ui_clone.hooks._common import mark_ref_session
 
 from ._helpers import (
@@ -35,8 +37,8 @@ class TestSectionGate:
         return {
             "id": cron_id or self.CRON_ID,
             "schedule": "* * * * *",
-            "recurring": True,
-            "prompt": f"wake [[{receipt['leaseTag']}]]",
+            "recurring": False,
+            "prompt": cc.continuation_prompt(receipt),
         }
 
     def _blocking_stop(
@@ -45,9 +47,11 @@ class TestSectionGate:
         session_id: str | None = None,
         session_crons: object = None,
         include_session_crons: bool = True,
+        ref_dir: Path | None = None,
     ) -> tuple[dict[str, object], Path]:
-        search_root = make_search_root(tmp_path)
-        ref_dir = make_ref_dir(search_root)
+        if ref_dir is None:
+            search_root = make_search_root(tmp_path)
+            ref_dir = make_ref_dir(search_root)
         set_active_marker(ref_dir)
         mark_ref_session(ref_dir, session_id or self.SESSION_ID, source="test")
         payload: dict[str, object] = {
@@ -275,111 +279,148 @@ class TestSectionGate:
         assert data.get("decision") == "block"
         assert "reason" in data
 
-    def test_valid_empty_cron_snapshot_pauses_missing_active_job(
+    def _arm_for_ref(self, tmp_path: Path) -> Path:
+        ref_dir = make_ref_dir(make_search_root(tmp_path))
+        cc.activate(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.bind_ref(tmp_path, self.SESSION_ID, ref_dir)
+        cc.arm(tmp_path, self.SESSION_ID)
+        return ref_dir
+
+    def test_valid_empty_cron_snapshot_pauses_missing_armed_job(
         self, tmp_path: Path
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
-        cc.mark_active(tmp_path, self.SESSION_ID, self.CRON_ID)
+        ref_dir = self._arm_for_ref(tmp_path)
+        cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
 
-        data, _ = self._blocking_stop(tmp_path, session_crons=[])
+        data, _ = self._blocking_stop(tmp_path, session_crons=[], ref_dir=ref_dir)
 
         receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
         assert receipt is not None
         assert receipt["state"] == cc.STATE_PAUSED
         reason = str(data["reason"])
-        assert "continuation scheduled task is paused" in reason
+        assert "continuation one-shot is paused" in reason
         assert "UI-RE Gate" in reason
 
     @pytest.mark.parametrize("session_crons", [None, "unavailable", [{"id": 3}]])
-    def test_absent_or_malformed_cron_snapshot_does_not_pause_active_receipt(
+    def test_absent_or_malformed_cron_snapshot_does_not_pause_armed_receipt(
         self, tmp_path: Path, session_crons: object
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
-        cc.mark_active(tmp_path, self.SESSION_ID, self.CRON_ID)
+        ref_dir = self._arm_for_ref(tmp_path)
+        cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
 
         if session_crons is None:
-            self._blocking_stop(tmp_path, include_session_crons=False)
+            self._blocking_stop(
+                tmp_path,
+                include_session_crons=False,
+                ref_dir=ref_dir,
+            )
         else:
-            self._blocking_stop(tmp_path, session_crons=session_crons)
+            self._blocking_stop(
+                tmp_path,
+                session_crons=session_crons,
+                ref_dir=ref_dir,
+            )
 
         receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
         assert receipt is not None
-        assert receipt["state"] == cc.STATE_ACTIVE
+        assert receipt["state"] == cc.STATE_ARMED
         assert receipt["cronId"] == self.CRON_ID
 
-    def test_exact_matching_cron_snapshot_activates_pending_receipt(
+    def test_exact_matching_cron_snapshot_arms_arming_receipt(
         self, tmp_path: Path
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        ref_dir = self._arm_for_ref(tmp_path)
         row = self._cron_row(tmp_path)
 
-        data, _ = self._blocking_stop(tmp_path, session_crons=[row])
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[row],
+            ref_dir=ref_dir,
+        )
 
         receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
         assert receipt is not None
-        assert receipt["state"] == cc.STATE_ACTIVE
+        assert receipt["state"] == cc.STATE_ARMED
         assert receipt["cronId"] == self.CRON_ID
         assert "CronCreate" not in str(data["reason"])
+        assert "end the current assistant turn" in str(data["reason"])
 
-    def test_exact_matching_cron_snapshot_confirms_active_receipt(
+    def test_exact_matching_cron_snapshot_confirms_armed_receipt(
         self, tmp_path: Path
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
-        cc.mark_active(tmp_path, self.SESSION_ID, self.CRON_ID)
+        ref_dir = self._arm_for_ref(tmp_path)
+        cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
         row = self._cron_row(tmp_path)
 
-        data, _ = self._blocking_stop(tmp_path, session_crons=[row])
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[row],
+            ref_dir=ref_dir,
+        )
 
         receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
         assert receipt is not None
-        assert receipt["state"] == cc.STATE_ACTIVE
+        assert receipt["state"] == cc.STATE_ARMED
         assert receipt["cronId"] == self.CRON_ID
         assert "duplicate continuation scheduled tasks" not in str(data["reason"])
+        assert "CronCreate" not in str(data["reason"])
 
     def test_duplicate_matching_cron_snapshot_prefixes_delete_guidance(
         self, tmp_path: Path
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        ref_dir = self._arm_for_ref(tmp_path)
         row_a = self._cron_row(tmp_path, cron_id="cron-a")
         row_b = self._cron_row(tmp_path, cron_id="cron-b")
 
-        data, _ = self._blocking_stop(tmp_path, session_crons=[row_a, row_b])
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[row_a, row_b],
+            ref_dir=ref_dir,
+        )
 
         receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
         assert receipt is not None
-        assert receipt["state"] == cc.STATE_PENDING
+        assert receipt["state"] == cc.STATE_ARMING
         reason = str(data["reason"])
         assert "duplicate continuation scheduled tasks" in reason
         assert "CronDelete" in reason
         assert "UI-RE Gate" in reason
 
-    def test_unrelated_cron_rows_do_not_activate_pending_receipt(
+    def test_unrelated_cron_rows_do_not_arm_arming_receipt(
         self, tmp_path: Path
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        ref_dir = self._arm_for_ref(tmp_path)
         unrelated = {
             "id": "other-cron",
             "schedule": "* * * * *",
-            "recurring": True,
+            "recurring": False,
             "prompt": "wake [[UI_RE_CONTINUATION:other]]",
         }
 
-        data, _ = self._blocking_stop(tmp_path, session_crons=[unrelated])
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[unrelated],
+            ref_dir=ref_dir,
+        )
 
         receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
         assert receipt is not None
-        assert receipt["state"] == cc.STATE_PENDING
+        assert receipt["state"] == cc.STATE_ARMING
         assert "CronCreate" in str(data["reason"])
 
     def test_paused_receipt_never_reactivates_from_matching_snapshot(
         self, tmp_path: Path
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
-        cc.mark_active(tmp_path, self.SESSION_ID, self.CRON_ID)
-        cc.pause(tmp_path, self.SESSION_ID)
+        ref_dir = self._arm_for_ref(tmp_path)
+        cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
         row = self._cron_row(tmp_path)
+        cc.finish_owned_delete(tmp_path, self.SESSION_ID)
 
-        data, _ = self._blocking_stop(tmp_path, session_crons=[row])
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[row],
+            ref_dir=ref_dir,
+        )
 
         receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
         assert receipt is not None
@@ -388,33 +429,148 @@ class TestSectionGate:
         assert "paused" in reason
         assert "CronDelete" in reason
 
-    def test_first_incomplete_stop_without_receipt_prefixes_croncreate_bootstrap(
+    def test_first_incomplete_stop_creates_binds_and_arms_one_shot(
         self, tmp_path: Path
     ) -> None:
-        data, _ = self._blocking_stop(tmp_path, session_crons=[])
+        data, ref_dir = self._blocking_stop(tmp_path, session_crons=[])
 
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ARMING
+        assert receipt["refDir"] == ref_dir.relative_to(tmp_path).as_posix()
+        create_input = cc.cron_create_input(receipt)
+        assert create_input["recurring"] is False
+        assert create_input["durable"] is False
         reason = str(data["reason"])
-        assert reason.startswith("⛔ UI-RE continuation lease missing")
+        assert reason.startswith("⛔ UI-RE continuation one-shot is arming")
         assert "CronCreate" in reason
-        assert "ui_clone.claude_continuation" in reason
+        assert json.dumps(create_input, sort_keys=True) in reason
         assert "UI-RE Gate" in reason
 
-    def test_first_incomplete_stop_with_pending_receipt_prefixes_croncreate_bootstrap(
+    def test_running_receipt_arms_only_after_gate_is_incomplete(
         self, tmp_path: Path
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.activate(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
 
         data, _ = self._blocking_stop(tmp_path, session_crons=[])
 
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ARMING
         reason = str(data["reason"])
-        assert "continuation lease is pending" in reason
+        assert '"recurring": false' in reason
         assert "CronCreate" in reason
         assert "UI-RE Gate" in reason
+
+    def test_armed_receipt_does_not_create_a_second_job(self, tmp_path: Path) -> None:
+        ref_dir = self._arm_for_ref(tmp_path)
+        cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
+
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[self._cron_row(tmp_path)],
+            ref_dir=ref_dir,
+        )
+
+        reason = str(data["reason"])
+        assert "CronCreate" not in reason
+        assert "end the current assistant turn" in reason
+
+    def test_unsupported_receipt_keeps_ordinary_one_nudge_gate(
+        self, tmp_path: Path
+    ) -> None:
+        ref_dir = self._arm_for_ref(tmp_path)
+        cc.mark_unsupported(
+            tmp_path,
+            self.SESSION_ID,
+            "CronCreate unavailable",
+        )
+
+        data, _ = self._blocking_stop(
+            tmp_path,
+            include_session_crons=False,
+            ref_dir=ref_dir,
+        )
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_UNSUPPORTED
+        reason = str(data["reason"])
+        assert reason.startswith("⛔ UI-RE Gate")
+        assert "continuation state" not in reason
+        assert "CronCreate" not in reason
+
+    def test_running_receipt_adopts_exact_existing_one_shot_without_recreating(
+        self, tmp_path: Path
+    ) -> None:
+        ref_dir = self._arm_for_ref(tmp_path)
+        row = self._cron_row(tmp_path)
+        cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
+        cc.accept_wake(tmp_path, self.SESSION_ID, str(row["prompt"]))
+
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[row],
+            ref_dir=ref_dir,
+        )
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ARMED
+        assert receipt["cronId"] == self.CRON_ID
+        reason = str(data["reason"])
+        assert "CronCreate" not in reason
+        assert "end the current assistant turn" in reason
+
+    def test_missing_receipt_recovers_exact_existing_one_shot_without_recreating(
+        self, tmp_path: Path
+    ) -> None:
+        ref_dir = self._arm_for_ref(tmp_path)
+        row = self._cron_row(tmp_path)
+        cc.receipt_path(tmp_path, self.SESSION_ID).unlink()
+
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[row],
+            ref_dir=ref_dir,
+        )
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ARMED
+        assert receipt["cronId"] == self.CRON_ID
+        reason = str(data["reason"])
+        assert "CronCreate" not in reason
+        assert "end the current assistant turn" in reason
+
+    def test_completed_stop_refreshes_receipt_from_canonical_goal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ref_dir = tmp_path / "tmp" / "ref" / "demo"
+        ref_dir.mkdir(parents=True)
+        cc.activate(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.bind_ref(tmp_path, self.SESSION_ID, ref_dir)
+        monkeypatch.setattr(
+            cc.subprocess,
+            "run",
+            lambda cmd, **kwargs: subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="DONE verify-stamp.json",
+                stderr="",
+            ),
+        )
+
+        section_gate._refresh_continuation_final(tmp_path, self.SESSION_ID, ref_dir)
+
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_COMPLETE
 
     def test_stop_hook_active_releases_without_recreating_continuation(
         self, tmp_path: Path
     ) -> None:
-        cc.create_pending(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.activate(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
         set_active_marker(ref_dir)
@@ -426,7 +582,7 @@ class TestSectionGate:
                     "hook_event_name": "Stop",
                     "session_id": self.SESSION_ID,
                     "stop_hook_active": True,
-                    "session_crons": [self._cron_row(tmp_path)],
+                    "session_crons": [],
                 }
             ),
             env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
@@ -436,7 +592,7 @@ class TestSectionGate:
         assert result.stdout.strip() == ""
         receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
         assert receipt is not None
-        assert receipt["state"] == cc.STATE_PENDING
+        assert receipt["state"] == cc.STATE_RUNNING
 
     def test_stop_hook_active_releases_even_when_gate_would_block(
         self, tmp_path: Path

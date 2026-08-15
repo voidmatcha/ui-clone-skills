@@ -99,25 +99,29 @@ def croncreate_input_from_context(stdout: str) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-def cron_input(receipt: dict[str, object]) -> dict[str, object]:
-    return {
-        "cron": "* * * * *",
-        "prompt": hook._bootstrap_prompt(receipt, SESSION),
-        "recurring": True,
-        "durable": False,
-    }
+def make_arming(project: Path) -> dict[str, object]:
+    cc.activate(project, SESSION, cc.UI_RE_SKILL)
+    ref = project / "tmp" / "ref" / "demo"
+    ref.mkdir(parents=True, exist_ok=True)
+    cc.bind_ref(project, SESSION, ref)
+    return cast(dict[str, object], cc.arm(project, SESSION))
+
+
+def make_armed(project: Path) -> dict[str, object]:
+    make_arming(project)
+    return cast(dict[str, object], cc.mark_armed(project, SESSION, CRON_ID))
 
 
 def cron_row(receipt: dict[str, object], cron_id: str = CRON_ID) -> dict[str, object]:
     return {
         "id": cron_id,
         "schedule": "* * * * *",
-        "recurring": True,
-        "prompt": f"wake [[{receipt['leaseTag']}]]",
+        "recurring": False,
+        "prompt": cc.continuation_prompt(receipt),
     }
 
 
-def test_matching_skill_creates_pending_receipt_and_requests_cron(tmp_path: Path) -> None:
+def test_matching_skill_activation_creates_running_without_cron_context(tmp_path: Path) -> None:
     out = run_adapter(
         tmp_path,
         payload(
@@ -130,18 +134,12 @@ def test_matching_skill_creates_pending_receipt_and_requests_cron(tmp_path: Path
 
     receipt = cc.load_receipt(tmp_path, SESSION)
     assert receipt is not None
-    assert receipt["state"] == cc.STATE_PENDING
-    ctx = context(out)
-    assert "CronCreate" in ctx
-    assert '"cron": "* * * * *"' in ctx
-    assert '"recurring": true' in ctx
-    assert '"durable": false' in ctx
-    assert f"[[{receipt['leaseTag']}]]" in ctx
+    assert receipt["state"] == cc.STATE_RUNNING
+    assert "cronId" not in receipt
+    assert out == ""
 
 
-def test_userprompt_raw_slash_skill_creates_pending_receipt_and_requests_cron(
-    tmp_path: Path,
-) -> None:
+def test_userprompt_raw_slash_skill_creates_running_without_cron_context(tmp_path: Path) -> None:
     out = run_adapter(
         tmp_path,
         user_prompt_payload(
@@ -152,16 +150,12 @@ def test_userprompt_raw_slash_skill_creates_pending_receipt_and_requests_cron(
 
     receipt = cc.load_receipt(tmp_path, SESSION)
     assert receipt is not None
-    assert receipt["state"] == cc.STATE_PENDING
-    assert hook_event_name(out) == "UserPromptSubmit"
-    ctx = context(out)
-    assert "CronCreate" in ctx
-    assert croncreate_input_from_context(out) == cron_input(receipt)
+    assert receipt["state"] == cc.STATE_RUNNING
+    assert "cronId" not in receipt
+    assert out == ""
 
 
-def test_userprompt_command_xml_skill_creates_pending_from_legacy_user_prompt(
-    tmp_path: Path,
-) -> None:
+def test_userprompt_command_xml_is_not_exact_start_slash_activation(tmp_path: Path) -> None:
     out = run_adapter(
         tmp_path,
         user_prompt_payload(
@@ -174,11 +168,8 @@ def test_userprompt_command_xml_skill_creates_pending_from_legacy_user_prompt(
         ),
     )
 
-    receipt = cc.load_receipt(tmp_path, SESSION)
-    assert receipt is not None
-    assert receipt["state"] == cc.STATE_PENDING
-    assert hook_event_name(out) == "UserPromptSubmit"
-    assert croncreate_input_from_context(out) == cron_input(receipt)
+    assert out == ""
+    assert cc.load_receipt(tmp_path, SESSION) is None
 
 
 @pytest.mark.parametrize(
@@ -193,10 +184,7 @@ def test_userprompt_command_xml_skill_creates_pending_from_legacy_user_prompt(
         "",
     ],
 )
-def test_userprompt_non_exact_skill_invocations_are_noops(
-    tmp_path: Path,
-    prompt: str,
-) -> None:
+def test_userprompt_non_exact_skill_invocations_are_noops(tmp_path: Path, prompt: str) -> None:
     out = run_adapter(tmp_path, user_prompt_payload(project=tmp_path, prompt=prompt))
 
     assert out == ""
@@ -230,11 +218,7 @@ def test_userprompt_malformed_payload_error_preserves_hook_event_name(tmp_path: 
 
 
 def test_malformed_json_error_defaults_to_pretooluse_hook_event(tmp_path: Path) -> None:
-    result = run_hook(
-        MODULE,
-        stdin_data="{not json",
-        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
-    )
+    result = run_hook(MODULE, stdin_data="{not json", env={"CLAUDE_PROJECT_DIR": str(tmp_path)})
 
     assert result.returncode == 0
     out = result.stdout.strip()
@@ -242,46 +226,7 @@ def test_malformed_json_error_defaults_to_pretooluse_hook_event(tmp_path: Path) 
     assert "Expecting property name" in context(out)
 
 
-def test_skill_croncreate_prompt_loads_bound_ref_then_runs_canonical_sequence(
-    tmp_path: Path,
-) -> None:
-    out = run_adapter(
-        tmp_path,
-        payload(
-            project=tmp_path,
-            event="PreToolUse",
-            tool="Skill",
-            tool_input={"skill": cc.UI_RE_SKILL},
-        ),
-    )
-
-    actual_input = croncreate_input_from_context(out)
-    prompt = cast(str, actual_input["prompt"])
-    assert actual_input == {
-        "cron": "* * * * *",
-        "prompt": prompt,
-        "recurring": True,
-        "durable": False,
-    }
-    assert "load exactly one bound refDir from the receipt" in prompt
-    assert "Treat the loaded receipt refDir as <bound-ref>" in prompt
-    assert "python -m ui_clone.goal <bound-ref> --check-done" in prompt
-    assert "python -m ui_clone.pipeline <bound-ref> status --json" in prompt
-    assert "python -m ui_clone.pipeline <bound-ref> next --json" in prompt
-    assert "python -m ui_clone.pipeline <bound-ref> report --for-llm" in prompt
-    assert prompt.index("python -m ui_clone.goal <bound-ref> --check-done") < prompt.index(
-        "python -m ui_clone.pipeline <bound-ref> status --json"
-    )
-    assert prompt.index("python -m ui_clone.pipeline <bound-ref> status --json") < prompt.index(
-        "python -m ui_clone.pipeline <bound-ref> next --json"
-    )
-    assert prompt.index("python -m ui_clone.pipeline <bound-ref> next --json") < prompt.index(
-        "python -m ui_clone.pipeline <bound-ref> report --for-llm"
-    )
-    assert "pipeline status/next/report" not in prompt
-
-
-def test_shim_allows_continuation_bootstrap_before_tmp_ref_exists(tmp_path: Path) -> None:
+def test_shim_allows_activation_before_tmp_ref_exists(tmp_path: Path) -> None:
     result = run_shim_adapter(
         tmp_path,
         payload(
@@ -293,12 +238,10 @@ def test_shim_allows_continuation_bootstrap_before_tmp_ref_exists(tmp_path: Path
     )
 
     assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
     receipt = cc.load_receipt(tmp_path, SESSION)
     assert receipt is not None
-    assert receipt["state"] == cc.STATE_PENDING
-    ctx = context(result.stdout.strip())
-    assert "CronCreate" in ctx
-    assert f"[[{receipt['leaseTag']}]]" in ctx
+    assert receipt["state"] == cc.STATE_RUNNING
 
 
 def test_unrelated_skill_is_noop(tmp_path: Path) -> None:
@@ -316,8 +259,29 @@ def test_unrelated_skill_is_noop(tmp_path: Path) -> None:
     assert cc.load_receipt(tmp_path, SESSION) is None
 
 
-def test_pre_croncreate_accepts_exact_continuation_input(tmp_path: Path) -> None:
-    receipt = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+def test_pre_croncreate_accepts_only_exact_nonrecurring_input(tmp_path: Path) -> None:
+    arming = make_arming(tmp_path)
+    exact = cc.cron_create_input(arming)
+
+    assert exact["recurring"] is False
+    assert run_adapter(
+        tmp_path,
+        payload(
+            project=tmp_path,
+            event="PreToolUse",
+            tool="CronCreate",
+            tool_input=exact,
+        ),
+    ) == ""
+
+
+def test_pre_croncreate_corrects_tagged_malformed_input(tmp_path: Path) -> None:
+    arming = make_arming(tmp_path)
+    malformed = {
+        **cc.cron_create_input(arming),
+        "cron": "*/5 * * * *",
+        "recurring": True,
+    }
 
     out = run_adapter(
         tmp_path,
@@ -325,38 +289,16 @@ def test_pre_croncreate_accepts_exact_continuation_input(tmp_path: Path) -> None
             project=tmp_path,
             event="PreToolUse",
             tool="CronCreate",
-            tool_input=cron_input(receipt),
+            tool_input=malformed,
         ),
     )
 
-    assert out == ""
-
-
-def test_pre_croncreate_correction_for_owned_malformed_input(tmp_path: Path) -> None:
-    receipt = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
-
-    out = run_adapter(
-        tmp_path,
-        payload(
-            project=tmp_path,
-            event="PreToolUse",
-            tool="CronCreate",
-            tool_input={
-                "cron": "*/5 * * * *",
-                "prompt": f"wake [[{receipt['leaseTag']}]]",
-                "recurring": True,
-                "durable": False,
-            },
-        ),
-    )
-
-    ctx = context(out)
-    assert "Replace the continuation CronCreate input" in ctx
-    assert '"cron": "* * * * *"' in ctx
+    assert croncreate_input_from_context(out) == cc.cron_create_input(arming)
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ARMING  # type: ignore[index]
 
 
 def test_pre_unowned_croncreate_and_delete_are_noops(tmp_path: Path) -> None:
-    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+    make_arming(tmp_path)
 
     create_out = run_adapter(
         tmp_path,
@@ -364,7 +306,7 @@ def test_pre_unowned_croncreate_and_delete_are_noops(tmp_path: Path) -> None:
             project=tmp_path,
             event="PreToolUse",
             tool="CronCreate",
-            tool_input={"cron": "* * * * *", "prompt": "unrelated", "recurring": True},
+            tool_input={"cron": "* * * * *", "prompt": "unrelated", "recurring": False},
         ),
     )
     delete_out = run_adapter(
@@ -381,8 +323,8 @@ def test_pre_unowned_croncreate_and_delete_are_noops(tmp_path: Path) -> None:
     assert delete_out == ""
 
 
-def test_failed_or_unstructured_create_never_activates(tmp_path: Path) -> None:
-    receipt = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+def test_post_unstructured_create_keeps_arming_and_requests_one_cronlist(tmp_path: Path) -> None:
+    arming = make_arming(tmp_path)
 
     out = run_adapter(
         tmp_path,
@@ -390,17 +332,17 @@ def test_failed_or_unstructured_create_never_activates(tmp_path: Path) -> None:
             project=tmp_path,
             event="PostToolUse",
             tool="CronCreate",
-            tool_input=cron_input(receipt),
+            tool_input=cc.cron_create_input(arming),
             tool_response="created maybe",
         ),
     )
 
-    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_PENDING  # type: ignore[index]
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ARMING  # type: ignore[index]
     assert "CronList" in context(out)
 
 
-def test_post_croncreate_structured_id_activates(tmp_path: Path) -> None:
-    receipt = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+def test_post_structured_create_arms_and_requires_immediate_turn_end(tmp_path: Path) -> None:
+    arming = make_arming(tmp_path)
 
     out = run_adapter(
         tmp_path,
@@ -408,20 +350,21 @@ def test_post_croncreate_structured_id_activates(tmp_path: Path) -> None:
             project=tmp_path,
             event="PostToolUse",
             tool="CronCreate",
-            tool_input=cron_input(receipt),
+            tool_input=cc.cron_create_input(arming),
             tool_response={"id": CRON_ID},
         ),
     )
 
-    assert out == ""
     current = cc.load_receipt(tmp_path, SESSION)
     assert current is not None
-    assert current["state"] == cc.STATE_ACTIVE
+    assert current["state"] == cc.STATE_ARMED
     assert current["cronId"] == CRON_ID
+    assert "end the current assistant turn" in context(out)
+    assert "pipeline work" in context(out)
 
 
 def test_post_unrelated_croncreate_structured_id_is_noop(tmp_path: Path) -> None:
-    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+    make_arming(tmp_path)
 
     out = run_adapter(
         tmp_path,
@@ -429,89 +372,65 @@ def test_post_unrelated_croncreate_structured_id_is_noop(tmp_path: Path) -> None
             project=tmp_path,
             event="PostToolUse",
             tool="CronCreate",
-            tool_input={"cron": "* * * * *", "prompt": "unrelated", "recurring": True},
+            tool_input={"cron": "* * * * *", "prompt": "unrelated", "recurring": False},
             tool_response={"id": CRON_ID},
         ),
     )
 
     assert out == ""
-    receipt = cc.load_receipt(tmp_path, SESSION)
-    assert receipt is not None
-    assert receipt["state"] == cc.STATE_PENDING
-    assert "cronId" not in receipt
-
-
-def test_post_tagged_malformed_croncreate_keeps_pending_and_corrects(tmp_path: Path) -> None:
-    receipt = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
-
-    out = run_adapter(
-        tmp_path,
-        payload(
-            project=tmp_path,
-            event="PostToolUse",
-            tool="CronCreate",
-            tool_input={
-                "cron": "*/5 * * * *",
-                "prompt": f"wake [[{receipt['leaseTag']}]]",
-                "recurring": True,
-                "durable": False,
-            },
-            tool_response={"id": CRON_ID},
-        ),
-    )
-
-    assert "Replace the continuation CronCreate input" in context(out)
     current = cc.load_receipt(tmp_path, SESSION)
     assert current is not None
-    assert current["state"] == cc.STATE_PENDING
+    assert current["state"] == cc.STATE_ARMING
     assert "cronId" not in current
 
 
-def test_cronlist_recovers_zero_and_duplicates(tmp_path: Path) -> None:
-    receipt = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+def test_cronlist_recovers_one_match_and_rejects_zero_or_duplicates(tmp_path: Path) -> None:
+    arming = make_arming(tmp_path)
 
-    assert "unsupported" in context(
-        run_adapter(
-            tmp_path,
-            payload(
-                project=tmp_path,
-                event="PostToolUse",
-                tool="CronList",
-                tool_response={"crons": []},
-            ),
-        )
-    )
-    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_PENDING  # type: ignore[index]
-
-    out = run_adapter(
+    absent = run_adapter(
         tmp_path,
         payload(
             project=tmp_path,
             event="PostToolUse",
             tool="CronList",
-            tool_response={"crons": [cron_row(receipt)]},
+            tool_response={"crons": []},
         ),
     )
-    assert out == ""
-    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ACTIVE  # type: ignore[index]
+    assert "unsupported" in context(absent)
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ARMING  # type: ignore[index]
 
-    cc.pause(tmp_path, SESSION)
-    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
-    dup_out = run_adapter(
+    one = run_adapter(
         tmp_path,
         payload(
             project=tmp_path,
             event="PostToolUse",
             tool="CronList",
-            tool_response={"crons": [cron_row(receipt, "cron-a"), cron_row(receipt, "cron-b")]},
+            tool_response={"crons": [cron_row(arming)]},
         ),
     )
-    assert "duplicate" in context(dup_out).lower()
-    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_PENDING  # type: ignore[index]
+    assert "end the current assistant turn" in context(one)
+    assert "pipeline work" in context(one)
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ARMED  # type: ignore[index]
+
+    project = tmp_path / "duplicate"
+    duplicate_arming = make_arming(project)
+    duplicate = run_adapter(
+        project,
+        payload(
+            project=project,
+            event="PostToolUse",
+            tool="CronList",
+            tool_response={
+                "crons": [cron_row(duplicate_arming, "cron-a"), cron_row(duplicate_arming, "cron-b")]
+            },
+        ),
+    )
+    assert "duplicate" in context(duplicate).lower()
+    assert cc.load_receipt(project, SESSION)["state"] == cc.STATE_ARMING  # type: ignore[index]
 
 
-def test_pending_cronlist_unavailable_or_malformed_fails_closed(tmp_path: Path) -> None:
-    receipt = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
+def test_cronlist_unavailable_or_malformed_arming_fails_closed(tmp_path: Path) -> None:
+    arming = make_arming(tmp_path)
 
     unavailable = run_adapter(
         tmp_path,
@@ -523,7 +442,7 @@ def test_pending_cronlist_unavailable_or_malformed_fails_closed(tmp_path: Path) 
         ),
     )
     assert "unsupported" in context(unavailable)
-    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_PENDING  # type: ignore[index]
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ARMING  # type: ignore[index]
 
     malformed = run_adapter(
         tmp_path,
@@ -531,28 +450,82 @@ def test_pending_cronlist_unavailable_or_malformed_fails_closed(tmp_path: Path) 
             project=tmp_path,
             event="PostToolUse",
             tool="CronList",
-            tool_response={"crons": [{"id": 3, "prompt": f"[[{receipt['leaseTag']}]]"}]},
+            tool_response={"crons": [{"id": 3, "prompt": f"[[{arming['leaseTag']}]]"}]},
         ),
     )
     assert "unsupported" in context(malformed)
     assert "malformed" in context(malformed)
-    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_PENDING  # type: ignore[index]
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ARMING  # type: ignore[index]
 
 
-def test_crondelete_owned_success_classifies_outcome(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_exact_wake_resumes_before_pipeline_context(tmp_path: Path) -> None:
+    armed = make_armed(tmp_path)
+    wake = cc.continuation_prompt(armed)
+
+    out = run_adapter(tmp_path, user_prompt_payload(project=tmp_path, prompt=wake))
+
+    current = cc.load_receipt(tmp_path, SESSION)
+    assert current is not None
+    assert current["state"] == cc.STATE_RUNNING
+    assert "cronId" not in current
+    assert "goal --check-done" in context(out)
+
+
+def test_altered_wake_does_not_resume_and_requires_owned_delete(tmp_path: Path) -> None:
+    armed = make_armed(tmp_path)
+    altered = cc.continuation_prompt(armed) + "\nchanged"
+
+    out = run_adapter(tmp_path, user_prompt_payload(project=tmp_path, prompt=altered))
+
+    current = cc.load_receipt(tmp_path, SESSION)
+    assert current is not None
+    assert current["state"] == cc.STATE_CANCELING
+    assert json.dumps({"id": CRON_ID}, sort_keys=True) in context(out)
+    assert "goal --check-done" not in context(out)
+
+
+def test_manual_prompt_cancels_armed_job_before_work(tmp_path: Path) -> None:
+    make_armed(tmp_path)
+
+    out = run_adapter(
+        tmp_path,
+        user_prompt_payload(project=tmp_path, prompt="continue with the fix"),
+    )
+
+    current = cc.load_receipt(tmp_path, SESSION)
+    assert current is not None
+    assert current["state"] == cc.STATE_CANCELING
+    assert json.dumps({"id": CRON_ID}, sort_keys=True) in context(out)
+    assert "pipeline work" in context(out)
+
+
+def test_exact_wake_loses_to_manual_resume_after_canceling_transition(tmp_path: Path) -> None:
+    armed = make_armed(tmp_path)
+    wake = cc.continuation_prompt(armed)
+    cc.begin_manual_resume(tmp_path, SESSION)
+
+    out = run_adapter(tmp_path, user_prompt_payload(project=tmp_path, prompt=wake))
+
+    current = cc.load_receipt(tmp_path, SESSION)
+    assert current is not None
+    assert current["state"] == cc.STATE_CANCELING
+    assert "stale one-shot wake" in context(out)
+    assert "goal --check-done" not in context(out)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(cc.STATE_CANCELING, cc.STATE_RUNNING), (cc.STATE_ARMED, cc.STATE_PAUSED)],
+)
+def test_owned_delete_success_uses_state_specific_outcome(
+    tmp_path: Path, before: str, after: str
 ) -> None:
-    receipt = cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
-    cc.mark_active(tmp_path, SESSION, CRON_ID)
-    calls: list[tuple[Path, str]] = []
+    make_armed(tmp_path)
+    if before == cc.STATE_CANCELING:
+        cc.begin_manual_resume(tmp_path, SESSION)
 
-    def fake_delete(project: Path, session_id: str) -> dict[str, object]:
-        calls.append((project, session_id))
-        return {**receipt, "state": cc.STATE_PAUSED}
-
-    monkeypatch.setattr(cc, "owned_delete_outcome", fake_delete)
-
-    out = hook.handle(
+    out = run_adapter(
+        tmp_path,
         payload(
             project=tmp_path,
             event="PostToolUse",
@@ -560,25 +533,17 @@ def test_crondelete_owned_success_classifies_outcome(
             tool_input={"id": CRON_ID},
             tool_response={"ok": True},
         ),
-        tmp_path,
     )
 
-    assert out is None
-    assert calls == [(tmp_path.resolve(), SESSION)]
+    assert out == ""
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == after  # type: ignore[index]
 
 
-def test_crondelete_unowned_success_is_noop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
-    cc.mark_active(tmp_path, SESSION, CRON_ID)
+def test_unowned_crondelete_success_is_noop(tmp_path: Path) -> None:
+    make_armed(tmp_path)
 
-    def fail_delete(project: Path, session_id: str) -> dict[str, object]:
-        raise AssertionError("unowned delete should not classify")
-
-    monkeypatch.setattr(cc, "owned_delete_outcome", fail_delete)
-
-    out = hook.handle(
+    out = run_adapter(
+        tmp_path,
         payload(
             project=tmp_path,
             event="PostToolUse",
@@ -586,52 +551,21 @@ def test_crondelete_unowned_success_is_noop(
             tool_input={"id": "other-cron"},
             tool_response={"ok": True},
         ),
-        tmp_path,
     )
 
-    assert out is None
-
-
-def test_post_crondelete_missing_response_does_not_classify(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
-    cc.mark_active(tmp_path, SESSION, CRON_ID)
-
-    def fail_delete(project: Path, session_id: str) -> dict[str, object]:
-        raise AssertionError("missing response should not classify")
-
-    monkeypatch.setattr(cc, "owned_delete_outcome", fail_delete)
-    data = payload(
-        project=tmp_path,
-        event="PostToolUse",
-        tool="CronDelete",
-        tool_input={"id": CRON_ID},
-        tool_response={"ok": True},
-    )
-    del data["tool_response"]
-
-    out = hook.handle(data, tmp_path)
-
-    assert out is not None
-    assert "missing required field: tool_response" in context(out)
-    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ACTIVE  # type: ignore[index]
+    assert out == ""
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_ARMED  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
     ("tool_response", "expected_context"),
-    [
-        ({"error": "CronDelete failed"}, "CronDelete failed"),
-        ({}, "supported successful response"),
-    ],
+    [({"error": "CronDelete failed"}, "CronDelete failed"), ({}, "supported successful response")],
 )
-def test_post_crondelete_unsuccessful_response_keeps_receipt_active(
-    tmp_path: Path,
-    tool_response: dict[str, object],
-    expected_context: str,
+def test_unsuccessful_owned_crondelete_preserves_canceling(
+    tmp_path: Path, tool_response: dict[str, object], expected_context: str
 ) -> None:
-    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
-    cc.mark_active(tmp_path, SESSION, CRON_ID)
+    make_armed(tmp_path)
+    cc.begin_manual_resume(tmp_path, SESSION)
 
     out = run_adapter(
         tmp_path,
@@ -646,27 +580,45 @@ def test_post_crondelete_unsuccessful_response_keeps_receipt_active(
 
     current = cc.load_receipt(tmp_path, SESSION)
     assert current is not None
-    assert current["state"] == cc.STATE_ACTIVE
+    assert current["state"] == cc.STATE_CANCELING
     assert current["cronId"] == CRON_ID
     assert expected_context in context(out)
 
 
-def test_pre_crondelete_paused_job_self_delete_guidance(tmp_path: Path) -> None:
-    cc.create_pending(tmp_path, SESSION, cc.UI_RE_SKILL)
-    cc.mark_active(tmp_path, SESSION, CRON_ID)
-    cc.pause(tmp_path, SESSION)
+def test_post_crondelete_missing_response_does_not_transition(tmp_path: Path) -> None:
+    make_armed(tmp_path)
+    cc.begin_manual_resume(tmp_path, SESSION)
+    data = payload(
+        project=tmp_path,
+        event="PostToolUse",
+        tool="CronDelete",
+        tool_input={"id": CRON_ID},
+        tool_response={"ok": True},
+    )
+    del data["tool_response"]
+
+    out = hook.handle(data, tmp_path)
+
+    assert out is not None
+    assert "missing required field: tool_response" in context(out)
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_CANCELING  # type: ignore[index]
+
+
+def test_valid_cronlist_absence_pauses_armed_without_context(tmp_path: Path) -> None:
+    make_armed(tmp_path)
 
     out = run_adapter(
         tmp_path,
         payload(
             project=tmp_path,
-            event="PreToolUse",
-            tool="CronDelete",
-            tool_input={"id": CRON_ID},
+            event="PostToolUse",
+            tool="CronList",
+            tool_response={"crons": []},
         ),
     )
 
-    assert "paused continuation receipt" in context(out)
+    assert out == ""
+    assert cc.load_receipt(tmp_path, SESSION)["state"] == cc.STATE_PAUSED  # type: ignore[index]
 
 
 def test_missing_required_payload_fields_fail_closed(tmp_path: Path) -> None:

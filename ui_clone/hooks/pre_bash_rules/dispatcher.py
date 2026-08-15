@@ -61,14 +61,16 @@ from .static_mirror import (
 
 _CONTINUATION_RECEIPT_DIR = ".ui-re-continuation"
 _CONTINUATION_FINAL_STATES = {"complete", "terminal", "unsupported"}
+_CONTINUATION_BLOCKED_STATES = {"arming", "armed", "canceling", "paused"}
 _CONTINUATION_TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _CONTINUATION_UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _CONTINUATION_CONTROL_SUBCOMMANDS = {
-    "create-pending",
+    "activate",
     "bind-ref",
+    "arm",
     "mark-unsupported",
     "pause",
     "status",
@@ -255,15 +257,17 @@ def _guard_claude_continuation(
     if receipt is None:
         return None
     state = receipt.get("state")
-    if state == "pending":
+    if state in _CONTINUATION_BLOCKED_STATES:
         return (
-            "⛔ UI-RE continuation is pending for this Claude session. Activate "
-            "the scheduled Cron continuation first; do not start UI-RE pipeline "
-            "work from the pre-activation tab. Allowed control commands are "
-            "`python -m ui_clone.claude_continuation create-pending`, "
-            "`bind-ref`, `mark-unsupported`, `pause`, and `status`."
+            f"⛔ UI-RE continuation state `{state}` owns this Claude session. "
+            "Do not start or resume UI-RE pipeline work until the one-shot create/delete "
+            "transition finishes or an explicit reactivation returns the receipt to "
+            "`running`. Allowed control commands are `activate`, `bind-ref`, `arm`, "
+            "`mark-unsupported`, `pause`, and `status`."
         )
-    return _bind_continuation_ref(project_root, session_id, receipt, target_ref)
+    if state == "running":
+        return _bind_continuation_ref(project_root, session_id, receipt, target_ref)
+    return None
 
 
 def _guard_whole_document_mirror(cmd: str) -> str | None:

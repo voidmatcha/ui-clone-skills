@@ -21,22 +21,26 @@ from ui_clone.state import PipelineState, is_authoritative_terminal_state
 UI_RE_SKILL = "ui-clone-skills:ui-reverse-engineering"
 RECEIPT_DIR = ".ui-re-continuation"
 
-STATE_PENDING = "pending"
-STATE_ACTIVE = "active"
+STATE_RUNNING = "running"
+STATE_ARMING = "arming"
+STATE_ARMED = "armed"
+STATE_CANCELING = "canceling"
 STATE_PAUSED = "paused"
 STATE_COMPLETE = "complete"
 STATE_TERMINAL = "terminal"
 STATE_UNSUPPORTED = "unsupported"
 STATES = {
-    STATE_PENDING,
-    STATE_ACTIVE,
+    STATE_RUNNING,
+    STATE_ARMING,
+    STATE_ARMED,
+    STATE_CANCELING,
     STATE_PAUSED,
     STATE_COMPLETE,
     STATE_TERMINAL,
     STATE_UNSUPPORTED,
 }
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _HOST = "claude-code"
 _SCHEDULE = "* * * * *"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -45,6 +49,7 @@ _UUID_RE = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _FINAL_STATES = {STATE_COMPLETE, STATE_TERMINAL, STATE_UNSUPPORTED}
+_SCHEDULER_STATES = {STATE_ARMING, STATE_ARMED, STATE_CANCELING}
 
 
 class ContinuationError(ValueError):
@@ -109,6 +114,19 @@ def _lease_tag(project: Path, session_id: str) -> str:
     return f"UI_RE_CONTINUATION:{digest}"
 
 
+def _safe_ref_dir(ref_dir: object) -> str:
+    if not isinstance(ref_dir, str) or not ref_dir:
+        raise ContinuationError("invalid ref dir")
+    path = Path(ref_dir)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {".", ".."} or _TOKEN_RE.fullmatch(part) is None for part in path.parts)
+    ):
+        raise ContinuationError("invalid ref dir")
+    return path.as_posix()
+
+
 def _validate_receipt(
     raw: object, session_id: str, project: Path | None = None
 ) -> dict[str, Any] | None:
@@ -121,20 +139,23 @@ def _validate_receipt(
     if raw.get("sessionId") != session_id:
         return None
     try:
-        _validate_state(raw.get("state"))
+        state = _validate_state(raw.get("state"))
         _validate_token(str(raw.get("sessionId")), label="session id")
         tag = raw.get("leaseTag")
         if not isinstance(tag, str) or not tag.startswith("UI_RE_CONTINUATION:"):
             return None
         cron_id = raw.get("cronId")
-        if cron_id is not None and _validate_cron_id(cron_id) is None:
+        if state in {STATE_ARMED, STATE_CANCELING}:
+            if _validate_cron_id(cron_id) is None:
+                return None
+        elif cron_id is not None:
             return None
         ref_dir = raw.get("refDir")
         if ref_dir is not None:
             _safe_ref_dir(ref_dir)
     except ContinuationError:
         return None
-    if project is not None and tag != _lease_tag(project, session_id):
+    if project is not None and raw.get("leaseTag") != _lease_tag(project, session_id):
         raise ContinuationError("receipt lease tag does not match project and session")
     return dict(raw)
 
@@ -167,17 +188,23 @@ def load_receipt(project: Path, session_id: str) -> dict[str, Any] | None:
 
 
 def _write_receipt_unlocked(
-    project: Path, session_id: str, receipt: Mapping[str, Any]
+    project: Path,
+    session_id: str,
+    receipt: Mapping[str, Any],
+    *,
+    expected_current: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     path = receipt_path(project, session_id)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     current = _read_receipt_unlocked(project, session_id)
-    if (
-        current is not None
-        and receipt.get("state") == STATE_PENDING
-        and current.get("state") in {STATE_ACTIVE, STATE_COMPLETE, STATE_TERMINAL}
-    ):
-        raise ContinuationError("receipt changed concurrently")
+    if expected_current is not None:
+        _ensure_current_unmodified(project, session_id, expected_current)
+    elif current is not None and receipt.get("state") == STATE_RUNNING:
+        current_state = current.get("state")
+        if current_state not in {STATE_RUNNING, STATE_PAUSED}:
+            raise ContinuationError("receipt changed concurrently")
+        if current.get("updatedAt") != receipt.get("updatedAt"):
+            raise ContinuationError("receipt changed concurrently")
     payload = json.dumps(dict(receipt), sort_keys=True, indent=2) + "\n"
     tmp_name: str | None = None
     try:
@@ -232,7 +259,7 @@ def _new_receipt(project: Path, session_id: str) -> dict[str, Any]:
         "host": _HOST,
         "sessionId": session_id,
         "skill": UI_RE_SKILL,
-        "state": STATE_PENDING,
+        "state": STATE_RUNNING,
         "leaseTag": _lease_tag(project, session_id),
         "createdAt": now,
         "updatedAt": now,
@@ -248,7 +275,11 @@ def _replace_state(
 ) -> dict[str, Any]:
     _validate_state(state)
     next_receipt = dict(receipt)
-    next_receipt.update(updates)
+    for key, value in updates.items():
+        if value is None:
+            next_receipt.pop(key, None)
+        else:
+            next_receipt[key] = value
     next_receipt["state"] = state
     next_receipt["updatedAt"] = _now()
     validated = _validate_receipt(next_receipt, session_id, project)
@@ -256,10 +287,15 @@ def _replace_state(
         raise ContinuationError("invalid receipt update")
     with _locked_session(project, session_id):
         _ensure_current_unmodified(project, session_id, receipt)
-        return _write_receipt_unlocked(project, session_id, validated)
+        return _write_receipt_unlocked(
+            project,
+            session_id,
+            validated,
+            expected_current=receipt,
+        )
 
 
-def create_pending(project: Path, session_id: str, skill: str) -> dict[str, Any]:
+def activate(project: Path, session_id: str, skill: str) -> dict[str, Any]:
     if skill != UI_RE_SKILL:
         raise ContinuationError("unsupported skill")
     _validate_token(session_id, label="session id")
@@ -270,20 +306,11 @@ def create_pending(project: Path, session_id: str, skill: str) -> dict[str, Any]
                 raise ContinuationError("invalid existing receipt")
             return _write_receipt_unlocked(project, session_id, _new_receipt(project, session_id))
     state = _validate_state(current.get("state"))
-    if state in {STATE_PENDING, STATE_ACTIVE}:
+    if state == STATE_RUNNING:
         return current
     if state == STATE_PAUSED:
-        return _replace_state(project, session_id, current, STATE_PENDING, cronId=None)
-    raise ContinuationError(f"cannot create pending receipt from {state}")
-
-
-def _safe_ref_dir(ref_dir: object) -> str:
-    if not isinstance(ref_dir, str) or not ref_dir:
-        raise ContinuationError("invalid ref dir")
-    path = Path(ref_dir)
-    if path.is_absolute() or ".." in path.parts:
-        raise ContinuationError("invalid ref dir")
-    return path.as_posix()
+        return _replace_state(project, session_id, current, STATE_RUNNING, reason=None)
+    raise ContinuationError(f"cannot activate {state} receipt")
 
 
 def _relative_ref(project: Path, ref_dir: Path) -> str:
@@ -312,7 +339,27 @@ def bind_ref(project: Path, session_id: str, ref_dir: Path) -> dict[str, Any]:
     return _replace_state(project, session_id, current, state, refDir=ref)
 
 
-def mark_active(project: Path, session_id: str, cron_id: str) -> dict[str, Any]:
+def _require_bound_ref(receipt: Mapping[str, Any]) -> str:
+    ref = receipt.get("refDir")
+    if ref is None:
+        raise ContinuationError("receipt has no bound ref")
+    return _safe_ref_dir(ref)
+
+
+def arm(project: Path, session_id: str) -> dict[str, Any]:
+    current = load_receipt(project, session_id)
+    if current is None:
+        raise ContinuationError("missing receipt")
+    state = _validate_state(current.get("state"))
+    _require_bound_ref(current)
+    if state == STATE_RUNNING:
+        return _replace_state(project, session_id, current, STATE_ARMING, cronId=None, reason=None)
+    if state == STATE_ARMING:
+        return current
+    raise ContinuationError(f"cannot arm {state} receipt")
+
+
+def mark_armed(project: Path, session_id: str, cron_id: str) -> dict[str, Any]:
     cron = _validate_cron_id(cron_id)
     if cron is None:
         raise ContinuationError("invalid cron id")
@@ -320,11 +367,35 @@ def mark_active(project: Path, session_id: str, cron_id: str) -> dict[str, Any]:
     if current is None:
         raise ContinuationError("missing receipt")
     state = _validate_state(current.get("state"))
-    if state == STATE_PENDING:
-        return _replace_state(project, session_id, current, STATE_ACTIVE, cronId=cron)
-    if state == STATE_ACTIVE and current.get("cronId") == cron:
+    if state == STATE_ARMING:
+        return _replace_state(project, session_id, current, STATE_ARMED, cronId=cron)
+    if state == STATE_ARMED and current.get("cronId") == cron:
         return current
-    raise ContinuationError(f"cannot activate {state} receipt")
+    raise ContinuationError(f"cannot mark armed from {state}")
+
+
+def begin_manual_resume(project: Path, session_id: str) -> dict[str, Any]:
+    current = load_receipt(project, session_id)
+    if current is None:
+        raise ContinuationError("missing receipt")
+    state = _validate_state(current.get("state"))
+    if state == STATE_ARMED:
+        return _replace_state(project, session_id, current, STATE_CANCELING)
+    if state == STATE_CANCELING:
+        return current
+    raise ContinuationError(f"cannot begin manual resume from {state}")
+
+
+def finish_owned_delete(project: Path, session_id: str) -> dict[str, Any]:
+    current = load_receipt(project, session_id)
+    if current is None:
+        raise ContinuationError("missing receipt")
+    state = _validate_state(current.get("state"))
+    if state == STATE_CANCELING:
+        return _replace_state(project, session_id, current, STATE_RUNNING, cronId=None, reason=None)
+    if state == STATE_ARMED:
+        return _replace_state(project, session_id, current, STATE_PAUSED, cronId=None, reason=None)
+    raise ContinuationError(f"cannot finish owned delete from {state}")
 
 
 def mark_unsupported(project: Path, session_id: str, reason: str) -> dict[str, Any]:
@@ -333,8 +404,8 @@ def mark_unsupported(project: Path, session_id: str, reason: str) -> dict[str, A
     current = load_receipt(project, session_id)
     if current is None:
         raise ContinuationError("missing receipt")
-    if current.get("state") != STATE_PENDING:
-        raise ContinuationError("only pending receipts can be unsupported")
+    if current.get("state") != STATE_ARMING:
+        raise ContinuationError("only arming receipts can be unsupported")
     return _replace_state(project, session_id, current, STATE_UNSUPPORTED, reason=reason.strip())
 
 
@@ -343,10 +414,12 @@ def pause(project: Path, session_id: str) -> dict[str, Any]:
     if current is None:
         raise ContinuationError("missing receipt")
     state = _validate_state(current.get("state"))
-    if state in {STATE_PENDING, STATE_ACTIVE}:
-        return _replace_state(project, session_id, current, STATE_PAUSED)
+    if state == STATE_RUNNING:
+        return _replace_state(project, session_id, current, STATE_PAUSED, reason=None)
     if state == STATE_PAUSED:
         return current
+    if state in _SCHEDULER_STATES:
+        raise ContinuationError(f"cannot pause scheduler-owned {state} receipt")
     raise ContinuationError(f"cannot pause {state} receipt")
 
 
@@ -354,7 +427,7 @@ def _row_match(row: Mapping[str, Any], lease_tag: str, cron_id: str | None) -> s
     row_id = _validate_cron_id(row.get("id"))
     if row_id is None:
         return None
-    if row.get("schedule") != _SCHEDULE or row.get("recurring") is not True:
+    if row.get("schedule") != _SCHEDULE or row.get("recurring") is not False:
         return None
     prompt = row.get("prompt")
     if not isinstance(prompt, str):
@@ -373,8 +446,8 @@ def _valid_rows(rows: list[object]) -> list[Mapping[str, Any]]:
             continue
         if (
             _validate_cron_id(row.get("id")) is None
-            or row.get("schedule") != _SCHEDULE
-            or row.get("recurring") is not True
+            or not isinstance(row.get("schedule"), str)
+            or not isinstance(row.get("recurring"), bool)
             or not isinstance(row.get("prompt"), str)
         ):
             continue
@@ -438,74 +511,77 @@ def reconcile_cron_snapshot(project: Path, session_id: str, snapshot: object) ->
     if len(cron_ids) > 1:
         raise ContinuationError("duplicate continuation crons")
     if cron_ids:
-        if state == STATE_PENDING:
-            receipt = mark_active(project, session_id, cron_ids[0])
-            return ReconcileResult("active", receipt, cron_ids[0])
-        if state == STATE_ACTIVE:
-            return ReconcileResult("active", current, cron_ids[0])
-        if state == STATE_PAUSED:
-            return ReconcileResult("paused", current, cron_ids[0])
-        return ReconcileResult(state, current)
-    if state == STATE_ACTIVE:
-        receipt = pause(project, session_id)
-        return ReconcileResult("paused", receipt)
+        if state == STATE_ARMING:
+            receipt = mark_armed(project, session_id, cron_ids[0])
+            return ReconcileResult(STATE_ARMED, receipt, cron_ids[0])
+        if state in {STATE_ARMED, STATE_CANCELING}:
+            return ReconcileResult(state, current, cron_ids[0])
+        return ReconcileResult("unexpected", current, cron_ids[0])
+    if state in {STATE_ARMED, STATE_CANCELING}:
+        receipt = _replace_state(project, session_id, current, STATE_PAUSED, cronId=None)
+        return ReconcileResult(STATE_PAUSED, receipt)
     return ReconcileResult("absent", current)
-
-
-def _require_single_ref(receipt: Mapping[str, Any]) -> str:
-    ref = receipt.get("refDir")
-    if ref is None:
-        raise ContinuationError("receipt has no bound ref")
-    return _safe_ref_dir(ref)
 
 
 def continuation_prompt(receipt: Mapping[str, Any]) -> str:
     state = _validate_state(receipt.get("state"))
+    if state not in _SCHEDULER_STATES:
+        raise ContinuationError("continuation prompt requires arming, armed, or canceling receipt")
     tag = receipt.get("leaseTag")
     session_id = receipt.get("sessionId")
-    cron_id = receipt.get("cronId")
     if not isinstance(tag, str) or not tag.startswith("UI_RE_CONTINUATION:"):
         raise ContinuationError("invalid lease tag")
     if not isinstance(session_id, str):
         raise ContinuationError("invalid session id")
     _validate_token(session_id, label="session id")
-    if cron_id is not None and _validate_cron_id(cron_id) is None:
-        raise ContinuationError("invalid cron id")
-    if state == STATE_PAUSED:
-        return (
-            f"[[{tag}]]\n"
-            "This continuation receipt is paused. Delete this scheduled task if it is still present, "
-            "then stop without running pipeline work."
-        )
-    if state != STATE_ACTIVE:
-        raise ContinuationError("continuation prompt requires active receipt")
-    ref = _require_single_ref(receipt)
-    status_command = (
-        "python -m ui_clone.claude_continuation status "
-        f"--session-id {session_id} --cwd . --json"
-    )
+    ref = _require_bound_ref(receipt)
     return (
         f"[[{tag}]]\n"
         "Claude UI reverse-engineering continuation wake-up.\n"
         f"Session: {session_id}\n"
         f"Ref: {ref}\n"
-        f"First run the continuation control check: {status_command}.\n"
-        "If receipt state is paused, complete, terminal, or unsupported, "
-        "delete the owned scheduled task and perform no pipeline work.\n"
-        "Only if the receipt state is active, continue with the exact bound ref above.\n"
-        "Then run the canonical goal --check-done command: python -m ui_clone.goal "
+        "The UserPromptSubmit hook must validate this entire immutable prompt before work.\n"
+        "Run canonical goal --check-done first: python -m ui_clone.goal "
         f"{ref} --check-done.\n"
-        "If complete, delete the owned scheduled task and report the verify-stamp evidence.\n"
-        "If terminal or authority is required, delete the owned scheduled task and report the blocker.\n"
-        "If incomplete, read these in order before acting: python -m ui_clone.pipeline "
+        "If incomplete, read these in order: python -m ui_clone.pipeline "
         f"{ref} status --json; python -m ui_clone.pipeline {ref} next --json; "
         f"python -m ui_clone.pipeline {ref} report --for-llm.\n"
-        "Execute the reported next required action while preserving normal gates."
+        "Execute the reported next required action while preserving normal gates. If the exact live "
+        "pipeline owner is already alive, attach to or wait on that owner and never start a duplicate."
+    )
+
+
+def cron_create_input(receipt: Mapping[str, Any]) -> dict[str, object]:
+    if _validate_state(receipt.get("state")) != STATE_ARMING:
+        raise ContinuationError("cron create input requires arming receipt")
+    return {
+        "cron": _SCHEDULE,
+        "prompt": continuation_prompt(receipt),
+        "recurring": False,
+        "durable": False,
+    }
+
+
+def accept_wake(project: Path, session_id: str, prompt: str) -> dict[str, Any]:
+    current = load_receipt(project, session_id)
+    if current is None:
+        raise ContinuationError("missing receipt")
+    if prompt != continuation_prompt(current):
+        raise ContinuationError("wake prompt must match exact prompt")
+    if current.get("state") != STATE_ARMED:
+        raise ContinuationError("wake requires armed receipt")
+    return _replace_state(
+        project,
+        session_id,
+        current,
+        STATE_RUNNING,
+        cronId=None,
+        wakeAcceptedAt=_now(),
     )
 
 
 def _ref_path(project: Path, receipt: Mapping[str, Any]) -> Path:
-    return _project_root(project) / _require_single_ref(receipt)
+    return _project_root(project) / _require_bound_ref(receipt)
 
 
 def _terminal_state(ref_dir: Path) -> dict[str, Any] | None:
@@ -516,25 +592,15 @@ def _terminal_state(ref_dir: Path) -> dict[str, Any] | None:
     return terminal if is_authoritative_terminal_state(terminal) else None
 
 
-def _set_delete_state(project: Path, session_id: str, state: str, **updates: Any) -> dict[str, Any]:
+def refresh_goal_state(project: Path, session_id: str) -> dict[str, Any]:
     current = load_receipt(project, session_id)
     if current is None:
         raise ContinuationError("missing receipt")
     current_state = _validate_state(current.get("state"))
-    if current_state not in {STATE_PENDING, STATE_ACTIVE}:
-        raise ContinuationError(f"cannot mark delete outcome from {current_state}")
-    return _replace_state(project, session_id, current, state, **updates)
-
-
-def owned_delete_outcome(project: Path, session_id: str) -> dict[str, Any]:
-    current = load_receipt(project, session_id)
-    if current is None:
-        raise ContinuationError("missing receipt")
-    current_state = _validate_state(current.get("state"))
-    if current_state not in {STATE_PENDING, STATE_ACTIVE}:
-        raise ContinuationError(f"cannot mark delete outcome from {current_state}")
-    if current.get("refDir") is None:
-        return _set_delete_state(project, session_id, STATE_PAUSED)
+    if current_state in _FINAL_STATES:
+        raise ContinuationError(f"cannot refresh goal state from {current_state}")
+    if current_state not in {STATE_RUNNING, STATE_ARMING}:
+        raise ContinuationError(f"cannot refresh goal state from {current_state}")
     ref_dir = _ref_path(project, current)
     try:
         result = subprocess.run(
@@ -545,34 +611,27 @@ def owned_delete_outcome(project: Path, session_id: str) -> dict[str, Any]:
         )
     except OSError as exc:
         raise ContinuationError(f"goal --check-done failed: {exc}") from exc
-    if result.returncode not in {0, 1, 2}:
-        raise ContinuationError(
-            f"unexpected goal --check-done return code: {result.returncode}"
-        )
     if result.returncode == 0:
-        return _set_delete_state(
+        return _replace_state(
             project,
             session_id,
+            current,
             STATE_COMPLETE,
             outcome="canonical goal --check-done passed",
         )
     if result.returncode == 1:
-        return _set_delete_state(
-            project,
-            session_id,
-            STATE_PAUSED,
-            goalReturnCode=result.returncode,
-        )
-    try:
-        terminal = _terminal_state(ref_dir)
-    except OSError as exc:
-        raise ContinuationError(f"pipeline state read failed: {exc}") from exc
-    if terminal:
-        return _set_delete_state(project, session_id, STATE_TERMINAL, terminalState=terminal)
+        return current
     if result.returncode == 2:
-        return _set_delete_state(
+        try:
+            terminal = _terminal_state(ref_dir)
+        except OSError as exc:
+            raise ContinuationError(f"pipeline state read failed: {exc}") from exc
+        if terminal:
+            return _replace_state(project, session_id, current, STATE_TERMINAL, terminalState=terminal)
+        return _replace_state(
             project,
             session_id,
+            current,
             STATE_TERMINAL,
             terminalState={
                 "status": "aborted",
@@ -595,13 +654,15 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--session-id", required=True)
         p.add_argument("--cwd", required=True, type=Path)
 
-    create = sub.add_parser("create-pending")
-    add_common(create)
-    create.add_argument("--skill", required=True)
+    activate_parser = sub.add_parser("activate")
+    add_common(activate_parser)
+    activate_parser.add_argument("--skill", required=True)
 
     bind = sub.add_parser("bind-ref")
     add_common(bind)
     bind.add_argument("--ref-dir", required=True, type=Path)
+
+    add_common(sub.add_parser("arm"))
 
     unsupported = sub.add_parser("mark-unsupported")
     add_common(unsupported)
@@ -619,10 +680,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command == "create-pending":
-            receipt = create_pending(args.cwd, args.session_id, args.skill)
+        if args.command == "activate":
+            receipt = activate(args.cwd, args.session_id, args.skill)
         elif args.command == "bind-ref":
             receipt = bind_ref(args.cwd, args.session_id, args.ref_dir)
+        elif args.command == "arm":
+            receipt = arm(args.cwd, args.session_id)
         elif args.command == "mark-unsupported":
             receipt = mark_unsupported(args.cwd, args.session_id, args.reason)
         elif args.command == "pause":
