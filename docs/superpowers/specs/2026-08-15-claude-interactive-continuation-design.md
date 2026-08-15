@@ -166,6 +166,8 @@ The required activation and Stop sequence is:
 5. End the current assistant turn without starting more pipeline work.
 6. When the one-shot fires and auto-deletes, accept only the exact immutable tagged wake prompt and atomically move `armed` back to `running` before checking the goal.
 
+Stop discovery normally starts from the shared active marker and implementation ownership scan. Extraction-only phases intentionally have neither `.ui-re-active` nor an implementation directory because that marker belongs to the first implementation write. If the normal scan is empty, an exact validated Claude receipt binding may therefore supply the single candidate ref after project-local path and freshness validation. This fallback is session-scoped and Claude-only; it does not broaden Codex or shared active-run discovery.
+
 A pre-Bash guard permits normal pipeline work in `running`. It blocks continuation-owned substantive commands in `arming`, `armed`, `canceling`, or `paused`, where work must wait for the scheduler transition or explicit reactivation. It permits an explicit `unsupported` receipt when the host genuinely lacks scheduled-task tools; unsupported hosts retain the current one-nudge Stop behavior instead of entering a broken enforcement loop.
 
 The guard permits the receipt control CLI and unrelated Bash. It does not block continuation-owned pipeline work in `running`, `complete`, `terminal`, or `unsupported`. A fresh direct slash command or fallback Skill-tool invocation may replace `paused` with a new `running` receipt only because that invocation is an explicit user request.

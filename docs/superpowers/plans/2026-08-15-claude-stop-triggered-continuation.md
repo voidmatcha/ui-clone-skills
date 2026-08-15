@@ -829,7 +829,8 @@ git commit -m "Deliver the one-shot continuation contract to fresh sessions" \
 ### Task 6: Verify, install, and prove fresh-session behavior
 
 **Files:**
-- No source edits expected.
+- Acceptance repair: `ui_clone/hooks/section_gate.py`, `tests/hooks/test_section_gate.py`
+- Cache-busting delivery: all six version carriers, plus `uv.lock`
 - Preserve: `.handover/` and temporary acceptance artifacts until the result is reported.
 
 - [ ] **Step 1: Run the complete repository verification gates**
@@ -853,7 +854,7 @@ Dispatch one read-only spec-compliance reviewer against the approved design and 
 bash install.sh
 ```
 
-Expected: Claude plugin `ui-clone-skills@voidmatcha` installs at `0.7.32`, the cache delivery probe finds the continuation hook files, the Codex projection and merged hooks verify, and the install marker points to this worktree.
+Expected: Claude plugin `ui-clone-skills@voidmatcha` installs at `0.7.33`, the cache delivery probe finds the continuation hook files, the Codex projection and merged hooks verify, and the install marker points to this worktree. The patch version is required because the first live acceptance exposed a markerless bound-ref Stop gap after `0.7.32` had already entered Claude's immutable cache.
 
 - [ ] **Step 4: Start fresh ordinary Claude and Codex tabs through Purplemux**
 

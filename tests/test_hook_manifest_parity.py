@@ -248,6 +248,19 @@ def test_claude_continuation_routes_are_explicitly_claude_only() -> None:
     assert codex_routes == set(), "Codex manifest must not register Claude continuations"
 
 
+def test_shared_stop_route_declares_the_invoking_host() -> None:
+    expected_hosts = {CLAUDE: "claude", CODEX: "codex"}
+    for path, expected_host in expected_hosts.items():
+        commands = [
+            hook.get("command", "")
+            for entry in (_load(path).get("hooks") or {}).get("Stop", [])
+            for hook in entry.get("hooks", [])
+            if _module_for(hook.get("command", "")) == "section_gate"
+        ]
+        assert len(commands) == 1
+        assert f"UI_CLONE_HOOK_HOST={expected_host} bash" in commands[0]
+
+
 def test_routes_omit_only_events_whose_hooks_are_all_explicitly_excluded() -> None:
     manifest = {
         "hooks": {

@@ -48,6 +48,7 @@ class TestSectionGate:
         session_crons: object = None,
         include_session_crons: bool = True,
         ref_dir: Path | None = None,
+        hook_host: str = "claude",
     ) -> tuple[dict[str, object], Path]:
         if ref_dir is None:
             search_root = make_search_root(tmp_path)
@@ -63,7 +64,10 @@ class TestSectionGate:
         result = run_hook(
             self.MODULE,
             stdin_data=json.dumps(payload),
-            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_CLONE_HOOK_HOST": hook_host,
+            },
         )
         assert result.returncode == 0
         data = json.loads(result.stdout.strip())
@@ -286,6 +290,28 @@ class TestSectionGate:
         cc.arm(tmp_path, self.SESSION_ID)
         return ref_dir
 
+    def _markerless_bound_incomplete_ref(self, tmp_path: Path) -> Path:
+        ref_dir = make_ref_dir(make_search_root(tmp_path), "capture-only")
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps(
+                {
+                    "component": "capture-only",
+                    "started_at": "2026-08-15T11:10:11Z",
+                    "completed_steps": ["reference"],
+                    "current_gate": "extraction",
+                    "last_updated": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    ),
+                    "gate_fail_counts": {},
+                    "unclonable_reasons": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        cc.activate(tmp_path, self.SESSION_ID, cc.UI_RE_SKILL)
+        cc.bind_ref(tmp_path, self.SESSION_ID, ref_dir)
+        return ref_dir
+
     def test_valid_empty_cron_snapshot_pauses_missing_armed_job(
         self, tmp_path: Path
     ) -> None:
@@ -446,6 +472,75 @@ class TestSectionGate:
         assert "CronCreate" in reason
         assert json.dumps(create_input, sort_keys=True) in reason
         assert "UI-RE Gate" in reason
+
+    def test_markerless_bound_incomplete_ref_arms_claude_one_shot(
+        self, tmp_path: Path
+    ) -> None:
+        self._markerless_bound_incomplete_ref(tmp_path)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": self.SESSION_ID,
+                    "session_crons": [],
+                }
+            ),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_CLONE_HOOK_HOST": "claude",
+            },
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip(), "the exact bound incomplete ref must engage Stop"
+        data = json.loads(result.stdout.strip())
+        assert data.get("decision") == "block"
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_ARMING
+        reason = str(data["reason"])
+        assert "continuation one-shot is arming" in reason
+        assert '"recurring": false' in reason
+        assert '"durable": false' in reason
+
+    def test_markerless_bound_incomplete_ref_is_not_a_codex_activation_path(
+        self, tmp_path: Path
+    ) -> None:
+        self._markerless_bound_incomplete_ref(tmp_path)
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps(
+                {"hook_event_name": "Stop", "session_id": self.SESSION_ID}
+            ),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_CLONE_HOOK_HOST": "codex",
+            },
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        assert receipt["state"] == cc.STATE_RUNNING
+
+    def test_codex_stop_keeps_shared_gate_without_claude_continuation(
+        self, tmp_path: Path
+    ) -> None:
+        data, _ = self._blocking_stop(
+            tmp_path,
+            session_crons=[],
+            hook_host="codex",
+        )
+
+        assert not cc.receipt_path(tmp_path, self.SESSION_ID).exists()
+        reason = str(data["reason"])
+        assert reason.startswith("⛔ UI-RE Gate")
+        assert "continuation one-shot" not in reason
+        assert "CronCreate" not in reason
 
     def test_running_receipt_arms_only_after_gate_is_incomplete(
         self, tmp_path: Path

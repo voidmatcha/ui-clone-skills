@@ -1454,9 +1454,47 @@ def _refresh_continuation_final(
         return
 
 
+def _continuation_bound_ref(
+    project_root: Path,
+    session_id: str,
+) -> Path | None:
+    """Resolve the exact project-local ref owned by this Claude receipt.
+
+    Extraction-only pipeline phases intentionally do not create
+    ``.ui-re-active``; that marker belongs to the first implementation write.
+    The validated receipt binding is the stronger ownership signal for the
+    incomplete Stop edge before generation begins.
+    """
+    if not session_id:
+        return None
+    try:
+        receipt = _continuation.load_receipt(project_root, session_id)
+    except _continuation.ContinuationError:
+        return None
+    if receipt is None or receipt.get("state") in {
+        _continuation.STATE_COMPLETE,
+        _continuation.STATE_TERMINAL,
+    }:
+        return None
+    raw_ref = receipt.get("refDir")
+    if not isinstance(raw_ref, str) or not raw_ref:
+        return None
+
+    project = project_root.resolve()
+    candidate = (project / raw_ref).resolve()
+    allowed_parents = {
+        (project / "tmp" / "ref").resolve(),
+        (project / ".ui-clone" / "runs").resolve(),
+    }
+    if candidate.parent not in allowed_parents or not candidate.is_dir():
+        return None
+    return candidate
+
+
 def main() -> None:
     project_root = _find_project_root()
     search_root = project_root / "tmp" / "ref"
+    is_claude_hook = os.environ.get("UI_CLONE_HOOK_HOST") == "claude"
 
     # Claude Code Stop hooks receive a JSON payload on stdin with
     # `session_id`, `hook_event_name`, etc. We read it (best-effort, never
@@ -1532,6 +1570,14 @@ def main() -> None:
             file=sys.stderr,
         )
     active_dirs = scoped_dirs
+    if not active_dirs and is_claude_hook:
+        bound_ref = _continuation_bound_ref(project_root, stop_scope_session_id)
+        if bound_ref is not None:
+            # A validated receipt is exact session ownership. Extraction-only
+            # phases have neither an implementation marker nor an impl dir, so
+            # use that bound ref as the single fail-closed fallback while still
+            # applying the ordinary freshness policy.
+            active_dirs = _fresh_active_dirs([bound_ref])
     if not active_dirs:
         # Off-pipeline scratch-clone closure (omx postmortem): block only on
         # the CORRELATED PAIR — (A) this session browsed an EXTERNAL site
@@ -1574,21 +1620,23 @@ def main() -> None:
     for ref_dir in active_dirs:
         block_reason = _enforce_ref_dir(ref_dir)
         if block_reason:
-            prefix = _continuation_stop_prefix(
-                project_root,
-                stop_scope_session_id,
-                payload,
-                ref_dir,
-            )
-            if prefix:
-                block_reason = f"{prefix}{block_reason}"
+            if is_claude_hook:
+                prefix = _continuation_stop_prefix(
+                    project_root,
+                    stop_scope_session_id,
+                    payload,
+                    ref_dir,
+                )
+                if prefix:
+                    block_reason = f"{prefix}{block_reason}"
             _emit_block(block_reason)
             sys.exit(0)
-        _refresh_continuation_final(
-            project_root,
-            stop_scope_session_id,
-            ref_dir,
-        )
+        if is_claude_hook:
+            _refresh_continuation_final(
+                project_root,
+                stop_scope_session_id,
+                ref_dir,
+            )
 
     sys.exit(0)
 
