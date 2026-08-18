@@ -33,14 +33,41 @@ _found_crumbs() {
   done
   return 1
 }
+# An armed continuation stores its receipt in <project>/.ui-re-continuation, which
+# outlives tmp/ref and is the other state claude_continuation acts on.
+_found_receipt() {
+  [[ -d "${CLAUDE_PROJECT_DIR}/.ui-re-continuation" ]] && return 0
+  local gr; gr="$(git rev-parse --show-toplevel 2>/dev/null)"
+  [[ -n "$gr" && -d "$gr/.ui-re-continuation" ]] && return 0
+  local d="$PWD"
+  while [[ "$d" != "/" ]]; do
+    [[ -d "$d/.ui-re-continuation" ]] && return 0
+    d="$(dirname "$d")"
+  done
+  return 1
+}
 _payload=""
 if ! _found_ref && ! _found_crumbs; then
   _payload="$(cat 2>/dev/null || true)"
+  # claude_continuation used to bypass the fast-skip unconditionally, which spawned
+  # uv plus an interpreter on every prompt in every project — ~1.2s to return None.
+  # It only acts on two states, so admit exactly those: a bootstrap invocation of the
+  # UI-RE skill in a tree that has no tmp/ref yet, or an existing continuation receipt.
+  # Match the bare skill name, NOT "/<name>": activation arrives both as a slash prompt
+  # on UserPromptSubmit and as PreToolUse Skill with tool_input.skill set, and only the
+  # first carries a leading slash. The payload test is deliberately looser than the
+  # module's; this is a pre-filter and the module still makes the exact decision.
+  _proceed=0
   case "${1:-}:$_payload" in
-    ui_clone.hooks.claude_continuation:*) : ;;
-    *agent-browser*open*http*) : ;;  # external browse — proceed to write the crumb
-    *) exit 0 ;;
+    ui_clone.hooks.claude_continuation:*"ui-clone-skills:ui-reverse-engineering"*) _proceed=1 ;;
+    *agent-browser*open*http*) _proceed=1 ;;  # external browse — proceed to write the crumb
   esac
+  if (( ! _proceed )) &&
+     [[ "${1:-}" == "ui_clone.hooks.claude_continuation" ]] &&
+     _found_receipt; then
+    _proceed=1
+  fi
+  (( _proceed )) || exit 0
 fi
 if ! command -v uv >/dev/null 2>&1; then
   # shellcheck disable=SC2016

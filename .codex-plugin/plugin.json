@@ -1,6 +1,6 @@
 {
   "name": "ui-clone-skills",
-  "version": "0.7.35",
+  "version": "0.7.36",
   "description": "Motion forensics for the animated web. Four jobs against a live URL: decode (analyse motion + build, no code), clone (URL → React + Tailwind), verify (AE/SSIM + motion-parity score vs. an existing impl), extract (raw JSON dump). Extracts real CSS and animation params (GSAP / Framer Motion / Lenis / anime.js) directly from JS bundles, then verifies with AE/SSIM diff — no vision tokens. Three skills: ui-reverse-engineering (decode/clone/verify/extract entry points, supports Webflow IX2 / Next.js / Tailwind v4), ui-capture (reference + transitions), visual-debug (AE/SSIM diff + computed-style mismatch diagnosis).",
   "author": {
     "name": "YONGJAE LEE"
