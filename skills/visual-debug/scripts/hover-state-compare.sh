@@ -1523,39 +1523,57 @@ if [ ! -f "$REGIONS" ]; then
 fi
 
 # Extract (name, triggerType, selector) tuples where triggerType matches the
-# hover family. Lenient regex like the verification-plan hasHover signal —
-# matches "hover", "css-hover", "scale-on-hover-target", etc.
+# hover family. Prefer live CSSOM hover activations because they are the actual
+# pointer targets for :hover rules; regions.json can contain synthesized
+# decoration targets that are present in the DOM but not reliably hoverable.
 TARGETS_FILE="$(mktemp)"
 track_temp_file "$TARGETS_FILE"
 
 if command -v jq >/dev/null 2>&1; then
+  if [ -f "$HOVER_CSS" ]; then
+    jq -r '(if type=="array" then . else (.rules // []) end)
+      | map((.activation // (.selector | split(",")[0] | split(":")[0] | gsub("^\\s+|\\s+$";""))) as $activation
+        | select($activation | type == "string" and length > 0)
+        | {name:$activation, triggerType:"synth-hover-css", selector:$activation})
+      | .[]
+      | "\(.name | gsub("[\\t\\n]";" "))\t\(.triggerType)\t\(.selector)"' \
+      "$HOVER_CSS" 2>/dev/null >> "$TARGETS_FILE" || true
+  fi
   jq -r '
     [.. | objects | select(.triggerType? | type == "string") | select(.triggerType | test("[Hh]over"))]
-    | unique_by(.selector)
-    | .[0:'"$MAX_HOVER_TARGETS"']
     | .[]
     | "\(.name // .triggerType)\t\(.triggerType)\t\(.selector)"
-  ' "$REGIONS" > "$TARGETS_FILE" 2>/dev/null || true
+  ' "$REGIONS" >> "$TARGETS_FILE" 2>/dev/null || true
+  if [ -s "$TARGETS_FILE" ]; then
+    CAPPED_TARGETS="$(mktemp)"
+    track_temp_file "$CAPPED_TARGETS"
+    python3 - "$TARGETS_FILE" "$MAX_HOVER_TARGETS" > "$CAPPED_TARGETS" <<'PY'
+import sys
+
+path = sys.argv[1]
+try:
+    limit = int(sys.argv[2])
+except Exception:
+    limit = 5
+seen = set()
+rows = []
+for line in open(path, encoding="utf-8", errors="ignore"):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) != 3 or not parts[2] or parts[2] in seen:
+        continue
+    seen.add(parts[2])
+    rows.append(line.rstrip("\n"))
+    if len(rows) >= max(0, limit):
+        break
+print("\n".join(rows))
+PY
+    mv "$CAPPED_TARGETS" "$TARGETS_FILE"
+  fi
 fi
 
-# regions.json carried no triggerType-tagged hover entries (realfood/Lenis
-# full-page-only shape). Try to recover real hover targets from the richer
-# hover artifacts before deciding this is a skip. Priority: hover-css-rules
-# (pure CSS selectors — agent-browser hover accepts them directly) →
-# hover-candidates (carry .text/.rect but selectors may be Playwright-syntax
-# like `button:text(...)`) → states/hover/manifest. Each branch caps at
-# MAX_HOVER_TARGETS and emits the same `name<TAB>triggerType<TAB>selector`
-# tuple the run loop below reads.
+# regions.json and hover-css-rules carried no target. Try hover-candidates and
+# states/hover/manifest before deciding this is a skip.
 if [ ! -s "$TARGETS_FILE" ] && command -v jq >/dev/null 2>&1; then
-  if [ -f "$HOVER_CSS" ]; then
-    # [{selector:".a:hover .b", css, media}]. Reduce ".x:hover .y" /
-    # ".x:focus-visible, .x:hover" → first hoverable base selector ".x"
-    # (split on first comma, then first colon).
-    jq -r '(if type=="array" then . else (.rules // []) end)
-      | map(.selector | split(",")[0] | split(":")[0] | gsub("^\\s+|\\s+$";""))
-      | map(select(length>0)) | unique | .[0:'"$MAX_HOVER_TARGETS"'] | .[]
-      | "\(.)\tsynth-hover-css\t\(.)"' "$HOVER_CSS" 2>/dev/null >> "$TARGETS_FILE" || true
-  fi
   if [ ! -s "$TARGETS_FILE" ] && [ -f "$HOVER_CAND" ]; then
     jq -r '(if type=="array" then . else (.candidates // []) end)
       | map(select(.selector!=null)) | unique_by(.selector)

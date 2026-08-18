@@ -93,7 +93,7 @@ def scrollheight_within_tolerance(
     ref: float | None,
     impl: float | None,
 ) -> bool:
-    if not isinstance(ref, int | float) or not isinstance(impl, int | float):
+    if not isinstance(ref, (int, float)) or not isinstance(impl, (int, float)):
         return False
     if ref <= 0:
         return False

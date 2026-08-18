@@ -372,7 +372,9 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     ),
     "hover-tree-diff": _ci(SRC, REF_SPEC),
     "click-state-compare": _ci(SRC, REF_SPEC + ("regions.json",)),
-    "video-motion-compare": _ci(SRC + PUBLIC, REF_SPEC + REF_ASSET_SUB),
+    "video-motion-compare": _ci(
+        SRC + PUBLIC, REF_SPEC + REF_ASSET_SUB + ("regions.json",)
+    ),
     # VLM "automated eyeball": judges live static crops + a scroll-motion sweep.
     # Impl behavior/style come from SRC; the crop pairing is driven off the ref
     # section map (crops themselves live under sections/, regenerated with it).

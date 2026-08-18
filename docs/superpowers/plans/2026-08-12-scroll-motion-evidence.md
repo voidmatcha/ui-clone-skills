@@ -216,7 +216,7 @@ Expected: PASS.
 
 Stage only Task 4 files and commit with Lore trailers.
 
-## Task 5: Update the skill contract and verify on Realfood
+## Task 5: Update the skill contract and verify on the benchmark site
 
 **Files:**
 
@@ -268,7 +268,7 @@ bash scripts/ci/pre-push-security.sh > /tmp/ui-clone-security.log 2>&1
 tail -40 /tmp/ui-clone-security.log
 ```
 
-Expected: literal `ci-local: all checks passed` and zero security blockers. Report Realfood clone completion only if `pipeline verify`, `verify-stamp.json`, and `python -m ui_clone.goal --check-done` also prove it; otherwise report the exact remaining gate.
+Expected: literal `ci-local: all checks passed` and zero security blockers. Report clone completion only if `pipeline verify`, `verify-stamp.json`, and `python -m ui_clone.goal --check-done` also prove it; otherwise report the exact remaining gate.
 
 - [ ] **Step 6: Commit skill documentation and generated evidence separately**
 

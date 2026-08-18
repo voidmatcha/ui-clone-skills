@@ -342,6 +342,26 @@ ref_secs_list = ref_data.get("sections") or []
 impl_secs_list = impl_data.get("sections") or []
 
 
+def _section_identity(section: dict) -> str:
+    name = str(section.get("name") or "")
+    if "#" not in name:
+        return ""
+    tag, rest = name.split("#", 1)
+    ident = rest.split(".", 1)[0].strip()
+    if not tag or not ident:
+        return ""
+    return f"{tag}#{ident}"
+
+
+impl_secs_by_identity = {
+    ident: section
+    for section in impl_secs_list
+    if isinstance(section, dict)
+    for ident in [_section_identity(section)]
+    if ident
+}
+
+
 def _bbox_overlap_ratio(a: dict, b: dict) -> float:
     """Vertical overlap fraction between two bboxes (0..1).
 
@@ -371,14 +391,17 @@ for i, ref_s in enumerate(ref_secs_list):
     rt = int(ref_s.get("total") or 0)
     if rt < 1:
         continue
-    impl_s = impl_secs_list[i] if i < len(impl_secs_list) else {}
+    ref_identity = _section_identity(ref_s)
+    impl_s = impl_secs_by_identity.get(ref_identity) if ref_identity else None
+    if impl_s is None:
+        impl_s = impl_secs_list[i] if i < len(impl_secs_list) else {}
     if not isinstance(impl_s, dict):
         impl_s = {}
     it = int(impl_s.get("total") or 0)
     # Bbox sanity: if the paired impl section is at the wrong page
     # location, fall back to "first impl section with non-zero total
     # whose bbox overlaps the ref section best" search.
-    if it == 0 or _bbox_overlap_ratio(ref_s, impl_s) < 0.3:
+    if not ref_identity and (it == 0 or _bbox_overlap_ratio(ref_s, impl_s) < 0.3):
         best = None
         best_score = 0.3  # require >= 0.3 overlap
         for j, candidate in enumerate(impl_secs_list):

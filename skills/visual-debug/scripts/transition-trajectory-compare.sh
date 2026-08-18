@@ -160,7 +160,37 @@ PY
 )
   [ -n "$EXTRA_DYN" ] && DYN_SELECTORS="$DYN_SELECTORS, $EXTRA_DYN"
 fi
-MASK_JS="(() => { const st = document.createElement('style'); st.id='__traj-mask__'; st.textContent = '${DYN_SELECTORS} { visibility: hidden !important; }'; document.head.appendChild(st); return 'masked'; })()"
+
+PROTECTED_TRAJ_TARGETS=""
+if [ -f "$DIR/transition-spec.json" ]; then
+  PROTECTED_TRAJ_TARGETS=$(python3 - "$DIR/transition-spec.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+out = []
+for t in d.get("transitions") or []:
+    if not isinstance(t, dict) or t.get("dynamic") is True:
+        continue
+    target = str(t.get("target") or "").strip()
+    if not target or '"' in target or "'" in target:
+        continue
+    animation = t.get("animation") if isinstance(t.get("animation"), dict) else {}
+    labels = [
+        str(t.get("id") or ""),
+        str(t.get("trigger") or ""),
+        str(t.get("type") or ""),
+        str(animation.get("type") or ""),
+    ]
+    if any("scroll-state-machine" in label for label in labels):
+        out.append(target)
+print(", ".join(dict.fromkeys(out)))
+PY
+)
+fi
+
+MASK_JS="(() => { const protectedTargets = '${PROTECTED_TRAJ_TARGETS}'.split(',').map((s) => s.trim()).filter(Boolean); for (const sel of protectedTargets) { for (const el of document.querySelectorAll(sel)) { const st = getComputedStyle(el); const r = el.getBoundingClientRect(); if (st.display !== 'none' && st.visibility !== 'hidden' && Number.parseFloat(st.opacity || '1') > 0.01 && r.width > 1 && r.height > 1) { el.setAttribute('data-ui-clone-traj-protected', 'true'); } } } const st = document.createElement('style'); st.id='__traj-mask__'; st.textContent = '${DYN_SELECTORS} { visibility: hidden !important; }'; document.head.appendChild(st); if (protectedTargets.length) { const rst = document.createElement('style'); rst.id='__traj-mask-target-restore__'; rst.textContent = '[data-ui-clone-traj-protected], [data-ui-clone-traj-protected] * { visibility: visible !important; }'; document.head.appendChild(rst); } return 'masked'; })()"
 agent-browser --session "$SESSION_REF" eval "$MASK_JS" >/dev/null 2>&1 || true
 agent-browser --session "$SESSION_IMPL" eval "$MASK_JS" >/dev/null 2>&1 || true
 
@@ -360,6 +390,182 @@ with report.open("a", encoding="utf-8") as fh:
         fh.write(f"❌ {fail}/{compared} structural motion target sample(s) exceeded trajectory thresholds\n")
         raise SystemExit(1)
     fh.write(f"✅ all {passed}/{compared} visible structural motion target samples within trajectory thresholds\n")
+PY
+  STATUS=$?
+  echo "Wrote $REPORT"
+  exit "$STATUS"
+fi
+
+TARGET_TRAJECTORY_MODE="${TARGET_TRAJECTORY_MODE:-auto}"
+if [ "$TARGET_TRAJECTORY_MODE" != "off" ] && [ -n "$PROTECTED_TRAJ_TARGETS" ]; then
+  TARGET_DIR="$OUT_DIR/target"
+  mkdir -p "$TARGET_DIR" "$OUT_DIR/diagnostic-full-frame/ref" "$OUT_DIR/diagnostic-full-frame/impl" "$OUT_DIR/diagnostic-full-frame/diff"
+  : > "$TARGET_DIR/full-frame-diagnostic.tsv"
+  TARGET_SEL_B64=$(printf '%s' "$PROTECTED_TRAJ_TARGETS" | base64 | tr -d '\n')
+  TARGET_SIGNATURE_JS='(() => JSON.stringify(atob("'"$TARGET_SEL_B64"'").split(",").map((sel) => sel.trim()).filter(Boolean).map((sel) => { const el = document.querySelector(sel); if (!el) return { selector: sel, missing: true }; const r = el.getBoundingClientRect(); const st = getComputedStyle(el); const matrix = st.transform && st.transform !== "none" ? st.transform.match(/matrix.*\(([^)]+)\)/) : null; const parts = matrix ? matrix[1].split(",").map((v) => Number.parseFloat(v.trim())) : []; const ty = parts.length >= 6 ? parts[5] : 0; const className = typeof el.className === "string" ? el.className : String(el.className && el.className.baseVal || ""); return { selector: sel, className, top: r.top, left: r.left, width: r.width, height: r.height, bottom: r.bottom, right: r.right, transform: st.transform, ty, opacity: st.opacity, visibility: st.visibility, display: st.display, rendered: st.display !== "none" && st.visibility !== "hidden" && Number.parseFloat(st.opacity || "1") > 0.01 && r.width > 1 && r.height > 1 }; }), null, 2))()'
+  {
+    echo "# transition-trajectory-compare"
+    echo "# mode: target-motion"
+    echo "# target selectors: $PROTECTED_TRAJ_TARGETS"
+    echo "# sampled points: $TRAJECTORY_POINTS"
+    echo "# ref scroll-range: ${REF_HEIGHT}px  impl scroll-range: ${IMPL_HEIGHT}px"
+    echo
+  } > "$REPORT"
+
+  for pct in $TRAJECTORY_POINTS; do
+    REF_Y=$(awk -v h="$REF_HEIGHT"  -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
+    IMPL_Y=$(awk -v h="$IMPL_HEIGHT" -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
+    agent-browser --session "$SESSION_REF"  eval "(() => { window.scrollTo({top: $REF_Y,  behavior: 'instant'}); return window.scrollY; })()" >/dev/null
+    agent-browser --session "$SESSION_IMPL" eval "(() => { window.scrollTo({top: $IMPL_Y, behavior: 'instant'}); return window.scrollY; })()" >/dev/null
+    sleep "$(awk -v ms="$WAIT_SCROLL_SETTLE_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
+    agent-browser --session "$SESSION_REF"  eval "$TARGET_SIGNATURE_JS" > "$TARGET_DIR/ref-$pct.json"
+    agent-browser --session "$SESSION_IMPL" eval "$TARGET_SIGNATURE_JS" > "$TARGET_DIR/impl-$pct.json"
+
+    REF_PNG="$OUT_DIR/diagnostic-full-frame/ref/${pct}.png"
+    IMPL_PNG="$OUT_DIR/diagnostic-full-frame/impl/${pct}.png"
+    DIFF_PNG="$OUT_DIR/diagnostic-full-frame/diff/${pct}.png"
+    agent-browser --session "$SESSION_REF"  screenshot "$REF_PNG"  >/dev/null || true
+    agent-browser --session "$SESSION_IMPL" screenshot "$IMPL_PNG" >/dev/null || true
+    if [ -s "$REF_PNG" ] && [ -s "$IMPL_PNG" ]; then
+      REF_SIZE=$(magick identify -format "%wx%h" "$REF_PNG" 2>/dev/null || echo "")
+      IMPL_SIZE=$(magick identify -format "%wx%h" "$IMPL_PNG" 2>/dev/null || echo "")
+      if [ -n "$REF_SIZE" ] && [ "$REF_SIZE" != "$IMPL_SIZE" ]; then
+        magick "$IMPL_PNG" -resize "$REF_SIZE!" -quality 95 "$IMPL_PNG" 2>/dev/null || true
+      fi
+      AE=$(magick compare -metric AE -fuzz "$FUZZ" "$REF_PNG" "$IMPL_PNG" "$DIFF_PNG" 2>&1 || true)
+      AE=$(echo "$AE" | head -1 | awk '{ if ($1 ~ /^[0-9.eE+-]+$/) printf "%.0f", $1 }')
+      [ -n "$AE" ] && AE=$(_ae_normalize "$AE")
+      if [ -n "$AE" ] && [ -n "$REF_SIZE" ]; then
+        REF_W=$(echo "$REF_SIZE" | cut -dx -f1)
+        REF_H=$(echo "$REF_SIZE" | cut -dx -f2)
+        AE_PER_MPX=$(awk -v ae="$AE" -v w="$REF_W" -v h="$REF_H" \
+          'BEGIN { area = (w*h)/1000000; if (area > 0) printf "%.0f", ae/area; else print "0" }')
+        printf "%s\t%s\t%s\n" "$pct" "$AE" "$AE_PER_MPX" >> "$TARGET_DIR/full-frame-diagnostic.tsv"
+      fi
+    fi
+  done
+
+  python3 - "$TARGET_DIR" "$REPORT" $TRAJECTORY_POINTS <<'PY'
+from __future__ import annotations
+
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+sig_dir = Path(sys.argv[1])
+report = Path(sys.argv[2])
+points = sys.argv[3:]
+
+MAX_TOP_DELTA = 12
+MAX_LEFT_DELTA = 16
+MAX_SIZE_RATIO = 0.25
+MAX_TY_DELTA = 16
+
+def load(path: Path) -> list[dict]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return []
+
+def by_selector(items: list[dict]) -> dict[str, dict]:
+    return {str(item.get("selector") or ""): item for item in items if item.get("selector")}
+
+def rendered(item: dict | None) -> bool:
+    return bool(item and item.get("rendered"))
+
+def norm_class(value: object) -> str:
+    return " ".join(sorted(str(value or "").split()))
+
+def num(item: dict, key: str) -> float:
+    try:
+        value = float(item.get(key, 0))
+        return value if math.isfinite(value) else 0.0
+    except Exception:
+        return 0.0
+
+rows: list[str] = [
+    "| point | target | topΔ | leftΔ | sizeΔ | tyΔ | class | status |",
+    "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+]
+fail = 0
+passed = 0
+skipped = 0
+compared = 0
+
+for point in points:
+    ref = by_selector(load(sig_dir / f"ref-{point}.json"))
+    impl = by_selector(load(sig_dir / f"impl-{point}.json"))
+    selectors = sorted(set(ref) | set(impl))
+    if not selectors:
+        rows.append(f"| {point}% | — | — | — | — | — | — | ⚠️ no target samples |")
+        continue
+    for sel in selectors:
+        r = ref.get(sel)
+        i = impl.get(sel)
+        if not r or not i or r.get("missing") or i.get("missing"):
+            fail += 1
+            rows.append(f"| {point}% | `{sel}` | — | — | — | — | — | ❌ missing target |")
+            continue
+        if not rendered(r) and not rendered(i):
+            skipped += 1
+            rows.append(f"| {point}% | `{sel}` | — | — | — | — | — | ⚪ hidden at viewport |")
+            continue
+        compared += 1
+        if rendered(r) != rendered(i):
+            fail += 1
+            rows.append(f"| {point}% | `{sel}` | — | — | — | — | — | ❌ render-state mismatch |")
+            continue
+        top_delta = abs(num(r, "top") - num(i, "top"))
+        left_delta = abs(num(r, "left") - num(i, "left"))
+        width_ref = max(abs(num(r, "width")), 1.0)
+        height_ref = max(abs(num(r, "height")), 1.0)
+        size_delta = max(
+            abs(num(r, "width") - num(i, "width")) / width_ref,
+            abs(num(r, "height") - num(i, "height")) / height_ref,
+        )
+        ty_delta = abs(num(r, "ty") - num(i, "ty"))
+        class_ok = norm_class(r.get("className")) == norm_class(i.get("className"))
+        ok = (
+            top_delta <= MAX_TOP_DELTA
+            and left_delta <= MAX_LEFT_DELTA
+            and size_delta <= MAX_SIZE_RATIO
+            and ty_delta <= MAX_TY_DELTA
+            and class_ok
+        )
+        if ok:
+            passed += 1
+            status = "✅"
+        else:
+            fail += 1
+            status = "❌"
+        rows.append(
+            f"| {point}% | `{sel}` | {top_delta:.1f} | {left_delta:.1f} | "
+            f"{size_delta:.2f} | {ty_delta:.1f} | {'✅' if class_ok else '❌'} | {status} |"
+        )
+
+diag = sig_dir / "full-frame-diagnostic.tsv"
+with report.open("a", encoding="utf-8") as fh:
+    fh.write("\n".join(rows))
+    fh.write("\n\n")
+    if diag.exists():
+        fh.write("## target-motion diagnostic: full-frame AE\n\n")
+        fh.write("| point | AE | AE/Mpx |\n")
+        fh.write("| --- | ---: | ---: |\n")
+        for line in diag.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                fh.write(f"| {parts[0]}% | {parts[1]} | {parts[2]} |\n")
+        fh.write("\n")
+    if compared == 0:
+        fh.write("❌ no rendered declared targets sampled — target trajectory probe is vacuous\n")
+        raise SystemExit(1)
+    if fail:
+        fh.write(f"❌ {fail}/{compared + fail} declared target trajectory sample(s) exceeded thresholds; {skipped} hidden sample(s) skipped\n")
+        raise SystemExit(1)
+    fh.write(f"✅ all {passed}/{compared} declared target trajectory samples within thresholds; {skipped} hidden sample(s) skipped\n")
 PY
   STATUS=$?
   echo "Wrote $REPORT"

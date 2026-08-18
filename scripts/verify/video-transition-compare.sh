@@ -148,6 +148,7 @@ mkdir -p "$OUT_DIR"/{ref-video,impl-video,ref-frames,impl-frames,diff-frames}
 
 TARGET_ROI_SELECTOR=""
 case "$ACTION" in
+  click:*) TARGET_ROI_SELECTOR="${ACTION#click:}" ;;
   hover:*) TARGET_ROI_SELECTOR="${ACTION#hover:}" ;;
   hover-and-out:*) TARGET_ROI_SELECTOR="${ACTION#hover-and-out:}" ;;
 esac
@@ -278,8 +279,16 @@ JS
 capture_target_roi() {
   local session="$1"
   local selector="$2"
-  local measure_selector="$3"
-  local out="$4"
+  local measure_selector out
+  # Callers that never separate the action selector from the measured element
+  # use the three-argument form (session, selector, out).
+  if [ "$#" -ge 4 ]; then
+    measure_selector="$3"
+    out="$4"
+  else
+    measure_selector="$selector"
+    out="${3:-}"
+  fi
   local forced_match_index="${5:-}"
   local forced_scroll_y="${6:-}"
   local selector_json measure_selector_json forced_match_index_json forced_scroll_y_json
@@ -331,6 +340,26 @@ $(hover_state_snapshot_js)
     const inViewport = (rect) =>
       rect.bottom > 0 && rect.right > 0 &&
       rect.top < window.innerHeight && rect.left < window.innerWidth;
+    // Smooth-scroll runtimes (Lenis, Locomotive) keep animating for hundreds of
+    // ms after scrollTo returns. Sample scrollY until it stops moving so the
+    // candidate rects below are read against a settled page.
+    const settle = async () => {
+      const settleStartedAt = performance.now();
+      let lastScrollY = window.scrollY;
+      let stableScrollSamples = 0;
+      while (stableScrollSamples < 4 &&
+          performance.now() - settleStartedAt < 3000) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        if (Math.abs(window.scrollY - lastScrollY) < 0.5) {
+          stableScrollSamples += 1;
+        } else {
+          stableScrollSamples = 0;
+        }
+        lastScrollY = window.scrollY;
+      }
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    };
     const colorAlpha = (color) => {
       const match = String(color || '').match(/rgba?\\(([^)]+)\\)/i);
       if (!match) return 0;
@@ -428,6 +457,8 @@ $(hover_state_snapshot_js)
         (left.complexity - right.complexity) || (left.matchIndex - right.matchIndex));
       return visibleCandidates[0] || null;
     };
+    let fallbackReason = null;
+    let probeIndex = null;
     let selected = selectVisibleCandidate();
     let el = selected ? selected.el : null;
     if (!el && forcedScrollY === null) {
@@ -454,6 +485,48 @@ $(hover_state_snapshot_js)
         selected = selectVisibleCandidate();
         el = selected ? selected.el : null;
         if (el) break;
+      }
+    }
+    if (!el && matches.length && forcedScrollY === null) {
+      // The fixed-step sweep above misses targets that only mount at curated
+      // page positions (nav re-show bands, pinned sections, footer reveals).
+      // Probe those positions explicitly and let the scroll runtime settle
+      // before declaring the selector unmeasurable.
+      const maxScroll = Math.max(
+        0,
+        document.documentElement.scrollHeight - window.innerHeight,
+        document.body ? document.body.scrollHeight - window.innerHeight : 0
+      );
+      const rawProbePositions = [
+        window.scrollY,
+        0,
+        window.innerHeight * 0.4,
+        window.innerHeight * 0.8,
+        window.innerHeight * 1.2,
+        maxScroll * 0.25,
+        maxScroll * 0.5,
+        maxScroll * 0.75,
+        maxScroll
+      ];
+      const __uiCloneProbeScrollPositions = [];
+      for (const raw of rawProbePositions) {
+        const y = Math.max(0, Math.min(maxScroll, Math.round(Number(raw) || 0)));
+        if (!__uiCloneProbeScrollPositions.includes(y)) {
+          __uiCloneProbeScrollPositions.push(y);
+        }
+      }
+      for (let index = 0; index < __uiCloneProbeScrollPositions.length; index += 1) {
+        const y = __uiCloneProbeScrollPositions[index];
+        window.scrollTo(0, y);
+        window.dispatchEvent(new Event('scroll'));
+        await settle();
+        selected = selectVisibleCandidate();
+        el = selected ? selected.el : null;
+        if (el) {
+          fallbackReason = 'scroll-probe-visible-match';
+          probeIndex = index;
+          break;
+        }
       }
     }
     if (!el) {
@@ -498,6 +571,8 @@ $(hover_state_snapshot_js)
         maxScrollY: maxScrollY(),
         progressY: maxScrollY() > 0 ? window.scrollY / maxScrollY() : 0
       },
+      fallbackReason,
+      scrollProbeIndex: probeIndex,
       transition: transitionContract(measurementEl),
       state: {
         phase: 'idle',
@@ -586,9 +661,18 @@ PY
 restore_visible_target_rect() {
   local session="$1"
   local selector="$2"
-  local measure_selector="$3"
-  local target_rect="${4:-}"
+  local measure_selector target_rect
+  # Callers that never separate the action selector from the measured element
+  # use the three-argument form (session, selector, target_rect).
+  if [ "$#" -ge 4 ]; then
+    measure_selector="$3"
+    target_rect="$4"
+  else
+    measure_selector="$selector"
+    target_rect="${3:-}"
+  fi
   local selector_json measure_selector_json target_payload_json match_index measurement_match_index
+  local target_scroll_y
   [ -n "$target_rect" ] || return 0
   selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$selector")
   measure_selector_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$measure_selector")
@@ -624,17 +708,48 @@ PY
     echo "UNMEASURABLE: hover target match index is unavailable"
     return 2
   fi
+  target_scroll_y=$(python3 - "$target_rect" <<'PY'
+import json
+import sys
+
+try:
+    value = json.loads(open(sys.argv[1], encoding="utf-8").read().strip())
+    while isinstance(value, str):
+        value = json.loads(value)
+    y = None
+    if isinstance(value, dict):
+        scroll_state = value.get("scrollState")
+        if isinstance(scroll_state, dict):
+            y = scroll_state.get("scrollY")
+        if y is None:
+            scroll = value.get("scroll")
+            if isinstance(scroll, dict):
+                y = scroll.get("y")
+    if isinstance(y, bool) or not isinstance(y, (int, float)):
+        raise ValueError
+    print(max(0, round(float(y))))
+except Exception:
+    print("null")
+PY
+  )
   agent-browser --session "$session" eval "(async () => {
 $(hover_state_snapshot_js)
     const actionSelector = $selector_json;
     const measureSelector = $measure_selector_json || actionSelector;
     const previousTargetPayload = $target_payload_json;
+    const savedScrollY = $target_scroll_y;
+    if (Number.isFinite(savedScrollY) && savedScrollY >= 0) {
+      window.scrollTo(0, savedScrollY);
+      window.dispatchEvent(new Event('scroll'));
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
     const matches = Array.from(document.querySelectorAll(actionSelector));
     const measurementMatches = Array.from(document.querySelectorAll(measureSelector));
     const maxScrollY = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     const matchIndex = $match_index;
     const measurementMatchIndex = $measurement_match_index;
-    const el = matches[matchIndex];
+    let el = matches[matchIndex];
     if (!el) {
       return JSON.stringify({
         found: false,
@@ -643,18 +758,129 @@ $(hover_state_snapshot_js)
         matchCount: matches.length
       });
     }
+    const renderedForAction = (candidate) => {
+      const candidateStyle = getComputedStyle(candidate);
+      const candidateRect = candidate.getBoundingClientRect();
+      if (typeof candidate.checkVisibility === 'function' &&
+          !candidate.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+        return false;
+      }
+      return candidateStyle.display !== 'none' &&
+        candidateStyle.visibility !== 'hidden' &&
+        Number.parseFloat(candidateStyle.opacity || '1') > 0 &&
+        candidateStyle.pointerEvents !== 'none' &&
+        candidateRect.width > 0 && candidateRect.height > 0;
+    };
+    const rectInViewport = (candidateRect) => candidateRect.bottom > 0 && candidateRect.right > 0 &&
+      candidateRect.top < innerHeight && candidateRect.left < innerWidth;
+    // Smooth-scroll runtimes keep animating after scrollTo returns; sample
+    // scrollY until it stops so the restored rect is read on a settled page.
+    const settle = async () => {
+      const settleStartedAt = performance.now();
+      let lastScrollY = window.scrollY;
+      let stableScrollSamples = 0;
+      while (stableScrollSamples < 4 &&
+          performance.now() - settleStartedAt < 3000) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        if (Math.abs(window.scrollY - lastScrollY) < 0.5) {
+          stableScrollSamples += 1;
+        } else {
+          stableScrollSamples = 0;
+        }
+        lastScrollY = window.scrollY;
+      }
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    };
+    const findVisibleMatch = async (allowScrollIntoView) => {
+      let found = matches.find((candidate) => {
+        const candidateRect = candidate.getBoundingClientRect();
+        return renderedForAction(candidate) && rectInViewport(candidateRect);
+      });
+      if (found || !allowScrollIntoView) return found || null;
+      for (const candidate of matches) {
+        if (!renderedForAction(candidate)) continue;
+        candidate.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await settle();
+        const candidateRect = candidate.getBoundingClientRect();
+        if (renderedForAction(candidate) && rectInViewport(candidateRect)) {
+          found = candidate;
+          break;
+        }
+      }
+      return found || null;
+    };
+    let resolvedMatchIndex = matchIndex;
+    let fallbackReason = null;
+    let probeIndex = null;
     el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    await new Promise((resolve) =>
-      requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const rect = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    const inViewport = rect.bottom > 0 && rect.right > 0 &&
-      rect.top < innerHeight && rect.left < innerWidth;
-    const visible = style.display !== 'none' &&
-      style.visibility !== 'hidden' &&
-      Number.parseFloat(style.opacity || '1') > 0 &&
-      style.pointerEvents !== 'none' &&
-      rect.width > 0 && rect.height > 0 && inViewport;
+    await settle();
+    let rect = el.getBoundingClientRect();
+    let visible = renderedForAction(el) && rectInViewport(rect);
+    if (!visible) {
+      // The saved match can be a duplicate that this run's DOM order or
+      // dynamic mount left offscreen. Re-select a visible sibling match
+      // rather than reporting the recorded index as unmeasurable.
+      fallbackReason = 'saved-match-not-visible';
+      for (const candidate of matches) {
+        if (!renderedForAction(candidate)) continue;
+        candidate.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await settle();
+        const candidateRect = candidate.getBoundingClientRect();
+        if (renderedForAction(candidate) && rectInViewport(candidateRect)) {
+          el = candidate;
+          rect = candidateRect;
+          resolvedMatchIndex = matches.indexOf(candidate);
+          visible = true;
+          break;
+        }
+      }
+    }
+    if (!visible) {
+      // Dynamic nav re-hide can make the recorded scroll position no longer
+      // reveal the target at all. Re-probe bounded page positions.
+      const maxScroll = Math.max(
+        0,
+        document.documentElement.scrollHeight - innerHeight,
+        document.body ? document.body.scrollHeight - innerHeight : 0
+      );
+      const rawProbePositions = [
+        savedScrollY,
+        window.scrollY,
+        0,
+        innerHeight * 0.4,
+        innerHeight * 0.8,
+        innerHeight * 1.2,
+        maxScroll * 0.25,
+        maxScroll * 0.5,
+        maxScroll * 0.75,
+        maxScroll
+      ];
+      const __uiCloneRestoreProbeScrollPositions = [];
+      const restoreProbeMarker = 'restore-scroll-probe-visible-match';
+      for (const raw of rawProbePositions) {
+        const y = Math.max(0, Math.min(maxScroll, Math.round(Number(raw) || 0)));
+        if (!__uiCloneRestoreProbeScrollPositions.includes(y)) {
+          __uiCloneRestoreProbeScrollPositions.push(y);
+        }
+      }
+      for (let index = 0; index < __uiCloneRestoreProbeScrollPositions.length; index += 1) {
+        const y = __uiCloneRestoreProbeScrollPositions[index];
+        window.scrollTo(0, y);
+        window.dispatchEvent(new Event('scroll'));
+        await settle();
+        const found = await findVisibleMatch(false);
+        if (found) {
+          el = found;
+          rect = found.getBoundingClientRect();
+          resolvedMatchIndex = matches.indexOf(found);
+          fallbackReason = restoreProbeMarker;
+          probeIndex = index;
+          visible = true;
+          break;
+        }
+      }
+    }
     const renderedForMeasurement = (candidate) => {
       if (!candidate) return false;
       const measurementStyle = getComputedStyle(candidate);
@@ -681,8 +907,10 @@ $(hover_state_snapshot_js)
     return JSON.stringify({
       found: visible && Boolean(measurementEl) && renderedForMeasurement(measurementEl),
       selector: actionSelector,
-      matchIndex,
+      matchIndex: resolvedMatchIndex,
       matchCount: matches.length,
+      fallbackReason,
+      scrollProbeIndex: probeIndex,
       measurementSelector: measureSelector,
       measurementMatchIndex: measurementEl ? measurementMatches.indexOf(measurementEl) : -1,
       measurementMatchCount: measurementMatches.length,
@@ -1040,7 +1268,9 @@ perform_action() {
     sleep "$RECORD_DURATION"
   elif [[ "$action" == click:* ]]; then
     local selector="${action#click:}"
+    restore_visible_target_rect "$session" "$selector" "$target_rect" || return 2
     sleep "$PRE_ACTION_WAIT"
+    capture_action_onset "$session" "$action_onset_file" || return 2
     agent-browser --session "$session" eval "(() => {
       var el = document.querySelector('$selector');
       if (el) { el.click(); return 'clicked'; }
@@ -1103,7 +1333,11 @@ perform_action() {
 start_record_epoch() {
   local session="$1"
   agent-browser --session "$session" eval \
-    '(() => { window.__uiCloneVmcRecordEpoch = performance.now(); return "ok"; })()' \
+    '(() => {
+      window.__uiCloneVmcRecordEpoch = performance.now();
+      window.__uiCloneVmcRecordEpochWallMs = Date.now();
+      return "ok";
+    })()' \
     >/dev/null 2>&1
 }
 
@@ -1113,7 +1347,29 @@ capture_action_onset() {
   local raw
   [ -n "$out" ] || return 0
   raw=$(agent-browser --session "$session" eval \
-    '(() => { const epoch = Number(window.__uiCloneVmcRecordEpoch); if (!Number.isFinite(epoch)) return ""; return ((performance.now() - epoch) / 1000).toFixed(6); })()' \
+    '(() => {
+      const epoch = Number(window.__uiCloneVmcRecordEpoch);
+      const wallEpoch = Number(window.__uiCloneVmcRecordEpochWallMs);
+      const perfRelative = Number.isFinite(epoch)
+        ? (performance.now() - epoch) / 1000
+        : NaN;
+      const wallRelative = Number.isFinite(wallEpoch)
+        ? (Date.now() - wallEpoch) / 1000
+        : NaN;
+      if (Number.isFinite(perfRelative) && perfRelative > 0) {
+        if (
+          Number.isFinite(wallRelative) && wallRelative > 0 &&
+          perfRelative > wallRelative + 1
+        ) {
+          return wallRelative.toFixed(6);
+        }
+        return perfRelative.toFixed(6);
+      }
+      if (Number.isFinite(wallRelative) && wallRelative > 0) {
+        return wallRelative.toFixed(6);
+      }
+      return "";
+    })()' \
     2>/dev/null | tail -1 | tr -d '"')
   if [[ ! "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     || ! awk -v seconds="$raw" 'BEGIN { exit !(seconds + 0 > 0) }'; then
@@ -1916,30 +2172,83 @@ _video_md5() {
   python3 -c 'import hashlib,sys;print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$1" 2>/dev/null || echo "unreadable"
 }
 
-_extract_frames() {
-  local video="$1" frames_dir="$2" side="$3"
-  local fflog="$OUT_DIR/ffmpeg-extract-${side}.log"
-  local filter="fps=$FPS"
-  if [ "$side" = "ref" ] && [ -n "$TARGET_ROI_REF_FILTER" ]; then
-    filter="$filter,$TARGET_ROI_REF_FILTER"
-  elif [ "$side" = "impl" ] && [ -n "$TARGET_ROI_IMPL_FILTER" ]; then
-    filter="$filter,$TARGET_ROI_IMPL_FILTER"
+_selector_working_video() {
+  local side="$1"
+  local raw="$OUT_DIR/${side}-video/raw.webm"
+  local working="$OUT_DIR/${side}-video/working.webm"
+  local receipt="$OUT_DIR/${side}-video/working-video.json"
+  local fflog="$OUT_DIR/ffmpeg-trim-${side}.log"
+  local raw_duration trim_start working_duration
+
+  [ -n "$TARGET_ROI_SELECTOR" ] || { printf '%s\n' "$raw"; return 0; }
+  if [[ "${UI_CLONE_VMC_SKIP_RECORD:-0}" == "1" ]]; then
+    printf '%s\n' "$raw"
+    return 0
   fi
-  if ! ffmpeg -y -i "$video" -vf "$filter" "$frames_dir/f-%06d.png" 2> "$fflog"; then
-    echo -e "${RED}ERROR: ffmpeg frame extraction FAILED for $side recording${NC}"
+
+  raw_duration=$(_recorded_duration "$raw")
+  if ! awk -v value="$raw_duration" 'BEGIN { exit !(value + 0 > 0) }'; then
+    echo -e "${RED}UNMEASURABLE: selector ${side} raw WebM duration is unavailable${NC}"
+    return 2
+  fi
+
+  # Browser-side record stop/save may keep seconds of orchestration tail before
+  # the intended selector window. Preserve raw.webm for audit, but compare a
+  # bounded working clip so ffmpeg extraction cannot spend minutes on orphaned
+  # frames before retained-tail onset normalization.
+  trim_start=$(awk -v duration="$raw_duration" -v record="$RECORD_DURATION" '
+    BEGIN {
+      start = duration - record
+      if (start < 0) start = 0
+      printf "%.6f", start
+    }
+  ')
+  # Keep the browser recording's native frame rate while trimming. The final
+  # extraction below is the single place that resamples to $FPS; doing it here
+  # as well inflated a 10fps selector recording to 60fps and encoded the same
+  # duplicate frames twice.
+  if ! ffmpeg -y -ss "$trim_start" -i "$raw" -t "$RECORD_DURATION" \
+      -an -c:v libvpx -b:v 1000k -deadline realtime -cpu-used 8 \
+      "$working" 2> "$fflog"; then
+    echo -e "${RED}UNMEASURABLE: selector ${side} working WebM trim failed${NC}"
     echo "  ffmpeg stderr (tail):"
     tail -5 "$fflog" | sed 's/^/    /'
-    echo "  Hard error — a failed extraction must never fall through to a verdict on stale frames."
-    exit 2
+    return 2
   fi
-  local count
-  count=$(ls "$frames_dir/"*.png 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$count" -eq 0 ]; then
-    echo -e "${RED}ERROR: ffmpeg produced 0 frames for $side recording${NC}"
-    tail -5 "$fflog" | sed 's/^/    /'
-    exit 2
+  working_duration=$(_recorded_duration "$working")
+  if ! awk -v value="$working_duration" -v record="$RECORD_DURATION" '
+    BEGIN { exit !(value + 0 > 0 && value <= record + 0.25) }
+  '; then
+    echo -e "${RED}UNMEASURABLE: selector ${side} working WebM duration is outside the bounded tail (${working_duration}s)${NC}"
+    return 2
   fi
-  _video_md5 "$video" > "$frames_dir/.fingerprint"
+  python3 - "$receipt" "$raw" "$working" "$raw_duration" "$trim_start" "$working_duration" "$RECORD_DURATION" "$FPS" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+receipt, raw, working, raw_duration, trim_start, working_duration, record_duration, fps = sys.argv[1:]
+
+def md5(path: str) -> str:
+    return hashlib.md5(Path(path).read_bytes()).hexdigest()
+
+payload = {
+    "schemaVersion": 1,
+    "mode": "selector-tail-working-video",
+    "rawWebm": raw,
+    "workingWebm": working,
+    "rawMd5": md5(raw),
+    "workingMd5": md5(working),
+    "rawDurationSeconds": float(raw_duration),
+    "trimStartSeconds": float(trim_start),
+    "workingDurationSeconds": float(working_duration),
+    "recordDurationSeconds": float(record_duration),
+    "extractedFps": int(float(fps)),
+}
+Path(receipt).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+  printf '%s\n' "$working"
 }
 
 build_target_roi_delta_frames() {
@@ -1970,6 +2279,32 @@ build_target_roi_delta_frames() {
     fi
   done
   [ "$(find "$delta_dir" -maxdepth 1 -type f -name 'f-*.png' | wc -l | tr -d ' ')" -gt 0 ]
+}
+
+_extract_frames() {
+  local video="$1" frames_dir="$2" side="$3"
+  local fflog="$OUT_DIR/ffmpeg-extract-${side}.log"
+  local filter="fps=$FPS"
+  if [ "$side" = "ref" ] && [ -n "$TARGET_ROI_REF_FILTER" ]; then
+    filter="$filter,$TARGET_ROI_REF_FILTER"
+  elif [ "$side" = "impl" ] && [ -n "$TARGET_ROI_IMPL_FILTER" ]; then
+    filter="$filter,$TARGET_ROI_IMPL_FILTER"
+  fi
+  if ! ffmpeg -y -i "$video" -vf "$filter" "$frames_dir/f-%06d.png" 2> "$fflog"; then
+    echo -e "${RED}ERROR: ffmpeg frame extraction FAILED for $side recording${NC}"
+    echo "  ffmpeg stderr (tail):"
+    tail -5 "$fflog" | sed 's/^/    /'
+    echo "  Hard error — a failed extraction must never fall through to a verdict on stale frames."
+    exit 2
+  fi
+  local count
+  count=$(ls "$frames_dir/"*.png 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$count" -eq 0 ]; then
+    echo -e "${RED}ERROR: ffmpeg produced 0 frames for $side recording${NC}"
+    tail -5 "$fflog" | sed 's/^/    /'
+    exit 2
+  fi
+  _video_md5 "$video" > "$frames_dir/.fingerprint"
 }
 
 build_target_roi_material_delta_frames() {
@@ -2315,11 +2650,14 @@ build_target_roi_timing_delta_frames() {
   [ "$(find "$out_dir" -maxdepth 1 -type f -name 'f-*.png' | wc -l | tr -d ' ')" -gt 0 ]
 }
 
-_extract_frames "$OUT_DIR/ref-video/raw.webm" "$OUT_DIR/ref-frames" ref
-_extract_frames "$OUT_DIR/impl-video/raw.webm" "$OUT_DIR/impl-frames" impl
+REF_VIDEO_SOURCE=$(_selector_working_video ref) || exit 2
+IMPL_VIDEO_SOURCE=$(_selector_working_video impl) || exit 2
+
+_extract_frames "$REF_VIDEO_SOURCE" "$OUT_DIR/ref-frames" ref
+_extract_frames "$IMPL_VIDEO_SOURCE" "$OUT_DIR/impl-frames" impl
 if [ -n "$TARGET_ROI_SELECTOR" ]; then
-  if ! write_video_source_metadata "$OUT_DIR/ref-video/raw.webm" "$OUT_DIR/ref-video/source-metadata.json" \
-    || ! write_video_source_metadata "$OUT_DIR/impl-video/raw.webm" "$OUT_DIR/impl-video/source-metadata.json"; then
+  if ! write_video_source_metadata "$REF_VIDEO_SOURCE" "$OUT_DIR/ref-video/source-metadata.json" \
+    || ! write_video_source_metadata "$IMPL_VIDEO_SOURCE" "$OUT_DIR/impl-video/source-metadata.json"; then
     echo -e "${RED}UNMEASURABLE: raw WebM source metadata is missing, VFR, or incompatible with extracted FPS${NC}"
     exit 2
   fi
@@ -2351,7 +2689,11 @@ fi
 # check protects manual phase re-runs and future refactors.)
 for SIDE in ref impl; do
   FP_FILE="$OUT_DIR/${SIDE}-frames/.fingerprint"
-  CUR_FP="$(_video_md5 "$OUT_DIR/${SIDE}-video/raw.webm")"
+  case "$SIDE" in
+    ref) CUR_FP="$(_video_md5 "$REF_VIDEO_SOURCE")" ;;
+    impl) CUR_FP="$(_video_md5 "$IMPL_VIDEO_SOURCE")" ;;
+    *) CUR_FP="unreadable" ;;
+  esac
   if [ ! -f "$FP_FILE" ] || [ "$(cat "$FP_FILE")" != "$CUR_FP" ]; then
     echo -e "${RED}ERROR: ${SIDE}-frames fingerprint does not match the current recording — stale frames${NC}"
     exit 2
@@ -2381,6 +2723,9 @@ REF_TIMING_SEARCH_START=1
 IMPL_TIMING_SEARCH_START=1
 REF_ACTION_ONSET_SECONDS=""
 IMPL_ACTION_ONSET_SECONDS=""
+REF_ACTION_ONSET_RAW_SECONDS=""
+IMPL_ACTION_ONSET_RAW_SECONDS=""
+ACTION_ONSET_DERIVED_FROM_RETAINED_TAIL=false
 if [ -n "$TARGET_ROI_SELECTOR" ]; then
   if [[ "${UI_CLONE_VMC_SKIP_RECORD:-0}" == "1" ]]; then
     REF_ACTION_ONSET_SECONDS="${VIDEO_COMPARE_REF_ACTION_ONSET_SECONDS:-${VIDEO_COMPARE_ACTION_ONSET_SECONDS:-}}"
@@ -2398,6 +2743,62 @@ if [ -n "$TARGET_ROI_SELECTOR" ]; then
       exit 2
     fi
   done
+  REF_ACTION_ONSET_RAW_SECONDS="$REF_ACTION_ONSET_SECONDS"
+  IMPL_ACTION_ONSET_RAW_SECONDS="$IMPL_ACTION_ONSET_SECONDS"
+  _normalize_selector_action_onset() {
+    local seconds="$1"
+    local frame_count="$2"
+    local fps="$3"
+    local record_duration="$4"
+    python3 - "$seconds" "$frame_count" "$fps" "$record_duration" <<'PY'
+import math
+import sys
+
+try:
+    seconds = float(sys.argv[1])
+    frame_count = int(sys.argv[2])
+    fps = float(sys.argv[3])
+    record_duration = float(sys.argv[4])
+except Exception:
+    raise SystemExit(2)
+if not (
+    math.isfinite(seconds)
+    and math.isfinite(fps)
+    and math.isfinite(record_duration)
+    and seconds > 0
+    and frame_count > 0
+    and fps > 0
+    and record_duration > 0
+):
+    raise SystemExit(2)
+if int(seconds * fps) + 1 <= frame_count:
+    print(f"{seconds:.6f}\t0")
+    raise SystemExit(0)
+video_duration = frame_count / fps
+derived = max(0.0, video_duration - record_duration)
+if int(derived * fps) + 1 < 1 or int(derived * fps) + 1 > frame_count:
+    raise SystemExit(2)
+print(f"{derived:.6f}\t1")
+PY
+  }
+  _ref_normalized=$(_normalize_selector_action_onset "$REF_ACTION_ONSET_SECONDS" "$REF_COUNT" "$FPS" "$RECORD_DURATION") || {
+    echo -e "${RED}UNMEASURABLE: selector action onset cannot be mapped into retained ref video timeline${NC}"
+    exit 2
+  }
+  _impl_normalized=$(_normalize_selector_action_onset "$IMPL_ACTION_ONSET_SECONDS" "$IMPL_COUNT" "$FPS" "$RECORD_DURATION") || {
+    echo -e "${RED}UNMEASURABLE: selector action onset cannot be mapped into retained impl video timeline${NC}"
+    exit 2
+  }
+  IFS=$'\t' read -r REF_ACTION_ONSET_SECONDS _ref_onset_derived <<< "$_ref_normalized"
+  IFS=$'\t' read -r IMPL_ACTION_ONSET_SECONDS _impl_onset_derived <<< "$_impl_normalized"
+  if [ "$_ref_onset_derived" = "1" ] || [ "$_impl_onset_derived" = "1" ]; then
+    if [ "$_ref_onset_derived" != "$_impl_onset_derived" ]; then
+      echo -e "${RED}UNMEASURABLE: selector action onset mapping differs between ref and impl retained videos${NC}"
+      exit 2
+    fi
+    ACTION_ONSET_DERIVED_FROM_RETAINED_TAIL=true
+    echo "  Selector action onset exceeded retained video timeline; derived onset from retained video tail (record duration ${RECORD_DURATION}s)"
+  fi
   REF_TIMING_SEARCH_START=$(awk -v seconds="$REF_ACTION_ONSET_SECONDS" -v fps="$FPS" '
     BEGIN {
       printf "%d", int((seconds + 0) * (fps + 0)) + 1
@@ -2494,6 +2895,9 @@ if [ -n "$TARGET_ROI_SELECTOR" ]; then
       "$TARGET_IMPL_DELTA_BASELINE_NAME" \
       "$REF_ACTION_ONSET_SECONDS" \
       "$IMPL_ACTION_ONSET_SECONDS" \
+      "$REF_ACTION_ONSET_RAW_SECONDS" \
+      "$IMPL_ACTION_ONSET_RAW_SECONDS" \
+      "$ACTION_ONSET_DERIVED_FROM_RETAINED_TAIL" \
       "$FPS" \
       "$OUT_DIR/ref-frames/.fingerprint" \
       "$OUT_DIR/impl-frames/.fingerprint" <<'PY'
@@ -2512,6 +2916,9 @@ try:
         impl_baseline_name,
         ref_onset_seconds,
         impl_onset_seconds,
+        ref_raw_onset_seconds,
+        impl_raw_onset_seconds,
+        onset_derived_from_retained_tail,
         fps,
         ref_fingerprint_path,
         impl_fingerprint_path,
@@ -2522,6 +2929,8 @@ try:
     impl_baseline_frame = int(impl_baseline_frame)
     ref_onset_seconds = float(ref_onset_seconds)
     impl_onset_seconds = float(impl_onset_seconds)
+    ref_raw_onset_seconds = float(ref_raw_onset_seconds)
+    impl_raw_onset_seconds = float(impl_raw_onset_seconds)
     fps = float(fps)
     if (
         not isinstance(payload, dict)
@@ -2529,9 +2938,13 @@ try:
         or ref_baseline_frame < 1
         or impl_baseline_frame < 1
         or not math.isfinite(ref_onset_seconds)
-        or ref_onset_seconds <= 0
+        or ref_onset_seconds < 0
         or not math.isfinite(impl_onset_seconds)
-        or impl_onset_seconds <= 0
+        or impl_onset_seconds < 0
+        or not math.isfinite(ref_raw_onset_seconds)
+        or ref_raw_onset_seconds <= 0
+        or not math.isfinite(impl_raw_onset_seconds)
+        or impl_raw_onset_seconds <= 0
         or not math.isfinite(fps)
         or fps <= 0
     ):
@@ -2540,6 +2953,11 @@ try:
         "baselineFrame": ref_baseline_frame,
         "baselineFrameName": ref_baseline_name,
         "actionOnsetSeconds": ref_onset_seconds,
+        "rawActionOnsetSeconds": {
+            "ref": ref_raw_onset_seconds,
+            "impl": impl_raw_onset_seconds,
+        },
+        "onsetDerivedFromRetainedTail": onset_derived_from_retained_tail == "true",
         "baselineFrames": {
             "ref": ref_baseline_frame,
             "impl": impl_baseline_frame,

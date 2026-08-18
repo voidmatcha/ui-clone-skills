@@ -64,7 +64,7 @@ PROJECT_ROOT="${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLO
 if [ -z "$PROJECT_ROOT" ]; then
   PROJECT_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 fi
-COMPARE="$PROJECT_ROOT/scripts/verify/video-transition-compare.sh"
+COMPARE="${UI_CLONE_VMC_COMPARE_SCRIPT:-$PROJECT_ROOT/scripts/verify/video-transition-compare.sh}"
 
 # Spec-declared dynamic regions (transition-spec dynamic:true targets) are
 # masked identically on both sides during scroll-position capture — the
@@ -166,6 +166,100 @@ PY
 
 STRUCTURAL_ONLY_MODE="${STRUCTURAL_TRAJECTORY_MODE:-$(structural_only_mode)}"
 
+target_local_scroll_state_only_mode() {
+  python3 - "$REF_DIR" "$HAS_IO" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+ref_dir = Path(sys.argv[1])
+has_io = sys.argv[2] == "true"
+if has_io:
+    print("false")
+    raise SystemExit(0)
+
+spec_path = ref_dir / "transition-spec.json"
+regions_path = ref_dir / "regions.json"
+if not spec_path.exists() or not regions_path.exists():
+    print("false")
+    raise SystemExit(0)
+
+try:
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    regions = json.loads(regions_path.read_text(encoding="utf-8"))
+except Exception:
+    print("false")
+    raise SystemExit(0)
+
+dispatch_selectors = {
+    str(region.get("selector"))
+    for region in regions.get("regions", [])
+    if isinstance(region, dict)
+    and region.get("dispatchOnly") is True
+    and region.get("selector")
+}
+if not dispatch_selectors:
+    print("false")
+    raise SystemExit(0)
+
+scroll_state_targets: list[str] = []
+for transition in spec.get("transitions", []):
+    if not isinstance(transition, dict):
+        print("false")
+        raise SystemExit(0)
+    trigger = str(transition.get("trigger") or "")
+    animation = transition.get("animation")
+    animation_type = (
+        str(animation.get("type") or "") if isinstance(animation, dict) else ""
+    )
+    is_scroll_state = (
+        trigger == "scroll-state-machine"
+        or animation_type == "scroll-state-machine"
+    )
+    mentions_scroll = "scroll" in trigger or "scroll" in animation_type
+    if mentions_scroll and not is_scroll_state:
+        print("false")
+        raise SystemExit(0)
+    if not is_scroll_state:
+        continue
+    if transition.get("dynamic") is True:
+        print("false")
+        raise SystemExit(0)
+    target = transition.get("target")
+    if not isinstance(target, str) or not target.strip():
+        print("false")
+        raise SystemExit(0)
+    measurement = (
+        str(animation.get("measurement") or "")
+        if isinstance(animation, dict)
+        else ""
+    )
+    if measurement and measurement not in {
+        "target",
+        "target-and-descendants",
+        "selector",
+        "element",
+    }:
+        print("false")
+        raise SystemExit(0)
+    scroll_state_targets.append(target)
+
+if not scroll_state_targets:
+    print("false")
+    raise SystemExit(0)
+if all(target in dispatch_selectors for target in scroll_state_targets):
+    print("true")
+else:
+    print("false")
+PY
+}
+
+TARGET_LOCAL_SCROLL_STATE_ONLY="$(
+  target_local_scroll_state_only_mode 2>/dev/null || echo false
+)"
+
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 {
   echo "# video-motion-compare"
@@ -179,7 +273,8 @@ NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # intros are time-driven, not scroll-driven, and trajectory-compare doesn't
 # apply. Skippable via PRE_FILTER=0 for video-pipeline debugging.
 PRE_FILTER="${PRE_FILTER:-1}"
-TRAJ_SCRIPT="$_SCRIPT_DIR/transition-trajectory-compare.sh"
+TRAJ_SCRIPT="${UI_CLONE_VMC_TRAJECTORY_SCRIPT:-$_SCRIPT_DIR/transition-trajectory-compare.sh}"
+TRAJECTORY_PREFILTER_PASSED=0
 if [ "$PRE_FILTER" = "1" ] \
    && { [ "$HAS_SCROLL" = "true" ] || [ "$HAS_IO" = "true" ]; } \
    && [ -f "$TRAJ_SCRIPT" ]; then
@@ -188,6 +283,7 @@ if [ "$PRE_FILTER" = "1" ] \
     echo
   } >> "$RESULT"
   if bash "$TRAJ_SCRIPT" "$ORIG_URL" "$IMPL_URL" "$SESSION-traj" "$REF_DIR" >> "$RESULT" 2>&1; then
+    TRAJECTORY_PREFILTER_PASSED=1
     {
       echo "✓ trajectory pre-filter passed"
       echo
@@ -281,7 +377,18 @@ if [ "$HAS_SPLASH" = "true" ]; then
 fi
 
 if [ "$HAS_SCROLL" = "true" ] || [ "$HAS_IO" = "true" ]; then
-  run_mode scroll "Scroll-driven motion"
+  if [ "$TARGET_LOCAL_SCROLL_STATE_ONLY" = "true" ] && [ "$TRAJECTORY_PREFILTER_PASSED" = "1" ]; then
+    RUN_COUNT=$((RUN_COUNT + 1))
+    {
+      echo "## Scroll-driven motion (scroll)"
+      echo
+      echo "✅ target-local scroll state-machine trajectory passed — skipping full-frame SSIM"
+      echo "   reason: all scroll-state-machine targets are dispatchOnly regions; target trajectory covers the declared moving regions"
+      echo
+    } >> "$RESULT"
+  else
+    run_mode scroll "Scroll-driven motion"
+  fi
 fi
 
 if [ "$RUN_COUNT" -eq 0 ]; then

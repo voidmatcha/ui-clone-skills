@@ -104,6 +104,34 @@ def test_groups_classified_with_section_scoped_keys() -> None:
     assert cls["footer-2::cards[0]"]["kind"] == "centered"
 
 
+def test_overflowing_section_content_box_is_not_transferred_as_centered() -> None:
+    by_vp = {
+        "1280x800": [_ref_row("hero", width=1280, lg=-15, rg=-15)],
+        "1600x900": [_ref_row("hero", width=1600, lg=-15, rg=-15)],
+    }
+
+    cls = classify(by_vp)
+
+    assert cls["hero"]["kind"] == "overflow"
+
+
+def test_overflowing_content_group_is_not_transferred_as_centered() -> None:
+    by_vp = {
+        "1280x800": [_ref_row(
+            "foods", width=1280, lg=128, rg=128,
+            groups=[_grp("track", c_l=128, c_w=1024, u_l=-60, u_w=1400)],
+        )],
+        "1600x900": [_ref_row(
+            "foods", width=1600, lg=160, rg=160,
+            groups=[_grp("track", c_l=160, c_w=1280, u_l=-20, u_w=1640)],
+        )],
+    }
+
+    cls = classify(by_vp)
+
+    assert cls["foods::track[0]"]["kind"] == "overflow"
+
+
 def test_duplicate_impl_classes_pair_by_fingerprint_when_indices_drift() -> None:
     first = _ref_row("grid", width=1280, lg=32, rg=400)
     first["impl"] = {
@@ -167,6 +195,115 @@ def test_duplicate_impl_classes_pair_by_fingerprint_when_indices_drift() -> None
     assert cls["grid-2"]["implFingerprint"] == "tagline section"
     assert "implIndex" not in cls["grid-2"]
     assert all(row["status"] == "ok" for row in rows)
+
+
+def test_fingerprint_miss_does_not_fallback_to_duplicate_class_neighbor() -> None:
+    cls = {
+        "foods::food-images[0]": {
+            "kind": "centered",
+            "basisWidth": 640,
+            "implClassName": "food-section",
+            "implFingerprint": "salmon apples grains",
+            "implIndex": 2,
+        },
+    }
+    samples = {
+        1281: [
+            {
+                **_sample_row(
+                    "food-section",
+                    width=1281,
+                    lg=0,
+                    rg=786,
+                    groups=[_grp("food-images", c_l=0, c_w=495, u_l=0, u_w=495)],
+                ),
+                "fingerprint": "watermelon blueberries steak",
+                "index": 2,
+            }
+        ]
+    }
+
+    rows, status = evaluate(cls, samples, plan_widths=[])
+
+    assert status == "warn"
+    assert rows == [
+        {
+            "key": "foods::food-images[0]",
+            "width": 1281,
+            "kind": "centered",
+            "status": "missing",
+        }
+    ]
+
+
+def test_duplicate_section_names_are_split_by_fingerprint_identity() -> None:
+    def row(name: str, fingerprint: str, *, width: int, lg: float, rg: float) -> dict:
+        item = _ref_row(name, width=width, lg=lg, rg=rg)
+        item["impl"] = {
+            "className": "generic-container",
+            "fingerprint": fingerprint,
+        }
+        return item
+
+    cls = classify(
+        {
+            "1280x800": [
+                row("container", "alpha content", width=1280, lg=128, rg=128),
+                row("container", "beta content", width=1280, lg=256, rg=256),
+            ],
+            "1600x900": [
+                row("container", "alpha content", width=1600, lg=160, rg=160),
+                row("container", "beta content", width=1600, lg=320, rg=320),
+            ],
+        }
+    )
+
+    centered = {key: info for key, info in cls.items() if info.get("kind") == "centered"}
+    assert len(centered) == 2
+    assert {info["implFingerprint"] for info in centered.values()} == {
+        "alpha content",
+        "beta content",
+    }
+
+    rows, status = evaluate(
+        cls,
+        {
+            1440: [
+                {
+                    **_sample_row("generic-container", width=1440, lg=144, rg=144),
+                    "fingerprint": "alpha content",
+                },
+                {
+                    **_sample_row("generic-container", width=1440, lg=288, rg=288),
+                    "fingerprint": "beta content",
+                },
+            ]
+        },
+        plan_widths=[],
+    )
+
+    assert status == "pass"
+    assert len(rows) == 2
+    assert all(row["status"] == "ok" for row in rows)
+
+
+def test_groups_missing_from_a_desktop_viewport_are_unclassifiable() -> None:
+    by_vp = {
+        "1280x800": [
+            _ref_row(
+                "section",
+                width=1280,
+                lg=128,
+                rg=128,
+                groups=[_grp("cards", c_l=128, c_w=1024, u_l=348, u_w=585)],
+            )
+        ],
+        "1600x900": [_ref_row("section", width=1600, lg=160, rg=160)],
+    }
+
+    cls = classify(by_vp)
+
+    assert cls["section::cards[0]"]["kind"] == "unclassifiable"
 
 
 def test_impl_class_mapping_uses_desktop_majority() -> None:

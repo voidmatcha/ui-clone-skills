@@ -3283,6 +3283,250 @@ def test_partially_visible_target_uses_center_of_visible_intersection(
     assert proc.stdout.strip() == "60\t5"
 
 
+def test_restore_reselects_visible_duplicate_when_saved_match_is_offscreen(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_agent_browser = fake_bin / "agent-browser"
+    fake_agent_browser.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+js="${*: -1}"
+if [[ "$js" == *"fallbackReason = 'saved-match-not-visible'"* ]]; then
+  printf '%s\n' '{"found":true,"selector":".dot","matchIndex":3,"matchCount":7,"transition":{"property":"opacity","duration":"0.2","delay":"0","timingFunction":"ease"},"state":{"phase":"idle","watchedStyle":{},"ancestorClassPath":[]},"rect":{"x":42,"y":84,"width":20,"height":20},"fallbackReason":"saved-match-not-visible"}'
+else
+  printf '%s\n' '{"found":false,"selector":".dot","matchIndex":0,"matchCount":7,"transition":{"property":"opacity","duration":"0.2","delay":"0","timingFunction":"ease"},"state":{"phase":"idle","watchedStyle":{},"ancestorClassPath":[]},"rect":{"x":10,"y":-132,"width":20,"height":20}}'
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_agent_browser.chmod(0o755)
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    hover_state_start = script.index("hover_state_snapshot_js() {")
+    hover_state_end = script.index("\n}\n\nhover_timing_probe_js", hover_state_start) + 3
+    center_start = script.index("target_center_from_rect() {")
+    center_end = script.index("\n}\n\nrestore_visible_target_rect", center_start) + 3
+    restore_start = script.index("restore_visible_target_rect() {")
+    restore_end = script.index("\n}\n\nhover_visible_target", restore_start) + 3
+    harness = tmp_path / "restore-visible.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\nVIEW_W=1440\nVIEW_H=900\n"
+        + script[hover_state_start:hover_state_end]
+        + "\n"
+        + script[center_start:center_end]
+        + "\n"
+        + script[restore_start:restore_end]
+        + "\nrestore_visible_target_rect test .dot \"$1\"\n",
+        encoding="utf-8",
+    )
+    target_rect = tmp_path / "target.json"
+    target_rect.write_text(
+        json.dumps(
+            {
+                "found": True,
+                "selector": ".dot",
+                "matchIndex": 0,
+                "matchCount": 7,
+                "rect": {"x": 10, "y": -132, "width": 20, "height": 20},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness), str(target_rect)],
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    restored = json.loads(target_rect.read_text(encoding="utf-8"))
+    assert restored["matchIndex"] == 3
+    assert restored["fallbackReason"] == "saved-match-not-visible"
+
+
+def test_restore_reprobes_scroll_states_when_dynamic_nav_rehide_breaks_saved_scroll(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_agent_browser = fake_bin / "agent-browser"
+    fake_agent_browser.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+js="${*: -1}"
+if [[ "$js" == *"restore-scroll-probe-visible-match"* ]]; then
+  printf '%s\n' '{"found":true,"selector":".dot","matchIndex":4,"matchCount":7,"transition":{"property":"opacity","duration":"0.2","delay":"0","timingFunction":"ease"},"state":{"phase":"idle","watchedStyle":{},"ancestorClassPath":[]},"rect":{"x":52,"y":94,"width":20,"height":20},"scroll":{"x":0,"y":1080,"probeIndex":4},"fallbackReason":"restore-scroll-probe-visible-match"}'
+else
+  printf '%s\n' '{"found":false,"selector":".dot","matchIndex":0,"matchCount":7,"transition":{"property":"opacity","duration":"0.2","delay":"0","timingFunction":"ease"},"state":{"phase":"idle","watchedStyle":{},"ancestorClassPath":[]},"rect":{"x":10,"y":-132,"width":20,"height":20},"fallbackReason":"saved-match-not-visible"}'
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_agent_browser.chmod(0o755)
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    hover_state_start = script.index("hover_state_snapshot_js() {")
+    hover_state_end = script.index("\n}\n\nhover_timing_probe_js", hover_state_start) + 3
+    center_start = script.index("target_center_from_rect() {")
+    center_end = script.index("\n}\n\nrestore_visible_target_rect", center_start) + 3
+    restore_start = script.index("restore_visible_target_rect() {")
+    restore_end = script.index("\n}\n\nhover_visible_target", restore_start) + 3
+    harness = tmp_path / "restore-scroll-reprobe.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\nVIEW_W=1440\nVIEW_H=900\n"
+        + script[hover_state_start:hover_state_end]
+        + "\n"
+        + script[center_start:center_end]
+        + "\n"
+        + script[restore_start:restore_end]
+        + "\nrestore_visible_target_rect test .dot \"$1\"\n",
+        encoding="utf-8",
+    )
+    target_rect = tmp_path / "target.json"
+    target_rect.write_text(
+        json.dumps(
+            {
+                "found": True,
+                "selector": ".dot",
+                "matchIndex": 0,
+                "matchCount": 7,
+                "rect": {"x": 10, "y": 84, "width": 20, "height": 20},
+                "scroll": {"x": 0, "y": 720, "probeIndex": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(harness), str(target_rect)],
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    restored = json.loads(target_rect.read_text(encoding="utf-8"))
+    assert restored["matchIndex"] == 4
+    assert restored["scroll"]["y"] == 1080
+    assert restored["fallbackReason"] == "restore-scroll-probe-visible-match"
+
+
+def test_capture_probes_scroll_states_before_declaring_hover_unmeasurable(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_agent_browser = fake_bin / "agent-browser"
+    fake_agent_browser.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"mouse move"* ]]; then
+  exit 0
+fi
+js="${*: -1}"
+if [[ "$js" == *"__uiCloneProbeScrollPositions"* ]]; then
+  printf '%s\n' '{"found":true,"selector":".dot","matchIndex":3,"matchCount":7,"transition":{"property":"opacity","duration":"0.2","delay":"0","timingFunction":"ease"},"state":{"phase":"idle","watchedStyle":{},"ancestorClassPath":[]},"rect":{"x":42,"y":84,"width":20,"height":20},"scroll":{"x":0,"y":720,"probeIndex":2},"fallbackReason":"scroll-probe-visible-match"}'
+else
+  printf '%s\n' '{"found":false,"reason":"no-visible-in-viewport-match","matchCount":7}'
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_agent_browser.chmod(0o755)
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    hover_state_start = script.index("hover_state_snapshot_js() {")
+    hover_state_end = script.index("\n}\n\nhover_timing_probe_js", hover_state_start) + 3
+    capture_start = script.index("capture_target_roi() {")
+    capture_end = script.index("\n}\n\ntarget_center_from_rect", capture_start) + 3
+    center_start = script.index("target_center_from_rect() {")
+    center_end = script.index("\n}\n\nrestore_visible_target_rect", center_start) + 3
+    harness = tmp_path / "capture-visible.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\nVIEW_W=1440\nVIEW_H=900\n"
+        + script[hover_state_start:hover_state_end]
+        + "\n"
+        + script[capture_start:capture_end]
+        + "\n"
+        + script[center_start:center_end]
+        + "\ncapture_target_roi test .dot \"$1\"\n",
+        encoding="utf-8",
+    )
+    target_rect = tmp_path / "target.json"
+
+    proc = subprocess.run(
+        ["bash", str(harness), str(target_rect)],
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    captured = json.loads(target_rect.read_text(encoding="utf-8"))
+    assert captured["matchIndex"] == 3
+    assert captured["scroll"]["y"] == 720
+    assert captured["fallbackReason"] == "scroll-probe-visible-match"
+
+
+def test_action_onset_uses_record_epoch_wall_clock_when_page_clock_is_absolute(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_agent_browser = fake_bin / "agent-browser"
+    fake_agent_browser.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+js="${*: -1}"
+if [[ "$js" == *"__uiCloneVmcRecordEpochWallMs"* ]]; then
+  printf '%s\n' '"2.500000"'
+else
+  printf '%s\n' '"23.500000"'
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_agent_browser.chmod(0o755)
+
+    script = VIDEO_COMPARE.read_text(encoding="utf-8")
+    start_epoch_start = script.index("start_record_epoch() {")
+    start_epoch_end = script.index("\n}\n\ncapture_action_onset", start_epoch_start) + 3
+    capture_onset_start = script.index("capture_action_onset() {")
+    capture_onset_end = script.index("\n}\n\n# ── Time-coupled", capture_onset_start) + 3
+    harness = tmp_path / "action-onset.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + script[start_epoch_start:start_epoch_end]
+        + "\n"
+        + script[capture_onset_start:capture_onset_end]
+        + "\nstart_record_epoch test\ncapture_action_onset test \"$1\"\n",
+        encoding="utf-8",
+    )
+    onset = tmp_path / "action-onset-seconds.txt"
+
+    proc = subprocess.run(
+        ["bash", str(harness), str(onset)],
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert float(onset.read_text(encoding="utf-8").strip()) == pytest.approx(2.5)
+
+
 def test_sparse_early_failures_are_retryable_by_elapsed_time() -> None:
     receipt = build_retry_receipt(
         [0.80, 0.95, 0.82, 0.96, 0.97],
@@ -4345,6 +4589,54 @@ def test_hover_roi_ignores_static_page_background_but_compares_target_arc(
     assert plan["normalization"]["extractedFps"] == pytest.approx(30)
     assert len(plan["normalization"]["refVideoMd5"]) == 32
     assert len(plan["normalization"]["implVideoMd5"]) == 32
+
+
+@needs_video_tools
+def test_hover_roi_derives_onset_from_retained_video_tail_when_page_onset_exceeds_frames(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "roi-retained-tail"
+    _make_background_video(out / "ref-video" / "raw.webm", "red")
+    _make_background_video(out / "impl-video" / "raw.webm", "blue")
+    _seed_target_rect(out)
+    env = {
+        **os.environ,
+        "UI_CLONE_VMC_SKIP_RECORD": "1",
+        "VIDEO_COMPARE_ACTION_ONSET_SECONDS": "25.6254",
+        "RECORD_DURATION": "1",
+        "FPS": "30",
+        "VIEW_W": "320",
+        "VIEW_H": "240",
+        "VIDEO_COMPARE_TARGET_PADDING": "0",
+    }
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(VIDEO_COMPARE),
+            "roi-retained-tail-test",
+            "http://ref.invalid",
+            "http://impl.invalid",
+            str(out),
+            "hover:.target",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "ALL PASS" in proc.stdout
+    assert "retained video tail" in proc.stdout
+    plan = json.loads((out / "target-roi.json").read_text(encoding="utf-8"))
+    normalization = plan["normalization"]
+    assert normalization["baselineFrame"] == 1
+    assert normalization["actionOnsetSeconds"] == pytest.approx(0.0)
+    assert normalization["rawActionOnsetSeconds"]["ref"] == pytest.approx(25.6254)
+    assert normalization["rawActionOnsetSeconds"]["impl"] == pytest.approx(25.6254)
+    assert normalization["onsetDerivedFromRetainedTail"] is True
 
 
 @needs_video_tools

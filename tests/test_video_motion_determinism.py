@@ -22,6 +22,7 @@ recordings so these behaviors are testable without a browser.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -310,3 +311,152 @@ def test_signals_read_without_jq_dependency() -> None:
     assert ".get(\"signals\")" in txt or "hasScrollScrub" in txt, (
         "signals must be parsed (via python) from the plan"
     )
+
+
+def test_wrapper_skips_full_frame_scroll_only_for_target_local_state_machines() -> None:
+    """Realfood class: verification-plan may say hasScrollScrub=true even when
+    the transition-spec only declares target-local scroll state machines. After
+    trajectory passes, full-frame scroll SSIM is redundant and noisy; the wrapper
+    may skip it only when every scroll-state-machine target is a dispatchOnly
+    region from regions.json."""
+    txt = WRAPPER.read_text(encoding="utf-8")
+    assert "target_local_scroll_state_only_mode()" in txt
+    helper = txt.split("target_local_scroll_state_only_mode()", 1)[1].split(
+        "TARGET_LOCAL_SCROLL_STATE_ONLY", 1
+    )[0]
+    assert 'trigger == "scroll-state-machine"' in helper
+    assert 'animation_type == "scroll-state-machine"' in helper
+    assert 'transition.get("dynamic") is True' in helper
+    assert 'region.get("dispatchOnly") is True' in helper
+    assert "all(target in dispatch_selectors" in helper
+    dispatch = txt.split('if [ "$HAS_SCROLL" = "true" ] || [ "$HAS_IO" = "true" ]; then', 1)[1]
+    assert '[ "$TARGET_LOCAL_SCROLL_STATE_ONLY" = "true" ]' in dispatch
+    assert '[ "$TRAJECTORY_PREFILTER_PASSED" = "1" ]' in dispatch
+    assert "target-local scroll state-machine trajectory passed" in dispatch
+    assert 'run_mode scroll "Scroll-driven motion"' in dispatch
+
+
+def test_wrapper_target_local_scroll_skip_stays_fail_closed_for_ambiguous_motion() -> None:
+    txt = WRAPPER.read_text(encoding="utf-8")
+    helper = txt.split("target_local_scroll_state_only_mode()", 1)[1].split(
+        "TARGET_LOCAL_SCROLL_STATE_ONLY", 1
+    )[0]
+    assert "has_io" in helper and 'print("false")' in helper
+    assert "mentions_scroll and not is_scroll_state" in helper
+    assert "not dispatch_selectors" in helper
+    assert "not scroll_state_targets" in helper
+    assert 'measurement not in {' in helper
+
+
+def _write_wrapper_motion_ref(
+    ref: Path,
+    *,
+    dispatch_only: bool,
+    dynamic: bool = False,
+    trigger: str = "scroll-state-machine",
+) -> None:
+    ref.mkdir(parents=True)
+    (ref / "transitions").mkdir()
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "signals": {
+                    "hasScrollScrub": True,
+                    "hasSplash": False,
+                    "hasIOReveal": False,
+                }
+            }
+        )
+    )
+    (ref / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "transitions": [
+                    {
+                        "id": "nav-scroll",
+                        "trigger": trigger,
+                        "target": ".nav",
+                        "dynamic": dynamic,
+                        "animation": {
+                            "type": trigger,
+                            "measurement": "target-and-descendants",
+                        },
+                    }
+                ]
+            }
+        )
+    )
+    (ref / "regions.json").write_text(
+        json.dumps({"regions": [{"selector": ".nav", "dispatchOnly": dispatch_only}]})
+    )
+
+
+def _write_fake_motion_scripts(tmp_path: Path) -> tuple[Path, Path]:
+    traj = tmp_path / "fake-trajectory.sh"
+    traj.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo '# transition-trajectory-compare'\n"
+        "echo '✅ all 1/1 declared target trajectory samples within thresholds'\n"
+        "exit 0\n"
+    )
+    compare = tmp_path / "fake-compare.sh"
+    compare.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo called >> \"$UI_CLONE_FAKE_COMPARE_CALLS\"\n"
+        "echo 'Total frames compared: 1'\n"
+        "echo 'Pass: 1, Fail: 0'\n"
+        "exit 0\n"
+    )
+    traj.chmod(0o755)
+    compare.chmod(0o755)
+    return traj, compare
+
+
+def test_wrapper_behavior_skips_compare_for_dispatch_only_scroll_state(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_wrapper_motion_ref(ref, dispatch_only=True)
+    traj, compare = _write_fake_motion_scripts(tmp_path)
+    calls = tmp_path / "compare.calls"
+    env = dict(
+        os.environ,
+        UI_CLONE_VMC_TRAJECTORY_SCRIPT=str(traj),
+        UI_CLONE_VMC_COMPARE_SCRIPT=str(compare),
+        UI_CLONE_FAKE_COMPARE_CALLS=str(calls),
+    )
+    proc = subprocess.run(
+        ["bash", str(WRAPPER), "https://example.test", "http://impl.test", "stub", str(ref)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result = (ref / "transitions" / "video-motion-result.txt").read_text()
+    assert "target-local scroll state-machine trajectory passed" in result
+    assert not calls.exists(), "full-frame compare must not run for dispatchOnly target-local state"
+
+
+def test_wrapper_behavior_runs_compare_for_non_dispatch_scroll_state(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    _write_wrapper_motion_ref(ref, dispatch_only=False)
+    traj, compare = _write_fake_motion_scripts(tmp_path)
+    calls = tmp_path / "compare.calls"
+    env = dict(
+        os.environ,
+        UI_CLONE_VMC_TRAJECTORY_SCRIPT=str(traj),
+        UI_CLONE_VMC_COMPARE_SCRIPT=str(compare),
+        UI_CLONE_FAKE_COMPARE_CALLS=str(calls),
+    )
+    proc = subprocess.run(
+        ["bash", str(WRAPPER), "https://example.test", "http://impl.test", "stub", str(ref)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert calls.read_text().strip() == "called"

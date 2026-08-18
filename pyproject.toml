@@ -1,6 +1,6 @@
 [project]
 name = "ui-clone-skills"
-version = "0.7.34"
+version = "0.7.35"
 description = "Clone any live website URL into React + Tailwind code — Claude Code and Codex plugin with extraction-first verification (real CSS, real animation params from JS bundles, AE/SSIM pixel diff)."
 readme = "README.md"
 license = { text = "Apache-2.0" }

@@ -1025,6 +1025,61 @@ def test_gate_svg_dom_parity_status_fail_fails(tmp_path: Path) -> None:
     assert any("svg-dom-parity" in r.label for r in failures), results
 
 
+def test_svg_dom_parity_matches_same_section_id_before_bbox_fallback(tmp_path: Path) -> None:
+    """A stable section id is a stronger match than bbox/order.
+
+    Regression: on realfood.gov, both ref and impl had one SVG inside
+    section#pyramid, but page-height drift pushed the impl bbox far enough that
+    the bbox fallback reported a false section-svg-missing violation.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_browser = fake_bin / "agent-browser"
+    fake_browser.write_text(
+        """#!/usr/bin/env bash
+set -eu
+session="$2"
+cmd="$3"
+if [ "$cmd" = "open" ] || [ "$cmd" = "wait" ]; then
+  exit 0
+fi
+if [ "$cmd" = "eval" ] && printf '%s' "${4:-}" | grep -q 'location.href'; then
+  printf 'https://loaded.example/\\n'
+  exit 0
+fi
+if [ "$cmd" = "eval" ]; then
+  if printf '%s' "$session" | grep -q -- '-ref$'; then
+    cat <<'JSON'
+{"page":{"total":1,"inlineSvg":1,"svgWithPath":1},"sections":[{"name":"header.site-header","bbox":{"top":0,"height":96,"width":1280},"total":0,"inlineSvg":0},{"name":"section#pyramid.dga-module__LrmiHG__erf","bbox":{"top":1000,"height":600,"width":1280},"total":1,"inlineSvg":1,"svgWithPath":1,"imgSvg":0,"useHref":0,"bgSvg":0,"pseudoBgSvg":0}]}
+JSON
+  else
+    cat <<'JSON'
+{"page":{"total":1,"inlineSvg":1,"svgWithPath":1},"sections":[{"name":"header.site-header","bbox":{"top":0,"height":96,"width":1280},"total":0,"inlineSvg":0},{"name":"section#intro","bbox":{"top":900,"height":600,"width":1280},"total":0,"inlineSvg":0},{"name":"section#pyramid.dga-module__LrmiHG__erf","bbox":{"top":2600,"height":600,"width":1280},"total":1,"inlineSvg":1,"svgWithPath":1,"imgSvg":0,"useHref":0,"bgSvg":0,"pseudoBgSvg":0}]}
+JSON
+  fi
+  exit 0
+fi
+exit 2
+""",
+        encoding="utf-8",
+    )
+    fake_browser.chmod(0o755)
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "svg-dom-parity-check.sh"
+    proc = subprocess.run(
+        ["bash", str(script), "svg-id-regression", "https://ref.example", "http://impl.example", str(ref)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    art = json.loads((ref / "svg-dom-parity.json").read_text())
+    assert art["status"] == "pass", art
+    assert art["violations"] == []
+
+
 
 # ── FIX 3: ref-screenshot-asset self-scan false positive ─────────────────
 # The check flagged 1 violation {"file":"ref-screenshot-asset.json",

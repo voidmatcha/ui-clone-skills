@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -8,6 +9,28 @@ from ui_clone.gates.live_parity import (
     find_accessibility_text_leaks,
     scrollheight_within_tolerance,
 )
+
+
+def test_live_parity_system_python_paths_avoid_runtime_pep604_unions() -> None:
+    root = Path(__file__).resolve().parents[1]
+    execution_surfaces = (
+        root / "ui_clone" / "gates" / "live_parity.py",
+        root / "skills" / "visual-debug" / "scripts" / "live-parity-sweep.sh",
+    )
+    runtime_union = re.compile(
+        r"isinstance\([^\n]*\b(?:int|float)\s*\|\s*(?:int|float)"
+    )
+
+    offenders = [
+        path.relative_to(root).as_posix()
+        for path in execution_surfaces
+        if runtime_union.search(path.read_text(encoding="utf-8"))
+    ]
+
+    assert offenders == [], (
+        "live-parity-sweep can run under macOS system Python 3.9; runtime "
+        f"PEP 604 unions inside isinstance() crash there: {offenders}"
+    )
 
 
 def test_timer_carousel_rotation_is_advisory() -> None:

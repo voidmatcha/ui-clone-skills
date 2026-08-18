@@ -719,10 +719,56 @@ if not isinstance(payload, list):
         kind="malformed-batch",
         retryable=True,
     )
-if len(payload) != 6:
+
+
+def decode_analysis_value(item: Any):
+    if not isinstance(item, dict) or item.get("success") is not True:
+        return None, None
+    result = item.get("result")
+    analysis_origin = result.get("origin") if isinstance(result, dict) else None
+    analysis_value = result.get("result") if isinstance(result, dict) else None
+    value: Any = analysis_value
+    for _ in range(3):
+        if not isinstance(value, str):
+            break
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            break
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("blocks"), list)
+        or not isinstance(analysis_origin, str)
+    ):
+        return None, None
+    return value, {"origin": analysis_origin}
+
+
+def has_final_capture_proof(item: Any) -> bool:
+    value, _analysis = decode_analysis_value(item)
+    if not isinstance(value, dict):
+        return False
+    return (
+        isinstance(value.get("phaseSampleStartIndex"), int)
+        and isinstance(value.get("pageReceipt"), dict)
+        and bool(value.get("blocks"))
+    )
+
+
+if len(payload) > 6:
     fail(
         f"batch result contained {len(payload)}/6 command results",
-        kind="incomplete-batch" if len(payload) < 6 else "oversized-batch",
+        kind="oversized-batch",
+        retryable=True,
+        command_result_count=len(payload),
+    )
+compact_final_capture = (
+    len(payload) == 5 and any(has_final_capture_proof(item) for item in payload)
+)
+if len(payload) < 6 and not compact_final_capture:
+    fail(
+        f"batch result contained {len(payload)}/6 command results",
+        kind="incomplete-batch",
         retryable=True,
         command_result_count=len(payload),
     )
@@ -742,25 +788,15 @@ if not same_url(requested_url, loaded_url):
         kind="url-mismatch",
     )
 
-analysis_result = payload[5].get("result")
-analysis_origin = (
-    analysis_result.get("origin") if isinstance(analysis_result, dict) else None
+analysis_item = payload[5] if len(payload) == 6 else next(
+    item for item in payload if has_final_capture_proof(item)
 )
+value, analysis = decode_analysis_value(analysis_item)
+analysis_origin = analysis.get("origin") if isinstance(analysis, dict) else None
 if not isinstance(analysis_origin, str) or not analysis_origin.lower().startswith(
     ("http://", "https://")
 ):
     fail(f"final analysis command did not run on HTTP(S): {analysis_origin!r}")
-analysis_value = (
-    analysis_result.get("result") if isinstance(analysis_result, dict) else None
-)
-value: Any = analysis_value
-for _ in range(3):
-    if not isinstance(value, str):
-        break
-    try:
-        value = json.loads(value)
-    except json.JSONDecodeError:
-        break
 if not isinstance(value, dict) or not isinstance(value.get("blocks"), list):
     fail("final analysis command did not return a blocks payload")
 if not value["blocks"]:

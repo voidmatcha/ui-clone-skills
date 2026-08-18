@@ -10,6 +10,8 @@ invariants instead of comparing absolutes:
                   at every sweep width.
   fixed-gutter  — leftGap constant across enforced desktop viewports → the
                   impl must keep that gutter at every sweep width.
+  overflow      — ref content exceeds its container → skipped because
+                  equal negative gaps are not a transferable centering rule.
   proportional  — anything else → skipped (no transferable invariant).
 
 Blocking policy: a violation must repeat at two ADJACENT sweep widths (or
@@ -96,6 +98,17 @@ def _viewport_width(viewport: str) -> int | None:
         return None
 
 
+def _identity_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:48] or "section"
+
+
+def _section_key(name: str, fingerprint: str, ambiguous_names: set[str]) -> str:
+    if name in ambiguous_names and fingerprint:
+        return f"{name}#{_identity_slug(fingerprint)}"
+    return name
+
+
 def _grouped_keys(row: dict[str, Any]) -> dict[str, tuple[float, float, float]]:
     """Per-group gap tuples keyed name[occurrence] (mirrors alignment-parity)."""
     out: dict[str, tuple[float, float, float]] = {}
@@ -118,7 +131,7 @@ def classify(
     """Classify sections + groups from ref data across enforced desktop viewports.
 
     Keys: section name, or "<section>::<group>[i]" for contentGroups.
-    Kinds: centered | fixed-gutter | proportional | unclassifiable.
+    Kinds: centered | fixed-gutter | overflow | proportional | unclassifiable.
     A key must be measurable at every desktop viewport to be classified;
     missing gap fields anywhere make it unclassifiable (frozen-ref debt —
     surfaced, never silently treated as proportional).
@@ -130,6 +143,29 @@ def classify(
     impl_fingerprints_by_name: dict[str, list[str]] = {}
     impl_indices_by_name: dict[str, list[int]] = {}
     desktop_count = 0
+    fingerprints_by_name: dict[str, set[str]] = {}
+
+    for viewport, matches in ref_rows_by_viewport.items():
+        vp_w = _viewport_width(viewport)
+        if vp_w is None or vp_w < DESKTOP_MIN_WIDTH:
+            continue
+        for match in matches or []:
+            if not isinstance(match, dict):
+                continue
+            ref_row = match.get("ref")
+            if not isinstance(ref_row, dict):
+                continue
+            impl_row = match.get("impl")
+            if not isinstance(impl_row, dict):
+                continue
+            fingerprint = str(impl_row.get("fingerprint") or "").strip()
+            if not fingerprint:
+                continue
+            name = str(match.get("name") or ref_row.get("className") or "section")
+            fingerprints_by_name.setdefault(name, set()).add(fingerprint)
+    ambiguous_names = {
+        name for name, fingerprints in fingerprints_by_name.items() if len(fingerprints) > 1
+    }
 
     for viewport, matches in ref_rows_by_viewport.items():
         vp_w = _viewport_width(viewport)
@@ -143,42 +179,48 @@ def classify(
             if not isinstance(ref_row, dict):
                 continue
             name = str(match.get("name") or ref_row.get("className") or "section")
+            impl_row = match.get("impl")
+            impl_fingerprint = ""
+            if isinstance(impl_row, dict):
+                impl_fingerprint = str(impl_row.get("fingerprint") or "").strip()
+            key_name = _section_key(name, impl_fingerprint, ambiguous_names)
             rect_raw = ref_row.get("rect")
             rect = rect_raw if isinstance(rect_raw, dict) else {}
             basis = _num(rect.get("width")) or float(vp_w)
             gaps = _gaps(ref_row)
             if gaps is None:
-                missing[name] = True
+                missing[key_name] = True
             else:
-                observed.setdefault(name, []).append((gaps[0], gaps[1], basis))
+                observed.setdefault(key_name, []).append((gaps[0], gaps[1], basis))
             for key, (g_l, g_r, g_w) in _grouped_keys(ref_row).items():
-                observed.setdefault(f"{name}::{key}", []).append((g_l, g_r, g_w))
+                observed.setdefault(f"{key_name}::{key}", []).append((g_l, g_r, g_w))
             # The sweep enumerates the LIVE impl, whose rows carry impl class
             # names — record them so evaluation can pair "footer-2" (a
             # safe-section name) back to the live row.
-            impl_row = match.get("impl")
             if isinstance(impl_row, dict):
                 impl_cls = str(impl_row.get("className") or "").strip()
                 if impl_cls:
-                    impl_classes_by_name.setdefault(name, []).append(impl_cls)
-                impl_fingerprint = str(impl_row.get("fingerprint") or "").strip()
+                    impl_classes_by_name.setdefault(key_name, []).append(impl_cls)
                 if impl_fingerprint:
-                    impl_fingerprints_by_name.setdefault(name, []).append(
+                    impl_fingerprints_by_name.setdefault(key_name, []).append(
                         impl_fingerprint
                     )
                 impl_index = impl_row.get("index")
                 if isinstance(impl_index, int):
-                    impl_indices_by_name.setdefault(name, []).append(impl_index)
+                    impl_indices_by_name.setdefault(key_name, []).append(impl_index)
 
     out: dict[str, dict[str, Any]] = {}
     for key, rows in observed.items():
-        if missing.get(key) or len(rows) < desktop_count and "::" not in key:
+        if missing.get(key) or len(rows) < desktop_count:
             out[key] = {"kind": "unclassifiable"}
             continue
         if not rows:
             out[key] = {"kind": "unclassifiable"}
             continue
         basis = min(w for _, _, w in rows)
+        if any(lg + rg < -_center_tol(w) for lg, rg, w in rows):
+            out[key] = {"kind": "overflow", "basisWidth": basis}
+            continue
         if all(abs(lg - rg) <= _center_tol(w) for lg, rg, w in rows):
             out[key] = {"kind": "centered", "basisWidth": basis}
             continue
@@ -280,6 +322,7 @@ def _row_for(
             for row in sample_rows:
                 if str(row.get("fingerprint") or "") == target_fingerprint:
                     return row
+        return None
     if info and isinstance(info.get("implIndex"), int):
         target_index = int(info["implIndex"])
         for row in sample_rows:

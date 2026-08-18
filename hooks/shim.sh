@@ -52,9 +52,23 @@ if command -v realpath >/dev/null 2>&1; then
   script_path="$(realpath "$script_path" 2>/dev/null || printf '%s' "$script_path")"
 fi
 project_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+# PYTHONSAFEPATH keeps the invoking session's cwd off sys.path. Without it a
+# session whose cwd holds its own `ui_clone/` — this repo's dev checkout, or any
+# tree with that package name — shadows the installed plugin package, and every
+# hook dies with ModuleNotFoundError against a version the checkout predates.
+#
+# Never propagate a non-zero status. The hook modules signal every outcome as
+# stdout JSON and only ever call sys.exit(0), so a non-zero status here is always
+# an internal failure: a missing module, a broken venv, an interpreter error.
+# Claude treats a failing UserPromptSubmit hook as a block, so propagating it
+# rejects the user's prompt outright — a far worse outcome than skipping
+# enforcement for one turn. Do not restore `exec` here; it would forward the
+# status again. If a module ever needs to block, it must say so in its JSON.
 # Re-feed a pre-captured payload (external-browse activation path) or pass
 # stdin straight through (normal path).
 if [[ -n "$_payload" ]]; then
-  exec uv run --project "$project_root" python -m "$@" <<< "$_payload"
+  PYTHONSAFEPATH=1 uv run --project "$project_root" python -m "$@" <<< "$_payload" || true
+  exit 0
 fi
-exec uv run --project "$project_root" python -m "$@"
+PYTHONSAFEPATH=1 uv run --project "$project_root" python -m "$@" || true
+exit 0

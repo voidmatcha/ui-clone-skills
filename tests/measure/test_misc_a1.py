@@ -2463,6 +2463,8 @@ def _run_runtime_text_sequence_with_stub(
                 "errorDocument": error_document,
             },
         })
+        initial_captured = json.loads(json.dumps(captured))
+        initial_captured["phaseSampleStartIndex"] = None
         return [
             {
                 "command": ["set", "media", "light", "reduced-motion"],
@@ -2487,7 +2489,7 @@ def _run_runtime_text_sequence_with_stub(
                 "error": None,
                 "result": {
                     "origin": origin,
-                    "result": json.dumps(captured)
+                    "result": json.dumps(initial_captured)
                 },
                 "success": True,
             },
@@ -2516,6 +2518,7 @@ def _run_runtime_text_sequence_with_stub(
     open_error_fixture = tmp_path / "runtime-text-open-error-batch.json"
     eval_error_fixture = tmp_path / "runtime-text-eval-error-batch.json"
     incomplete_fixture = tmp_path / "runtime-text-incomplete-batch.json"
+    compact_success_fixture = tmp_path / "runtime-text-compact-success-batch.json"
     oversized_fixture = tmp_path / "runtime-text-oversized-batch.json"
     object_fixture = tmp_path / "runtime-text-object-batch.json"
     malformed_fixture = tmp_path / "runtime-text-malformed-batch.json"
@@ -2584,6 +2587,18 @@ def _run_runtime_text_sequence_with_stub(
                 ref_error_document,
             )[:5]
         ),
+        encoding="utf-8",
+    )
+    compact_success_payload = _batch_payload(
+        ref_blocks,
+        ref_capture,
+        ref_url,
+        ref_actual_url,
+        ref_response_status,
+        ref_error_document,
+    )
+    compact_success_fixture.write_text(
+        json.dumps(compact_success_payload[:3] + compact_success_payload[4:]),
         encoding="utf-8",
     )
     oversized_fixture.write_text(
@@ -2701,6 +2716,10 @@ def _run_runtime_text_sequence_with_stub(
         "  if [[ \"$session\" == \"${FIRST_BATCH_INCOMPLETE_SESSION:-}\"-capture-*-1 "
         "|| ( \"$session\" == rtseq-ref-*-1 && \"${FIRST_BATCH_INCOMPLETE_SESSION:-}\" = *-text-ref ) ]]; then\n"
         f"    cat {str(incomplete_fixture)!r}; exit 7\n"
+        "  fi\n"
+        "  if [[ \"$session\" == \"${FIRST_BATCH_COMPACT_SUCCESS_SESSION:-}\"-capture-*-1 "
+        "|| ( \"$session\" == rtseq-ref-*-1 && \"${FIRST_BATCH_COMPACT_SUCCESS_SESSION:-}\" = *-text-ref ) ]]; then\n"
+        f"    cat {str(compact_success_fixture)!r}; exit 0\n"
         "  fi\n"
         "  if [ \"${OPEN_FAIL_STALE:-0}\" = '1' ]; then\n"
         f"    cat {str(open_error_fixture)!r}; exit 7\n"
@@ -4069,6 +4088,29 @@ def test_runtime_text_sequence_retries_incomplete_side_on_fresh_session(
             if line == f"--session {capture_session} close"
         ]
         assert len(close_lines) == 1
+
+
+def test_runtime_text_sequence_accepts_compact_success_batch_with_final_capture(
+    tmp_path: Path,
+) -> None:
+    proc, artifact, log = _run_runtime_text_sequence_with_stub(
+        tmp_path,
+        ["Reference"],
+        ["Reference"],
+        stub_env={"FIRST_BATCH_COMPACT_SUCCESS_SESSION": "text-seq-text-ref"},
+    )
+
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert artifact["status"] == "pass"
+    assert artifact["captureReceipt"]["ref"]["attempt"] == 1
+    assert artifact["captureReceipt"]["ref"]["retryCount"] == 0
+    assert artifact["captureReceipt"]["ref"]["batchCommandCount"] == 5
+    assert "batch result contained 5/6 command results" not in proc.stderr
+    assert sum(
+        line.startswith("--session text-seq-text-ref-capture-")
+        and " batch --json --bail" in line
+        for line in log.splitlines()
+    ) == 1
 
 
 @pytest.mark.parametrize(
