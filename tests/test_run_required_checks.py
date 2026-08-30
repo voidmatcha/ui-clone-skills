@@ -2420,6 +2420,7 @@ def test_cleanup_sessions_bounds_each_hung_close_and_fails_if_registry_remains(
     agent_browser.write_text(
         "#!/usr/bin/env bash\n"
         "if [ \"${1:-}\" = session ] && [ \"${2:-}\" = list ]; then\n"
+        "  sleep 0.1\n"
         "  echo 'Active sessions:'\n"
         "  echo '  hung-owned'\n"
         "  exit 0\n"

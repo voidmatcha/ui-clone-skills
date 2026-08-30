@@ -1,6 +1,6 @@
 {
   "name": "ui-clone-skills",
-  "version": "0.7.36",
+  "version": "0.7.37",
   "description": "Motion forensics for the animated web. Four jobs against a live URL: decode (analyse motion + build, no code), clone (URL → React + Tailwind), verify (AE/SSIM + motion-parity score vs. an existing impl), extract (raw JSON dump). Extracts real CSS and animation params (GSAP / Framer Motion / Lenis / anime.js) directly from JS bundles, then verifies with AE/SSIM diff — no vision tokens. Three skills: ui-reverse-engineering (decode/clone/verify/extract entry points, supports Webflow IX2 / Next.js / Tailwind v4), ui-capture (reference + transitions), visual-debug (AE/SSIM diff + computed-style mismatch diagnosis).",
   "author": {
     "name": "YONGJAE LEE"
@@ -47,11 +47,11 @@
     "builder-io-alternative"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/codex-hooks.json",
+  "hooks": "./hooks/codex-plugin-hooks.json",
   "interface": {
     "displayName": "ui-clone-skills",
     "shortDescription": "Motion forensics for the animated web — decode / clone / verify / extract against a live URL. AE/SSIM-verified, no vision tokens.",
-    "longDescription": "Motion forensics for the animated web. Four user-facing jobs against a live URL: decode (analyse motion + build, no code), clone (URL → React + Tailwind), verify (AE/SSIM + motion-parity score vs. an existing impl), extract (raw JSON dump). Extracts real CSS and animation params (GSAP, Framer Motion, Lenis, anime.js) directly from JS bundles, then verifies with AE/SSIM diff — no vision tokens, no screenshot input. Exposes the same three public skills as the Claude Code plugin from shared ./skills/: ui-reverse-engineering routes the four jobs through one extraction engine (supports Webflow IX2, Next.js, Tailwind v4); ui-capture records reference screenshots, scroll evidence, and transitions; visual-debug diagnoses implementation mismatches via AE/SSIM diff and computed-style evidence. Includes lifecycle hooks through hooks/codex-hooks.json -> hooks/shim.sh when Codex plugin hooks are enabled, and uses AGENTS.md as the canonical project guide.",
+    "longDescription": "Motion forensics for the animated web. Four user-facing jobs against a live URL: decode (analyse motion + build, no code), clone (URL → React + Tailwind), verify (AE/SSIM + motion-parity score vs. an existing impl), extract (raw JSON dump). Extracts real CSS and animation params (GSAP, Framer Motion, Lenis, anime.js) directly from JS bundles, then verifies with AE/SSIM diff — no vision tokens, no screenshot input. Exposes the same three public skills as the Claude Code plugin from shared ./skills/: ui-reverse-engineering routes the four jobs through one extraction engine (supports Webflow IX2, Next.js, Tailwind v4); ui-capture records reference screenshots, scroll evidence, and transitions; visual-debug diagnoses implementation mismatches via AE/SSIM diff and computed-style evidence. The global plugin is skills-only; clone workspaces opt into the canonical hooks/codex-hooks.json routes through project-local .codex/hooks.json. Uses AGENTS.md as the canonical project guide.",
     "developerName": "YONGJAE LEE",
     "category": "Frontend",
     "capabilities": [

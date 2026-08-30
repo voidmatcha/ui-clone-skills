@@ -196,7 +196,9 @@ class TestCompletionPatternWordBoundary:
 class TestGateSubprocessTimeout:
     """Verifies that gate subprocess calls fail-open on TimeoutExpired."""
 
-    def test_pre_generate_run_gate_timeout_fail_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_pre_generate_run_gate_timeout_fail_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """_run_gate in pre_generate fails open (returns passed=True) on TimeoutExpired."""
         from importlib import reload
 
@@ -208,11 +210,14 @@ class TestGateSubprocessTimeout:
             raise subprocess.TimeoutExpired(cmd=args[0], timeout=5)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        result = mod._run_gate(Path("/tmp/fake"))
+        result = mod._run_gate(tmp_path)
         assert result.get("passed") is True, "TimeoutExpired must fail-open"
         assert result.get("fail_count") == 0
+        assert (tmp_path / ".gate-skip-log").is_file(), "skip must be durably recorded"
 
-    def test_section_gate_run_gate_timeout_fail_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_section_gate_run_gate_timeout_fail_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """_run_gate in section_gate fails open (returns passed=True) on TimeoutExpired."""
         from importlib import reload
 
@@ -224,9 +229,10 @@ class TestGateSubprocessTimeout:
             raise subprocess.TimeoutExpired(cmd=args[0], timeout=5)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        result = mod._run_gate(Path("/tmp/fake"), "extraction")
+        result = mod._run_gate(tmp_path, "extraction")
         assert result.get("passed") is True, "TimeoutExpired must fail-open"
         assert result.get("fail_count") == 0
+        assert (tmp_path / ".gate-skip-log").is_file(), "skip must be durably recorded"
 
 
 

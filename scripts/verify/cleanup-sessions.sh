@@ -102,6 +102,7 @@ done <<< "$MATCHES"
 # visible to `session list`.
 REMAINING=""
 WAIT_ATTEMPT=0
+WAIT_STARTED_AT=$SECONDS
 while [ "$WAIT_ATTEMPT" -lt 20 ]; do
   if ! REMAINING=$(_matching_sessions); then
     echo "agent-browser session list failed or timed out after ${LIST_TIMEOUT}s" >&2
@@ -109,6 +110,7 @@ while [ "$WAIT_ATTEMPT" -lt 20 ]; do
   fi
   [ -z "$REMAINING" ] && break
   WAIT_ATTEMPT=$((WAIT_ATTEMPT + 1))
+  [ "$((SECONDS - WAIT_STARTED_AT))" -ge 2 ] && break
   sleep 0.1
 done
 if [ -n "$REMAINING" ]; then

@@ -28,6 +28,7 @@ def test_ui_clone_wrapper_help() -> None:
     assert "ui-clone — agent-readable" in result.stdout
     assert "status --json" in result.stdout
     assert "state terminal" in result.stdout
+    assert "hooks enable|disable|status" in result.stdout
 
 
 @pytest.mark.skipif(not _node_available(), reason="node is required for npm wrapper tests")
@@ -81,6 +82,36 @@ def test_ui_clone_wrapper_pipeline_shorthand_status_json(tmp_path: Path) -> None
     assert payload["status"] == "incomplete"
     assert payload["layout"] == "agent-run"
     assert payload["verify_stamp"]["success_only"] is True
+
+
+@pytest.mark.skipif(not _node_available(), reason="node is required for npm wrapper tests")
+def test_ui_clone_wrapper_dispatches_project_hook_status(tmp_path: Path) -> None:
+    env = {
+        **os.environ,
+        "UI_CLONE_CLI_PYTHON_DIRECT": "1",
+        "PYTHONPATH": str(REPO_ROOT),
+    }
+
+    result = subprocess.run(
+        [
+            "node",
+            str(BIN),
+            "hooks",
+            "status",
+            "--project-root",
+            str(tmp_path),
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["active"] is False
+    assert payload["routeCount"] == 0
+    assert payload["canonicalRouteCount"] == 6
 
 
 def test_package_json_bin_and_version_match_pyproject() -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "ui-clone-skills"
-version = "0.7.36"
+version = "0.7.37"
 description = "Clone any live website URL into React + Tailwind code — Claude Code and Codex plugin with extraction-first verification (real CSS, real animation params from JS bundles, AE/SSIM pixel diff)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -56,6 +56,7 @@ dev = [
     "ruff==0.9.10",
     "mypy==1.15.0",
     "pytest-cov==7.1.0",
+    "pytest-timeout==2.4.0",
     "pytest-xdist==3.8.0",
 ]
 # Step D — AST-based JS bundle parsing, opt-in. Extractors prefer
@@ -74,6 +75,15 @@ packages = ["ui_clone"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Safety net for subprocess.run calls that shell out to scripts touching
+# agent-browser: one un-timed call against a dead host would hang serial CI.
+# timeout_method=thread terminates the whole process on expiry, even when
+# blocked in a C-level subprocess wait. Keep this above the suite's explicit
+# longest subprocess contracts (up to 300s) so it remains a final safety net,
+# not the first timeout to fire. Opt-in integration tests are exempted with a
+# per-item timeout(0) marker in tests/integration/conftest.py.
+timeout = 300
+timeout_method = "thread"
 
 [tool.ruff]
 target-version = "py311"

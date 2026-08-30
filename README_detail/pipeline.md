@@ -2,7 +2,9 @@
 
 ## Pipeline hooks (automatic)
 
-Hooks register through the Claude Code plugin source's `hooks/hooks.json` and, for Codex, via `install.sh` merging `hooks/codex-hooks.json` into `~/.codex/hooks.json` (codex-cli 0.137 removed the `plugin_hooks` manifest path). Both hosts are installed from the lightweight local projection at `~/plugins/ui-clone-skills`, and all hooks route through a single `hooks/shim.sh` that fast-skips when no `tmp/ref/` directory exists.
+Claude Code registers hooks through the plugin source's `hooks/hooks.json`. The globally enabled Codex plugin is skills-only; the `ui-reverse-engineering` preflight configures the canonical `hooks/codex-hooks.json` routes under the active workspace's `.codex/hooks.json`. This project scope means unrelated Codex sessions load zero ui-clone routes. Both hosts route enabled hooks through a single `hooks/shim.sh`.
+
+Manual Codex management is available through `ui-clone hooks status|enable|disable [--project-root <path>]`. The first enable or a manifest change may require one `/hooks` trust review and a fresh Codex session. Installation and updates remove only legacy ui-clone entries left in the user-global `~/.codex/hooks.json`; they preserve all other hooks and trust state.
 
 | Hook module | Event | Purpose |
 |------|-------|---------|
@@ -42,8 +44,7 @@ The `ui-reverse-engineering` skill is auto-loaded so the prompt does not need to
 # ~/.codex/config.toml — enable once, restart Codex
 [features]
 goals = true
-# (Gate hooks load from ~/.codex/hooks.json via install.sh — plugin_hooks was
-#  removed in codex-cli 0.137 and is no longer used.)
+# The ui-reverse-engineering preflight configures project-local gate hooks.
 ```
 
 In the Codex REPL, run a one-line `/goal` invocation (the `ui-reverse-engineering` skill ships an `AGENTS.md` block that Codex auto-loads, so the goal prompt doesn't re-embed the full pipeline briefing): `/goal Drive the ui-clone-skills pipeline for tmp/ref/<component> until python -m ui_clone.goal tmp/ref/<component> --check-done exits 0. Never declare completion until the exit code is 0.` Use `/goal pause` to narrow scope mid-run, `/goal resume` to continue.

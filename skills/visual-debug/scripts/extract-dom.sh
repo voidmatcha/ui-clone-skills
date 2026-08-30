@@ -75,6 +75,10 @@ if ! command -v agent-browser >/dev/null 2>&1; then
   echo "extract-dom: agent-browser not found on PATH" >&2; exit 3
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/idle-reset.sh
+. "$SCRIPT_DIR/lib/idle-reset.sh"
+
 OUT_PATH="$REF_DIR/structure.json"
 if [[ -n "$VIEWPORT" ]]; then
   # Validate WxH form so a typo doesn't silently produce desktop styles.
@@ -94,7 +98,6 @@ if [[ -n "$VIEWPORT" ]]; then
   fi
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTRACT_JS_SOURCE="$SCRIPT_DIR/lib/extract-dom.js"
 if [[ ! -r "$EXTRACT_JS_SOURCE" ]]; then
   echo "extract-dom: JS helper not found: $EXTRACT_JS_SOURCE" >&2
@@ -145,6 +148,8 @@ TMP_OUT=$(mktemp)
 trap 'rm -f "$EVAL_JS" "$TMP_OUT"' EXIT
 sed "s|SELECTOR_PLACEHOLDER|'${SELECTOR_LITERAL}'|" "$EXTRACT_JS_SOURCE" > "$EVAL_JS"
 
+CAPTURED_IDLE="$(ab_idle_reset "$SESSION")"
+
 # Run via agent-browser and capture.
 agent-browser --session "$SESSION" eval --stdin < "$EVAL_JS" > "$TMP_OUT" 2>&1 || {
   echo "extract-dom: agent-browser eval failed:" >&2
@@ -157,14 +162,20 @@ agent-browser --session "$SESSION" eval --stdin < "$EVAL_JS" > "$TMP_OUT" 2>&1 |
 # Newer agent-browser versions JSON-encode the eval return value, so a function
 # that already calls JSON.stringify(...) yields a double-encoded string on disk.
 # Unwrap once if the top-level is a string, then re-write the canonical form.
-if ! python3 -c "
-import json, sys
+if ! UI_CLONE_CAPTURED_IDLE="$CAPTURED_IDLE" python3 -c "
+import json, os, sys
 d = json.load(open('$TMP_OUT'))
 if isinstance(d, str):
     d = json.loads(d)
 if not isinstance(d, dict): raise ValueError('top-level must be object')
 if 'tag' not in d: raise ValueError('missing tag — schema mismatch (Fix 14)')
 if 'children' not in d: raise ValueError('missing children — schema mismatch')
+ci = os.environ.get('UI_CLONE_CAPTURED_IDLE')
+if ci:
+    try:
+        d['capturedIdle'] = json.loads(ci)
+    except Exception:
+        d['capturedIdle'] = {'reset': False, 'idle': None, 'note': 'provenance-parse-failed'}
 json.dump(d, open('$OUT_PATH', 'w'), indent=2)
 " 2>&1; then
   echo "extract-dom: output failed schema validation" >&2

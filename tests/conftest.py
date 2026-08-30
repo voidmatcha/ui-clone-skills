@@ -36,19 +36,22 @@ def _short_ab_open_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     under UI_CLONE_AB_OPEN_TIMEOUT seconds (default 30). Tests drive those
     scripts against unreachable hosts like https://ref.example (NXDOMAIN); at
     the 30s default the pre-flight `open` deadlocks past pytest's per-test
-    timeout. Setting it to 5s here makes a dead-URL open fail fast — and because
-    tests build their subprocess env from os.environ (e.g. {**os.environ, ...}),
+    timeout (now bounded by pytest-timeout — see pyproject
+    [tool.pytest.ini_options]). Setting it to 5s here makes a dead-URL open fail
+    fast — and because tests build their subprocess env from os.environ (e.g.
+    {**os.environ, ...}),
     monkeypatch.setenv propagates the override into the script's environment.
 
     open alone is NOT enough: on a timeout the watchdog reaps the detached
     session by calling `agent-browser close`, and gate scripts also close their
     own probe sessions — but `close` itself BLOCKS ~8-12s on a wedged dead-host
     session. With two viewports that reap+close cost (≈2×~10s) pushed the
-    hover-state-compare fan-out past pytest's 30s even with the open bounded. So
-    also bound the post-timeout reap (UI_CLONE_AB_REAP_TIMEOUT) and explicit
-    close (UI_CLONE_AB_CLOSE_TIMEOUT) to 3s. A bounded close that is killed
-    before the server exits leaves an orphan reaped by `agent-browser close
-    --all`; the test run itself stays well under 30s.
+    hover-state-compare fan-out toward the per-test timeout even with the open
+    bounded. So also bound the post-timeout reap (UI_CLONE_AB_REAP_TIMEOUT) and
+    explicit close (UI_CLONE_AB_CLOSE_TIMEOUT) to 3s. A bounded close that is
+    killed before the server exits leaves an orphan reaped by `agent-browser
+    close --all`; the test run itself stays well under the repo-wide pytest
+    timeout.
 
     Scope/safety: these only shorten agent-browser open/reap/close ceilings. They
     have no effect on non-browser tests; 5s is far above any healthy open and 3s

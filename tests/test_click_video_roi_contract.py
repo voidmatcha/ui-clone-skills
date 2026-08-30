@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 VIDEO_COMPARE = (
     Path(__file__).resolve().parents[1]
     / "scripts"

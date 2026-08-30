@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -32,23 +33,23 @@ HANGUL = re.compile(r"[\uac00-\ud7a3]")
 
 def find_hits(root: Path) -> list[str]:
     hits: list[str] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix not in {".py", ".sh"}:
-            continue
-        if path.name in EXCLUDED_FILES:
-            continue
-        relative = path.relative_to(root)
-        if any(part in EXCLUDED_DIRS for part in relative.parts):
-            continue
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError:
-            continue
-        for lineno, line in enumerate(lines, 1):
-            if HANGUL.search(line):
-                hits.append(f"{relative}:{lineno}: {line}")
+    for current_root, dir_names, file_names in os.walk(root):
+        dir_names[:] = sorted(name for name in dir_names if name not in EXCLUDED_DIRS)
+        current_dir = Path(current_root)
+        for file_name in sorted(file_names):
+            path = current_dir / file_name
+            if path.suffix not in {".py", ".sh"}:
+                continue
+            if path.name in EXCLUDED_FILES:
+                continue
+            relative = path.relative_to(root)
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                continue
+            for lineno, line in enumerate(lines, 1):
+                if HANGUL.search(line):
+                    hits.append(f"{relative}:{lineno}: {line}")
     return hits
 
 

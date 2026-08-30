@@ -28,6 +28,31 @@ dependencies).
 > `node bin/ui-clone ...` (or `python -m ui_clone.*`) over `npx ui-clone-cli`,
 > which resolves to the published version unless the package is npm-linked.
 
+## Codex project hooks
+
+The globally enabled Codex plugin is skills-only, so ui-clone hooks do not run
+in unrelated sessions. The `ui-reverse-engineering` skill checks the current
+workspace automatically and configures the canonical six routes on first use.
+Use these commands when managing the boundary directly:
+
+```bash
+ui-clone hooks status --project-root <path> --json
+ui-clone hooks enable --project-root <path>
+ui-clone hooks disable --project-root <path>
+```
+
+Without `--project-root`, the CLI uses the current Git root. `enable` merges
+only ui-clone-owned entries into `<project>/.codex/hooks.json`; `disable`
+removes only those entries. Foreign hooks, metadata, and hook state survive the
+round trip. Writes are backed up and atomic, and malformed JSON is left
+untouched.
+
+`status --json` reports `active`, `parity`, `routeCount`,
+`canonicalRouteCount`, `trust`, and `nextStep`. `active` means the on-disk
+project manifest exactly matches the canonical ui-clone route set; Codex trust
+is a separate host decision. After the first enable or a manifest change,
+review `/hooks` if prompted and start a fresh session.
+
 ## Pipeline status
 
 ```bash

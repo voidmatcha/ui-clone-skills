@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import runpy
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "ci" / "check-universality.sh"
@@ -36,6 +41,34 @@ def test_hangul_scanner_reports_production_source_only(tmp_path: Path) -> None:
     assert proc.returncode == 0
     assert "scripts/tool.py:1" in proc.stdout
     assert "tests/fixture.py" not in proc.stdout
+
+
+def test_hangul_scanner_prunes_excluded_directories_before_file_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    excluded = tmp_path / "node_modules"
+    excluded.mkdir()
+    (excluded / "trap.py").write_text("# ignored\n", encoding="utf-8")
+
+    original_is_file = Path.is_file
+
+    def guarded_is_file(path: Path) -> bool:
+        try:
+            relative = path.relative_to(tmp_path)
+        except ValueError:
+            return original_is_file(path)
+        if "node_modules" in relative.parts:
+            raise AssertionError("excluded directory contents were traversed")
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+    find_hits = cast(
+        Callable[[Path], list[str]],
+        runpy.run_path(str(HELPER))["find_hits"],
+    )
+
+    assert find_hits(tmp_path) == []
 
 
 def test_universality_scanners_ignore_tokensave_runtime_state(

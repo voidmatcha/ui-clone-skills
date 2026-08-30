@@ -193,6 +193,10 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # instead of deadlocking this compare. See lib/ab-timeout.sh header.
 # shellcheck source=lib/ab-timeout.sh
 . "$SCRIPTS_DIR/lib/ab-timeout.sh"
+# Frozen section-map provenance: advisory only, used to warn when reused ground
+# truth was captured before the idle-reset rule or while a page state was open.
+# shellcheck source=lib/idle-reset.sh
+. "$SCRIPTS_DIR/lib/idle-reset.sh"
 # AE unit normalization: ImageMagick 7.1.2-27 Q16 returns `compare -metric AE`
 # as pixel_count * 65535 (QuantumRange), not the raw count. Every AE flows
 # through _ae_at, which normalizes via _ae_normalize. See lib/ae-quantum.sh.
@@ -1535,6 +1539,27 @@ if [ ! -f "$SECTION_MAP_FILE" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROO
   SECTION_MAP_FILE="${REF_ROOT_DIR}/section-map.json"
 fi
 if [ -f "$SECTION_MAP_FILE" ]; then
+  python3 - "$SECTION_MAP_FILE" 2>/dev/null <<'PY' || true
+import json, sys
+
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+ci = d.get("capturedIdle")
+if ci is None:
+    sys.stderr.write(
+        "section-compare: ADVISORY - section-map.json has no capturedIdle "
+        "provenance; cannot confirm frozen-ref ground truth was captured idle.\n"
+    )
+elif not ci.get("idle"):
+    sys.stderr.write(
+        "section-compare: ADVISORY - section-map.json was NOT captured idle "
+        "(%s). A faithful idle clone may fail against this ground truth; "
+        "re-extract the section map from an idle page.\n"
+        % json.dumps({k: ci.get(k) for k in ("scrollY", "openStateMatches", "reset")})
+    )
+PY
   if [ "$REUSE_FROZEN_REF" != "1" ]; then
     ref_eval "$IMPL_SEMANTIC_CANDIDATES" > "$DIR/sections/ref-semantic-candidates.json" 2>&1 || true
   fi
@@ -2074,6 +2099,8 @@ GUARD_STRUCTURAL_COUNT=0
 # those sections — and blank ref crops cluster on mid-reveal/animated sections,
 # i.e. precisely what this tool exists to verify.
 UNMEASURED_COUNT=0
+JUDGE_OVERRIDE_COUNT=0
+JUDGE_OVERRIDE_NAMES=""
 # Review-1 MAJOR 2: guard evaluation is mandatory for matched crop runs.
 # A failed guard pass injects a blocking row so the table (and every
 # consumer keying on FAIL counts) sees the closure was inactive.
@@ -2515,12 +2542,16 @@ PY
        && [ "$REF_HAS_VARIANCE" = "1" ] \
        && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
        && dssim_cap_allows "$AE_PER_MPX" "$THRESHOLD" "$SECTION_DSSIM_AE_CAP_MULT" \
-            "$DIR/sections/${NAME}-judge.json" "$IMPL_IMG" \
+            "$DIR/sections/${NAME}-judge.json" "$IMPL_IMG" "$REF_IMG" \
        && awk -v d="$DSSIM_SCORE" -v max="$DSSIM_PASS_MAX" 'BEGIN{exit !(d+0 <= max+0)}'; then
     STATUS="✅"
     SEV="pass-by-dssim"
     PASS_COUNT=$((PASS_COUNT + 1))
     NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+    if [ "${DSSIM_LAST_CAP_OVERRIDE:-0}" = "1" ]; then
+      JUDGE_OVERRIDE_COUNT=$((JUDGE_OVERRIDE_COUNT + 1))
+      JUDGE_OVERRIDE_NAMES="${JUDGE_OVERRIDE_NAMES}${JUDGE_OVERRIDE_NAMES:+, }${NAME}"
+    fi
   elif [ "$SECTION_PERCEPTUAL_DENSE" = "1" ] \
        && [ "$PERCEPTUAL_REFSHOT_CLEAN" = "1" ] \
        && [ -n "$DSSIM_SCORE" ] \
@@ -2553,7 +2584,7 @@ PY
        && [ -n "$DSSIM_SCORE" ] \
        && [ "$AE_PER_MPX" -lt "$SATURATION" ] \
        && dssim_cap_allows "$AE_PER_MPX" "$THRESHOLD" "$SECTION_DSSIM_AE_CAP_MULT" \
-            "$DIR/sections/${NAME}-judge.json" "$IMPL_IMG" \
+            "$DIR/sections/${NAME}-judge.json" "$IMPL_IMG" "$REF_IMG" \
        && _perceptual_is_dense "$NAME" \
        && awk -v d="$DSSIM_SCORE" -v max="$SECTION_DSSIM_DENSE_MAX" 'BEGIN{exit !(d+0 <= max+0)}' \
        && [ "$(_perceptual_dom_sev "$NAME")" != "critical" ] \
@@ -2568,6 +2599,10 @@ PY
     SEV="pass-by-perceptual"
     PASS_COUNT=$((PASS_COUNT + 1))
     NON_STRUCTURAL_PASS_COUNT=$((NON_STRUCTURAL_PASS_COUNT + 1))
+    if [ "${DSSIM_LAST_CAP_OVERRIDE:-0}" = "1" ]; then
+      JUDGE_OVERRIDE_COUNT=$((JUDGE_OVERRIDE_COUNT + 1))
+      JUDGE_OVERRIDE_NAMES="${JUDGE_OVERRIDE_NAMES}${JUDGE_OVERRIDE_NAMES:+, }${NAME}"
+    fi
   elif [ "$AE" -lt "${SECTION_AE_ABS_FLOOR:-8000}" ] \
        && [ -n "$DSSIM_SCORE" ] \
        && [ "$REF_HAS_VARIANCE" = "1" ] \
@@ -2748,7 +2783,11 @@ PY
      && awk -v d="$DSSIM_SCORE" -v max="$SECTION_DSSIM_DENSE_MAX" 'BEGIN{exit !(d+0 <= max+0)}'; then
     echo "  ↳ ${NAME}: dssim leniency blocked by AE cap (AE/Mpx ${AE_PER_MPX} > ${SECTION_DSSIM_AE_CAP_MULT}x threshold)."
     echo "    To confirm a perceptual pass, dispatch visual-debug-reviewer for this section and write"
-    echo "    $DIR/sections/${NAME}-judge.json with {\"verdict\": \"PASS\"} — stale (older than crop) judges are ignored."
+    echo "    $DIR/sections/${NAME}-judge.json with verdict PASS bound to the exact crop bytes reviewed:"
+    echo "      {\"verdict\":\"PASS\", \"implSha256\":\"\$(shasum -a 256 '$IMPL_IMG' | cut -d' ' -f1)\","
+    echo "       \"refSha256\":\"\$(shasum -a 256 '$REF_IMG' | cut -d' ' -f1)\", \"rationale\":\"<why it passes despite high AE>\"}"
+    echo "    The override is re-verified against the live crop sha256 at read time; a bare verdict line,"
+    echo "    a mismatched or absent hash, or an empty rationale is ignored."
   fi
 
   RESULTS="${RESULTS}| ${NAME} | ${AE} | ${AE_PER_MPX} | ${SEV} | ${STATUS} |\n"
@@ -2790,6 +2829,13 @@ echo -e "$RESULTS"
 echo ""
 echo "**Result: ${PASS_COUNT} PASS, ${FAIL_COUNT} FAIL, ${SKIP_COUNT} SKIP, ${SUBSTITUTED_COUNT} STRUCTURAL_ONLY, ${UNMEASURED_COUNT} UNMEASURED**"
 echo "(Severity is based on AE/Mpx — defect density per megapixel — not raw AE.)"
+
+if [ "${JUDGE_OVERRIDE_COUNT:-0}" -gt 0 ]; then
+  echo ""
+  echo "⚠ Visual-judge overrides: ${JUDGE_OVERRIDE_COUNT} section(s) passed above the AE cap via a"
+  echo "  crop-sha256-bound verdict (${JUDGE_OVERRIDE_NAMES}). Each is a human/LLM PASS on a high-AE"
+  echo "  section, not a pixel-level match; re-confirm if the impl crops changed."
+fi
 
 # Count saturated rows for the agent's stop-decision routing.
 SATURATED_COUNT=$(echo -e "$RESULTS" | grep -c "| saturated | 🌑 |" || true)

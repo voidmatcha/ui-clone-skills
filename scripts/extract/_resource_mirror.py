@@ -15,16 +15,26 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
+import ipaddress
 import json
+import os
 import posixpath
 import re
+import socket
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPHandler,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    Request,
+    build_opener,
+)
 
 JsonObject = dict[str, Any]
 
@@ -55,6 +65,13 @@ def _manifest_status(
     if failed:
         status = "warn"
         reasons.append(f"{len(failed)} resource(s) failed to download")
+    blocked = [row for row in rows if row.get("status") == "blocked"]
+    if blocked:
+        status = "warn"
+        reasons.append(
+            f"{len(blocked)} resource(s) blocked by SSRF deny gate "
+            "(non-public host)"
+        )
     capped = [row for row in rows if row.get("reason") == "max-resources-reached"]
     if capped:
         status = "warn"
@@ -373,6 +390,136 @@ def _failure_record(candidate: JsonObject, status: str, reason: str) -> JsonObje
     }
 
 
+class SsrfBlocked(URLError):
+    """Raised when a resource host resolves to a non-public address."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"ssrf-blocked: {reason}")
+
+
+def _allow_private_addresses() -> bool:
+    value = os.environ.get("UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ip_block_reason(ip_str: str) -> str | None:
+    """Return a deny reason for non-public addresses, including wrapped IPv4."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return f"unparseable-address:{ip_str}"
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
+        elif ip.teredo is not None:
+            ip = ip.teredo[1]
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        return f"non-public-address:{ip}"
+    return None
+
+
+def _validate_host_addrs(host: str, port: int) -> list[tuple[int, tuple]]:
+    """Resolve host and require every returned address to be public."""
+    host = host.strip().strip("[]")
+    if not host:
+        raise SsrfBlocked("empty-host")
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise URLError(f"dns-resolution-failed: {exc}") from exc
+    validated: list[tuple[int, tuple]] = []
+    for family, _type, _proto, _canon, sockaddr in infos:
+        if not _allow_private_addresses():
+            reason = _ip_block_reason(str(sockaddr[0]))
+            if reason is not None:
+                raise SsrfBlocked(f"host {host!r} -> {reason}")
+        validated.append((family, sockaddr))
+    if not validated:
+        raise URLError(f"no-addresses-for-host: {host}")
+    return validated
+
+
+class _GuardedHTTPConnection(http.client.HTTPConnection):
+    def connect(self) -> None:
+        _family, sockaddr = _validate_host_addrs(self.host, self.port)[0]
+        self.sock = socket.create_connection(
+            (str(sockaddr[0]), self.port),
+            self.timeout,
+            self.source_address,  # type: ignore[attr-defined]
+        )
+        if self._tunnel_host:  # type: ignore[attr-defined]
+            self._tunnel()  # type: ignore[attr-defined]
+
+
+class _GuardedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        _family, sockaddr = _validate_host_addrs(self.host, self.port)[0]
+        sock = socket.create_connection(
+            (str(sockaddr[0]), self.port),
+            self.timeout,
+            self.source_address,  # type: ignore[attr-defined]
+        )
+        server_hostname = self.host
+        if self._tunnel_host:  # type: ignore[attr-defined]
+            self.sock = sock
+            self._tunnel()  # type: ignore[attr-defined]
+            server_hostname = self._tunnel_host  # type: ignore[attr-defined]
+            sock = self.sock
+        self.sock = self._context.wrap_socket(  # type: ignore[attr-defined]
+            sock, server_hostname=server_hostname
+        )
+
+
+class _GuardedHTTPHandler(HTTPHandler):
+    def http_open(self, req: Request) -> Any:
+        return self.do_open(_GuardedHTTPConnection, req)
+
+
+class _GuardedHTTPSHandler(HTTPSHandler):
+    def https_open(self, req: Request) -> Any:
+        return self.do_open(
+            _GuardedHTTPSConnection,
+            req,
+            context=self._context,  # type: ignore[attr-defined]
+        )
+
+
+class _GuardedRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Request | None:
+        parsed = urlparse(newurl)
+        if parsed.scheme not in {"http", "https"}:
+            raise SsrfBlocked(f"redirect-to-disallowed-scheme:{parsed.scheme}")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        _validate_host_addrs(parsed.hostname or "", port)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _guarded_opener() -> Any:
+    return build_opener(
+        _GuardedHTTPHandler(),
+        _GuardedHTTPSHandler(),
+        _GuardedRedirectHandler(),
+    )
+
+
 def download_candidate(
     candidate: JsonObject,
     ref_dir: Path,
@@ -383,9 +530,24 @@ def download_candidate(
 ) -> JsonObject:
     """Download one candidate and return its manifest row."""
     url = str(candidate.get("url") or "")
-    request = Request(url, headers={"User-Agent": _USER_AGENT})
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return _failure_record(candidate, "skipped", "disallowed-scheme")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        with urlopen(request, timeout=timeout) as response:  # noqa: S310 - user-supplied research URL
+        _validate_host_addrs(parsed.hostname or "", port)
+    except SsrfBlocked as exc:
+        row = _failure_record(candidate, "blocked", "ssrf-blocked")
+        row["error"] = exc.reason
+        return row
+    except URLError as exc:
+        row = _failure_record(candidate, "failed", "URLError")
+        row["error"] = str(exc)
+        return row
+    request = Request(url, headers={"User-Agent": _USER_AGENT})
+    opener = _guarded_opener()
+    try:
+        with opener.open(request, timeout=timeout) as response:
             status_code = int(getattr(response, "status", 200) or 200)
             headers = response.headers
             content_type = headers.get("Content-Type", "")
@@ -435,6 +597,10 @@ def download_candidate(
         row = _failure_record(candidate, "failed", "http-error")
         row["httpStatus"] = exc.code
         row["error"] = str(exc)
+        return row
+    except SsrfBlocked as exc:
+        row = _failure_record(candidate, "blocked", "ssrf-blocked")
+        row["error"] = exc.reason
         return row
     except (OSError, URLError, TimeoutError, ValueError) as exc:
         row = _failure_record(candidate, "failed", type(exc).__name__)

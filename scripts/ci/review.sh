@@ -298,6 +298,50 @@ else
   err "dead-flag agent-browser opens (--viewport/--wait are silently ignored; use ab_open_at_viewport): $DEAD_OPEN"
 fi
 
+# Ratchet: subprocess.run in tests without timeout=. pytest-timeout (pyproject
+# timeout=300, thread method) is the hard net, but a per-call timeout= fails
+# faster and surfaces the offending call. Legacy call-sites predate the net;
+# this ratchet forbids new un-timed calls without forcing a one-shot cleanup.
+# Lower SUBPROCESS_NO_TIMEOUT_BASELINE as call-sites are fixed. Opt-in
+# integration tests carry their own generous timeouts and are excluded.
+section "Subprocess timeouts"
+SUBPROCESS_NO_TIMEOUT_BASELINE=223
+NO_TIMEOUT_COUNT=$(python3 scripts/ci/review_checks.py count-subprocess-without-timeout 2>/dev/null || echo "ERR")
+if [ "$NO_TIMEOUT_COUNT" = "ERR" ]; then
+  warn "could not scan tests for un-timed subprocess.run (python3 failed)"
+elif [ "$NO_TIMEOUT_COUNT" -gt "$SUBPROCESS_NO_TIMEOUT_BASELINE" ]; then
+  err "subprocess.run without timeout= in tests rose to $NO_TIMEOUT_COUNT (baseline $SUBPROCESS_NO_TIMEOUT_BASELINE) — add timeout= to new calls"
+elif [ "$NO_TIMEOUT_COUNT" -lt "$SUBPROCESS_NO_TIMEOUT_BASELINE" ]; then
+  ok "subprocess.run without timeout= dropped to $NO_TIMEOUT_COUNT — lower SUBPROCESS_NO_TIMEOUT_BASELINE to $NO_TIMEOUT_COUNT"
+else
+  ok "subprocess.run without timeout= at baseline ($NO_TIMEOUT_COUNT)"
+fi
+
+# ── 9a. gates.md thinness guard ──
+# docs/gates.md is re-read whenever an agent touches a gate (AGENTS.md points at
+# it), so it MUST stay a thin per-gate lookup. Round-by-round narrative belongs
+# in docs/gate-hardening-history.md.
+section "gates.md thinness"
+GATES_MD="docs/gates.md"
+GATES_MAXLINE=1500
+GATES_MAXBYTES=20000
+if [ -f "$GATES_MD" ]; then
+  GATES_MAXLEN=$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$GATES_MD")
+  GATES_SIZE=$(wc -c < "$GATES_MD" | tr -d ' ')
+  if [ "$GATES_MAXLEN" -gt "$GATES_MAXLINE" ]; then
+    err "docs/gates.md has a ${GATES_MAXLEN}-char line (limit ${GATES_MAXLINE}) — relocate narrative prose to docs/gate-hardening-history.md"
+  else
+    ok "docs/gates.md longest line ${GATES_MAXLEN} ≤ ${GATES_MAXLINE}"
+  fi
+  if [ "$GATES_SIZE" -gt "$GATES_MAXBYTES" ]; then
+    err "docs/gates.md is ${GATES_SIZE}B (limit ${GATES_MAXBYTES}B) — relocate history to docs/gate-hardening-history.md"
+  else
+    ok "docs/gates.md size ${GATES_SIZE}B ≤ ${GATES_MAXBYTES}"
+  fi
+else
+  warn "docs/gates.md not found — skipping thinness guard"
+fi
+
 # ── 10. Language consistency ──
 section "Language"
 

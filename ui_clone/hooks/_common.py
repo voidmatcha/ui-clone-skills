@@ -867,18 +867,35 @@ def is_component_file(file_path: str) -> bool:
     return False
 
 
-def _log_gate_skip(ref_dir: Path, gate_name: str, reason: str) -> None:
+def _log_gate_skip(ref_dir: Path, gate_name: str, reason: str) -> bool:
     """Append a gate skip event to ref_dir/.gate-skip-log for auditability.
 
-    Best-effort — never raises.
+    Returns True only if the skip was durably recorded (written, flushed,
+    fsync'd, and read back). Returns False on any failure; never raises.
     """
     try:
         ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         log_path = ref_dir / ".gate-skip-log"
+        marker = f"gate={gate_name} reason={reason}"
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"{ts} gate={gate_name} reason={reason}\n")
+            f.write(f"{ts} {marker}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        return any(marker in line for line in log_path.read_text(encoding="utf-8").splitlines())
     except OSError:
-        pass
+        return False
+
+
+def _gate_skip_acknowledged(ref_dir: Path) -> bool:
+    """Return True when verification-plan.json explicitly accepts skipped gates."""
+    plan_path = Path(ref_dir) / "verification-plan.json"
+    if not plan_path.is_file():
+        return False
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(str(plan.get("gateSkipAck") or "").strip())
 
 
 def _clear_gate_skip(ref_dir: Path, gate_name: str) -> None:
@@ -977,7 +994,37 @@ def run_gate(ref_dir: Path, gate_name: str) -> dict[str, object]:
         f"not run ({skip_reason}). It is NOT enforced this run.",
         file=sys.stderr,
     )
-    _log_gate_skip(ref_dir, gate_name, skip_reason)
+    recorded = _log_gate_skip(ref_dir, gate_name, skip_reason)
+    if not recorded and not _gate_skip_acknowledged(ref_dir):
+        print(
+            f"ui-clone-skills: ⛔ FAIL-CLOSED: gate '{gate_name}' was skipped "
+            f"({skip_reason}) but the skip could NOT be durably recorded to "
+            f"{ref_dir}/.gate-skip-log. Blocking.",
+            file=sys.stderr,
+        )
+        return {
+            "passed": False,
+            "fail_count": 1,
+            "failures": [
+                {
+                    "label": gate_name,
+                    "reason": (
+                        f"gate '{gate_name}' could not run ({skip_reason}) and the "
+                        "skip could not be durably recorded to .gate-skip-log, so it "
+                        "cannot be enforced at closeout."
+                    ),
+                    "fix": (
+                        "Make .gate-skip-log writable, run on a host with the "
+                        "ui-clone-skills environment so the gate executes, or set "
+                        "`gateSkipAck` in verification-plan.json to explicitly accept "
+                        "un-enforced runs."
+                    ),
+                }
+            ],
+            "skipped": True,
+            "skip_reason": skip_reason,
+            "skip_record_failed": True,
+        }
     return {
         "passed": True,
         "fail_count": 0,
@@ -1238,14 +1285,8 @@ def gate_skip_blocker(ref_dir: Path) -> str | None:
         return None
     if not lines:
         return None
-    plan_path = Path(ref_dir) / "verification-plan.json"
-    if plan_path.is_file():
-        try:
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            if str(plan.get("gateSkipAck") or "").strip():
-                return None
-        except (json.JSONDecodeError, OSError):
-            pass
+    if _gate_skip_acknowledged(ref_dir):
+        return None
     gates: list[str] = []
     for ln in lines:
         m = re.search(r"gate=(\S+)", ln)

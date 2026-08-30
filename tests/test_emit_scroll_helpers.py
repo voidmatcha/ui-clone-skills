@@ -1820,6 +1820,7 @@ def test_emits_scroll_latch_driver_from_plan_latch_sites(tmp_path: Path) -> None
     assert "opacity" in source
     # progress fraction resolved against the live scroll range, not baked px
     assert "scrollHeight" in source
+    assert 'node.style.setProperty(property, value, "important")' in source
     assert 'addEventListener("scroll"' in source
 
 

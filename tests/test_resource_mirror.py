@@ -7,7 +7,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
-from typing import ClassVar
+from typing import Any, ClassVar, cast
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,8 +58,11 @@ def _server_base_url() -> tuple[ThreadingHTTPServer, str]:
     return server, f"http://127.0.0.1:{server.server_port}"
 
 
-def test_mirror_resources_downloads_browser_observed_assets(tmp_path: Path) -> None:
+def test_mirror_resources_downloads_browser_observed_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mod = _load_module()
+    monkeypatch.setenv("UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE", "1")
     server, base = _server_base_url()
     try:
         payload = {
@@ -117,8 +122,11 @@ def test_mirror_resources_can_skip_external_origins(tmp_path: Path) -> None:
     assert manifest["resources"][0]["reason"] == "external-origin"
 
 
-def test_payload_source_url_drives_manifest_and_same_origin_policy(tmp_path: Path) -> None:
+def test_payload_source_url_drives_manifest_and_same_origin_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mod = _load_module()
+    monkeypatch.setenv("UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE", "1")
     server, base = _server_base_url()
     try:
         manifest = mod.mirror_resources(
@@ -164,3 +172,79 @@ def test_unwrap_agent_browser_result_envelope() -> None:
     payload = mod.unwrap_agent_browser(payload)
 
     assert payload["resources"][0]["url"] == "https://example.com/a.js"
+
+
+def _dl(mod: ModuleType, url: str, tmp_path: Path) -> dict[str, Any]:
+    return cast(
+        dict[str, Any],
+        mod.download_candidate(
+            {"url": url, "initiatorType": "img"}, tmp_path, set(), timeout=2
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1/secret",
+        "http://[::1]/secret",
+        "http://10.0.0.5/internal",
+        "http://192.168.1.1/router",
+        "http://0.0.0.0/x",
+    ],
+)
+def test_download_candidate_blocks_non_public_hosts(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_module()
+    monkeypatch.delenv("UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE", raising=False)
+    row = _dl(mod, url, tmp_path)
+    assert row["status"] == "blocked", row
+    assert row["reason"] == "ssrf-blocked"
+
+
+def test_download_candidate_skips_disallowed_scheme(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_module()
+    monkeypatch.delenv("UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE", raising=False)
+    row = _dl(mod, "file:///etc/passwd", tmp_path)
+    assert row["status"] == "skipped"
+    assert row["reason"] == "disallowed-scheme"
+
+
+def test_allow_private_env_reopens_loopback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_module()
+    monkeypatch.setenv("UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE", "1")
+    row = _dl(mod, "http://127.0.0.1:1/x", tmp_path)
+    assert row["status"] != "blocked"
+
+
+def test_ip_block_reason_classification() -> None:
+    mod = _load_module()
+    assert mod._ip_block_reason("8.8.8.8") is None
+    assert mod._ip_block_reason("1.1.1.1") is None
+    assert mod._ip_block_reason("127.0.0.1") is not None
+    assert mod._ip_block_reason("169.254.169.254") is not None
+    assert mod._ip_block_reason("10.1.2.3") is not None
+    assert mod._ip_block_reason("172.16.0.1") is not None
+    assert mod._ip_block_reason("::1") is not None
+    assert mod._ip_block_reason("::ffff:10.0.0.1") is not None
+    assert mod._ip_block_reason("not-an-ip") is not None
+
+
+def test_guarded_opener_revalidates_redirect_hops() -> None:
+    mod = _load_module()
+    handler = mod._GuardedRedirectHandler()
+    with pytest.raises(mod.SsrfBlocked):
+        handler.redirect_request(
+            req=None,
+            fp=None,
+            code=302,
+            msg="Found",
+            headers={},
+            newurl="http://169.254.169.254/latest/meta-data/",
+        )

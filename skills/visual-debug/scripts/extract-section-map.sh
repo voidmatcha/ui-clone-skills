@@ -44,6 +44,10 @@ if ! command -v agent-browser >/dev/null 2>&1; then
   exit 3
 fi
 
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/idle-reset.sh
+. "$_SCRIPT_DIR/lib/idle-reset.sh"
+
 OUT_PATH="$REF_DIR/section-map.json"
 
 # The JS is written to a temp file INSTEAD of `VAR=$(cat <<HEREDOC)`:
@@ -346,6 +350,8 @@ cat <<'JSEOF' > "$EVAL_JS_FILE"
 JSEOF
 EVAL_JS=$(cat "$EVAL_JS_FILE")
 
+CAPTURED_IDLE="$(ab_idle_reset "$SESSION")"
+
 TMP_OUT=$(mktemp)
 agent-browser --session "$SESSION" eval "$EVAL_JS" > "$TMP_OUT" 2>&1 || {
   echo "extract-section-map: agent-browser eval failed:" >&2
@@ -357,8 +363,8 @@ agent-browser --session "$SESSION" eval "$EVAL_JS" > "$TMP_OUT" 2>&1 || {
 # Newer agent-browser versions JSON-encode the eval return value, so a
 # function that already calls JSON.stringify(...) yields a double-encoded
 # string on disk. Same unwrap-and-validate pattern as extract-dom.sh.
-if ! python3 -c "
-import json, sys
+if ! UI_CLONE_CAPTURED_IDLE="$CAPTURED_IDLE" python3 -c "
+import json, os, sys
 d = json.load(open('$TMP_OUT'))
 if isinstance(d, str):
     d = json.loads(d)
@@ -369,6 +375,12 @@ for k in ('totalCount', 'sections'):
         raise ValueError('missing ' + k)
 if not isinstance(d['sections'], list):
     raise ValueError('sections must be list')
+ci = os.environ.get('UI_CLONE_CAPTURED_IDLE')
+if ci:
+    try:
+        d['capturedIdle'] = json.loads(ci)
+    except Exception:
+        d['capturedIdle'] = {'reset': False, 'idle': None, 'note': 'provenance-parse-failed'}
 json.dump(d, open('$OUT_PATH', 'w'), indent=2, ensure_ascii=False)
 " 2>&1; then
   echo "extract-section-map: output failed schema validation" >&2

@@ -9,6 +9,7 @@ const modules = new Map([
   ["state", "ui_clone.state"],
   ["gate", "ui_clone.gate"],
   ["goal", "ui_clone.goal"],
+  ["hooks", "ui_clone.codex_hooks_install"],
 ]);
 
 function printHelp() {
@@ -18,6 +19,7 @@ Usage:
   ui-clone pipeline <url> <component-or-run-dir> <session> <action> [options]
   ui-clone gate <ref-dir> <gate-name> [--json]
   ui-clone goal <ref-dir> [--json]
+  ui-clone hooks enable|disable|status [--project-root <path>] [--json]
   ui-clone state terminal <ref-dir> --status <status> --category <category> --reason <reason> [--gate <gate>]
   ui-clone <url> <component-or-run-dir> <session> <action> [options]
 

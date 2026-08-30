@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CLAUDE = ROOT / "hooks" / "hooks.json"
 CODEX = ROOT / "hooks" / "codex-hooks.json"
 SHIM = ROOT / "hooks" / "shim.sh"
+CODEX_PLUGIN = ROOT / ".codex-plugin" / "plugin.json"
 
 # The authoritative enforcement topology: every lifecycle event -> the ordered
 # ui_clone.hooks.* modules it must route to. Claude carries the full map; Codex
@@ -200,6 +201,18 @@ def test_both_manifests_are_valid_json_objects() -> None:
         assert isinstance(data, dict) and isinstance(data.get("hooks"), dict), (
             f"{path} missing a dict 'hooks' key"
         )
+
+
+def test_codex_plugin_bundles_no_global_hook_routes() -> None:
+    plugin = _load(CODEX_PLUGIN)
+    bundled_path = (ROOT / plugin["hooks"]).resolve()
+    bundled = _load(bundled_path)
+
+    assert bundled_path != CODEX, "the global plugin must not bundle the project template"
+    assert bundled == {"hooks": {}}, (
+        "the globally enabled Codex plugin must be skills-only; project hooks are "
+        "installed explicitly under <project>/.codex/hooks.json"
+    )
 
 
 def test_manifests_match_the_expected_enforcement_topology() -> None:

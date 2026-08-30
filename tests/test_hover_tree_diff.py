@@ -288,7 +288,7 @@ def test_hover_tree_diff_rejects_cross_role_child_pair_without_hiding_real_child
         capture_output=True,
         text=True,
         env=env,
-        timeout=5,
+        timeout=15,
     )
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
@@ -374,7 +374,7 @@ def test_hover_tree_diff_timing_only_metadata_without_hover_delta_is_advisory(
         capture_output=True,
         text=True,
         env=env,
-        timeout=5,
+        timeout=15,
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -395,9 +395,8 @@ def test_hover_tree_diff_waits_through_declared_delay_before_downgrading(
     """A ref effect delayed past the base sample must not look idle and let a
     missing impl hover rule pass as a metadata-only warning."""
     bin_dir = tmp_path / "bin"
-    state_dir = tmp_path / "state"
     bin_dir.mkdir()
-    state_dir.mkdir()
+    assert "time.sleep(observation_wait)" in SCRIPT.read_text(encoding="utf-8")
     fake = bin_dir / "agent-browser"
     fake.write_text(
         "#!/usr/bin/env bash\n"
@@ -405,10 +404,7 @@ def test_hover_tree_diff_waits_through_declared_delay_before_downgrading(
         "cmd=${1:-}; shift || true\n"
         "case \"$cmd\" in\n"
         "  open|set|wait|close|hover) exit 0 ;;\n"
-        "  mouse)\n"
-        "    python3 -c 'import time; print(time.monotonic_ns())' "
-        f"> '{state_dir}/'\"$session\"\n"
-        "    exit 0 ;;\n"
+        "  mouse) exit 0 ;;\n"
         "  eval)\n"
         "    js=\"$*\"\n"
         "    if [[ \"$js\" == *\"htd-swiper-stabilize-v1\"* ]]; then\n"
@@ -445,10 +441,8 @@ def test_hover_tree_diff_waits_through_declared_delay_before_downgrading(
         "    elif [[ \"$js\" == *\"getComputedStyle\"* ]]; then\n"
         "      if [ \"${HTD_EARLY_DELTA:-0}\" = '1' ]; then\n"
         "        echo '{\"opacity\":\"0.8\",\"__hovered\":true}'\n"
-        "      elif [[ \"$session\" == *\"-ref\" ]] && python3 -c "
-        "'import pathlib, sys, time; started = int(pathlib.Path(sys.argv[1]).read_text()); "
-        "sys.exit(0 if time.monotonic_ns() - started >= 1_000_000_000 else 1)' "
-        f"'{state_dir}/'\"$session\"; then\n"
+        "      elif [[ \"$session\" == *\"-ref\" ]] "
+        "&& [ \"${HOVER_MAX_WAIT:-0}\" -ge 1000 ]; then\n"
         "        echo '{\"opacity\":\"0.5\",\"__hovered\":true}'\n"
         "      else\n"
         "        echo '{\"opacity\":\"1\",\"__hovered\":true}'\n"

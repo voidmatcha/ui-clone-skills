@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Codex ui-clone hooks are now project-scoped. The global plugin bundles an
+  explicit empty manifest, install/update removes legacy global ui-clone
+  entries, and `ui-reverse-engineering` configures the canonical six routes in
+  the active workspace only. Unrelated Codex sessions no longer run or display
+  ui-clone hook status lines.
 - Interactive Claude clone runs now acquire a host-owned continuation lease
   before reference capture. A blocked Stop hook can resume the same ordinary
   session until canonical completion, while Codex keeps its native goal-driven

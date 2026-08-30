@@ -98,14 +98,16 @@ fi
 # 1. Tests
 # Parallelised with xdist. `--dist loadfile` keeps every test in a file on ONE
 # worker, which removes intra-file ordering and shared-fixture races without
-# anyone having to enumerate which files those are. NOTHING is subset or
-# skipped: the same 4251 tests run, only on more cores. Equivalence was proved
-# per-test, not inferred from a summary — serial and parallel junit outcome sets
-# were diffed both ways (0 missing, 0 extra) and wall time went 17:09 -> 3:51.
+# anyone having to enumerate which files those are. Cap the shared-host default
+# at four workers: many tests launch shell/browser subprocesses with deliberate
+# wall-clock bounds, and `auto` can oversubscribe developer machines enough to
+# turn those bounds into false failures. NOTHING is subset or skipped.
 # The drift smoke test (step 6, test-parity.sh) is a separate shell step that
 # xdist never sees, so it is unaffected by worker count.
-# Override with UI_CLONE_PYTEST_WORKERS=1 to bisect a suspected isolation bug.
-PYTEST_WORKERS="${UI_CLONE_PYTEST_WORKERS:-auto}"
+# Override with UI_CLONE_PYTEST_WORKERS=auto on a dedicated machine or 1 to
+# bisect a suspected isolation bug.
+DEFAULT_PYTEST_WORKERS=$(python3 -c 'import os; print(min(os.cpu_count() or 1, 4))')
+PYTEST_WORKERS="${UI_CLONE_PYTEST_WORKERS:-$DEFAULT_PYTEST_WORKERS}"
 step "Tests"
 if [ "$QUIET" = "1" ]; then
   "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q \

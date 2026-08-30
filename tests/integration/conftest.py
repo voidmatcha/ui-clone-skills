@@ -48,17 +48,24 @@ def pytest_collection_modifyitems(
     duplicating it across three files invites drift. Centralizing here keeps
     the gate single-source.
     """
-    if os.environ.get("UI_CLONE_INTEGRATION") == "1":
-        return
+    integration_enabled = os.environ.get("UI_CLONE_INTEGRATION") == "1"
     skip_marker = pytest.mark.skip(
         reason="opt-in integration test — set UI_CLONE_INTEGRATION=1 to run",
     )
+    # Each integration test drives a real Chrome session and uses its own
+    # explicit subprocess timeouts. Keep those contracts local by disabling the
+    # repo-wide timeout when integration items run.
+    disable_timeout_marker = pytest.mark.timeout(0)
     for item in items:
         try:
             item_path = Path(str(item.fspath))
         except Exception:
             continue
-        if _INTEGRATION_DIR in item_path.parents:
+        if _INTEGRATION_DIR not in item_path.parents:
+            continue
+        if integration_enabled:
+            item.add_marker(disable_timeout_marker)
+        else:
             item.add_marker(skip_marker)
 
 

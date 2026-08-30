@@ -70,7 +70,6 @@ PLUGIN_NAME="ui-clone-skills"
 CODEX_MARKETPLACE_NAME="local"
 CODEX_PERSONAL_MARKETPLACE="$HOME/.agents/plugins/marketplace.json"
 CODEX_PLUGIN_DIR="$HOME/plugins/$PLUGIN_NAME"
-CODEX_PLUGIN_SOURCE_PATH="./plugins/$PLUGIN_NAME"
 CODEX_NATIVE_AGENTS_DIR="${CODEX_HOME:-$HOME/.codex}/agents"
 LOCAL_BIN_DIR="${UI_CLONE_LOCAL_BIN_DIR:-$HOME/.local/bin}"
 LOCAL_CLI_BIN="$LOCAL_BIN_DIR/ui-clone"
@@ -90,6 +89,25 @@ CODEX_PLUGIN_PROJECTION_KEEP="$CODEX_PLUGIN_PROJECTION_ITEMS skills"
 # the staging rm -rf inside the working tree. Sibling path, plus the
 # inside-the-checkout assertion in prepare_claude_plugin_source.
 CLAUDE_PLUGIN_SRC="${UI_CLONE_CLAUDE_SRC_DIR:-$HOME/.local/share/$PLUGIN_NAME-claude-src}"
+
+# Codex does NOT load a plugin from the marketplace source path. It copies that
+# path into its own versioned cache (~/.codex/plugins/cache/<market>/<plugin>/
+# <version>) and loads from there — and its copy skips symlinks. Pointing the
+# marketplace at $CODEX_PLUGIN_DIR therefore produced a cache entry holding one
+# empty skills/ dir and no plugin.json, while `codex plugin list` still reported
+# "installed, enabled": the plugin contributed nothing to any Codex session, and
+# a version bump could not fix it because the re-copy skips symlinks too.
+# So the marketplace points at the staged real-file tree instead. The projection
+# at $CODEX_PLUGIN_DIR stays symlinks on purpose — install_local_cli_bin depends
+# on it to keep ~/.local/bin/ui-clone running the live checkout.
+case "$CLAUDE_PLUGIN_SRC" in
+  "$HOME"/*) CODEX_PLUGIN_SOURCE_PATH="./${CLAUDE_PLUGIN_SRC#"$HOME"/}" ;;
+  *) CODEX_PLUGIN_SOURCE_PATH="$CLAUDE_PLUGIN_SRC" ;;
+esac
+# Entries written before the move above still name the projection. Ownership and
+# removal must recognise them, or an upgrade would strand a marketplace entry this
+# installer wrote and then refuse to clean it up as "not ours".
+CODEX_PLUGIN_SOURCE_PATH_LEGACY="./plugins/$PLUGIN_NAME"
 # Build residue that must never reach a published plugin source.
 CLAUDE_PLUGIN_SRC_PRUNE="__pycache__ .pytest_cache .mypy_cache .ruff_cache node_modules .venv venv .DS_Store"
 # Secondary tripwire. The clean set measures ~6.4MiB; the repo root is ~50GB of
@@ -388,8 +406,7 @@ loop_setup_notice() {
       # Append to ~/.codex/config.toml:
       [features]
       goals = true
-      # (Gate hooks are installed by install.sh into ~/.codex/hooks.json — the
-      #  plugin_hooks feature was removed in codex-cli 0.137 and is not used.)
+      # The ui-reverse-engineering skill configures gate hooks per workspace.
       # Restart Codex, then in the REPL run:
       /goal Drive the ui-clone-skills pipeline for tmp/ref/<component> until python -m ui_clone.goal tmp/ref/<component> --check-done exits 0.
 
@@ -454,7 +471,50 @@ register_marketplace() {
   fi
 }
 
+# Claude Code keys an installation by marketplace, not by plugin name, so the
+# same plugin installed from two marketplaces loads twice: both register their
+# hooks, skills, and agents. Nothing in the CLI warns about it. This happens
+# whenever a developer installs from a local dev marketplace and then runs this
+# installer (or the reverse), and it was observed in practice with
+# ui-clone-skills@ui-clone-dev enabled alongside ui-clone-skills@voidmatcha.
+# Disable rather than uninstall, and leave the competing MARKETPLACE registered.
+# Uninstalling discards a command-source plugin's recorded acceptance, so a
+# developer returning to their local marketplace would have to confirm its
+# source command again in a real terminal; disabling keeps the installation and
+# that record intact, and re-enabling is one command. It is also the less
+# destructive act for an installer that runs on other people's machines.
+# Call this only AFTER this marketplace's own install or update succeeded:
+# switching the other copy off first and then failing leaves nothing enabled.
+disable_competing_claude_installs() {
+  have claude || return 0
+  local listing entry other
+  listing="$(claude plugin list 2>/dev/null || true)"
+  [ -n "$listing" ] || return 0
+  for entry in $(printf '%s\n' "$listing" |
+      grep -oE "${PLUGIN_NAME}@[A-Za-z0-9._-]+" | sort -u); do
+    other="${entry#*@}"
+    [ "$other" = "$MARKETPLACE_NAME" ] && continue
+    warn "Disabling competing installation $entry (same plugin, different marketplace)"
+    if claude plugin disable "$entry" --scope user >/dev/null 2>&1; then
+      ok "disabled $entry"
+    else
+      warn "could not disable $entry — disable it manually to avoid double-loading"
+    fi
+  done
+}
+
+# The competing installer disables this plugin rather than uninstalling it, so
+# a refresh can succeed against an installation that is still switched off —
+# leaving the machine with a plugin installed, current, and inert. Re-enabling
+# is idempotent and cheap, so assert it on every run rather than tracking who
+# turned it off.
+ensure_claude_plugin_enabled() {
+  have claude || return 0
+  claude plugin enable "$PLUGIN_NAME@$MARKETPLACE_NAME" --scope user >/dev/null 2>&1 || true
+}
+
 install_claude_plugin() {
+  have claude || return
   # Marketplace registration alone never loads the plugin — it must be
   # installed once (user scope). The CLI's install step COPIES the marketplace
   # source into ~/.claude/plugins/cache/<owner>/<plugin>/<version> and the
@@ -462,14 +522,19 @@ install_claude_plugin() {
   # the source must be real files (prepare_claude_plugin_source) and why an
   # existing install still has to be refreshed: the cache is keyed by version,
   # so 'present in plugin list' means 'cached', not 'current'.
-  have claude || return
-  if claude plugin list 2>/dev/null | grep -qF "$PLUGIN_NAME@$MARKETPLACE_NAME"; then
+  # Same shape as the Codex listing above, and one plugin-list growth away from the
+  # same EPIPE/pipefail failure. Buffer it for the same reason.
+  local claude_listing
+  claude_listing="$(claude plugin list 2>/dev/null || true)"
+  if grep -qF "$PLUGIN_NAME@$MARKETPLACE_NAME" <<<"$claude_listing"; then
     act "Refreshing installed Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
     # `plugin update`, never uninstall+install: uninstall rewrites
     # enabledPlugins in ~/.claude/settings.json, and a failure between the two
     # steps leaves no plugin where a stale one stood.
     if claude plugin update "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
       ok "Claude plugin refreshed from $CLAUDE_PLUGIN_SRC"
+      ensure_claude_plugin_enabled
+      disable_competing_claude_installs
     else
       warn "claude plugin update failed — run inside the app: /plugin update $PLUGIN_NAME@$MARKETPLACE_NAME"
     fi
@@ -478,6 +543,8 @@ install_claude_plugin() {
   act "Installing Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME (user scope)"
   if claude plugin install "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
     ok "Claude plugin installed — new Claude Code sessions load it automatically"
+    ensure_claude_plugin_enabled
+    disable_competing_claude_installs
   else
     warn "claude plugin install failed — run inside the app: /plugin install $PLUGIN_NAME@$MARKETPLACE_NAME"
   fi
@@ -1077,7 +1144,8 @@ write_codex_personal_marketplace() {
   fi
 
   if ! MARKETPLACE_PATH="$marketplace" PLUGIN_NAME="$PLUGIN_NAME" \
-       PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" python3 - <<'PY'
+       PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" \
+       PLUGIN_SOURCE_PATH_LEGACY="$CODEX_PLUGIN_SOURCE_PATH_LEGACY" python3 - <<'PY'
 import json
 import os
 import stat
@@ -1087,6 +1155,7 @@ from pathlib import Path
 path = Path(os.environ["MARKETPLACE_PATH"]).expanduser()
 plugin = os.environ["PLUGIN_NAME"]
 source_path = os.environ["PLUGIN_SOURCE_PATH"]
+legacy_source_path = os.environ.get("PLUGIN_SOURCE_PATH_LEGACY", "")
 entry = {
     "name": plugin,
     "source": {
@@ -1164,6 +1233,40 @@ PY
   ok "Codex personal marketplace → $marketplace"
 }
 
+# `codex plugin add` reports success from the presence of a version directory in
+# the cache, not from its contents, so an install that copied nothing still reads
+# as "installed, enabled". That is exactly how the symlink-skipping copy stayed
+# invisible for months. Assert the copy actually carries a manifest.
+codex_source_version() {
+  local manifest="$CLAUDE_PLUGIN_SRC/.codex-plugin/plugin.json"
+  [ -f "$manifest" ] || return 1
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1
+}
+
+# Assert the version being installed, not "some version". A previous release can
+# leave a populated directory behind, so a scan that accepts any version dir with
+# a manifest reports success while the CURRENT copy is the empty one — the exact
+# failure this assertion exists to catch.
+verify_codex_plugin_delivered() {
+  have codex || return 0
+  local cache_root version dir
+  cache_root="${CODEX_HOME:-$HOME/.codex}/plugins/cache/$CODEX_MARKETPLACE_NAME/$PLUGIN_NAME"
+  [ -d "$cache_root" ] || { warn "Codex plugin cache missing at $cache_root"; return 1; }
+  version="$(codex_source_version || true)"
+  if [ -z "$version" ]; then
+    warn "Cannot read the source plugin version — delivery not asserted."
+    return 1
+  fi
+  dir="$cache_root/$version"
+  if [ -f "$dir/.codex-plugin/plugin.json" ]; then
+    ok "Codex plugin delivered ($version)"
+    return 0
+  fi
+  err "Codex plugin cache $version has no .codex-plugin/plugin.json — the copy is empty."
+  err "Codex skips symlinks when copying; the marketplace source must be real files."
+  return 1
+}
+
 register_codex_marketplace() {
   if ! have codex; then
     warn "Codex CLI ('codex') not found on PATH — skipping Codex marketplace registration."
@@ -1172,6 +1275,11 @@ register_codex_marketplace() {
   fi
 
   act "Preparing Codex personal plugin source"
+  # The marketplace entry names the staged real-file tree, so --codex-only has to
+  # build it too. Without this a Codex-only install publishes an entry pointing at
+  # a directory nothing ever created, and a Codex-only re-run after pulling serves
+  # whatever the last Claude-side run happened to stage.
+  prepare_claude_plugin_source || return
   prepare_plugin_projection || return
   install_public_agent_skills || return
   install_local_cli_bin || return
@@ -1179,37 +1287,68 @@ register_codex_marketplace() {
   write_codex_personal_marketplace || return
 
   act "Installing Codex plugin from personal marketplace"
-  if codex plugin list 2>/dev/null | grep -qE "^[[:space:]]+$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME \\(installed\\)"; then
+  # codex 0.147 prints a table row ("<plugin>@<market>  installed, enabled  <ver>  <path>"),
+  # not the "(installed)" form this once matched. The stale pattern never hit, so every
+  # run re-added the plugin — which is part of why the empty cache went unnoticed.
+  # codex has no `plugin update`; `plugin add` is the only refresh. Skipping merely
+  # because a row says "installed" would pin the cache forever — the stale
+  # "(installed)" pattern never matched, so the unconditional re-add WAS the
+  # refresh. Skip only once the current version is actually delivered.
+  # Buffer the listing instead of piping it. `grep -q` exits at the first match and
+  # closes the pipe; Rust ignores SIGPIPE, so codex panics on the next write and
+  # exits 101 rather than dying at 141, and under `set -o pipefail` that 101 becomes
+  # the pipeline's status — the condition read false on every run and this branch
+  # never once executed. The old "(installed)" pattern was accidentally immune
+  # because it never matched, so grep drained the output and no EPIPE occurred:
+  # fixing the pattern is what made the latent bug live. A herestring has no
+  # pipeline, so pipefail has nothing to observe.
+  local codex_listing
+  codex_listing="$(codex plugin list 2>/dev/null || true)"
+  if grep -qE "(^|[[:space:]])$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME[[:space:]]+installed" <<<"$codex_listing" &&
+     verify_codex_plugin_delivered; then
     skip "Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
   elif codex plugin add "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME" >/dev/null 2>&1; then
     ok "Codex plugin installed → $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+    verify_codex_plugin_delivered || true
   else
     warn "Codex personal marketplace is ready, but plugin install did not complete."
     warn "Run manually: codex plugin add $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
   fi
 }
 
-merge_codex_hooks() {
-  # codex-cli >= 0.137 REMOVED the `plugin_hooks` feature, so the plugin's
-  # hooks/codex-hooks.json gates no longer load from the plugin manifest. Merge
-  # them into the stable, OMX-shared ~/.codex/hooks.json instead — idempotent,
-  # touches only `.hooks` (OMX's trust `state` and native wrappers are preserved).
-  # The merged commands resolve the checkout via the install marker, so this is
-  # host- and source-agnostic (local working tree or github clone).
-  have codex || { warn "codex CLI absent — skipping gate-hook merge"; return; }
-  local hooks_file plugin_hooks
-  hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
-  plugin_hooks="$REPO_ROOT/hooks/codex-hooks.json"
-  if [ ! -f "$plugin_hooks" ]; then
-    warn "missing $plugin_hooks — skipping gate-hook merge"; return
+run_codex_hooks_manager() {
+  local python="" candidate
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    python="$candidate"
+    break
+  done < <(python_candidates)
+  if [ -z "$python" ]; then
+    warn "Python >=3.11 not found — cannot manage Codex hooks"
+    return 1
   fi
-  act "Merging ui-clone gate hooks → $hooks_file"
-  if uv run --project "$REPO_ROOT" python -m ui_clone.codex_hooks_install merge \
-       --hooks-file "$hooks_file" --plugin "$plugin_hooks"; then
-    ok "Codex gate hooks installed (idempotent)"
-    warn "First Codex session prompts once to trust the new hooks — accept it."
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    "$python" -m ui_clone.codex_hooks_install "$@"
+}
+
+cleanup_legacy_codex_hooks() {
+  # Releases through 0.7.36 merged ui-clone routes into the user-global hooks
+  # file. Current Codex plugins support bundled hooks again, but bundling the
+  # enforcement template would still make it run in unrelated sessions. Remove
+  # only ui-clone-owned legacy entries; project-local activation is handled by
+  # `ui-clone hooks enable` inside an actual clone workspace.
+  local hooks_file
+  hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
+  if [ ! -f "$hooks_file" ] || ! grep -qF "ui_clone.hooks" "$hooks_file"; then
+    skip "no legacy global ui-clone hooks"
+    return 0
+  fi
+  act "Removing legacy global ui-clone hooks → $hooks_file"
+  if run_codex_hooks_manager remove --hooks-file "$hooks_file"; then
+    ok "Legacy global ui-clone hooks removed"
   else
-    err "Gate-hook merge failed; $hooks_file left untouched"
+    err "Legacy hook cleanup failed; $hooks_file left untouched"
+    return 1
   fi
 }
 
@@ -1633,7 +1772,8 @@ remove_codex_personal_marketplace_entry() {
   local result
   if ! result="$(
     MARKETPLACE_PATH="$marketplace" PLUGIN_NAME="$PLUGIN_NAME" \
-      PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" python3 - <<'PY'
+      PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" \
+       PLUGIN_SOURCE_PATH_LEGACY="$CODEX_PLUGIN_SOURCE_PATH_LEGACY" python3 - <<'PY'
 import json
 import os
 import stat
@@ -1643,6 +1783,7 @@ from pathlib import Path
 path = Path(os.environ["MARKETPLACE_PATH"]).expanduser()
 plugin = os.environ["PLUGIN_NAME"]
 source_path = os.environ["PLUGIN_SOURCE_PATH"]
+legacy_source_path = os.environ.get("PLUGIN_SOURCE_PATH_LEGACY", "")
 
 if path.is_symlink():
     try:
@@ -1678,7 +1819,7 @@ for item in plugins:
         and item.get("name") == plugin
         and isinstance(source, dict)
         and source.get("source") == "local"
-        and source.get("path") == source_path
+        and source.get("path") in {source_path, legacy_source_path}
     ):
         removed += 1
     else:
@@ -1725,7 +1866,8 @@ codex_personal_marketplace_entry_owned() {
   have python3 || return 1
 
   MARKETPLACE_PATH="$marketplace" PLUGIN_NAME="$PLUGIN_NAME" \
-    PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" python3 - <<'PY'
+    PLUGIN_SOURCE_PATH="$CODEX_PLUGIN_SOURCE_PATH" \
+       PLUGIN_SOURCE_PATH_LEGACY="$CODEX_PLUGIN_SOURCE_PATH_LEGACY" python3 - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -1743,7 +1885,8 @@ for item in data.get("plugins", []) if isinstance(data, dict) else []:
         and item.get("name") == os.environ["PLUGIN_NAME"]
         and isinstance(source, dict)
         and source.get("source") == "local"
-        and source.get("path") == os.environ["PLUGIN_SOURCE_PATH"]
+        and source.get("path") in {os.environ["PLUGIN_SOURCE_PATH"],
+                                   os.environ.get("PLUGIN_SOURCE_PATH_LEGACY", "")}
     ):
         raise SystemExit(0)
 raise SystemExit(1)
@@ -1824,10 +1967,7 @@ uninstall_all() {
   CLAUDE_UNINSTALL_SOURCE="$(claude_marketplace_source 2>/dev/null || true)"
   verify_public_skills_removable
   if [ -f "$hooks_file" ] && grep -qF "ui_clone.hooks" "$hooks_file"; then
-    if ! have uv; then
-      mark_uninstall_incomplete "uv absent — could not strip ui-clone gate hooks from $hooks_file"
-    elif uv run --project "$REPO_ROOT" python -m ui_clone.codex_hooks_install remove \
-         --hooks-file "$hooks_file"; then
+    if run_codex_hooks_manager remove --hooks-file "$hooks_file"; then
       ok "stripped ui-clone gate hooks from $hooks_file"
     else
       mark_uninstall_incomplete "could not strip gate hooks from $hooks_file"
@@ -1928,12 +2068,11 @@ main() {
     register_codex_marketplace
   fi
 
-  # Codex gate hooks are a SEPARATE concern from the plugin/marketplace (the
-  # plugin only carries skills now that codex removed plugin_hooks), so install
-  # them whenever Codex is targeted — even under --no-marketplace.
+  # Older releases registered ui-clone hooks globally. Clean those entries on
+  # every Codex-targeted install, including --no-marketplace updates.
   if [ "$INSTALL_CODEX" -eq 1 ]; then
-    section "Codex gate hooks"
-    merge_codex_hooks
+    section "Codex hook cleanup"
+    cleanup_legacy_codex_hooks
   fi
 
   # Install marker — lets inline preflight bash and shared scripts resolve the
@@ -1971,11 +2110,12 @@ EOF
     if [ "$INSTALL_CODEX" -eq 1 ]; then
       cat <<EOF
 
-      Codex: restart the CLI to pick up the registered marketplace + gate hooks.
-             Verify plugin: codex plugin list | grep '${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME} (installed)'
-             Verify hooks:  grep -q ui_clone.hooks "${CODEX_HOME:-\$HOME/.codex}/hooks.json" && echo gate-hooks OK
+      Codex: restart the CLI to pick up the registered marketplace plugin.
+             Verify plugin: codex plugin list | grep '${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME}'
              Source: ${CODEX_PLUGIN_DIR} is a public-skill projection symlinked to ${REPO_ROOT}
-             (Accept the one-time hook-trust prompt on first Codex session.)
+             Clone workspaces configure hooks automatically through the ui-reverse-engineering skill.
+             Manual setup: ui-clone hooks enable --project-root <clone-project>
+             Review /hooks if prompted, then start a fresh Codex session.
 EOF
     fi
     cat <<EOF

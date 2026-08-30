@@ -427,6 +427,26 @@ Or install manually:
 EOF
   exit 1
 fi
+
+# Codex hooks are project-scoped so unrelated sessions load zero ui-clone
+# routes. Configure this workspace automatically on first skill use. A newly
+# written manifest still needs Codex's one-time trust review and a fresh session.
+if [ -n "${CODEX_THREAD_ID:-}" ]; then
+  _project_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+  _hooks_status="$(node "$UI_CLONE_ROOT/bin/ui-clone" hooks status --project-root "$_project_root" --json)" || exit 1
+  case "$_hooks_status" in
+    *'"active": true'*) ;;
+    *)
+      node "$UI_CLONE_ROOT/bin/ui-clone" hooks enable --project-root "$_project_root" || exit 1
+      cat >&2 <<'EOF'
+ui-clone configured six project-local Codex hook routes for this workspace.
+Review them once with /hooks if prompted, then start a fresh Codex session and
+invoke ui-reverse-engineering again. The current session may not reload hooks.
+EOF
+      exit 3
+      ;;
+  esac
+fi
 ```
 
 **1. Before-starting state inspection / Pipeline status:**

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json as _json
+import subprocess
 from pathlib import Path as _Path
 from typing import Any
 
@@ -114,6 +115,42 @@ def test_remove_on_clean_active_is_noop() -> None:
     assert remove_ui_clone_hooks(active) == active
 
 
+def test_remove_preserves_foreign_hook_in_shared_entry() -> None:
+    active = {
+        "state": {"opaque": {"keep": True}},
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": "python -m foreign.hook"},
+                        {
+                            "type": "command",
+                            "command": "python -m ui_clone.hooks.pre_bash",
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+
+    cleaned = remove_ui_clone_hooks(active)
+
+    assert cleaned == {
+        "state": active["state"],
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": "python -m foreign.hook"}
+                    ],
+                }
+            ]
+        },
+    }
+
+
 # ── CLI / on-disk behaviour (fail-closed, atomic) ────────────────────────────
 def _write(p: _Path, obj: object) -> None:
     p.write_text(_json.dumps(obj), encoding="utf-8")
@@ -123,6 +160,96 @@ def _plugin_file(tmp: _Path) -> _Path:
     p = tmp / "codex-hooks.json"
     _write(p, _plugin())
     return p
+
+
+def _canonical_route_count() -> int:
+    manifest = _json.loads(
+        (_Path(__file__).resolve().parents[1] / "hooks" / "codex-hooks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return len(_ui_clone_cmds(manifest))
+
+
+def test_project_status_reports_inactive_without_hook_file(
+    tmp_path: _Path, capsys: Any
+) -> None:
+    project = tmp_path / "unrelated-project"
+    project.mkdir()
+
+    rc = _main(["status", "--project-root", str(project), "--json"])
+
+    assert rc == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["active"] is False
+    assert payload["parity"] is False
+    assert payload["routeCount"] == 0
+    assert payload["canonicalRouteCount"] == 6
+    assert payload["trust"] == "not-configured"
+
+
+def test_project_enable_installs_exact_canonical_routes_and_is_idempotent(
+    tmp_path: _Path,
+) -> None:
+    project = tmp_path / "clone-project"
+    project.mkdir()
+
+    assert _main(["enable", "--project-root", str(project)]) == 0
+    assert _main(["enable", "--project-root", str(project)]) == 0
+
+    hooks = project / ".codex" / "hooks.json"
+    data = _json.loads(hooks.read_text(encoding="utf-8"))
+    assert len(_ui_clone_cmds(data)) == _canonical_route_count() == 6
+
+
+def test_project_enable_disable_preserves_foreign_hooks_and_metadata(
+    tmp_path: _Path,
+) -> None:
+    project = tmp_path / "shared-project"
+    hooks = project / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    original = _active()
+    original["owner"] = {"name": "foreign"}
+    _write(hooks, original)
+
+    assert _main(["enable", "--project-root", str(project)]) == 0
+    assert (project / ".codex" / "hooks.json.bak").is_file()
+    assert _main(["disable", "--project-root", str(project)]) == 0
+
+    assert _json.loads(hooks.read_text(encoding="utf-8")) == original
+
+
+def test_project_enable_fails_closed_on_malformed_hooks(tmp_path: _Path) -> None:
+    project = tmp_path / "broken-project"
+    hooks = project / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{broken", encoding="utf-8")
+
+    assert _main(["enable", "--project-root", str(project)]) == 2
+    assert hooks.read_text(encoding="utf-8") == "{broken"
+
+
+def test_project_enable_rejects_missing_project_root(tmp_path: _Path) -> None:
+    missing = tmp_path / "missing"
+
+    assert _main(["enable", "--project-root", str(missing)]) == 2
+    assert not missing.exists()
+
+
+def test_project_status_defaults_to_git_root_from_nested_directory(
+    tmp_path: _Path, monkeypatch: Any, capsys: Any
+) -> None:
+    project = tmp_path / "repo"
+    nested = project / "packages" / "web"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    monkeypatch.chdir(nested)
+
+    assert _main(["status", "--json"]) == 0
+
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["projectRoot"] == str(project.resolve())
+    assert payload["hooksFile"] == str(project.resolve() / ".codex" / "hooks.json")
 
 
 def test_cli_merge_into_absent_file_creates_struct(tmp_path: _Path) -> None:
@@ -207,6 +334,93 @@ def test_cli_remove_fails_closed_on_non_dict_active(tmp_path: _Path) -> None:
     rc = _main(["remove", "--hooks-file", str(hooks)])
     assert rc != 0
     assert hooks.read_text() == '[{"command": "my-own-hook"}]', "must not wipe a non-dict file"
+
+
+def test_cli_remove_fails_closed_when_foreign_entry_would_shift(tmp_path: _Path) -> None:
+    hooks = tmp_path / "hooks.json"
+    original = {
+        "state": {"hooks.json:pre_tool_use:1:0": {"trusted_hash": "foreign"}},
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python -m ui_clone.hooks.pre_bash",
+                        }
+                    ],
+                },
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": "python -m foreign.hook"}
+                    ],
+                },
+            ]
+        },
+    }
+    _write(hooks, original)
+
+    assert _main(["remove", "--hooks-file", str(hooks)]) == 2
+    assert _json.loads(hooks.read_text(encoding="utf-8")) == original
+
+
+def test_cli_remove_fails_closed_when_foreign_hook_would_shift_within_entry(
+    tmp_path: _Path,
+) -> None:
+    hooks = tmp_path / "hooks.json"
+    original = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python -m ui_clone.hooks.pre_bash",
+                        },
+                        {"type": "command", "command": "python -m foreign.hook"},
+                    ],
+                }
+            ]
+        }
+    }
+    _write(hooks, original)
+
+    assert _main(["remove", "--hooks-file", str(hooks)]) == 2
+    assert _json.loads(hooks.read_text(encoding="utf-8")) == original
+
+
+def test_cli_enable_fails_closed_on_non_list_event_entries(tmp_path: _Path) -> None:
+    project = tmp_path / "broken-event"
+    hooks = project / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text('{"hooks":{"PreToolUse":{"bad":true}}}', encoding="utf-8")
+
+    assert _main(["enable", "--project-root", str(project)]) == 2
+    assert hooks.read_text(encoding="utf-8") == '{"hooks":{"PreToolUse":{"bad":true}}}'
+
+
+def test_cli_status_fails_closed_on_non_dict_entry(tmp_path: _Path) -> None:
+    project = tmp_path / "broken-entry"
+    hooks = project / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text('{"hooks":{"PreToolUse":["bad"]}}', encoding="utf-8")
+
+    assert _main(["status", "--project-root", str(project), "--json"]) == 2
+    assert hooks.read_text(encoding="utf-8") == '{"hooks":{"PreToolUse":["bad"]}}'
+
+
+def test_cli_status_fails_closed_on_non_string_command(tmp_path: _Path) -> None:
+    project = tmp_path / "broken-command"
+    hooks = project / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    original = '{"hooks":{"PreToolUse":[{"hooks":[{"command":5}]}]}}'
+    hooks.write_text(original, encoding="utf-8")
+
+    assert _main(["status", "--project-root", str(project), "--json"]) == 2
+    assert hooks.read_text(encoding="utf-8") == original
 
 
 def test_cli_write_failure_fails_closed_and_cleans_tmp(tmp_path: _Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

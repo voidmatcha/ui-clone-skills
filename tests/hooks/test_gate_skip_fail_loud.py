@@ -31,6 +31,58 @@ def test_run_gate_skip_is_loud_and_logged(tmp_path: Path, monkeypatch: pytest.Mo
     assert "gate=section-compare" in log
 
 
+def test_run_gate_fails_closed_when_skip_unrecordable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_a: object, **_k: object) -> object:
+        raise FileNotFoundError("uv not found")
+
+    monkeypatch.setattr(_common.subprocess, "run", boom)
+    monkeypatch.setattr(_common, "_log_gate_skip", lambda *_a, **_k: False)
+
+    res = _common.run_gate(tmp_path, "section-compare")
+
+    assert res["passed"] is False, "unrecordable skip must fail closed"
+    assert res["skip_record_failed"] is True
+    assert res["fail_count"] == 1
+    failures = res["failures"]
+    assert isinstance(failures, list)
+    first = failures[0]
+    assert isinstance(first, dict)
+    assert first["label"] == "section-compare"
+    assert "could not be durably recorded" in first["reason"]
+
+
+def test_run_gate_unrecordable_skip_released_by_ack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_a: object, **_k: object) -> object:
+        raise FileNotFoundError("uv not found")
+
+    monkeypatch.setattr(_common.subprocess, "run", boom)
+    monkeypatch.setattr(_common, "_log_gate_skip", lambda *_a, **_k: False)
+    (tmp_path / "verification-plan.json").write_text(
+        json.dumps({"schemaVersion": 1, "gateSkipAck": "dependency-poor host accepted"}),
+        encoding="utf-8",
+    )
+
+    res = _common.run_gate(tmp_path, "section-compare")
+
+    assert res["passed"] is True
+    assert res["skipped"] is True
+
+
+def test_log_gate_skip_reports_durability(tmp_path: Path) -> None:
+    assert _common._log_gate_skip(tmp_path, "spec", "FileNotFoundError") is True
+    log = (tmp_path / ".gate-skip-log").read_text(encoding="utf-8")
+    assert "gate=spec reason=FileNotFoundError" in log
+
+
+def test_log_gate_skip_returns_false_on_unwritable_dir(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist"
+    assert _common._log_gate_skip(missing, "spec", "x") is False
+
+
 def test_run_gate_success_clears_prior_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".gate-skip-log").write_text(
         "2026-01-01T00:00:00Z gate=section-compare reason=FileNotFoundError\n",

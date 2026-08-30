@@ -1825,7 +1825,7 @@ export default function ScrollLatchDriver() {{
         const node = document.querySelectorAll(site.selector)[site.selectorIndex];
         if (!(node instanceof HTMLElement)) continue;
         for (const [property, value] of Object.entries(site.endState)) {{
-          node.style.setProperty(property, value);
+          node.style.setProperty(property, value, "important");
         }}
       }}
     }};

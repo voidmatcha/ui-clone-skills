@@ -12,9 +12,9 @@ For Claude Code: the installer registers the local projection at `~/plugins/ui-c
 /plugin install ui-clone-skills@voidmatcha
 ```
 
-For Codex: the installer reuses the same lightweight plugin projection, writes `~/.agents/plugins/marketplace.json`, runs `codex plugin add ui-clone-skills@local`, **and merges the gate hooks into `~/.codex/hooks.json`**. That projection includes only the three public skills, so maintainer-only skills such as `skills/benchmark` do not appear in either host. Verify the plugin with `codex plugin list | grep 'ui-clone-skills@local (installed)'` and the hooks with `grep -q ui_clone.hooks ~/.codex/hooks.json && echo gate-hooks OK`.
+For Codex: the installer reuses the same lightweight plugin projection, writes `~/.agents/plugins/marketplace.json`, and runs `codex plugin add ui-clone-skills@local`. The global plugin is skills-only. That projection includes only the three public skills, so maintainer-only skills such as `skills/benchmark` do not appear in either host. Verify it with `codex plugin list | grep 'ui-clone-skills@local (installed)'`.
 
-codex-cli 0.137 removed the `plugin_hooks` feature, so plugin-manifest hooks no longer load — that is why the installer merges the gate entries into the stable `~/.codex/hooks.json` instead (idempotently, preserving your existing hooks). Accept the one-time hook-trust prompt on the next Codex session. If you skip the merge (e.g. a docs-only `npx skills add`), the skills still load but the hook gate chain does not run: it can guide the agent but cannot block bypasses.
+Codex enforcement hooks are project-scoped. The `ui-reverse-engineering` preflight runs `ui-clone hooks status` and, when needed, enables the canonical six routes under the current workspace's `.codex/hooks.json`. This keeps unrelated sessions at zero ui-clone routes. A newly enabled or changed manifest may require one `/hooks` trust review and a fresh session; the skill surfaces that boundary instead of claiming the current session reloaded it. Installation and updates automatically remove legacy ui-clone entries from `~/.codex/hooks.json` while preserving every foreign hook and trust-state entry.
 
 The installer is idempotent: it bootstraps shared dependencies, registers the local checkout for whichever host(s) are present, and skips anything already installed.
 
@@ -63,7 +63,7 @@ cd /path/to/the/checkout/the/hosts/should/use
 The installer also writes the fallback marker
 `~/.config/ui-clone-skills/root` to the current checkout. Hook commands normally
 receive `CLAUDE_PLUGIN_ROOT` / `CODEX_PLUGIN_ROOT` from the plugin host; the
-merged Codex hooks, standalone scripts, and inline skill snippets use that
+project-scoped Codex hooks, standalone scripts, and inline skill snippets use that
 marker when no host-provided plugin root is available.
 
 ## Install only one host

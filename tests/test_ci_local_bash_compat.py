@@ -19,3 +19,13 @@ def test_ci_local_scopes_bash_compat_to_pytest_children() -> None:
     assert source.index("# 2. Type check") > source.rindex(
         '"${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q'
     )
+
+
+def test_ci_local_caps_default_pytest_workers_under_shared_host_load() -> None:
+    source = CI_LOCAL.read_text(encoding="utf-8")
+
+    assert "min(os.cpu_count() or 1, 4)" in source
+    assert (
+        'PYTEST_WORKERS="${UI_CLONE_PYTEST_WORKERS:-$DEFAULT_PYTEST_WORKERS}"'
+        in source
+    )

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import re
@@ -200,7 +201,34 @@ def find_hangul() -> int:
     return 0
 
 
+def count_subprocess_without_timeout() -> int:
+    integ = pathlib.Path("tests/integration")
+    count = 0
+    for path in sorted(pathlib.Path("tests").rglob("*.py")):
+        if integ in path.parents:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "run"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "subprocess"
+                and "timeout" not in {keyword.arg for keyword in node.keywords}
+            ):
+                count += 1
+    print(count)
+    return 0
+
+
 COMMANDS: dict[str, Callable[[], int]] = {
+    "count-subprocess-without-timeout": count_subprocess_without_timeout,
     "public-skills": check_public_skills,
     "trigger-boundaries": check_trigger_boundaries,
     "trigger-fixtures": check_trigger_fixtures,

@@ -34,6 +34,23 @@ def test_codex_install_does_not_register_working_repo_as_marketplace() -> None:
     assert 'codex plugin marketplace add $(shell_quote "$REPO_ROOT")' not in text
 
 
+def test_codex_install_cleans_legacy_global_hooks_instead_of_merging() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    match = re.search(
+        r"^cleanup_legacy_codex_hooks\(\) \{\n(?:.*\n)*?^\}\n",
+        text,
+        re.MULTILINE,
+    )
+
+    assert match is not None, "installer must expose legacy global-hook cleanup"
+    body = match.group(0)
+    assert "run_codex_hooks_manager remove" in body
+    assert "-m ui_clone.codex_hooks_install" in text
+    assert "codex_hooks_install merge" not in text
+    assert "hooks/codex-hooks.json" not in body
+    assert 'hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"' in body
+
+
 def test_claude_install_uses_real_file_source_not_the_symlink_projection() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
@@ -73,8 +90,20 @@ def test_codex_install_uses_personal_projection_marketplace() -> None:
 
     assert 'CODEX_PERSONAL_MARKETPLACE="$HOME/.agents/plugins/marketplace.json"' in text
     assert 'CODEX_PLUGIN_DIR="$HOME/plugins/$PLUGIN_NAME"' in text
-    assert 'CODEX_PLUGIN_SOURCE_PATH="./plugins/$PLUGIN_NAME"' in text
     assert 'codex plugin add "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"' in text
+
+    # The marketplace source must NOT be the projection. Codex copies the source
+    # into its own versioned cache and skips symlinks while copying, and the
+    # projection is entirely symlinks — pointing at it produced a cache holding one
+    # empty skills/ dir and no plugin.json while `codex plugin list` still said
+    # "installed, enabled". Derive it from the staged real-file tree instead.
+    assert 'CODEX_PLUGIN_SOURCE_PATH="./plugins/$PLUGIN_NAME"' not in text
+    assert 'CODEX_PLUGIN_SOURCE_PATH="${CLAUDE_PLUGIN_SRC#"$HOME"/}"' in text.replace(
+        './${CLAUDE_PLUGIN_SRC#"$HOME"/}', '${CLAUDE_PLUGIN_SRC#"$HOME"/}'
+    )
+    # Entries written before that move still name the projection; ownership and
+    # removal have to keep recognising them or an upgrade strands them.
+    assert 'CODEX_PLUGIN_SOURCE_PATH_LEGACY="./plugins/$PLUGIN_NAME"' in text
 
 
 def test_codex_install_projects_and_installs_native_agents() -> None:
@@ -1336,12 +1365,12 @@ def test_claude_legacy_settings_fallback_and_conflict_preservation(
     assert not conflict_log.exists()
 
 
-def test_uninstall_is_fail_closed_on_missing_uv_and_codex_failure(
+def test_uninstall_cleans_hooks_without_uv_and_is_fail_closed_on_codex_failure(
     tmp_path: Path,
 ) -> None:
-    for name, with_hooks, codex_exit in (
-        ("missing-uv", True, 0),
-        ("codex-failure", False, 1),
+    for name, with_hooks, codex_exit, expected_rc in (
+        ("missing-uv", True, 0, 0),
+        ("codex-failure", False, 1, 1),
     ):
         case_dir = tmp_path / name
         home = case_dir / "home"
@@ -1391,7 +1420,9 @@ exit 0
             hooks = home / ".codex" / "hooks.json"
             hooks.parent.mkdir(parents=True, exist_ok=True)
             hooks.write_text(
-                '{"hooks": {"PreToolUse": [{"command": "python -m ui_clone.hooks.pretool"}]}}\n',
+                '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": '
+                '[{"type": "command", "command": '
+                '"python -m ui_clone.hooks.pretool"}]}]}}\n',
                 encoding="utf-8",
             )
 
@@ -1414,15 +1445,20 @@ exit 0
             text=True,
         )
 
-        assert result.returncode == 1
-        assert "Uninstall incomplete" in result.stdout
-        assert "Uninstall complete." not in result.stdout
-        assert marker.is_file()
-        plugins = json.loads(marketplace.read_text(encoding="utf-8"))["plugins"]
-        assert [item["name"] for item in plugins] == ["ui-clone-skills"]
-        assert codex_config.read_text(encoding="utf-8") == (
-            '[plugins."ui-clone-skills@local"]\nenabled = true\n'
-        )
+        assert result.returncode == expected_rc
+        if expected_rc == 0:
+            assert "Uninstall complete." in result.stdout
+            cleaned = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+            assert cleaned == {"hooks": {}}
+        else:
+            assert "Uninstall incomplete" in result.stdout
+            assert "Uninstall complete." not in result.stdout
+            assert marker.is_file()
+            plugins = json.loads(marketplace.read_text(encoding="utf-8"))["plugins"]
+            assert [item["name"] for item in plugins] == ["ui-clone-skills"]
+            assert codex_config.read_text(encoding="utf-8") == (
+                '[plugins."ui-clone-skills@local"]\nenabled = true\n'
+            )
 
 
 def test_uninstall_removes_exact_stale_claude_marketplace(

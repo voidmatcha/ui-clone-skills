@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,3 +73,25 @@ def test_runtime_install_guidance_avoids_curl_pipe_shell() -> None:
             offenders.append(str(path.relative_to(ROOT)))
 
     assert not offenders, "curl|shell installer guidance found in: " + ", ".join(offenders)
+
+
+def test_shell_entrypoints_parse() -> None:
+    # A hooks/shim.sh that does not parse is not a local annoyance. Codex blocks a
+    # tool call when a hook exits 2 with non-empty stderr, and a bash syntax error
+    # is exactly that, so every tool call in every Codex session in every project
+    # fails with the parse error as its reason until the file is fixed. Nothing
+    # else in the suite or in ci-local.sh checks shell syntax, so a broken save
+    # reached the working tree with no gate in front of it.
+    targets = sorted((ROOT / "hooks").glob("*.sh")) + [ROOT / "install.sh"]
+    broken = []
+    for path in targets:
+        result = subprocess.run(
+            ["bash", "-n", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            broken.append(f"{path.relative_to(ROOT)}: {result.stderr.strip()}")
+
+    assert not broken, "shell files fail to parse: " + "; ".join(broken)
