@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # section-compare-frozen.sh — three-pass frozen-ref + impl-path-calib wrapper
-# around section-compare.sh, for the REAL-CLONE verify path (Task B / loop-16).
+# around section-compare.sh, for the REAL-CLONE verify path (Task B / specific regression).
 #
 # WHY: the default single-pass section-compare captures the ref AND the impl LIVE
 # each run, so a framer scroll-scrub section lands on a DIFFERENT sub-frame each
-# capture -> run-to-run AE variance (loop-16: a faithful section PASSes one run,
+# capture -> run-to-run AE variance (specific regression: a faithful section PASSes one run,
 # saturates the next). This wrapper freezes the ref ONCE and captures the impl at
 # the SAME forced scroll frame so pixel AE is same-frame and meaningful again,
 # while an impl-path calibration measures the ref's OWN same-frame scrub noise as

@@ -93,8 +93,8 @@ def test_build_verify_stamp_pins_motion_evidence(tmp_path: Path) -> None:
     assert stamp["transitionFiresSha256"] == hashlib.sha256(fires).hexdigest()
 
 
-def _write_canonical_stamp(ref: Path, *, pin: str | None) -> None:
-    stamp = {
+def _write_canonical_stamp(ref: Path, *, pin: object | None) -> None:
+    stamp: dict[str, object] = {
         "verifiedAt": datetime.datetime.now(datetime.UTC).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
@@ -236,6 +236,16 @@ def test_check_done_rejects_tampered_pin(tmp_path: Path) -> None:
     ref = _ref_with_result(tmp_path)
     _write_done_state(ref)
     _write_canonical_stamp(ref, pin="0" * 64)
+    assert _check_done(ref) != 0
+
+
+@pytest.mark.parametrize("pin", [None, "", "abc", 123])
+def test_check_done_rejects_missing_or_malformed_pin_when_result_exists(
+    tmp_path: Path, pin: object | None
+) -> None:
+    ref = _ref_with_result(tmp_path)
+    _write_done_state(ref)
+    _write_canonical_stamp(ref, pin=pin)
     assert _check_done(ref) != 0
 
 

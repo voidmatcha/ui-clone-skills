@@ -12,9 +12,9 @@ ref_dir = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
 
 # Tolerances are env-tunable per repo convention; defaults preserve the
-# calibrated values (loop-9 regression corpus). A LARGER tolerance is more
+# calibrated values (the regression corpus). A LARGER tolerance is more
 # lenient, so each env override is clamped to a max that cannot be opened wide
-# enough to pass a real off-center defect (loop-9 class is >=64px) — env
+# enough to pass a real off-center defect (specific regression class is >=64px) — env
 # leniency is itself a bypass surface (batch-7 ITEM 4).
 def _clamp_tol(env, default, ceiling):
     try:
@@ -132,7 +132,7 @@ def _is_overflow_group(group: dict) -> bool:
     are exempted. The VISIBLE box stays measured by the section-center and
     contentbox-asym prongs. Gated strictly on union > container + the alignment
     tolerance, so a centered/fitting group (union <= container) is NEVER exempted
-    and real off-center defects still fail (loop-9 class: union sits well INSIDE
+    and real off-center defects still fail (specific regression class: union sits well INSIDE
     its container, ratio < 1)."""
     cw = _num(group.get("containerWidth"))
     uw = _num(group.get("unionWidth"))
@@ -318,7 +318,7 @@ for viewport, matches_path in sources:
 
         # ── prong (c): contentGroups asymmetry, ref-relative ──
         # A whole-section union is diluted by full-width centered siblings
-        # (loop-9 eatReal: h2 spans the content column while the carousel
+        # (specific regression eatReal: h2 spans the content column while the carousel
         # cards group is +64px off-center). Per-container child-union gaps
         # measure each group against ITS container, so narrow mis-centered
         # groups cannot hide behind wide centered ones.

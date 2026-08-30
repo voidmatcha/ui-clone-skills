@@ -3,7 +3,7 @@
 #
 # Dynamic:true spec selectors are masked out of pixel comparison, video-motion,
 # and the motion proof — and the motion proof checks MOTION only. That left
-# STATIC style defects under a mask completely unverified (loop-10/11: the
+# STATIC style defects under a mask completely unverified (specific regression: the
 # eatReal "Eat Real" h2 rendered left-aligned while the ref centers it; the h2
 # is inside the eatreal-food-carousel dynamic mask, so every gate passed).
 #

@@ -14,7 +14,7 @@ Three failure classes proved structurally noisy on timer/scroll-dynamic pages
 2. scrollHeight exact equality: pages with scroll-activated content legally
    grow/shrink (realfood erf region +-180px), so equality across two
    independent sessions is luck. Tolerance is max(0.5%, 200px) — far below the
-   2.2x balloon class (loop-129) this check exists to catch; geometry-sanity
+   2.2x balloon class (specific regression) this check exists to catch; geometry-sanity
    independently enforces docH within 15%.
 
 3. Accessibility-only copy leaks: long text captured from clipped/screen-reader

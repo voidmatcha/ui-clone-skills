@@ -510,7 +510,7 @@
     // AE by ~700k per image-heavy section.
     // A-family: allow/allowfullscreen must survive capture — without iframe
     // allow, the Chrome permissions policy blocks autoplay in cross-origin
-    // embeds (ebpb loop-1: all 3 Vimeo players stuck on poster+Play).
+    // embeds (ebpb observed regression: all 3 Vimeo players stuck on poster+Play).
     const ATTR_KEYS = ['id','src','href','alt','poster','srcset','sizes','media','type','target','rel','aria-label','aria-haspopup','aria-expanded','title','role','allow','allowfullscreen','width','height','data-src','data-poster','data-srcset','data-lazy-src','data-original','data-lazy'];
     const keys = elIsSvg ? ATTR_KEYS.concat(SVG_ATTR_KEYS) : ATTR_KEYS;
     for (const k of keys) {

@@ -32,10 +32,10 @@ from typing import Any
 DESKTOP_MIN_WIDTH = int(os.environ.get("UI_CLONE_ALIGN_DESKTOP_MIN_WIDTH", "768"))
 DESKTOP_MAX_WIDTH = int(os.environ.get("UI_CLONE_ALIGN_DESKTOP_MAX_WIDTH", "1920"))
 # Tolerances are env-tunable per repo convention; defaults preserve the
-# calibrated values (loop-9 regression corpus). A LARGER tolerance is more
+# calibrated values (the regression corpus). A LARGER tolerance is more
 # lenient (a bypass surface — batch-7 ITEM 4), so each is clamped to a max that
 # still admits sub-pixel AA / rounding but cannot be opened wide enough to pass
-# a real off-center defect (the loop-9 class is >=64px).
+# a real off-center defect (the specific regression class is >=64px).
 
 
 def _clamp_tol(env: str, default: str, ceiling: float) -> float:

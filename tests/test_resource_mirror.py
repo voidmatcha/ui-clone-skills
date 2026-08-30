@@ -248,3 +248,30 @@ def test_guarded_opener_revalidates_redirect_hops() -> None:
             headers={},
             newurl="http://169.254.169.254/latest/meta-data/",
         )
+
+
+def test_guarded_connection_uses_the_validated_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_module()
+    resolved_ip = "93.184.216.34"
+    connected: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "_validate_host_addrs",
+        lambda host, port: [(mod.socket.AF_INET, (resolved_ip, port))],
+    )
+
+    class _Socket:
+        pass
+
+    def fake_create_connection(address: tuple[str, int], *args: object) -> _Socket:
+        connected.append(address)
+        return _Socket()
+
+    monkeypatch.setattr(mod.socket, "create_connection", fake_create_connection)
+    connection = mod._GuardedHTTPConnection("example.com", 80, timeout=1)
+    connection.connect()
+
+    assert connected == [(resolved_ip, 80)]

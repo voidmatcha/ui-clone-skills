@@ -4,7 +4,7 @@
 #
 # Dynamic:true spec entries are masked out of pixel comparison because their
 # frame is timer-phase-dependent — which previously left them with NO
-# compensating verification (loop-9: carousel timer ran, content swapped
+# compensating verification (specific regression: carousel timer ran, content swapped
 # instantly, the spec-declared card motion never happened, every gate
 # passed). This check samples the LIVE impl DOM per entry (~250ms cadence
 # for >=1.5x the declared interval, retrying to ~2.2x when no change is

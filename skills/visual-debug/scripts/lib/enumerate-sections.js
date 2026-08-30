@@ -10,7 +10,7 @@
   // `visibility: hidden` on the dynamic:true selectors to absorb timer-phase
   // MOTION from the screenshot, and applies it BEFORE this enumeration. Because
   // the contentBox/contentGroups filters below drop visibility:hidden /
-  // opacity:0 nodes, a STATIC geometry defect under a mask (loop-11 footer cards
+  // opacity:0 nodes, a STATIC geometry defect under a mask (observed regression footer cards
   // baked left:426px / ±192 transform, off-center at non-extraction viewports)
   // silently vanished from alignment-parity — exemption-without-compensation.
   // visibility:hidden PRESERVES layout, so for elements under a masked selector
@@ -276,7 +276,7 @@
 
     // contentGroups — per-container child-union gaps (depth <= 4). The
     // whole-section contentBox union is diluted by full-width centered
-    // siblings (loop-9 eatReal: the h2 spans the content column while the
+    // siblings (observed regression eatReal: the h2 spans the content column while the
     // carousel cards group sits +64px off-center), so each multi-child
     // container also records the union bbox of ITS children. The
     // alignment-parity gate pairs groups ref-vs-impl by normalized class

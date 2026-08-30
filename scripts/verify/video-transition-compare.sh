@@ -1875,7 +1875,7 @@ PY
   fi
 fi
 
-# ── Splash navigation anchor (loop-10 fix b) ───────────────────────────
+# ── Splash navigation anchor (specific regression fix b) ───────────────────────────
 # The splash window used to be pure wall-clock: record, open, sleep N. The
 # live ref's hydration latency shifts the splash inside that window by
 # seconds run-to-run — late starts clip the arc (vacuous all-PASS on a
@@ -1903,7 +1903,7 @@ _wait_nav_anchor() {
   return 1
 }
 
-# Splash recording with validated retry (loop-10 fix b): the recorder
+# Splash recording with validated retry (specific regression fix b): the recorder
 # itself flakes — recordings truncate to <1s under load (the run-5 class:
 # ref 60 / impl 36 frames). A truncated capture used to flow straight into
 # a vacuous verdict; now the recorded duration is validated immediately and
@@ -2043,7 +2043,7 @@ _splash_record() {
   return 1
 }
 
-# Test hook (loop-10 corrupted-frame fixture): skip the browser phases and
+# Test hook (specific regression corrupted-frame fixture): skip the browser phases and
 # run extraction/compare against pre-seeded $OUT_DIR/{ref,impl}-video/raw.webm.
 if [[ "${UI_CLONE_VMC_SKIP_RECORD:-0}" == "1" ]]; then
   echo -e "${YELLOW}▸ UI_CLONE_VMC_SKIP_RECORD=1 — using pre-seeded recordings${NC}"
@@ -3110,7 +3110,7 @@ else
     fi
   fi
 
-  # Phase-jitter allowance (loop-10 fix b): two INDEPENDENT recordings of even
+  # Phase-jitter allowance (specific regression fix b): two INDEPENDENT recordings of even
   # an identical page sample fast motion at sub-frame phase offsets — measured:
   # self-compare of the same site failed 15-30 mid-flight frames per run. On a
   # failing frame, _best_frame_ssim retries against the neighboring ±N frames

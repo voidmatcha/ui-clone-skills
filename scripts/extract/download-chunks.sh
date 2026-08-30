@@ -27,6 +27,30 @@ NC='\033[0m'
 
 mkdir -p "$DIR/bundles"
 
+ui_clone_download_url() {
+  local url="$1"
+  local dest="$2"
+  UI_CLONE_EXTRACT_SCRIPT_DIR="$SCRIPT_DIR" "${PYTHON_BIN:-python3}" - "$url" "$dest" <<'PY'
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["UI_CLONE_EXTRACT_SCRIPT_DIR"])
+from _resource_mirror import SsrfBlocked, download_url_to_path  # noqa: E402
+
+try:
+    download_url_to_path(sys.argv[1], Path(sys.argv[2]), timeout=30.0, max_bytes=10_485_760)
+except SsrfBlocked as exc:
+    print(f"ssrf-blocked: {exc.reason}", file=sys.stderr)
+    raise SystemExit(1)
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 # ─────────────────────────────────────────────
 # 1. Parse URL list (JSON array or newline-separated)
 # ─────────────────────────────────────────────
@@ -54,7 +78,7 @@ for url in "${URLS[@]}"; do
   if [[ "$url" =~ (cloudflare|iubenda|analytics|gtag|gtm|hotjar|facebook|sentry) ]]; then
     continue
   fi
-  if [[ "$url" =~ ^https:// ]]; then
+  if [[ "$url" =~ ^https?:// ]]; then
     FILTERED+=("$url")
   fi
 done
@@ -68,8 +92,7 @@ DOWNLOADED=0
 FAILED=0
 for url in "${FILTERED[@]}"; do
   FILENAME=$(basename "$url" | sed 's/?.*//')
-  if curl -s --max-time 30 --max-filesize 10485760 --fail --location \
-    -o "$DIR/bundles/$FILENAME" -- "$url" 2>/dev/null; then
+  if ui_clone_download_url "$url" "$DIR/bundles/$FILENAME"; then
     SIZE=$(wc -c < "$DIR/bundles/$FILENAME" | tr -d ' ')
     if [ "$SIZE" -lt 100 ]; then
       echo -e "${YELLOW}⚠️  $FILENAME — ${SIZE}B (suspiciously small)${NC}"
@@ -78,6 +101,7 @@ for url in "${FILTERED[@]}"; do
     fi
     DOWNLOADED=$((DOWNLOADED + 1))
   else
+    rm -f "$DIR/bundles/$FILENAME"
     echo -e "${RED}❌${NC} Failed: $FILENAME"
     FAILED=$((FAILED + 1))
   fi

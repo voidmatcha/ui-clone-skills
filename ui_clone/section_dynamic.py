@@ -47,7 +47,7 @@ DYNAMIC_DSSIM_FLOOR_EPS_DEFAULT = 0.015
 # Layout box footprint tolerance (the section must occupy the same geometry).
 DYNAMIC_DIM_TOL_DEFAULT = 0.06
 
-# Same-frame strict-AE ceiling for a dynamic section (Task B / loop-16). In the
+# Same-frame strict-AE ceiling for a dynamic section (Task B / specific regression). In the
 # frozen-calib flow the impl is captured at the SAME forced scroll frame the ref
 # was frozen at, so pixel AE is meaningful again (low for a faithful clone, high
 # for a real defect). The dssim floor alone let a same-layout-but-wrong-content
@@ -176,7 +176,7 @@ def dynamic_section_verdict(
             f"h {h_ratio:.2f}x>{allow_h:.2f}x; ref self-variance "
             f"w {_dim_ratio(ref_w, calib_w):.2f}x h {_dim_ratio(ref_h, calib_h):.2f}x)",
         )
-    # Same-frame strict-AE gate (Task B / loop-16 — closes the F1 dssim-only
+    # Same-frame strict-AE gate (Task B / specific regression — closes the F1 dssim-only
     # defect-hiding hole). When the impl was captured at the SAME forced scroll
     # frame as the frozen ref, pixel AE is meaningful: a faithful clone is LOW, a
     # wrong-content defect is HIGH. The dssim floor below cannot be the only gate

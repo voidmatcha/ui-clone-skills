@@ -43,15 +43,22 @@ def _write_verify_stamp(ref: Path) -> None:
     """The canonical stamp `check_strict_done` now requires. Written last so it
     is never older than the impl files the stamp contract compares it against."""
     import datetime
+    import hashlib
 
-    (ref / "verify-stamp.json").write_text(json.dumps({
+    stamp = {
         "schemaVersion": 1,
         "stampedBy": "pipeline.execute_verify",
         "verifiedAt": datetime.datetime.now(datetime.UTC).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
         "gatesPassed": list(POST_IMPL_VERIFY_GATES),
-    }))
+    }
+    result_file = ref / "sections" / "result.txt"
+    if result_file.is_file():
+        stamp["sectionsResultSha256"] = hashlib.sha256(
+            result_file.read_bytes()
+        ).hexdigest()
+    (ref / "verify-stamp.json").write_text(json.dumps(stamp))
 
 
 def _write_strict_proofs(

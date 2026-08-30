@@ -128,7 +128,7 @@ def header_measure(d: dict) -> tuple[bool, str]:
         # Geometric trajectory (header-state-runtime-check.sh geoChanges): a header
         # that animates geometry on scroll (height/transform/position) must be
         # reproduced — class-toggle parity alone cannot prove the motion arc
-        # (realfood loop-145: ref nav springs on scrollY while impl is pinned).
+        # (realfood specific regression: ref nav springs on scrollY while impl is pinned).
         # Artifacts predating the geometry probe carry no geoChanges -> both False
         # -> this reduces to the original mutation-parity behaviour (no regression).
         ref_geo = bool(ref.get("geoChanges"))

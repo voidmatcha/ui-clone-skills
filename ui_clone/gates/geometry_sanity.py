@@ -1,7 +1,7 @@
 """Geometry sanity — rendered page/section heights must track the ref capture.
 
 Whole-page dSSIM and per-section AE miss a structural failure class: a build
-can score its best dSSIM while the document is 2x the ref's height (loop-129:
+can score its best dSSIM while the document is 2x the ref's height (specific regression:
 best 0.1156 with docH ballooned), because pixel metrics compare what IS
 rendered, not how much page exists. This gate compares the built impl's
 rendered docH and per-section heights against the ref capture's geometry

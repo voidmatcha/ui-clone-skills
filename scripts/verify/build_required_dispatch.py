@@ -303,7 +303,7 @@ if not has_section_row and has_ref_screenshots and section_script.is_file():
                 continue
     viewport_env = [f"VIEWPORTS={','.join(vps)}"] if len(vps) > 1 else []
     if tier == "comprehensive" and frozen_script.is_file():
-        # Capture-variance determinism (loop-16): the comprehensive tier runs the
+        # Capture-variance determinism (specific regression): the comprehensive tier runs the
         # 3-pass frozen-ref + impl-path-calib wrapper so the impl is captured at the
         # SAME forced scroll frame as the frozen ref. Same-frame strict AE is KEPT
         # (the section_dynamic AE ceiling, not discarded), killing the run-to-run

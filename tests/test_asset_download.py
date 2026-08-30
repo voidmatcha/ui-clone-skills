@@ -1,13 +1,41 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "extract" / "asset-download.sh"
+
+
+class _BytesHandler(BaseHTTPRequestHandler):
+    body = b"W" * 1500
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        reported_length = (
+            30 * 1024 * 1024 if self.path.endswith(".mp4") else len(self.body)
+        )
+        self.send_header("Content-Length", str(reported_length))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+
+def _server_base_url() -> tuple[ThreadingHTTPServer, str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _BytesHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    return server, f"http://{str(host)}:{port}"
 
 
 def test_asset_download_shell_avoids_large_python_heredoc() -> None:
@@ -55,82 +83,65 @@ def test_asset_download_prefers_repo_venv_over_path_python(tmp_path: Path) -> No
     assert not marker.exists()
 
 
-def _write_fake_curl(bin_dir: Path) -> None:
-    fake = bin_dir / "curl"
-    fake.write_text(
-        "#!/usr/bin/env bash\n"
-        "out=''\n"
-        "while [ \"$#\" -gt 0 ]; do\n"
-        "  if [ \"$1\" = '-o' ]; then out=\"$2\"; shift 2; continue; fi\n"
-        "  shift\n"
-        "done\n"
-        "if [ -n \"$out\" ]; then printf 'forbidden' > \"$out\"; fi\n"
-        "printf '403'\n"
-        "printf 'curl: (22) The requested URL returned error: 403\\n' >&2\n"
-        "exit 22\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-
-
-def _write_fake_agent_browser(bin_dir: Path, calls_log: Path, body: bytes) -> None:
-    payload = base64.b64encode(body).decode("ascii")
-    fake = bin_dir / "agent-browser"
-    fake.write_text(
-        "#!/usr/bin/env bash\n"
-        f"printf '%s\\n' \"$*\" >> '{calls_log}'\n"
-        "args=\"$*\"\n"
-        "case \" $args \" in\n"
-        "  *' fetch '*) printf 'Unknown command: fetch\\n' >&2; exit 2 ;;\n"
-        "  *' open '*) exit 0 ;;\n"
-        "  *' wait '*) exit 0 ;;\n"
-        "  *' eval '*)\n"
-        "    python3 - <<'PY'\n"
-        "import json\n"
-        "print(json.dumps({\n"
-        "    'success': True,\n"
-        "    'data': {'result': {\n"
-        "        'ok': True,\n"
-        "        'status': 200,\n"
-        "        'contentType': 'image/webp',\n"
-        f"        'bodyBase64': '{payload}',\n"
-        "    }},\n"
-        "    'error': None,\n"
-        "}))\n"
-        "PY\n"
-        "    exit 0 ;;\n"
-        "esac\n"
-        "exit 0\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-
-
-def test_asset_download_uses_supported_browser_fallback_after_curl_403(
+def test_asset_download_uses_guarded_downloader(
     tmp_path: Path,
 ) -> None:
     ref = tmp_path / "ref"
     public = tmp_path / "impl" / "public"
     ref.mkdir()
-    expected = b"webp-bytes-from-browser"
-    (ref / "head.json").write_text(
-        json.dumps({"url": "https://source.example/"}),
-        encoding="utf-8",
-    )
+    server, base_url = _server_base_url()
+    try:
+        (ref / "head.json").write_text(
+            json.dumps({"url": f"{base_url}/"}),
+            encoding="utf-8",
+        )
+        (ref / "visible-images.json").write_text(
+            json.dumps([
+                {"src": f"{base_url}/assets/hero.webp"},
+            ]),
+            encoding="utf-8",
+        )
+
+        env = os.environ.copy()
+        env["PYTHON_BIN"] = sys.executable
+        env["UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE"] = "1"
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(public)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+            cwd=ROOT,
+        )
+    finally:
+        server.shutdown()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    dest = public / "assets" / "hero.webp"
+    assert dest.read_bytes() == _BytesHandler.body
+
+    log = json.loads((ref / "download-log.json").read_text(encoding="utf-8"))
+    assert log["succeeded"] == 1
+    assert log["failed"] == 0
+    assert log["attempts"][0]["via"] == "guarded-urlopen"
+
+
+def test_asset_download_blocks_decoded_path_traversal(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    public = tmp_path / "impl" / "public"
+    ref.mkdir()
     (ref / "visible-images.json").write_text(
         json.dumps([
-            {"src": "https://cdn.example/assets/hero.webp"},
+            {"src": "https://cdn.example/%2e%2e/escaped.txt"},
         ]),
         encoding="utf-8",
     )
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    calls_log = tmp_path / "agent-browser-calls.log"
-    _write_fake_curl(bin_dir)
-    _write_fake_agent_browser(bin_dir, calls_log, expected)
-
+    _write_success_curl(bin_dir)
     env = os.environ.copy()
+    env["PYTHON_BIN"] = sys.executable
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     proc = subprocess.run(
         ["bash", str(SCRIPT), str(ref), str(public)],
@@ -142,18 +153,81 @@ def test_asset_download_uses_supported_browser_fallback_after_curl_403(
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    dest = public / "assets" / "hero.webp"
-    assert dest.read_bytes() == expected
-
+    assert not (tmp_path / "impl" / "escaped.txt").exists()
     log = json.loads((ref / "download-log.json").read_text(encoding="utf-8"))
-    assert log["succeeded"] == 1
-    assert log["failed"] == 0
-    assert log["attempts"][0]["via"] == "agent-browser-eval"
+    assert log["attempts"][0]["status"] == "blocked"
+    assert log["attempts"][0]["reason"] == "unsafe-destination"
 
-    calls = calls_log.read_text(encoding="utf-8")
-    assert " fetch " not in f" {calls} "
-    assert " open " in f" {calls} "
-    assert " eval " in f" {calls} "
+
+def test_asset_download_blocks_symlink_escape(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    public = tmp_path / "impl" / "public"
+    outside = tmp_path / "outside"
+    ref.mkdir()
+    public.mkdir(parents=True)
+    outside.mkdir()
+    (public / "assets").symlink_to(outside, target_is_directory=True)
+    (ref / "visible-images.json").write_text(
+        json.dumps([{"src": "https://cdn.example/assets/escaped.txt"}]),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(public)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHON_BIN": sys.executable},
+        timeout=20,
+        cwd=ROOT,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (outside / "escaped.txt").exists()
+    log = json.loads((ref / "download-log.json").read_text(encoding="utf-8"))
+    assert log["attempts"][0]["status"] == "blocked"
+    assert log["attempts"][0]["reason"] == "unsafe-destination"
+
+
+def test_asset_download_blocks_link_local_url_before_curl(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    public = tmp_path / "impl" / "public"
+    ref.mkdir()
+    (ref / "visible-images.json").write_text(
+        json.dumps([
+            {"src": "http://169.254.169.254/latest/meta-data/iam"},
+        ]),
+        encoding="utf-8",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "curl-called"
+    fake = bin_dir / "curl"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        f"touch '{marker}'\n"
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    env = os.environ.copy()
+    env["PYTHON_BIN"] = sys.executable
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(public)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+        cwd=ROOT,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not marker.exists()
+    log = json.loads((ref / "download-log.json").read_text(encoding="utf-8"))
+    assert log["attempts"][0]["status"] == "blocked"
+    assert log["attempts"][0]["reason"] == "ssrf-blocked"
+
 
 def _write_success_curl(bin_dir: Path) -> None:
     """Fake curl that 'downloads' by writing bytes to -o and reporting 200."""
@@ -173,25 +247,6 @@ def _write_success_curl(bin_dir: Path) -> None:
     fake.chmod(0o755)
 
 
-def _write_success_curl_with_args_log(bin_dir: Path, args_log: Path) -> None:
-    """Fake curl that records arguments before writing bytes to -o."""
-    fake = bin_dir / "curl"
-    fake.write_text(
-        "#!/usr/bin/env bash\n"
-        f"printf '%s\\n' \"$*\" >> '{args_log}'\n"
-        "out=''\n"
-        "while [ \"$#\" -gt 0 ]; do\n"
-        "  if [ \"$1\" = '-o' ]; then out=\"$2\"; shift 2; continue; fi\n"
-        "  shift\n"
-        "done\n"
-        "if [ -n \"$out\" ]; then head -c 800 /dev/zero | tr '\\0' 'J' > \"$out\"; fi\n"
-        "printf '200'\n"
-        "exit 0\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-
-
 def test_asset_download_mirrors_required_lottie_without_visible_images(tmp_path: Path) -> None:
     """Bundle-discovered Lottie JSON is required media even when it is never a
     visible DOM image; asset-download must not skip when visible-images.json is
@@ -199,33 +254,35 @@ def test_asset_download_mirrors_required_lottie_without_visible_images(tmp_path:
     ref = tmp_path / "ref"
     public = tmp_path / "impl" / "public"
     ref.mkdir()
-    (ref / "head.json").write_text(
-        json.dumps({"url": "https://reference.example/"}),
-        encoding="utf-8",
-    )
-    (ref / "required-media.json").write_text(
-        json.dumps({
-            "schemaVersion": 1,
-            "videos": [],
-            "lottie": [{"path": "/img/lottie/reference-main-intro.json"}],
-            "svgs": [],
-        }),
-        encoding="utf-8",
-    )
+    server, base_url = _server_base_url()
+    try:
+        (ref / "head.json").write_text(
+            json.dumps({"url": f"{base_url}/"}),
+            encoding="utf-8",
+        )
+        (ref / "required-media.json").write_text(
+            json.dumps({
+                "schemaVersion": 1,
+                "videos": [],
+                "lottie": [{"path": "/img/lottie/reference-main-intro.json"}],
+                "svgs": [],
+            }),
+            encoding="utf-8",
+        )
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_success_curl(bin_dir)
-    env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    proc = subprocess.run(
-        ["bash", str(SCRIPT), str(ref), str(public)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=20,
-        cwd=ROOT,
-    )
+        env = os.environ.copy()
+        env["PYTHON_BIN"] = sys.executable
+        env["UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE"] = "1"
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(public)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+            cwd=ROOT,
+        )
+    finally:
+        server.shutdown()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (public / "img" / "lottie" / "reference-main-intro.json").exists()
@@ -239,33 +296,35 @@ def test_asset_download_mirrors_required_video_to_scaffold_path(tmp_path: Path) 
     ref = tmp_path / "ref"
     public = tmp_path / "impl" / "public"
     ref.mkdir()
-    (ref / "head.json").write_text(
-        json.dumps({"url": "https://reference.example/"}),
-        encoding="utf-8",
-    )
-    (ref / "required-media.json").write_text(
-        json.dumps({
-            "schemaVersion": 1,
-            "videos": [{"src": "https://cdn.example/assets/media/hero.mp4"}],
-            "lottie": [],
-            "svgs": [],
-        }),
-        encoding="utf-8",
-    )
+    server, base_url = _server_base_url()
+    try:
+        (ref / "head.json").write_text(
+            json.dumps({"url": f"{base_url}/"}),
+            encoding="utf-8",
+        )
+        (ref / "required-media.json").write_text(
+            json.dumps({
+                "schemaVersion": 1,
+                "videos": [{"src": f"{base_url}/assets/media/hero.mp4"}],
+                "lottie": [],
+                "svgs": [],
+            }),
+            encoding="utf-8",
+        )
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_success_curl(bin_dir)
-    env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    proc = subprocess.run(
-        ["bash", str(SCRIPT), str(ref), str(public)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=20,
-        cwd=ROOT,
-    )
+        env = os.environ.copy()
+        env["PYTHON_BIN"] = sys.executable
+        env["UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE"] = "1"
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(public)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+            cwd=ROOT,
+        )
+    finally:
+        server.shutdown()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (public / "videos" / "hero.mp4").exists()
@@ -281,33 +340,31 @@ def test_asset_download_harvests_vimeo_oembed_thumbnail(tmp_path: Path) -> None:
     public = tmp_path / "impl" / "public"
     oembed_dir = ref / "resources" / "vimeo.com" / "api"
     oembed_dir.mkdir(parents=True)
-    (ref / "head.json").write_text(
-        json.dumps({"url": "https://playbook.example/"}),
-        encoding="utf-8",
-    )
+    server, base_url = _server_base_url()
+    (ref / "head.json").write_text(json.dumps({"url": f"{base_url}/"}), encoding="utf-8")
     (ref / "visible-images.json").write_text("[]", encoding="utf-8")
     (oembed_dir / "oembed-44bfb360.json").write_text(
         json.dumps({
             "video_id": 949632393,
-            "thumbnail_url": "https://i.vimeocdn.com/video/1857665641-d_1280",
+            "thumbnail_url": f"{base_url}/video/1857665641-d_1280",
         }),
         encoding="utf-8",
     )
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    args_log = tmp_path / "curl-args.log"
-    _write_success_curl_with_args_log(bin_dir, args_log)
     env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    proc = subprocess.run(
-        ["bash", str(SCRIPT), str(ref), str(public)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=20,
-        cwd=ROOT,
-    )
+    env["PYTHON_BIN"] = sys.executable
+    env["UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE"] = "1"
+    try:
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(public)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+            cwd=ROOT,
+        )
+    finally:
+        server.shutdown()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (public / "videos" / "vimeo-949632393.jpg").exists()
@@ -316,9 +373,7 @@ def test_asset_download_harvests_vimeo_oembed_thumbnail(tmp_path: Path) -> None:
     assert log["succeeded"] == 1
     assert log["failed"] == 0
     assert log["attempts"][0]["dest"].endswith("public/videos/vimeo-949632393.jpg")
-    curl_args = args_log.read_text(encoding="utf-8")
-    assert "Accept: image/jpeg,image/*;q=0.9,*/*;q=0.8" in curl_args
-    assert "image/avif" not in curl_args
+    assert log["attempts"][0]["via"] == "guarded-urlopen"
 
 
 def test_asset_download_harvests_vimeo_progressive_signed_mp4(tmp_path: Path) -> None:
@@ -327,48 +382,50 @@ def test_asset_download_harvests_vimeo_progressive_signed_mp4(tmp_path: Path) ->
     ref = tmp_path / "ref"
     public = tmp_path / "impl" / "public"
     ref.mkdir()
+    server, base_url = _server_base_url()
     signed_url = (
-        "https://player.vimeo.com/progressive_redirect/playback/949632393/"
+        f"{base_url}/progressive_redirect/playback/949632393/"
         "rendition/1080p/file.mp4%20%281080p%29.mp4"
-        "?loc=external\\\\u0026oauth2_token_id=1747418641"
-        "\\\\u0026signature=abc123\\\\\\"
+        "?loc=external&oauth2_token_id=1747418641&signature=abc123"
     )
-    (ref / "head.json").write_text(
-        json.dumps({"url": "https://playbook.example/"}),
-        encoding="utf-8",
-    )
-    (ref / "visible-images.json").write_text("[]", encoding="utf-8")
-    (ref / "structure.json").write_text(
-        '{"tag":"iframe","src":"' + signed_url + '"}',
-        encoding="utf-8",
-    )
+    try:
+        (ref / "head.json").write_text(
+            json.dumps({"url": f"{base_url}/"}),
+            encoding="utf-8",
+        )
+        (ref / "visible-images.json").write_text("[]", encoding="utf-8")
+        (ref / "required-media.json").write_text(
+            json.dumps({
+                "schemaVersion": 1,
+                "videos": [{"src": signed_url}],
+                "lottie": [],
+                "svgs": [],
+            }),
+            encoding="utf-8",
+        )
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    args_log = tmp_path / "curl-args.log"
-    _write_success_curl_with_args_log(bin_dir, args_log)
-    env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    proc = subprocess.run(
-        ["bash", str(SCRIPT), str(ref), str(public)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=20,
-        cwd=ROOT,
-    )
+        env = os.environ.copy()
+        env["PYTHON_BIN"] = sys.executable
+        env["UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE"] = "1"
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(public)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+            cwd=ROOT,
+        )
+    finally:
+        server.shutdown()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert (public / "videos" / "vimeo-949632393.mp4").exists()
+    assert (public / "videos" / "file.mp4 (1080p).mp4").exists()
     log = json.loads((ref / "download-log.json").read_text(encoding="utf-8"))
     assert log["totalAttempted"] == 1
     assert log["failed"] == 0
-    assert log["attempts"][0]["dest"].endswith("public/videos/vimeo-949632393.mp4")
-    curl_args = args_log.read_text(encoding="utf-8")
-    assert "https://player.vimeo.com/progressive_redirect/playback/949632393/" in curl_args
-    assert "?loc=external&oauth2_token_id=1747418641&signature=abc123" in curl_args
-    assert "signature=abc123\\" not in curl_args
-    assert "%20%281080p%29.mp4" in curl_args
+    assert log["attempts"][0]["dest"].endswith("public/videos/file.mp4 (1080p).mp4")
+    assert "?loc=external&oauth2_token_id=1747418641&signature=abc123" in log["attempts"][0]["url"]
+    assert "%20%281080p%29.mp4" in log["attempts"][0]["url"]
 
 
 def test_asset_download_harvests_image_urls_from_structure(tmp_path: Path) -> None:
@@ -378,39 +435,35 @@ def test_asset_download_harvests_image_urls_from_structure(tmp_path: Path) -> No
     ref = tmp_path / "ref"
     public = tmp_path / "impl" / "public"
     ref.mkdir()
-    (ref / "head.json").write_text(json.dumps({"url": "https://realfood.gov/"}), encoding="utf-8")
-    # visible-images has only the pyramid image, NOT the intro one.
-    (ref / "visible-images.json").write_text(
-        json.dumps([
-            {"src": "https://realfood.gov/cdn-cgi/image/width=3840,quality=90,format=auto,fit=scale-down/images/pyramid/broccoli.webp"},
-        ]),
-        encoding="utf-8",
-    )
-    # structure.json (captured DOM) references an intro/ image absent above,
-    # as a ROOT-RELATIVE cdn-cgi src (realfood's real form) — must be resolved
-    # against the origin from head.json and downloaded.
-    (ref / "structure.json").write_text(
-        json.dumps({
-            "tag": "body",
-            "children": [
-                {"tag": "img", "src": "/cdn-cgi/image/width=2048,quality=90,format=auto,fit=scale-down/images/intro/broccoli.webp"},
-                # width-variant of the visible pyramid image → same local dest,
-                # must be counted as a present success, not drag the rate down.
-                {"tag": "img", "src": "/cdn-cgi/image/width=1080,quality=90,format=auto,fit=scale-down/images/pyramid/broccoli.webp"},
-            ],
-        }),
-        encoding="utf-8",
-    )
+    server, base_url = _server_base_url()
+    try:
+        (ref / "head.json").write_text(json.dumps({"url": f"{base_url}/"}), encoding="utf-8")
+        (ref / "visible-images.json").write_text(
+            json.dumps([
+                {"src": f"{base_url}/cdn-cgi/image/width=3840,quality=90,format=auto,fit=scale-down/images/pyramid/broccoli.webp"},
+            ]),
+            encoding="utf-8",
+        )
+        (ref / "structure.json").write_text(
+            json.dumps({
+                "tag": "body",
+                "children": [
+                    {"tag": "img", "src": "/cdn-cgi/image/width=2048,quality=90,format=auto,fit=scale-down/images/intro/broccoli.webp"},
+                    {"tag": "img", "src": "/cdn-cgi/image/width=1080,quality=90,format=auto,fit=scale-down/images/pyramid/broccoli.webp"},
+                ],
+            }),
+            encoding="utf-8",
+        )
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_success_curl(bin_dir)
-    env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    proc = subprocess.run(
-        ["bash", str(SCRIPT), str(ref), str(public)],
-        capture_output=True, text=True, env=env, timeout=20, cwd=ROOT,
-    )
+        env = os.environ.copy()
+        env["PYTHON_BIN"] = sys.executable
+        env["UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE"] = "1"
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(public)],
+            capture_output=True, text=True, env=env, timeout=20, cwd=ROOT,
+        )
+    finally:
+        server.shutdown()
     assert proc.returncode == 0, proc.stdout + proc.stderr
     # both the visible pyramid image AND the structure-only intro image land.
     assert (public / "images" / "pyramid" / "broccoli.webp").exists()
@@ -432,31 +485,31 @@ def test_asset_download_harvests_url_with_decoy_middle_extension(tmp_path: Path)
     ref = tmp_path / "ref"
     public = tmp_path / "impl" / "public"
     ref.mkdir()
-    (ref / "head.json").write_text(json.dumps({"url": "https://ref.example/"}), encoding="utf-8")
-    # a visible image so the script does not early-SKIP; the URL under test is
-    # the structure-only one harvested by the DOM regex.
-    (ref / "visible-images.json").write_text(
-        json.dumps([{"src": "https://cdn.example.net/images/logo.png"}]),
-        encoding="utf-8",
-    )
-    full = (
-        "https://cdn.example.net/MjAySEG1AA/"
-        "MDAxHASHaa.tok1AAAA.tok2BBBB.PNG/photo_wide.png?type=w960"
-    )
-    (ref / "structure.json").write_text(
-        json.dumps({"tag": "body", "children": [{"tag": "img", "src": full}]}),
-        encoding="utf-8",
-    )
+    server, base_url = _server_base_url()
+    try:
+        (ref / "head.json").write_text(json.dumps({"url": f"{base_url}/"}), encoding="utf-8")
+        (ref / "visible-images.json").write_text(
+            json.dumps([{"src": f"{base_url}/images/logo.png"}]),
+            encoding="utf-8",
+        )
+        full = (
+            f"{base_url}/MjAySEG1AA/"
+            "MDAxHASHaa.tok1AAAA.tok2BBBB.PNG/photo_wide.png?type=w960"
+        )
+        (ref / "structure.json").write_text(
+            json.dumps({"tag": "body", "children": [{"tag": "img", "src": full}]}),
+            encoding="utf-8",
+        )
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_success_curl(bin_dir)
-    env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    proc = subprocess.run(
-        ["bash", str(SCRIPT), str(ref), str(public)],
-        capture_output=True, text=True, env=env, timeout=20, cwd=ROOT,
-    )
+        env = os.environ.copy()
+        env["PYTHON_BIN"] = sys.executable
+        env["UI_CLONE_RESOURCE_MIRROR_ALLOW_PRIVATE"] = "1"
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), str(ref), str(public)],
+            capture_output=True, text=True, env=env, timeout=20, cwd=ROOT,
+        )
+    finally:
+        server.shutdown()
     assert proc.returncode == 0, proc.stdout + proc.stderr
     # The file must land at the FULL path (query stripped) — exactly what the
     # scaffold's rewrite_asset_url emits as the <img src>.

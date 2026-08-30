@@ -942,7 +942,7 @@ add_check "junk-token" \
 # Tier=quick: alignment-parity is pure file IO over the section-compare
 # enumeration artifacts (matches.json already records both sides' rects,
 # contentBox and contentGroups per fan-out viewport — zero extra browser
-# time). Catches the loop-9 class AE crops are structurally blind to: a
+# time). Catches the specific regression class AE crops are structurally blind to: a
 # full-bleed section whose rect is IDENTICAL ref-vs-impl while the inner
 # content column / a card group is horizontally off-center (pixel constants
 # baked for one design width). Frozen refs without contentBox surface as
@@ -1423,7 +1423,7 @@ add_check "dynamic-behavior-parity" \
 
 # Conditional: dynamic:true timer/carousel spec entries. These regions are
 # dynamic-masked out of pixel comparison (frame is timer-phase-dependent),
-# which previously left them with NO compensating verification — loop-9's
+# which previously left them with NO compensating verification — specific regression's
 # carousel timer ran and swapped content instantly while the spec-declared
 # card motion never happened, and every gate passed. The motion proof
 # samples the live impl DOM per entry and asserts phase-free properties
@@ -1453,7 +1453,7 @@ fi
 # Conditional: any dynamic:true masked selector. The motion proof checks MOTION
 # only; the dynamic mask (visibility:hidden) also hides the region's STATIC
 # style/geometry from section-compare, video-motion, and the motion proof. A
-# static style defect under a mask (loop-11 eatReal "Eat Real" h2 lost
+# static style defect under a mask (specific regression eatReal "Eat Real" h2 lost
 # text-align:center) thus passed every gate. This check probes the live impl DOM
 # (un-masked) and compares phase-free computed styles to the extraction-time ref
 # ground truth (dom-scaffold.json). Pure artifact-vs-DOM, no pixel capture.
@@ -1480,7 +1480,7 @@ fi
 
 # Conditional: bundle declares an active-state width reveal (nav active-section
 # label expansion). The hover-fallback gate only covers hover-triggered reveals;
-# an active-state (scroll) reveal had no compensating verification (loop-11: the
+# an active-state (scroll) reveal had no compensating verification (specific regression: the
 # newly-active nav button's label stayed width:0 on scroll). This drives the
 # active state on the live impl and asserts the bundle-declared reveal fires.
 HAS_ACTIVE_REVEAL="false"
@@ -1497,7 +1497,7 @@ if [ "$HAS_ACTIVE_REVEAL" = "true" ]; then
   add_check "state-reveal" \
             "skills/visual-debug/scripts/state-reveal-proof-check.sh" \
             "state-reveal.json" \
-            "bundle-declared active-state reveals (nav active-section label width 0->auto) must fire on the live impl: driving the state change (scroll) must expand the active element's label to show its text — a label that stays collapsed when active is the loop-11 defect" \
+            "bundle-declared active-state reveals (nav active-section label width 0->auto) must fire on the live impl: driving the state change (scroll) must expand the active element's label to show its text — a label that stays collapsed when active is the specific regression defect" \
             "block" \
             "standard" \
             "runtime-env" \

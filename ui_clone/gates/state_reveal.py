@@ -12,7 +12,7 @@ gate drives the state change on the LIVE impl (scrolling through the page so eac
 section becomes active in turn) and asserts the declared end-state delta
 actually occurs: across the sweep the revealed element must expand past the
 collapsed width at least once. A faithful impl reveals the active label
-(pass); the loop-11 impl keeps every label at width:0 (fail).
+(pass); the specific regression impl keeps every label at width:0 (fail).
 
 Honest-unmeasurable (never a silent pass) when no per-state delta is declared:
 the remediation is to re-run extraction so the bundle's active-state expansion
@@ -48,7 +48,7 @@ DEFAULT_SCROLL_SAMPLES = 8
 # A label is "revealed" when its rendered box shows at least this fraction of its
 # own content width (scrollWidth). This is site-independent: a collapsed label
 # (width:0 + padding) shows ~0 of its text, a revealed one shows ~all of it. The
-# loop-11 defect — active "FAQs" label box 8px vs content 74px (ratio 0.11) —
+# specific regression defect — active "FAQs" label box 8px vs content 74px (ratio 0.11) —
 # fails; a faithful reveal (box ≈ content, ratio ≈ 1) passes.
 DEFAULT_REVEAL_RATIO = 0.5
 # Ignore labels with negligible content (genuinely empty / icon-only) — no text
@@ -56,7 +56,7 @@ DEFAULT_REVEAL_RATIO = 0.5
 DEFAULT_MIN_CONTENT_PX = 12.0
 
 # Env-tunability is itself a bypass surface (batch-7 ITEM 4): RATIO=0.01 or
-# MIN_CONTENT_PX=100 softened the gate below the loop-11 defect's real ratio.
+# MIN_CONTENT_PX=100 softened the gate below the specific regression defect's real ratio.
 # Clamp every override to a sane band; the defaults sit inside their bands so
 # normal config is a clamp no-op. The EFFECTIVE (clamped) value is recorded in
 # the artifact and re-validated by the consumer.
@@ -295,7 +295,7 @@ def evaluate(plan: dict[str, Any], observations: Any) -> dict[str, Any]:
     # section is stably active. A label IDENTITY (same selector + same text) that
     # reveals+paints at ANY sampled position has a working reveal — its
     # collapse/empty-pill rows at OTHER positions are scroll-transition artifacts.
-    # A label that NEVER reveals at any position (the loop-11 FAQs defect: baked
+    # A label that NEVER reveals at any position (the specific regression FAQs defect: baked
     # collapsed at its active position; a baked width:0 label) has 0 ok rows for
     # its text -> stays FAILED, so a real per-label non-revealing defect is still
     # caught. Keyed on text (not just selector), so one revealing label cannot
@@ -380,7 +380,7 @@ def evaluate(plan: dict[str, Any], observations: Any) -> dict[str, Any]:
             "Every bundle-declared active-state reveal must fire on the live "
             "impl: when a section becomes active, its nav button's label must "
             "expand to show its text (box >= revealRatio * content). A label "
-            "that stays collapsed when active is the loop-11 defect (baked "
+            "that stays collapsed when active is the specific regression defect (baked "
             "width:0, reveal only on the initial active state)."
         ),
     }

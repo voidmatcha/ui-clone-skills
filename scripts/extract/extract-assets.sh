@@ -70,11 +70,15 @@ echo "  Found $VIDEO_COUNT videos"
 if [ "$VIDEO_COUNT" -gt 0 ]; then
   UI_CLONE_EXTRACT_ASSETS_VIDEOS_JSON="$VIDEOS_JSON" \
   UI_CLONE_EXTRACT_ASSETS_PUBLIC="$PUBLIC" \
-  python3 <<'PY'
+  UI_CLONE_EXTRACT_SCRIPT_DIR="$SCRIPT_DIR" \
+  "${PYTHON_BIN:-python3}" <<'PY'
 import json
 import os
-import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["UI_CLONE_EXTRACT_SCRIPT_DIR"])
+from _resource_mirror import SsrfBlocked, download_url_to_path  # noqa: E402
 
 
 def _timeout_env(name, default):
@@ -101,7 +105,6 @@ except json.JSONDecodeError as exc:
 public_dir = os.environ["UI_CLONE_EXTRACT_ASSETS_PUBLIC"]
 video_dir = os.path.join(public_dir, "videos")
 os.makedirs(video_dir, exist_ok=True)
-curl_max_time = os.environ.get("UI_CLONE_EXTRACT_ASSETS_VIDEO_CURL_MAX_TIME", "30")
 download_timeout = _timeout_env("UI_CLONE_EXTRACT_ASSETS_VIDEO_TIMEOUT", 35.0)
 
 for v in videos:
@@ -126,13 +129,18 @@ for v in videos:
 
     print(f'  ⬇️  {filename} from {url[:80]}...')
     try:
-        result = subprocess.run(
-            ['curl', '-sL', '-o', out_path, '--max-time', curl_max_time, url],
-            capture_output=True,
+        download_url_to_path(
+            url,
+            Path(out_path),
             timeout=download_timeout,
+            max_bytes=250 * 1024 * 1024,
         )
-    except subprocess.TimeoutExpired:
+    except TimeoutError:
         print(f'  ❌ {filename} TIMEOUT after {download_timeout:g}s', file=sys.stderr)
+        _remove_partial(out_path)
+        continue
+    except SsrfBlocked as exc:
+        print(f'  ❌ {filename} BLOCKED: {exc.reason}', file=sys.stderr)
         _remove_partial(out_path)
         continue
     except OSError as exc:
@@ -140,7 +148,7 @@ for v in videos:
         _remove_partial(out_path)
         continue
 
-    if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
         size_mb = os.path.getsize(out_path) / 1024 / 1024
         print(f'  ✅ {filename} ({size_mb:.1f} MB)')
     else:
@@ -199,12 +207,16 @@ FONT_JSON=$(echo "$FONT_JSON" | sed 's/^"//;s/"$//' | sed 's/\\"/"/g')
 UI_CLONE_EXTRACT_ASSETS_FONT_JSON="$FONT_JSON" \
 UI_CLONE_EXTRACT_ASSETS_PUBLIC="$PUBLIC" \
 UI_CLONE_EXTRACT_ASSETS_DIR="$DIR" \
-python3 <<'PY'
+UI_CLONE_EXTRACT_SCRIPT_DIR="$SCRIPT_DIR" \
+"${PYTHON_BIN:-python3}" <<'PY'
 import json
 import os
 import re
-import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["UI_CLONE_EXTRACT_SCRIPT_DIR"])
+from _resource_mirror import SsrfBlocked, download_url_to_path  # noqa: E402
 
 
 def _timeout_env(name, default):
@@ -234,7 +246,6 @@ font_dir = os.path.join(public_dir, "fonts")
 assets_dir = os.path.join(ref_dir, "assets")
 os.makedirs(font_dir, exist_ok=True)
 os.makedirs(assets_dir, exist_ok=True)
-curl_max_time = os.environ.get("UI_CLONE_EXTRACT_ASSETS_FONT_CURL_MAX_TIME", "15")
 download_timeout = _timeout_env("UI_CLONE_EXTRACT_ASSETS_FONT_TIMEOUT", 20.0)
 font_faces = []
 
@@ -265,13 +276,17 @@ for entry in entries:
         print(f'  ⏭️  {filename} ({family} w{weight})')
     else:
         try:
-            result = subprocess.run(
-                ['curl', '-sL', '-o', out_path, '--max-time', curl_max_time, url],
-                capture_output=True,
+            download_url_to_path(
+                url,
+                Path(out_path),
                 timeout=download_timeout,
             )
-        except subprocess.TimeoutExpired:
+        except TimeoutError:
             print(f'  ❌ {filename} TIMEOUT after {download_timeout:g}s', file=sys.stderr)
+            _remove_partial(out_path)
+            continue
+        except SsrfBlocked as exc:
+            print(f'  ❌ {filename} BLOCKED: {exc.reason}', file=sys.stderr)
             _remove_partial(out_path)
             continue
         except OSError as exc:
@@ -279,7 +294,7 @@ for entry in entries:
             _remove_partial(out_path)
             continue
 
-        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 100:
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 100:
             print(f'  ✅ {filename} ({family} w{weight})')
         else:
             print(f'  ❌ {filename} FAILED')

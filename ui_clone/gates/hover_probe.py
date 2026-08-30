@@ -17,7 +17,7 @@ The probe is impl-side only (ref truth comes from spec/bundle evidence):
                     presence is the honest check — and unmounted overlay
                     targets can only be verified this way)
   fail            — neither: the declared hover behavior does not exist in
-                    the impl (the loop-9 nav pill: labels baked width:0,
+                    the impl (the specific regression nav pill: labels baked width:0,
                     no expansion rule, no JS handler)
 
 Plan sources: transition-spec hover entries (channels parsed from

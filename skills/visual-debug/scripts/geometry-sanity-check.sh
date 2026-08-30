@@ -2,7 +2,7 @@
 # geometry-sanity-check.sh — rendered geometry must track the ref capture.
 #
 # Whole-page dSSIM / per-section AE structurally miss a failure class: a build
-# can score its best dSSIM while the document is 2x the ref height (loop-129:
+# can score its best dSSIM while the document is 2x the ref height (specific regression:
 # best 0.1156 with docH ballooned), because pixel metrics compare what IS
 # rendered, not how much page exists. This check renders the impl AT THE
 # CAPTURE VIEWPORT (orig-layout.json viewportWidth/Height — apples-to-apples
@@ -142,7 +142,7 @@ MEASURE_JS="(() => {
   // Fix 96 (B2) — impl docH must capture Lenis / overflow-hidden balloons. The
   // document scrollbar may live on documentElement or an inner wrapper, so
   // body.scrollHeight alone under-measures a ballooned page (the 2.2x-tall
-  // loop-129 case). Take the max of the document and the tallest inner scroll
+  // specific regression case). Take the max of the document and the tallest inner scroll
   // container (same detection as section-compare's DETECT_SCROLLER_JS).
   let __maxInner = 0;
   document.querySelectorAll('*').forEach((el) => {

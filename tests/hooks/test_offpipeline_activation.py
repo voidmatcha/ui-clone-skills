@@ -26,6 +26,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from ._helpers import run_hook
 
 REPO = Path(__file__).resolve().parents[2]
@@ -383,3 +385,17 @@ def test_crumb_for_real_command_after_chain(tmp_path: Path) -> None:
         "sess-chain",
     )
     assert _crumb_exists(tmp_path, "sess-chain")
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "BROWSER_DEBUG=1 agent-browser open https://example.org --session s",
+        "env BROWSER_DEBUG=1 agent-browser open https://example.org --session s",
+    ],
+)
+def test_crumb_for_env_prefixed_real_agent_browser_open(
+    tmp_path: Path, cmd: str
+) -> None:
+    _run_pre_bash(tmp_path, cmd, "sess-env")
+    assert _crumb_exists(tmp_path, "sess-env")

@@ -1380,7 +1380,7 @@ echo "▸ Enumerating sections..."
 # DYNAMIC_SELECTORS to absorb timer-phase MOTION from the screenshot. That mask
 # is applied BEFORE this enumeration, and visibility:hidden also makes the
 # enumerator's contentBox/contentGroups filters drop the masked elements — so a
-# STATIC geometry defect under a mask (loop-11 footer cards baked left:426px /
+# STATIC geometry defect under a mask (specific regression footer cards baked left:426px /
 # ±192 transform, off-center at non-extraction viewports) became invisible to
 # alignment-parity (exemption-without-compensation). visibility:hidden PRESERVES
 # layout, so we hand the enumerator the masked selector list; it measures
@@ -2469,7 +2469,7 @@ status, reason = dynamic_section_verdict(
     ref_w=float(ref_w), ref_h=float(ref_h), impl_w=float(iw), impl_h=float(ih),
     impl_near_black=False,
     calib_w=_f(rec.get("calibW")), calib_h=_f(rec.get("calibH")),
-    # Task B / loop-16: same-frame strict-AE gate. impl AE/Mpx at the SAME scroll
+    # Task B / specific regression: same-frame strict-AE gate. impl AE/Mpx at the SAME scroll
     # frame must stay within the ref's OWN same-frame AE noise (selfAePerMpx) — a
     # content defect over the ceiling FAILS even if dssim<=floor (closes F1).
     impl_ae_per_mpx=_f(ae_per_mpx),

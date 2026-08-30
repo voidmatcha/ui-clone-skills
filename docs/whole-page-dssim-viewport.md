@@ -38,7 +38,7 @@ agent-browser set viewport <W> <H> --session <name>   # NOT `resize` / `viewport
 `resize` and a bare `viewport` both return "Unknown command"; the working form
 is `set viewport`. Verify it took with
 `agent-browser eval '(() => window.innerWidth)()'` — headless sessions silently
-default to 1280 otherwise (the loop-145 viewport confound).
+default to 1280 otherwise (the specific regression viewport confound).
 
 ## Worked evidence (eBay F-1 vs F-2, 2026-07-05)
 

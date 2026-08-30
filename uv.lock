@@ -723,7 +723,7 @@ wheels = [
 
 [[package]]
 name = "ui-clone-skills"
-version = "0.7.37"
+version = "0.7.38"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
@@ -736,6 +736,7 @@ ast = [
     { name = "esprima" },
 ]
 dev = [
+    { name = "execnet" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -754,6 +755,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 ast = [{ name = "esprima", specifier = "==4.0.1" }]
 dev = [
+    { name = "execnet", specifier = "==2.1.2" },
     { name = "mypy", specifier = "==1.15.0" },
     { name = "pytest", specifier = "==9.0.3" },
     { name = "pytest-cov", specifier = "==7.1.0" },

@@ -7,8 +7,10 @@ module's argparse + exit codes stay the source of truth.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -158,8 +160,6 @@ def build_verify_stamp(ref_dir: Path, impl_dir: Path, gates: list[str]) -> dict:
 
 def verify_stamp_evidence_problem(ref_dir: Path, stamp: dict) -> str | None:
     """Return a problem when motion evidence no longer matches its stamp pins."""
-    import hashlib
-
     for artifact_name, stamp_key in _MOTION_EVIDENCE_PINS:
         artifact = Path(ref_dir) / artifact_name
         stamped_sha = stamp.get(stamp_key)
@@ -183,6 +183,31 @@ def verify_stamp_evidence_problem(ref_dir: Path, stamp: dict) -> str | None:
     return None
 
 
+def sections_result_pin_problem(
+    ref_dir: Path, stamp: dict, *, stamp_name: str = "verify-stamp.json"
+) -> str | None:
+    """Return a problem when sections/result.txt is not hash-pinned by stamp."""
+    result_file = Path(ref_dir) / "sections" / "result.txt"
+    stamped_sha = stamp.get("sectionsResultSha256")
+    if result_file.is_file():
+        if not isinstance(stamped_sha, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", stamped_sha
+        ):
+            return (
+                f"sections/result.txt exists but {stamp_name} has no valid "
+                "sectionsResultSha256 evidence pin"
+            )
+        current_sha = hashlib.sha256(result_file.read_bytes()).hexdigest()
+        if current_sha != stamped_sha:
+            return (
+                "sections/result.txt sha256 changed after the stamp "
+                f"(sha {current_sha[:12]}… != stamped {stamped_sha[:12]}…)"
+            )
+    elif stamped_sha is not None:
+        return "sections/result.txt was removed after the stamp"
+    return None
+
+
 def canonical_stamp_problem(ref_dir: Path, max_age_s: int = 1800) -> str | None:
     """Why the canonical verify-stamp does NOT currently attest completion.
 
@@ -192,8 +217,6 @@ def canonical_stamp_problem(ref_dir: Path, max_age_s: int = 1800) -> str | None:
     a sections/result.txt hash pin that still matches the file on disk.
     Returns None when the stamp is valid.
     """
-    import hashlib
-
     from ui_clone.state import POST_IMPL_VERIFY_GATES as _GATES
 
     stamp_path = Path(ref_dir) / "verify-stamp.json"
@@ -224,15 +247,11 @@ def canonical_stamp_problem(ref_dir: Path, max_age_s: int = 1800) -> str | None:
             f"not satisfied: verify-stamp.json is {int(age_s)}s old "
             f"(max {max_age_s}s) — re-run the canonical verify"
         )
-    result_file = Path(ref_dir) / "sections" / "result.txt"
-    stamped_sha = stamp.get("sectionsResultSha256")
-    if stamped_sha and result_file.is_file():
-        current_sha = hashlib.sha256(result_file.read_bytes()).hexdigest()
-        if current_sha != stamped_sha:
-            return (
-                "not satisfied: sections/result.txt changed after the stamp "
-                f"(sha {current_sha[:12]}… != stamped {stamped_sha[:12]}…)"
-            )
+    sections_problem = sections_result_pin_problem(
+        Path(ref_dir), stamp, stamp_name="verify-stamp.json"
+    )
+    if sections_problem is not None:
+        return f"not satisfied: {sections_problem}"
     evidence_problem = verify_stamp_evidence_problem(Path(ref_dir), stamp)
     if evidence_problem is not None:
         return f"not satisfied: {evidence_problem}"

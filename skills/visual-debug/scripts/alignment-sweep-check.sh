@@ -5,7 +5,7 @@
 # intermediate widths have none. Sections/groups the ref keeps centered (or
 # fixed-gutter) at EVERY enforced desktop viewport must keep that invariant
 # at midpoint/breakpoint widths — pixel constants baked for one design width
-# (the loop-9 footer carousel class) drift everywhere except the width they
+# (the specific regression footer carousel class) drift everywhere except the width they
 # were authored for. The sweep is IMPL-ONLY: one browser session, viewport
 # set per width, DOM rects via the shared enumerator, no screenshots.
 #

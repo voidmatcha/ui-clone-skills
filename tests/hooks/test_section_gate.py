@@ -2190,7 +2190,9 @@ class TestSectionGateStructuralCloseout:
 
     def _write_verify_stamp(self, ref_dir: Path) -> Path:
         import datetime
+        import hashlib
 
+        result_file = ref_dir / "sections" / "result.txt"
         stamp = ref_dir / "verify-stamp.json"
         stamp.write_text(
             json.dumps(
@@ -2206,6 +2208,9 @@ class TestSectionGateStructuralCloseout:
                         "section-compare",
                     ],
                     "stampedBy": "pipeline.execute_verify",
+                    "sectionsResultSha256": hashlib.sha256(
+                        result_file.read_bytes()
+                    ).hexdigest(),
                 }
             ),
             encoding="utf-8",
@@ -2399,6 +2404,37 @@ class TestSectionGateStructuralCloseout:
         assert data.get("decision") == "block"
         reason = data.get("reason", "")
         assert "tampered" in reason.lower() or "sha256" in reason.lower() or "mismatch" in reason.lower()
+
+    @pytest.mark.parametrize("pin", [None, "", "abc", 123])
+    def test_structural_stamp_blocks_when_sections_result_pin_missing_or_malformed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pin: object | None
+    ) -> None:
+        ref_dir = tmp_path / "tmp" / "ref" / "comp"
+        self._write_structural_state(ref_dir)
+        result_file = self._write_converged_result(ref_dir)
+
+        src = tmp_path / "impl" / "src"
+        src.mkdir(parents=True)
+        (src / "App.tsx").write_text(
+            "export default function App(){return null}", encoding="utf-8"
+        )
+
+        stamp = self._write_stamp(ref_dir, result_file)
+        stamp_data = json.loads(stamp.read_text(encoding="utf-8"))
+        if pin is None:
+            stamp_data.pop("sectionsResultSha256")
+        else:
+            stamp_data["sectionsResultSha256"] = pin
+        stamp.write_text(json.dumps(stamp_data), encoding="utf-8")
+        self._write_verify_stamp(ref_dir)
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        exit_code, output = self._run_gate_hook(ref_dir, monkeypatch)
+        data = json.loads(output) if output.strip().startswith("{") else {}
+        assert exit_code == 0
+        assert data.get("decision") == "block"
+        reason = data.get("reason", "")
+        assert "sectionsResultSha256" in reason
 
     def test_canonical_policy_unchanged_when_field_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

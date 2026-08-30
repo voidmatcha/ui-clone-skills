@@ -19,6 +19,7 @@ set -euo pipefail
 SESSION="${1:?usage: extract-asset-metadata.sh <session> <ref-dir> [url]}"
 REF_DIR="${2:?usage: extract-asset-metadata.sh <session> <ref-dir> [url]}"
 SOURCE_URL="${3:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 command -v agent-browser >/dev/null 2>&1 || {
   echo "extract-asset-metadata.sh: agent-browser not found in PATH" >&2
@@ -177,16 +178,18 @@ if ! agent-browser --session "$SESSION" eval "$JS" > "$RAW_FILE"; then
   exit 1
 fi
 
-python3 - "$REF_DIR" "$SOURCE_URL" "$RAW_FILE" <<'PY'
+UI_CLONE_EXTRACT_SCRIPT_DIR="$SCRIPT_DIR" "${PYTHON_BIN:-python3}" - "$REF_DIR" "$SOURCE_URL" "$RAW_FILE" <<'PY'
 from __future__ import annotations
 
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+sys.path.insert(0, os.environ["UI_CLONE_EXTRACT_SCRIPT_DIR"])
+from _resource_mirror import SsrfBlocked, download_url_to_path  # noqa: E402
 
 ref_dir = Path(sys.argv[1])
 source_url = sys.argv[2]
@@ -247,7 +250,6 @@ def _download_css(urls: list[str]) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     used = {p.name for p in css_dir.glob("*.css")}
     timeout = os.environ.get("UI_CLONE_ASSET_METADATA_CSS_TIMEOUT", "20")
-    curl = os.environ.get("UI_CLONE_CURL", "curl")
     user_agent = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -257,19 +259,31 @@ def _download_css(urls: list[str]) -> list[dict[str, object]]:
             continue
         filename = _safe_css_name(url, index, used)
         dest = css_dir / filename
-        command = [curl, "-fsSL", "--max-time", timeout, "-A", user_agent, "-o", str(dest), url]
         try:
-            proc = subprocess.run(command, capture_output=True, timeout=float(timeout) + 5)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            _status, bytes_written = download_url_to_path(
+                url,
+                dest,
+                headers={"User-Agent": user_agent},
+                timeout=float(timeout),
+            )
+        except SsrfBlocked as exc:
+            records.append({
+                "url": url,
+                "path": f"css/{filename}",
+                "status": "blocked",
+                "reason": "ssrf-blocked",
+                "error": exc.reason,
+            })
+            continue
+        except (OSError, TimeoutError, ValueError) as exc:
             dest.unlink(missing_ok=True)
             records.append({"url": url, "path": f"css/{filename}", "status": "failed", "error": str(exc)})
             continue
-        if proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
-            records.append({"url": url, "path": f"css/{filename}", "status": "downloaded", "bytes": dest.stat().st_size})
+        if dest.is_file() and dest.stat().st_size > 0:
+            records.append({"url": url, "path": f"css/{filename}", "status": "downloaded", "bytes": bytes_written})
         else:
             dest.unlink(missing_ok=True)
-            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-            records.append({"url": url, "path": f"css/{filename}", "status": "failed", "error": stderr})
+            records.append({"url": url, "path": f"css/{filename}", "status": "failed", "error": "empty body"})
     return records
 
 

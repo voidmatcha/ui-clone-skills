@@ -395,7 +395,7 @@ PHASE1="(async () => {
   $SNAP_JS
   // Mount sweep (Fix 78c) — React impls conditionally MOUNT animated content
   // ({inView && ...}), so at scroll-top the element does not exist in the DOM
-  // at all and every class-selector probe reports 'element not found' (loop-3:
+  // at all and every class-selector probe reports 'element not found' (specific regression:
   // 15/17 fires failures; the ref renders everything upfront so this is an
   // impl-shape difference, not a selector bug). Scroll the document through
   // once so lazy/in-view content mounts, then return to top before marking.
@@ -447,7 +447,7 @@ PHASE1="(async () => {
       // (.card_hero__aB3dX); the impl's hash differs (or is absent), so even
       // [class*=card_hero__aB3dX] never matches. Retry with the hash suffix
       // stripped to the stable base token: [class*=\"card_hero\"]. This was
-      // 15/17 motion-fire failures on the loop-3 validation run.
+      // 15/17 motion-fire failures on the specific regression validation run.
       if (!el) {
         for (let a3 = 0; a3 < alts.length && !el; a3++) {
           const stripped = alts[a3].trim().replace(/\.([A-Za-z0-9_-]+?)(?:__[A-Za-z0-9_-]{4,})(?=[\s>:\[.]|$)/g, '[class*=\"\$1\"]')

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.7.38] - 2026-08-31
+
+### Fixed
+
+- Canonical and structural completion stamps now fail closed when
+  `sections/result.txt` exists without a valid matching SHA-256 evidence pin.
+- Asset extraction now rejects non-public network targets, guarded redirects,
+  DNS rebinding, and decoded or symlinked paths that escape the implementation
+  public directory.
+- External-browse breadcrumbs now recognize environment-prefixed
+  `agent-browser open` commands without matching quoted or heredoc data.
+- The universality gate now uses one portable Python scanner so macOS and Linux
+  reject the same maintainer-only labels and production-language leaks.
+
+## [0.7.37] - 2026-08-30
+
 ### Fixed
 
 - Codex ui-clone hooks are now project-scoped. The global plugin bundles an

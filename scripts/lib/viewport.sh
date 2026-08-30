@@ -5,7 +5,7 @@
 # and `--wait N` are NOT supported. Historically these shipped as dead
 # flags, leaving motion probes at the default window size (1280x633) where
 # vw-sized references reflow but px-baked impls do not, so trajectory
-# compares failed on every vw-heavy site (loop-145 finding). The supported
+# compares failed on every vw-heavy site (specific regression finding). The supported
 # sequence is: open, then `set viewport <w> <h>`, then settle.
 #
 # ab_open_at_viewport <session> <url> <width> <height> [settle_seconds]

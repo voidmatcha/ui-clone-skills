@@ -520,6 +520,57 @@ def _guarded_opener() -> Any:
     )
 
 
+def validate_resource_url(url: str) -> None:
+    """Require an HTTP(S) URL whose host resolves only to public addresses."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise SsrfBlocked(f"disallowed-scheme:{parsed.scheme}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    _validate_host_addrs(parsed.hostname or "", port)
+
+
+def download_url_to_path(
+    url: str,
+    dest: Path,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float = 20.0,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+) -> tuple[int, int]:
+    """Download a URL to a path through the SSRF-guarded opener."""
+    validate_resource_url(url)
+    request = Request(url, headers=headers or {"User-Agent": _USER_AGENT})
+    opener = _guarded_opener()
+    with opener.open(request, timeout=timeout) as response:
+        status_code = int(getattr(response, "status", 200) or 200)
+        content_length_raw = response.headers.get("Content-Length", "")
+        try:
+            content_length = int(content_length_raw) if content_length_raw else 0
+        except ValueError:
+            content_length = 0
+        if content_length > max_bytes:
+            raise ValueError("content-length-over-limit")
+
+        tmp_dest = dest.with_suffix(dest.suffix + ".tmp")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        total = 0
+        try:
+            with tmp_dest.open("wb") as fh:
+                while True:
+                    chunk = response.read(1024 * 64)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError("body-over-limit")
+                    fh.write(chunk)
+            tmp_dest.replace(dest)
+        except Exception:
+            tmp_dest.unlink(missing_ok=True)
+            raise
+        return status_code, total
+
+
 def download_candidate(
     candidate: JsonObject,
     ref_dir: Path,
@@ -533,9 +584,8 @@ def download_candidate(
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         return _failure_record(candidate, "skipped", "disallowed-scheme")
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        _validate_host_addrs(parsed.hostname or "", port)
+        validate_resource_url(url)
     except SsrfBlocked as exc:
         row = _failure_record(candidate, "blocked", "ssrf-blocked")
         row["error"] = exc.reason

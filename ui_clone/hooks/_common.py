@@ -1070,6 +1070,18 @@ def quick_tier_blocker(ref_dir: Path) -> str | None:
 # smoke check" ships with font/layout drift unmeasured (no gates ever ran).
 
 _EXTERNAL_BROWSE_DIR = "tmp/.ui-re-external-browse"
+# Command-position anchor shared by every pre_bash deny matcher (82b0a4e class).
+# A tool is INVOKED only at command position: string start, or right after a
+# shell connector (newline ; & | && || or a subshell paren), optionally via
+# xargs. A tool NAME elsewhere — a quoted pgrep pattern, a `command -v` / grep
+# argument — is DATA, not an invocation, and must not trigger a deny.
+# An invocation may be preceded by leading environment assignments and/or `env`
+# (batch-4 review MAJOR 2): `FOO=1 agent-browser open`, `HTTPS_PROXY=x curl ...`,
+# `PORT=5173 npm run dev` are real command-position invocations and must not
+# bypass the deny. The trailing `(?:(?:\w+=\S*|env)\s+)*` consumes those leading
+# KEY=VAL / env tokens; it cannot match a bare tool name (no `=`, not `env`), so
+# the quoted/heredoc/command-v/pgrep-argument exemptions are unaffected.
+CMD_POSITION_PREFIX = r"(?:^|[\n;&|(]\s*|&&\s*|\|\|\s*|\bxargs\s+)(?:(?:\w+=\S*|env)\s+)*"
 # Command-position anchor (orchestrator live-fire false positive 2026-06-12):
 # the previous bare `search()` matched the literal trigger string INSIDE a
 # heredoc body (a commission doc written via `cat <<EOF`) and crumbed the
@@ -1077,7 +1089,7 @@ _EXTERNAL_BROWSE_DIR = "tmp/.ui-re-external-browse"
 # invocation must start a command: string start or right after a shell
 # connector (&& ; | & newline or subshell paren).
 _AB_OPEN_RE = re.compile(
-    r"(?:^|[;&|(]\s*|&&\s*|\|\|\s*|\n\s*)agent-browser\b[^\n;|&]*\bopen\s+['\"]?(https?://[^'\"\s;|&]+)"
+    rf"{CMD_POSITION_PREFIX}agent-browser\b[^\n;|&]*\bopen\s+['\"]?(https?://[^'\"\s;|&]+)"
 )
 _LOCAL_HOST_RE = re.compile(
     r"^https?://(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.|\[::1\])"
@@ -1095,19 +1107,6 @@ def _sanitize_for_command_match(cmd: str) -> str:
         cmd = cmd[: m.start()]
     return _QUOTED_RE.sub("''", cmd)
 
-
-# Command-position anchor shared by every pre_bash deny matcher (82b0a4e class).
-# A tool is INVOKED only at command position: string start, or right after a
-# shell connector (newline ; & | && || or a subshell paren), optionally via
-# xargs. A tool NAME elsewhere — a quoted pgrep pattern, a `command -v` / grep
-# argument — is DATA, not an invocation, and must not trigger a deny.
-# An invocation may be preceded by leading environment assignments and/or `env`
-# (batch-4 review MAJOR 2): `FOO=1 agent-browser open`, `HTTPS_PROXY=x curl ...`,
-# `PORT=5173 npm run dev` are real command-position invocations and must not
-# bypass the deny. The trailing `(?:(?:\w+=\S*|env)\s+)*` consumes those leading
-# KEY=VAL / env tokens; it cannot match a bare tool name (no `=`, not `env`), so
-# the quoted/heredoc/command-v/pgrep-argument exemptions are unaffected.
-CMD_POSITION_PREFIX = r"(?:^|[\n;&|(]\s*|&&\s*|\|\|\s*|\bxargs\s+)(?:(?:\w+=\S*|env)\s+)*"
 
 # Heredoc BODY remover: drops the document body between `<<DELIM` and its
 # terminator line while KEEPING any command after the terminator (unlike

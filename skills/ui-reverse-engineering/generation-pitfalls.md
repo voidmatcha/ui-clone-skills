@@ -262,7 +262,7 @@ Never conditionally MOUNT animated content (`{inView && <H2 .../>}`):
 references render everything upfront and animate visibility, while a
 conditionally-mounted impl has NO element in the DOM at scroll-top — every
 class-selector probe (transition-fires, hover compares, auto-diagnose) reports
-"element not found" and motion verification structurally fails (loop-3:
+"element not found" and motion verification structurally fails (specific regression:
 15/17 fire failures were exactly this shape). Render the element always and
 drive opacity/transform via `whileInView` / `useInView(ref, { once: true })`
 state — animate visibility, never existence.

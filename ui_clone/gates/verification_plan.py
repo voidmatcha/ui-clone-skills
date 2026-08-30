@@ -2050,11 +2050,11 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
             # (omx postmortem); the evaluate() result always carries status.
             "geometry-sanity",
             # alignment-parity — inner-content horizontal alignment
-            # (loop-9 footer carousel off-center while section rects and
+            # (specific regression footer carousel off-center while section rects and
             # AE crops passed); status-less artifact must not pass.
             "alignment-parity",
             # junk-token — serialization junk in class/id/src/alt/style
-            # (loop-9 nav dots carried a literal "undefined" class).
+            # (specific regression nav dots carried a literal "undefined" class).
             "junk-token",
             # alignment-sweep — invariant transfer to intermediate widths.
             "alignment-sweep",
@@ -2066,11 +2066,11 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
             # recording that the producer actually judged the fingerprints.
             "dynamic-behavior-parity",
             # masked-region-static — static-style parity for dynamic-masked
-            # regions (loop-11 eatReal h2 lost text-align:center under the
+            # regions (specific regression eatReal h2 lost text-align:center under the
             # mask; motion proof checks MOTION only).
             "masked-region-static",
             # state-reveal — active-state (scroll) reveal end-state proof
-            # (loop-11 nav active label stayed width:0 on scroll; hover
+            # (specific regression nav active label stayed width:0 on scroll; hover
             # fallback only covers hover-triggered reveals).
             "state-reveal",
             # Common cheat pattern A1/A2/A3 anti-cheat — entry-coherence

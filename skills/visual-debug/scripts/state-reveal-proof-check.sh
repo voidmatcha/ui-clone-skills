@@ -8,7 +8,7 @@
 # (width 0 -> auto on the active flag, from bundle-extraction activeStateExpansions)
 # actually occurs: the revealed element must expand past the collapsed width at
 # least once across the sweep. A faithful impl reveals the active label; the
-# loop-11 impl keeps every label at width:0.
+# specific regression impl keeps every label at width:0.
 #
 # Usage: state-reveal-proof-check.sh <session> <impl-url> <ref-dir>
 #

@@ -161,7 +161,7 @@ if [ -n "$SESSION" ] && [ -n "$IMPL_URL" ] && command -v agent-browser >/dev/nul
     const wait = ms => new Promise(r => setTimeout(r, ms));
     scan();
     // Scroll + settle sweep (batch-6 ITEM 5a): the fixed ~2s window misses junk
-    // applied later via setTimeout(>2s) or on scroll/timer (the loop-9 nav-dot
+    // applied later via setTimeout(>2s) or on scroll/timer (the specific regression nav-dot
     // class). Re-scan across a scroll sweep and after a longer settle so
     // late-materializing junk is captured.
     const maxScroll = () => Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);

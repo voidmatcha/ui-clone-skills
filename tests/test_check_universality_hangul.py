@@ -12,14 +12,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "ci" / "check-universality.sh"
-HELPER = ROOT / "scripts" / "ci" / "check_universality_hangul.py"
+HELPER = ROOT / "scripts" / "ci" / "check_universality.py"
 
 
-def test_check_universality_uses_standalone_hangul_scanner() -> None:
+def test_check_universality_uses_standalone_python_scanner() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert "python3 - <<'PY'" not in source
-    assert 'python3 "$REPO_ROOT/scripts/ci/check_universality_hangul.py"' in source
+    assert 'python3 "$REPO_ROOT/scripts/ci/check_universality.py"' in source
 
 
 def test_hangul_scanner_reports_production_source_only(tmp_path: Path) -> None:
@@ -38,9 +38,51 @@ def test_hangul_scanner_reports_production_source_only(tmp_path: Path) -> None:
         timeout=5,
     )
 
-    assert proc.returncode == 0
+    assert proc.returncode == 1
     assert "scripts/tool.py:1" in proc.stdout
     assert "tests/fixture.py" not in proc.stdout
+
+
+def test_universality_scanner_reports_loop_labels_on_all_hosts(
+    tmp_path: Path,
+) -> None:
+    production = tmp_path / "ui_clone" / "gate.py"
+    production.parent.mkdir(parents=True)
+    production.write_text("# observed in loop-129\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        ["python3", str(HELPER), str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert proc.returncode == 1
+    assert "Per-loop finding labels" in proc.stdout
+    assert "ui_clone/gate.py:1" in proc.stdout
+
+
+def test_universality_scanner_ignores_svg_path_line_commands(
+    tmp_path: Path,
+) -> None:
+    production = tmp_path / "skills" / "visual-debug" / "scripts" / "tool.sh"
+    production.parent.mkdir(parents=True)
+    production.write_text(
+        '# sample path "M10 5 L20 15" vs "M11 5 L20 16"\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["python3", str(HELPER), str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert proc.returncode == 0
+    assert "Per-loop finding labels" not in proc.stdout
 
 
 def test_hangul_scanner_prunes_excluded_directories_before_file_checks(
@@ -64,19 +106,19 @@ def test_hangul_scanner_prunes_excluded_directories_before_file_checks(
 
     monkeypatch.setattr(Path, "is_file", guarded_is_file)
     find_hits = cast(
-        Callable[[Path], list[str]],
+        Callable[[Path], dict[str, list[str]]],
         runpy.run_path(str(HELPER))["find_hits"],
     )
 
-    assert find_hits(tmp_path) == []
+    assert all(rule_hits == [] for rule_hits in find_hits(tmp_path).values())
 
 
 def test_universality_scanners_ignore_tokensave_runtime_state(
     tmp_path: Path,
 ) -> None:
     """Machine-local TokenSave metadata is not part of the shipped surface."""
-    shell_source = SCRIPT.read_text(encoding="utf-8")
-    assert "--exclude-dir=.tokensave" in shell_source
+    scanner_source = HELPER.read_text(encoding="utf-8")
+    assert '".tokensave"' in scanner_source
 
     runtime_file = tmp_path / ".tokensave" / "runtime.py"
     runtime_file.parent.mkdir()

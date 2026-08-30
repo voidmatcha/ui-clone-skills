@@ -3,13 +3,14 @@
 # ruff: noqa: E402, F401, F541, I001, UP038
 """Download captured and runtime-required media into an implementation tree."""
 
-import base64
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, unquote, urljoin
+
+from _resource_mirror import SsrfBlocked, download_url_to_path
 
 ref_dir = Path(sys.argv[1])
 impl_public = Path(sys.argv[2])
@@ -91,6 +92,26 @@ def _safe_dest_path(value: object) -> Path | None:
     if dest_path.is_absolute() or any(part in ("", ".", "..") for part in dest_path.parts):
         return None
     return dest_path
+
+
+def _dest_under_public(raw_path: str) -> Path | None:
+    rel_path = Path(raw_path)
+    if rel_path.is_absolute() or any(part in ("", ".", "..") for part in rel_path.parts):
+        return None
+    dest = impl_public / rel_path
+    public_root = impl_public.resolve(strict=False)
+    try:
+        dest.resolve(strict=False).relative_to(public_root)
+    except ValueError:
+        return None
+    return dest
+
+
+def _display_dest(dest: Path) -> str:
+    try:
+        return str(dest.relative_to(impl_public.parent))
+    except ValueError:
+        return str(dest)
 
 
 def _add_vimeo_oembed_thumbnails() -> None:
@@ -187,6 +208,7 @@ USER_AGENT = (
 )
 DEFAULT_ACCEPT = "image/avif,image/webp,image/apng,image/svg+xml,image/*,application/json,video/*,*/*;q=0.8"
 JPEG_ACCEPT = "image/jpeg,image/*;q=0.9,*/*;q=0.8"
+MAX_VIDEO_BYTES = 250 * 1024 * 1024
 
 
 def read_referrer_url() -> str:
@@ -217,107 +239,6 @@ def read_referrer_url() -> str:
             if isinstance(value, str) and value.startswith(("http://", "https://")):
                 return value
     return ""
-
-
-def curl_command(url: str, dest: Path, referrer_url: str) -> list[str]:
-    accept_header = JPEG_ACCEPT if dest.suffix.lower() in (".jpg", ".jpeg") else DEFAULT_ACCEPT
-    command = [
-        "curl", "-sSL", "--fail-with-body",
-        "--max-time", "15", "--retry", "3", "--retry-delay", "1",
-        "-A", USER_AGENT,
-        "-H", f"Accept: {accept_header}",
-    ]
-    if referrer_url:
-        command.extend(["-e", referrer_url])
-        command.extend([
-            "-H", "Sec-Fetch-Dest: image",
-            "-H", "Sec-Fetch-Mode: no-cors",
-            "-H", "Sec-Fetch-Site: cross-site",
-        ])
-    command.extend(["-w", "%{http_code}", "-o", str(dest), url])
-    return command
-
-
-def unwrap_agent_browser_payload(raw: str) -> dict:
-    parsed = json.loads(raw)
-    if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict) and "result" in parsed["data"]:
-        parsed = parsed["data"]["result"]
-    if isinstance(parsed, dict) and "result" in parsed and isinstance(parsed["result"], (dict, str)):
-        parsed = parsed["result"]
-    if isinstance(parsed, str):
-        parsed = json.loads(parsed)
-    if not isinstance(parsed, dict):
-        raise ValueError("agent-browser eval returned a non-object payload")
-    return parsed
-
-
-def agent_browser_download(url: str, dest: Path, referrer_url: str) -> tuple[bool, str, str, int]:
-    session = "asset-dl"
-    start_url = referrer_url or url
-    open_result = subprocess.run(
-        ["agent-browser", "--session", session, "open", start_url],
-        capture_output=True, text=True, timeout=30,
-    )
-    if open_result.returncode != 0:
-        err = (open_result.stderr or open_result.stdout or "").strip()[:200]
-        return False, "open", err, 0
-
-    if referrer_url:
-        navigate_js = (
-            "(() => { window.location.href = "
-            + json.dumps(url)
-            + "; return window.location.href; })()"
-        )
-        nav_result = subprocess.run(
-            ["agent-browser", "--session", session, "eval", "--json", navigate_js],
-            capture_output=True, text=True, timeout=15,
-        )
-        if nav_result.returncode != 0:
-            err = (nav_result.stderr or nav_result.stdout or "").strip()[:200]
-            return False, "navigate", err, 0
-        subprocess.run(
-            ["agent-browser", "--session", session, "wait", "1000"],
-            capture_output=True, text=True, timeout=10,
-        )
-
-    fetch_js = """(async () => {
-  const response = await fetch(window.location.href, { cache: "no-store" });
-  if (!response.ok) {
-    return { ok: false, status: response.status, statusText: response.statusText };
-  }
-  const buffer = await response.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return {
-    ok: true,
-    status: response.status,
-    contentType: response.headers.get("content-type") || "",
-    bodyBase64: btoa(binary),
-  };
-})()"""
-    eval_result = subprocess.run(
-        ["agent-browser", "--session", session, "eval", "--json", fetch_js],
-        capture_output=True, text=True, timeout=45,
-    )
-    if eval_result.returncode != 0:
-        err = (eval_result.stderr or eval_result.stdout or "").strip()[:200]
-        return False, "eval", err, 0
-
-    try:
-        payload = unwrap_agent_browser_payload(eval_result.stdout.strip())
-        status = int(payload.get("status") or 0)
-        body_base64 = payload.get("bodyBase64")
-        if payload.get("ok") is True and isinstance(body_base64, str) and body_base64:
-            dest.write_bytes(base64.b64decode(body_base64))
-            return True, "", "", status
-        err = payload.get("statusText") or payload.get("error") or "empty body"
-        return False, "eval", str(err)[:200], status
-    except (ValueError, json.JSONDecodeError, OSError, base64.binascii.Error) as e:
-        return False, "eval", str(e)[:200], 0
 
 
 referrer_url = read_referrer_url()
@@ -358,54 +279,61 @@ for item in items:
         raw_path = raw_path.lstrip("/")
         if not raw_path:
             raw_path = parsed.netloc.replace(":", "_") + "/root"
-    dest = impl_public / raw_path
+    dest = _dest_under_public(raw_path)
+    if dest is None:
+        attempts.append({"url": url, "status": "blocked", "reason": "unsafe-destination"})
+        failed += 1
+        continue
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     if dest.exists() and dest.stat().st_size > 0:
-        attempts.append({"url": url, "dest": str(dest.relative_to(impl_public.parent)),
+        attempts.append({"url": url, "dest": _display_dest(dest),
                          "status": "skipped-exists", "bytes": dest.stat().st_size})
         skipped += 1
         continue
 
     try:
-        # -w writes the status code to stdout for the attempt log.
-        result = subprocess.run(
-            curl_command(url, dest, referrer_url),
-            capture_output=True, text=True, timeout=30
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": JPEG_ACCEPT if dest.suffix.lower() in (".jpg", ".jpeg") else DEFAULT_ACCEPT,
+        }
+        if referrer_url:
+            headers.update({
+                "Referer": referrer_url,
+                "Sec-Fetch-Dest": "image",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Site": "cross-site",
+            })
+        http_status, bytes_written = download_url_to_path(
+            url,
+            dest,
+            headers=headers,
+            timeout=30.0,
+            max_bytes=(
+                MAX_VIDEO_BYTES
+                if dest.suffix.lower() in {".mp4", ".webm", ".mov", ".m4v"}
+                else 25 * 1024 * 1024
+            ),
         )
-        http_code = (result.stdout or "").strip()
-        if result.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
-            attempts.append({"url": url, "dest": str(dest.relative_to(impl_public.parent)),
-                             "status": "ok", "httpCode": http_code, "via": "curl", "bytes": dest.stat().st_size})
-            succeeded += 1
-        else:
-            try:
-                ok, phase, ab_error, ab_status = agent_browser_download(url, dest, referrer_url)
-                if ok and dest.exists() and dest.stat().st_size > 0:
-                    attempts.append({"url": url, "dest": str(dest.relative_to(impl_public.parent)),
-                                     "status": "ok", "httpCode": str(ab_status or http_code),
-                                     "via": "agent-browser-eval",
-                                     "bytes": dest.stat().st_size})
-                    succeeded += 1
-                else:
-                    err_curl = (result.stderr or "").strip()[:100]
-                    err_ab = f"{phase}: {ab_error}"[:100]
-                    attempts.append({"url": url, "dest": str(dest.relative_to(impl_public.parent)),
-                                     "status": "failed", "httpCode": http_code,
-                                     "errorCurl": err_curl, "errorAgentBrowser": err_ab})
-                    failed += 1
-                    if dest.exists():
-                        dest.unlink()
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-                err = (result.stderr or "").strip()[:200]
-                attempts.append({"url": url, "dest": str(dest.relative_to(impl_public.parent)),
-                                 "status": "failed", "httpCode": http_code,
-                                 "errorCurl": err, "errorAgentBrowser": f"unavailable: {e}"})
-                failed += 1
-                if dest.exists():
-                    dest.unlink()
-    except (subprocess.TimeoutExpired, OSError) as e:
-        attempts.append({"url": url, "status": "timeout", "error": str(e)[:200]})
+        attempts.append({"url": url, "dest": _display_dest(dest),
+                         "status": "ok", "httpCode": str(http_status),
+                         "via": "guarded-urlopen", "bytes": bytes_written})
+        succeeded += 1
+    except SsrfBlocked as e:
+        attempts.append({"url": url, "dest": _display_dest(dest),
+                         "status": "blocked", "reason": "ssrf-blocked", "error": e.reason})
+        failed += 1
+        if dest.exists():
+            dest.unlink()
+    except HTTPError as e:
+        attempts.append({"url": url, "dest": _display_dest(dest),
+                         "status": "failed", "httpCode": str(e.code), "error": str(e)[:200]})
+        failed += 1
+        if dest.exists():
+            dest.unlink()
+    except (OSError, URLError, TimeoutError, ValueError) as e:
+        attempts.append({"url": url, "dest": _display_dest(dest),
+                         "status": "failed", "error": str(e)[:200]})
         failed += 1
         if dest.exists():
             dest.unlink()

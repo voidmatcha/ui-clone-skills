@@ -975,25 +975,21 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
             f"  python -m ui_clone.pipeline <url> <component> <session> verify\n"
         )
 
-    # Hash pin (parity with the structural-convergence stamp): the canonical
-    # stamp records sections/result.txt's sha256 at verify time — stamping
-    # while green then editing result.txt to claim more PASS rows must block.
-    result_file = ref_dir / "sections" / "result.txt"
-    stamped_sha = stamp.get("sectionsResultSha256")
-    if stamped_sha and result_file.is_file():
-        import hashlib
+    from ui_clone.pipeline_phases.verify import (
+        sections_result_pin_problem,
+        verify_stamp_evidence_problem,
+    )
 
-        current_sha = hashlib.sha256(result_file.read_bytes()).hexdigest()
-        if current_sha != stamped_sha:
-            return (
-                f"⛔ UI-RE Verify-stamp gate: result.txt tampered after verify for {ref_dir}\n\n"
-                f"sections/result.txt sha256 mismatch: stamp recorded {stamped_sha[:12]}…\n"
-                f"but the file now hashes to {current_sha[:12]}…\n\n"
-                f"Re-run the canonical closeout:\n\n"
-                f"  python -m ui_clone.pipeline <url> <component> <session> verify\n"
-            )
-    from ui_clone.pipeline_phases.verify import verify_stamp_evidence_problem
-
+    sections_problem = sections_result_pin_problem(
+        ref_dir, stamp, stamp_name="verify-stamp.json"
+    )
+    if sections_problem is not None:
+        return (
+            f"⛔ UI-RE Verify-stamp gate: result.txt evidence invalid for {ref_dir}\n\n"
+            f"{sections_problem}.\n\n"
+            f"Re-run the canonical closeout:\n\n"
+            f"  python -m ui_clone.pipeline <url> <component> <session> verify\n"
+        )
     evidence_problem = verify_stamp_evidence_problem(ref_dir, stamp)
     if evidence_problem is not None:
         return (
@@ -1091,22 +1087,19 @@ def _enforce_structural_convergence_stamp(ref_dir: Path) -> str | None:
             f"  bash scripts/verify/check-converged.sh {ref_dir} --write-stamp\n"
         )
 
-    # Re-validate the sections/result.txt hash — detects the cheat of stamping
-    # while converged then editing result.txt to claim more PASS rows.
-    result_file = ref_dir / "sections" / "result.txt"
-    stamped_sha = stamp.get("sectionsResultSha256")
-    if stamped_sha and result_file.is_file():
-        import hashlib
-        current_sha = hashlib.sha256(result_file.read_bytes()).hexdigest()
-        if current_sha != stamped_sha:
-            return (
-                f"⛔ UI-RE Structural-stamp gate: result.txt tampered after stamp for {ref_dir}\n\n"
-                f"sections/result.txt sha256 mismatch: stamp recorded {stamped_sha[:12]}…\n"
-                f"but the file now hashes to {current_sha[:12]}…\n\n"
-                f"The convergence evidence the stamp attests to has changed.\n"
-                f"Re-run the convergence detector:\n\n"
-                f"  bash scripts/verify/check-converged.sh {ref_dir} --write-stamp\n"
-            )
+    from ui_clone.pipeline_phases.verify import sections_result_pin_problem
+
+    sections_problem = sections_result_pin_problem(
+        ref_dir, stamp, stamp_name="structural-convergence-stamp.json"
+    )
+    if sections_problem is not None:
+        return (
+            f"⛔ UI-RE Structural-stamp gate: result.txt evidence invalid for {ref_dir}\n\n"
+            f"{sections_problem}.\n\n"
+            f"The convergence evidence the stamp attests to has changed.\n"
+            f"Re-run the convergence detector:\n\n"
+            f"  bash scripts/verify/check-converged.sh {ref_dir} --write-stamp\n"
+        )
 
     changed = _newer_impl_files(impl_dir, stamp_path)
     if changed:
@@ -1543,8 +1536,8 @@ def main() -> None:
     # Stop-hook re-entrancy guard. Claude Code sets stop_hook_active=true when
     # the current stop is itself the result of a previous Stop-hook block. If we
     # block again the turn never ends — it loops until the consecutive-block cap
-    # (observed on loop-112: 9 blocks -> ~2h18m wasted churn, then a forced
-    # turn-end with the agent left idle and no STATUS marker, read as a stall).
+    # (observed in a prior maintainer run: repeated blocks caused wasted churn,
+    # then a forced turn-end with no STATUS marker, read as a stall).
     # Allow the stop: the agent was already nudged once, and the driver's STATUS
     # marker + stall watchdog own round closeout. Matches Claude Code guidance.
     if stop_hook_active:

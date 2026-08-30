@@ -78,7 +78,7 @@ def _disable_smooth_scroll_js() -> str:
 
     A Lenis/Framer smooth-scroll controller intercepts the native scroll and
     animates back toward its own target during settle, collapsing the capture's
-    forced_scroll_y to actualY=0 (loop-15: scrubbed sections all crop the start
+    forced_scroll_y to actualY=0 (specific regression: scrubbed sections all crop the start
     frame). This sets a capture flag the generator can honor, forces
     scroll-behavior:auto, and best-effort stops/destroys a live Lenis instance.
     Idempotent (guarded by a marker), so it is safe to call before every shot.
@@ -174,7 +174,7 @@ def _settle_js() -> str:
     document.getAnimations() never sees them, so the WAAPI/GSAP/anime/Lottie
     fast-forward leaves Framer (and IntersectionObserver-started) animations
     mid-flight, and a deterministic capture of that frozen frame is
-    deterministically WRONG (loop-145: 60/76 reveals frozen). This probe
+    deterministically WRONG (specific regression: 60/76 reveals frozen). This probe
     (1) best-effort enables MotionGlobalConfig.skipAnimations, (2) yields two
     rAF ticks so pending IO callbacks run, then (3) polls an inline-style
     fingerprint until two consecutive samples are identical (quiescent) or
@@ -325,7 +325,7 @@ def _ensure_viewport(
     settle: float = 0.8,
 ) -> None:
     """V-1 (loop-nvti-4): the agent-browser session viewport silently REVERTS
-    mid-session (loop-145 confound; a 14-depth sweep ran at 1280x633 and had
+    mid-session (specific regression confound; a 14-depth sweep ran at 1280x633 and had
     to be discarded). Assert innerWidth in-page immediately before every
     screenshot; on mismatch re-set the viewport ONCE and re-assert; a
     persistent mismatch aborts the capture — a wrong-viewport crop poisons
@@ -656,7 +656,7 @@ def _capture_one(
         target_y: float, output_path: Path
     ) -> tuple[dict[str, Any] | None, float, dict[str, Any]]:
         # Kill Lenis/smooth-scroll first so the forced scroll is not reverted to
-        # actualY=0 during settle (loop-15 cross-impl scroll-mapping class).
+        # actualY=0 during settle (specific regression cross-impl scroll-mapping class).
         _run_agent_eval(session, _disable_smooth_scroll_js())
         _run_agent_eval(session, _scroll_js(target_y, scroller_selector))
         _run_agent_eval(session, _fixed_overlay_toggle_js(target_y > 0))
