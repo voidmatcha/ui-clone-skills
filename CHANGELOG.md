@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.7.41] - 2026-09-01
+
+### Fixed
+
+- Detect a real PATH-backed `agent-browser` executable before fan-out session
+  cleanup, instead of mistaking the navigation watchdog shell function for an
+  installed CLI on dependency-light Linux runners.
+
 ## [0.7.40] - 2026-09-01
 
 ### Fixed

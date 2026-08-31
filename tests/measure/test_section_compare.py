@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from unittest import mock
@@ -475,12 +476,16 @@ def test_section_compare_fanout_result_json_sums_five_viewports(tmp_path: Path) 
     assert len(result_json["sections"]) == 40
 
 
-def test_section_compare_fanout_skips_cleanup_when_agent_browser_stub_is_not_runnable(
+@pytest.mark.parametrize("browser_mode", ["missing", "exit-127"])
+def test_section_compare_fanout_skips_cleanup_without_usable_agent_browser(
     tmp_path: Path,
+    browser_mode: str,
 ) -> None:
-    """Fan-out unit tests may inject an agent-browser name that is not a real
-    browser CLI. The wrapper should not turn a successful stubbed compare into a
-    cleanup failure when no browser sessions could have been created.
+    """Fan-out unit tests may run without a usable agent-browser binary.
+
+    ab-timeout.sh defines a same-named shell function, so the wrapper must test
+    for a real PATH executable rather than mistaking that function for the CLI.
+    A PATH-visible command that reports 127 is likewise unavailable.
     """
     ref = tmp_path / "ref"
     ref.mkdir()
@@ -499,21 +504,32 @@ def test_section_compare_fanout_skips_cleanup_when_agent_browser_stub_is_not_run
         encoding="utf-8",
     )
     stub.chmod(0o755)
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    agent_browser = fake_bin / "agent-browser"
-    agent_browser.write_text(
-        "#!/usr/bin/env bash\n"
-        "echo 'stub agent-browser is not available' >&2\n"
-        "exit 127\n",
-        encoding="utf-8",
-    )
-    agent_browser.chmod(0o755)
+    path = os.environ["PATH"]
+    if browser_mode == "exit-127":
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        agent_browser = fake_bin / "agent-browser"
+        agent_browser.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'stub agent-browser is not available' >&2\n"
+            "exit 127\n",
+            encoding="utf-8",
+        )
+        agent_browser.chmod(0o755)
+        path = f"{fake_bin}:{path}"
+    else:
+        path_entries = [entry for entry in path.split(os.pathsep) if entry]
+        path = os.pathsep.join(
+            entry
+            for entry in path_entries
+            if shutil.which("agent-browser", path=entry) is None
+        )
+        assert shutil.which("agent-browser", path=path) is None
 
     script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
     env = {
         **os.environ,
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "PATH": path,
         "VIEWPORTS": "375x812",
         "SECTION_COMPARE_INNER_CMD": str(stub),
         "UI_CLONE_SESSION_SETTLE_SEC": "0",

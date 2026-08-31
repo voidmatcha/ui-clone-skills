@@ -254,13 +254,17 @@ if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
     [ "$_AGENT_BROWSER_CLEANUP_STATE" = "ready" ] && return 0
     [ "$_AGENT_BROWSER_CLEANUP_STATE" = "absent" ] && return 1
     [ -f "$REPO_ROOT/scripts/verify/cleanup-sessions.sh" ] || return 1
-    if ! command -v agent-browser >/dev/null 2>&1; then
+    # ab-timeout.sh defines an `agent-browser` shell function even when the
+    # executable is not installed. Resolve a PATH-backed executable explicitly
+    # so the wrapper function cannot make dependency-light CI look browser-ready.
+    _agent_browser_bin="$(type -P agent-browser || true)"
+    if [ -z "$_agent_browser_bin" ]; then
       _AGENT_BROWSER_CLEANUP_STATE="absent"
       return 1
     fi
     _cleanup_probe_status=0
     python3 -c 'import subprocess,sys; raise SystemExit(subprocess.run(sys.argv[2:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=float(sys.argv[1])).returncode)' \
-      "${UI_CLONE_SESSION_LIST_TIMEOUT_SEC:-5}" agent-browser session list \
+      "${UI_CLONE_SESSION_LIST_TIMEOUT_SEC:-5}" "$_agent_browser_bin" session list \
       2>/dev/null || _cleanup_probe_status=$?
     if [ "$_cleanup_probe_status" -eq 127 ]; then
       _AGENT_BROWSER_CLEANUP_STATE="absent"
