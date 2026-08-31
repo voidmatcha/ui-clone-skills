@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.7.40] - 2026-09-01
+
+### Fixed
+
+- Install ffmpeg and ImageMagick in GitHub Actions before running the local CI
+  mirror, provide the ImageMagick 7 command surface on ImageMagick 6 runners,
+  and move checkout/setup-uv to their Node 24 action majors.
+- Make verification-plan staleness checks use GNU `stat -c %Y` before BSD
+  `stat -f %m`, preventing Linux filesystem-stat output from entering integer
+  comparisons.
+- Keep Pillow lazy at the reference-media decode boundary so geometry and
+  canonical verification modules remain importable from dependency-light
+  system Python environments.
+- Resolve hover comparison libraries from the checkout when tests or hosts
+  override the plugin root, and avoid counting measured selectors twice in the
+  fallback probe.
+- Skip fan-out session cleanup only for an absent or non-runnable browser CLI;
+  real cleanup failures continue to fail closed.
+
 ## [0.7.39] - 2026-09-01
 
 ### Fixed

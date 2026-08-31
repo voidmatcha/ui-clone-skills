@@ -13,8 +13,6 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from PIL import Image
-
 from .base import CheckResult
 from .post_implement import _check_spec_bundle_grounding
 
@@ -99,10 +97,14 @@ def _resolve_reference_media(
 def _reference_media_is_decodable(path: Path) -> tuple[bool, str]:
     if path.suffix.lower() in _REFERENCE_IMAGE_EXTENSIONS:
         try:
+            from PIL import Image
+
             with Image.open(path) as image:
                 image.verify()
             with Image.open(path) as image:
                 image.load()
+        except ImportError as exc:
+            return False, f"image decode unavailable: Pillow is not installed: {exc}"
         except (OSError, ValueError) as exc:
             return False, f"image decode failed: {exc}"
         return True, ""

@@ -94,6 +94,7 @@ PROJECT_ROOT="${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLO
 if [ -z "$PROJECT_ROOT" ]; then
   PROJECT_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 fi
+SCRIPT_PROJECT_ROOT="$(cd "$_SCRIPT_DIR/../../.." && pwd)"
 COMPARE="$PROJECT_ROOT/scripts/verify/video-transition-compare.sh"
 CLEANUP_SESSIONS="$PROJECT_ROOT/scripts/verify/cleanup-sessions.sh"
 FRAME_ALIGN="$PROJECT_ROOT/scripts/verify/lib/frame-align.sh"
@@ -104,7 +105,16 @@ REFERENCE_SELF_CALIBRATOR="${HOVER_REFERENCE_SELF_CALIBRATOR:-$PROJECT_ROOT/scri
 # symmetric dynamic mask as scroll-position capture and protects the hover
 # target itself when it lives inside a declared dynamic region.
 # shellcheck source=../../../scripts/verify/lib/position-compare.sh
-. "$PROJECT_ROOT/scripts/verify/lib/position-compare.sh"
+POSITION_COMPARE_LIB="$PROJECT_ROOT/scripts/verify/lib/position-compare.sh"
+if [ ! -f "$POSITION_COMPARE_LIB" ]; then
+  POSITION_COMPARE_LIB="$SCRIPT_PROJECT_ROOT/scripts/verify/lib/position-compare.sh"
+fi
+if [ -f "$POSITION_COMPARE_LIB" ]; then
+  . "$POSITION_COMPARE_LIB"
+else
+  echo "ERROR: required position-compare library not found: $POSITION_COMPARE_LIB" >&2
+  exit 2
+fi
 VIDEO_COMPARE_DYNAMIC_SELECTORS="$(dynamic_selectors_from_spec "$REF_DIR/transition-spec.json")"
 export VIDEO_COMPARE_DYNAMIC_SELECTORS
 
@@ -1957,29 +1967,68 @@ PY
   done < "$VP_TARGETS"
 done
 
-# Review-2 finding 2: the fallback probe runs UNCONDITIONALLY with the
-# measured-selector accounting — entries covered by a measured run are
-# marked "measured"; every other planned entry gets a probe verdict. The
-# old RUN_COUNT==0 gating let one unrelated measured run suppress probing
-# of all remaining entries (the nav-pill width-0 defect survived behind
-# partial coverage).
+# Review-2 finding 2: the fallback probe runs when there are unmeasured
+# planned hover entries. Entries covered by a measured run do not need a
+# second probe; every other planned entry still gets a probe verdict. The old
+# RUN_COUNT==0 gating let one unrelated measured run suppress probing of all
+# remaining entries (the nav-pill width-0 defect survived behind partial
+# coverage).
+hover_fallback_has_unmeasured_entries() {
+  [ -s "$MEASURED_SEL_FILE" ] || return 0
+  PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/hover-fallback-plan.XXXXXX")"
+  track_temp_file "$PLAN_FILE"
+  if ! PYTHONPATH="$SCRIPT_PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+      python3 -m ui_clone.gates.hover_probe plan "$REF_DIR" > "$PLAN_FILE" 2>/dev/null; then
+    return 0
+  fi
+  python3 - "$PLAN_FILE" "$MEASURED_SEL_FILE" <<'PY'
+import json
+import sys
+
+plan_path, measured_path = sys.argv[1:3]
+try:
+    plans = json.load(open(plan_path, encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+try:
+    measured = {
+        line.strip()
+        for line in open(measured_path, encoding="utf-8")
+        if line.strip()
+    }
+except OSError:
+    measured = set()
+if not plans:
+    raise SystemExit(1)
+for entry in plans:
+    selectors = entry.get("selectors") if isinstance(entry, dict) else []
+    if not any(selector in measured for selector in selectors or []):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 FALLBACK_FAILED=0
-echo "▸ per-entry fallback probe (measured runs: $RUN_COUNT)"
-_fallback_status=0
-register_hover_session "${SESSION}-hfb"
-UI_CLONE_HOVER_MEASURED_FILE="$MEASURED_SEL_FILE" \
-  bash "$_SCRIPT_DIR/hover-fallback-probe.sh" "${SESSION}-hfb" "$IMPL_URL" "$REF_DIR" \
-  >> "$RESULT" 2>&1 || _fallback_status=$?
-_fallback_cleanup_status=0
-cleanup_hover_sessions "${SESSION}-hfb" || _fallback_cleanup_status=$?
-if [ "$_fallback_cleanup_status" -ne 0 ]; then
-  echo "⚠️ UNMEASURABLE: fallback session cleanup failed; no pass can be reported" >> "$RESULT"
-  UNMEASURABLE_COUNT=$((UNMEASURABLE_COUNT + 1))
-elif [ "$_fallback_status" -eq 1 ]; then
-  FALLBACK_FAILED=1
-elif [ "$_fallback_status" -ne 0 ]; then
-  echo "⚠️ UNMEASURABLE: fallback probe returned status $_fallback_status" >> "$RESULT"
-  UNMEASURABLE_COUNT=$((UNMEASURABLE_COUNT + 1))
+if hover_fallback_has_unmeasured_entries; then
+  echo "▸ per-entry fallback probe (measured runs: $RUN_COUNT)"
+  _fallback_status=0
+  register_hover_session "${SESSION}-hfb"
+  UI_CLONE_HOVER_MEASURED_FILE="$MEASURED_SEL_FILE" \
+    bash "$_SCRIPT_DIR/hover-fallback-probe.sh" "${SESSION}-hfb" "$IMPL_URL" "$REF_DIR" \
+    >> "$RESULT" 2>&1 || _fallback_status=$?
+  _fallback_cleanup_status=0
+  cleanup_hover_sessions "${SESSION}-hfb" || _fallback_cleanup_status=$?
+  if [ "$_fallback_cleanup_status" -ne 0 ]; then
+    echo "⚠️ UNMEASURABLE: fallback session cleanup failed; no pass can be reported" >> "$RESULT"
+    UNMEASURABLE_COUNT=$((UNMEASURABLE_COUNT + 1))
+  elif [ "$_fallback_status" -eq 1 ]; then
+    FALLBACK_FAILED=1
+  elif [ "$_fallback_status" -ne 0 ]; then
+    echo "⚠️ UNMEASURABLE: fallback probe returned status $_fallback_status" >> "$RESULT"
+    UNMEASURABLE_COUNT=$((UNMEASURABLE_COUNT + 1))
+  fi
+else
+  echo "▸ per-entry fallback probe skipped — all planned hover entries covered by measured runs" >> "$RESULT"
 fi
 
 {

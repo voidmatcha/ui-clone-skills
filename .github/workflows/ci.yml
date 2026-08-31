@@ -8,11 +8,31 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
+
+      - name: Install media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg imagemagick
+          if ! command -v magick >/dev/null 2>&1; then
+            printf '%s\n' \
+              '#!/usr/bin/env bash' \
+              'case "${1:-}" in' \
+              '  compare|composite|convert|identify|mogrify|montage|stream)' \
+              '    tool="$1"' \
+              '    shift' \
+              '    exec "$tool" "$@"' \
+              '    ;;' \
+              '  *) exec convert "$@" ;;' \
+              'esac' | sudo tee /usr/local/bin/magick >/dev/null
+            sudo chmod 0755 /usr/local/bin/magick
+          fi
+          command -v ffmpeg
+          command -v magick
 
       - name: Local CI mirror
         # Pinned rather than left at `-n auto`. The suite carries ~700
@@ -27,7 +47,7 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Pre-push security gate
         run: bash scripts/ci/pre-push-security.sh
@@ -35,7 +55,7 @@ jobs:
   socket:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: SocketDev/action@v1
         with:
           mode: firewall-free
@@ -44,9 +64,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -50,7 +52,7 @@ def test_capture_viewport_prefers_original_context_over_reused_section_viewport(
 def test_geometry_sanity_imports_under_macos_system_python() -> None:
     """Canonical shell gates can run through /usr/bin/python3 on macOS."""
     host_python = shutil.which("python3")
-    if Path("/usr/bin/python3").exists():
+    if platform.system() == "Darwin" and Path("/usr/bin/python3").exists():
         host_python = "/usr/bin/python3"
     if not host_python:
         pytest.skip("python3 not available")
@@ -69,8 +71,47 @@ def test_geometry_sanity_imports_under_macos_system_python() -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def test_geometry_sanity_import_does_not_require_pillow(tmp_path: Path) -> None:
+    """Linux shell gates must import geometry helpers without optional Pillow."""
+    blocker = tmp_path / "blocker"
+    blocker.mkdir()
+    (blocker / "sitecustomize.py").write_text(
+        "\n".join(
+            [
+                "import importlib.abc",
+                "import sys",
+                "class BlockPillow(importlib.abc.MetaPathFinder):",
+                "    def find_spec(self, fullname, path=None, target=None):",
+                "        if fullname == 'PIL' or fullname.startswith('PIL.'):",
+                "            raise ModuleNotFoundError(\"No module named 'PIL'\")",
+                "        return None",
+                "sys.meta_path.insert(0, BlockPillow())",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib; importlib.import_module('ui_clone.gates.geometry_sanity')",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env={"PYTHONPATH": str(blocker)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 def test_capture_viewport_runs_under_macos_system_python(tmp_path: Path) -> None:
-    host_python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else shutil.which("python3")
+    host_python = (
+        "/usr/bin/python3"
+        if platform.system() == "Darwin" and Path("/usr/bin/python3").exists()
+        else shutil.which("python3")
+    )
     if not host_python:
         pytest.skip("python3 not available")
     (tmp_path / "container-context.json").write_text(

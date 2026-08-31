@@ -475,6 +475,61 @@ def test_section_compare_fanout_result_json_sums_five_viewports(tmp_path: Path) 
     assert len(result_json["sections"]) == 40
 
 
+def test_section_compare_fanout_skips_cleanup_when_agent_browser_stub_is_not_runnable(
+    tmp_path: Path,
+) -> None:
+    """Fan-out unit tests may inject an agent-browser name that is not a real
+    browser CLI. The wrapper should not turn a successful stubbed compare into a
+    cleanup failure when no browser sessions could have been created.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    stub = tmp_path / "stub-section-compare.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "out=\"${4:?out}\"\n"
+        "mkdir -p \"$out/sections\"\n"
+        "{\n"
+        "  echo '| Section | AE | AE/Mpx | Severity | Status |'\n"
+        "  echo '|---------|-----|--------|----------|--------|'\n"
+        "  echo '| Hero Section | 0 | 0 | ok | ✅ |'\n"
+        "  echo '**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**'\n"
+        "} > \"$out/sections/result.txt\"\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    agent_browser = fake_bin / "agent-browser"
+    agent_browser.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'stub agent-browser is not available' >&2\n"
+        "exit 127\n",
+        encoding="utf-8",
+    )
+    agent_browser.chmod(0o755)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "section-compare.sh"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "VIEWPORTS": "375x812",
+        "SECTION_COMPARE_INNER_CMD": str(stub),
+        "UI_CLONE_SESSION_SETTLE_SEC": "0",
+    }
+    proc = subprocess.run(
+        ["bash", str(script), "https://ref.example", "https://impl.example", "stubbed-vp", str(ref)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "cleanup failed for viewport" not in proc.stderr
+
+
 def test_pair_sections_uses_text_content_when_class_signatures_differ() -> None:
     """A faithful Tailwind clone of a CSS-Modules reference shares ZERO class
     tokens with the ref, so class-signature pairing is blind. The ref

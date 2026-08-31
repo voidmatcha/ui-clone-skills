@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -118,6 +119,54 @@ def test_verification_plan_regenerates_when_extraction_is_newer(tmp_path: Path) 
     assert "regenerating." in proc.stderr
     plan = json.loads((ref / "verification-plan.json").read_text())
     assert plan["generatedAt"] != "2000-01-01T00:00:00Z"
+
+
+def test_verification_plan_staleness_uses_gnu_stat_mtime(tmp_path: Path) -> None:
+    """GNU stat accepts `-f` as filesystem stats, so `-c %Y` must run first."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "extracted.json").write_text(json.dumps({"sections": []}))
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "generatedAt": "2000-01-01T00:00:00Z",
+                "requiredChecks": [],
+            }
+        )
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_stat = bin_dir / "stat"
+    fake_stat.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "if [ \"$1\" = \"-c\" ]; then echo 1788190486; exit 0; fi",
+                "if [ \"$1\" = \"-f\" ]; then",
+                "  printf '  File: \"%s\"\\nBlocks: Total: 22202607   Available: 22198511\\n' \"$3\"",
+                "  exit 0",
+                "fi",
+                "exit 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fake_stat.chmod(fake_stat.stat().st_mode | stat.S_IEXEC)
+
+    script = _project_root() / "skills" / "visual-debug" / "scripts" / "verification-plan.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), "--tier=quick"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "integer expression expected" not in proc.stderr
+    assert "verification-plan.json is stale" in proc.stderr
 
 
 def test_verification_plan_keeps_anti_cheat_checks_in_universal_baseline(

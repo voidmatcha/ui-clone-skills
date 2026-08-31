@@ -54,6 +54,8 @@ def test_hover_state_compare_single_viewport_back_compat(tmp_path: Path) -> None
         capture_output=True, text=True, timeout=120, env=env,
     )
     assert proc.returncode == 0
+    assert "position-compare.sh" not in proc.stderr
+    assert "dynamic_selectors_from_spec" not in proc.stderr
     result = (ref / "transitions" / "hover-state-result.txt").read_text()
     assert "viewports: <single" in result
     # No per-viewport WxH subdir under hover-state/ — the target dir sits
@@ -392,6 +394,7 @@ def test_hover_state_compare_stays_unmeasurable_after_one_retry(tmp_path: Path) 
     assert "unmeasurable-after-retry" in result
     assert "failed=0" in result
     assert "unmeasurable=1" in result
+    assert "fallback probe skipped" in result
     target = ref / "transitions" / "hover-state" / "btn"
     retry = ref / "transitions" / "hover-state" / "btn-retry-1"
     assert (target / "failed.marker").is_file()

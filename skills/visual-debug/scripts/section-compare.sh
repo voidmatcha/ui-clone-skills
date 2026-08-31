@@ -249,6 +249,28 @@ if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
     [ -z "${RESULT_TMP:-}" ] || rm -f "$RESULT_TMP"
     [ -z "${RESULT_JSON_TMP:-}" ] || rm -f "$RESULT_JSON_TMP"
   }
+  _AGENT_BROWSER_CLEANUP_STATE="unknown"
+  _agent_browser_cleanup_ready() {
+    [ "$_AGENT_BROWSER_CLEANUP_STATE" = "ready" ] && return 0
+    [ "$_AGENT_BROWSER_CLEANUP_STATE" = "absent" ] && return 1
+    [ -f "$REPO_ROOT/scripts/verify/cleanup-sessions.sh" ] || return 1
+    if ! command -v agent-browser >/dev/null 2>&1; then
+      _AGENT_BROWSER_CLEANUP_STATE="absent"
+      return 1
+    fi
+    _cleanup_probe_status=0
+    python3 -c 'import subprocess,sys; raise SystemExit(subprocess.run(sys.argv[2:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=float(sys.argv[1])).returncode)' \
+      "${UI_CLONE_SESSION_LIST_TIMEOUT_SEC:-5}" agent-browser session list \
+      2>/dev/null || _cleanup_probe_status=$?
+    if [ "$_cleanup_probe_status" -eq 127 ]; then
+      _AGENT_BROWSER_CLEANUP_STATE="absent"
+      return 1
+    fi
+    # A real CLI that is temporarily unhealthy must still reach the canonical
+    # cleanup helper below, which fails closed and reports the actionable error.
+    _AGENT_BROWSER_CLEANUP_STATE="ready"
+    return 0
+  }
   trap '_result_status=$?; _cleanup_result_stage; exit "$_result_status"' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
@@ -286,8 +308,7 @@ if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
       > "$VP_DIR/section-compare.log" 2>&1
     COMPARE_CODE=$?
     CODE=$COMPARE_CODE
-    if command -v agent-browser >/dev/null 2>&1 \
-      && [ -f "$REPO_ROOT/scripts/verify/cleanup-sessions.sh" ]; then
+    if _agent_browser_cleanup_ready; then
       CLEANUP_OUTPUT="$(
         bash "$REPO_ROOT/scripts/verify/cleanup-sessions.sh" "${SESSION}-${VP}" 2>&1
       )"

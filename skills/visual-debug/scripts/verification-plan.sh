@@ -319,8 +319,8 @@ BOOLEAN_CSS_REVEAL_SIGNAL=$("$PYTHON_BIN" "$VERIFICATION_PLAN_HELPER" \
 
 file_mtime_epoch() {
   local path="$1"
-  stat -f %m "$path" 2>/dev/null \
-    || stat -c %Y "$path" 2>/dev/null \
+  stat -c %Y "$path" 2>/dev/null \
+    || stat -f %m "$path" 2>/dev/null \
     || "$PYTHON_BIN" -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$path"
 }
 
