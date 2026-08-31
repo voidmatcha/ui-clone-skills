@@ -62,6 +62,25 @@ fi
 
 step() { [ "$QUIET" = "1" ] || echo "── $* ──"; }
 fail() { echo "❌ ci-local: $1 FAILED" >&2; exit 1; }
+run_quiet() {
+  local label="$1"
+  local log_path
+  local status
+  shift
+
+  log_path=$(mktemp "${TMPDIR:-/tmp}/ui-clone-ci-${label}.XXXXXX") \
+    || fail "$label (cannot create failure log)"
+  "$@" >"$log_path" 2>&1
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    rm -f "$log_path"
+    return 0
+  fi
+
+  cat "$log_path" >&2
+  rm -f "$log_path"
+  fail "$label"
+}
 
 # Resolve a bash 4+ binary and put it FIRST on PATH before anything runs.
 # macOS ships bash 3.2 as /bin/bash, which cannot parse a heredoc nested inside
@@ -110,8 +129,8 @@ DEFAULT_PYTEST_WORKERS=$(python3 -c 'import os; print(min(os.cpu_count() or 1, 4
 PYTEST_WORKERS="${UI_CLONE_PYTEST_WORKERS:-$DEFAULT_PYTEST_WORKERS}"
 step "Tests"
 if [ "$QUIET" = "1" ]; then
-  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q \
-    -n "$PYTEST_WORKERS" --dist loadfile >/dev/null 2>&1 || fail "tests"
+  run_quiet "tests" "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q \
+    -n "$PYTEST_WORKERS" --dist loadfile
 else
   "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q \
     -n "$PYTEST_WORKERS" --dist loadfile || fail "tests"
@@ -120,7 +139,7 @@ fi
 # 2. Type check (mypy)
 step "Type check"
 if [ "$QUIET" = "1" ]; then
-  uv run python -m mypy ui_clone/ tests/ >/dev/null 2>&1 || fail "mypy"
+  run_quiet "mypy" uv run python -m mypy ui_clone/ tests/
 else
   uv run python -m mypy ui_clone/ tests/ || fail "mypy"
 fi
@@ -128,7 +147,7 @@ fi
 # 3. Lint check (ruff)
 step "Lint check"
 if [ "$QUIET" = "1" ]; then
-  uv run python -m ruff check ui_clone/ tests/ >/dev/null 2>&1 || fail "ruff"
+  run_quiet "ruff" uv run python -m ruff check ui_clone/ tests/
 else
   uv run python -m ruff check ui_clone/ tests/ || fail "ruff"
 fi
@@ -164,7 +183,7 @@ done
 # ahead of calling ci-local.
 step "Review checks"
 if [ "$QUIET" = "1" ]; then
-  bash scripts/ci/review.sh --quiet >/dev/null 2>&1 || fail "review.sh"
+  run_quiet "review.sh" bash scripts/ci/review.sh --quiet
 else
   bash scripts/ci/review.sh || fail "review.sh"
 fi
@@ -174,7 +193,7 @@ fi
 # source). See scripts/ci/check-universality.sh header for the full set.
 step "Universality (no maintainer-bias drift)"
 if [ "$QUIET" = "1" ]; then
-  bash scripts/ci/check-universality.sh >/dev/null 2>&1 || fail "check-universality.sh"
+  run_quiet "check-universality.sh" bash scripts/ci/check-universality.sh
 else
   bash scripts/ci/check-universality.sh || fail "check-universality.sh"
 fi
@@ -184,7 +203,7 @@ fi
 # denylist entry getting dropped, language scanner no-opping on a platform).
 step "Drift smoke test"
 if [ "$QUIET" = "1" ]; then
-  bash scripts/ci/test-parity.sh >/dev/null 2>&1 || fail "test-parity.sh"
+  run_quiet "test-parity.sh" bash scripts/ci/test-parity.sh
 else
   bash scripts/ci/test-parity.sh || fail "test-parity.sh"
 fi

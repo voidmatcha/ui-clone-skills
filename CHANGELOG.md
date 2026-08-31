@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.7.39] - 2026-09-01
+
+### Fixed
+
+- Quiet CI runs now retain and print the complete output from a failing step,
+  so Linux-only test failures remain diagnosable in GitHub Actions logs while
+  successful runs stay silent.
+
 ## [0.7.38] - 2026-08-31
 
 ### Fixed

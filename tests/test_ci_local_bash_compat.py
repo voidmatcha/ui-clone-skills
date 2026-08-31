@@ -29,3 +29,12 @@ def test_ci_local_caps_default_pytest_workers_under_shared_host_load() -> None:
         'PYTEST_WORKERS="${UI_CLONE_PYTEST_WORKERS:-$DEFAULT_PYTEST_WORKERS}"'
         in source
     )
+
+
+def test_ci_local_quiet_mode_preserves_failure_output() -> None:
+    source = CI_LOCAL.read_text(encoding="utf-8")
+
+    assert "run_quiet()" in source
+    assert 'cat "$log_path" >&2' in source
+    assert 'run_quiet "tests" "${PYTEST_ENV[@]}" uv run python -m pytest' in source
+    assert '>/dev/null 2>&1 || fail "tests"' not in source
