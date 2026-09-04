@@ -82,6 +82,11 @@ def _make_fake_agent_browser(
         'if [ "$1" = "open" ]; then\n'
         f"  exit {open_returncode}\n"
         'elif [ "$1" = "eval" ]; then\n'
+        # capture-hover.sh pipes the eval script in on stdin. Consume it: a
+        # reader that exits without draining makes the writer's exit status
+        # depend on scheduling, and `set -o pipefail` in capture-hover.sh turns
+        # that into a spurious "agent-browser eval failed".
+        '  cat >/dev/null 2>/dev/null || true\n'
         f"  echo '{eval_payload}'\n"
         f"  exit {eval_returncode}\n"
         "fi\n"
@@ -473,7 +478,7 @@ def test_js_only_candidate_emits_entry_with_runtime_changes(
     ]
     bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
     proc = _run_capture_hover(ref_dir, bin_dir)
-    assert proc.returncode == 0
+    assert proc.returncode == 0, proc.stderr
 
     hover_dir = ref_dir / "states" / "hover"
     manifest = json.loads((hover_dir / "manifest.json").read_text())
@@ -498,7 +503,7 @@ def test_descendant_hover_records_affected_scope_distinct_from_activation(
     ]
     bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
     proc = _run_capture_hover(ref_dir, bin_dir)
-    assert proc.returncode == 0
+    assert proc.returncode == 0, proc.stderr
 
     hover_dir = ref_dir / "states" / "hover"
     manifest = json.loads((hover_dir / "manifest.json").read_text())
@@ -518,7 +523,7 @@ def test_combined_css_and_js_signal(tmp_path: Path) -> None:
     ]
     bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(results))
     proc = _run_capture_hover(ref_dir, bin_dir)
-    assert proc.returncode == 0
+    assert proc.returncode == 0, proc.stderr
 
     hover_dir = ref_dir / "states" / "hover"
     manifest = json.loads((hover_dir / "manifest.json").read_text())
@@ -594,7 +599,7 @@ def test_derived_session_used_by_default(tmp_path: Path) -> None:
     ref_dir = tmp_path / "ref"
     bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload([]))
     proc = _run_capture_hover(ref_dir, bin_dir, reuse_session=False)
-    assert proc.returncode == 0
+    assert proc.returncode == 0, proc.stderr
     calls = (tmp_path / "calls.log").read_text()
     assert "sess1-hover" in calls
     assert "--session sess1-hover close" in calls
@@ -610,7 +615,7 @@ def test_reuse_session_flag_uses_callers_session(tmp_path: Path) -> None:
     ref_dir = tmp_path / "ref"
     bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload([]))
     proc = _run_capture_hover(ref_dir, bin_dir, reuse_session=True)
-    assert proc.returncode == 0
+    assert proc.returncode == 0, proc.stderr
     calls = (tmp_path / "calls.log").read_text()
     assert "--session sess1 " in (calls + " ")
     assert "sess1-hover" not in calls
@@ -631,7 +636,7 @@ def test_summary_carries_cap_metadata(tmp_path: Path) -> None:
         ),
     )
     proc = _run_capture_hover(ref_dir, bin_dir)
-    assert proc.returncode == 0
+    assert proc.returncode == 0, proc.stderr
     summary = json.loads((ref_dir / "states" / "hover" / "summary.json").read_text())
     assert summary["candidatesFound"] == 150
     assert summary["candidatesProcessed"] == 50
