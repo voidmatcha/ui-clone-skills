@@ -81,6 +81,186 @@ def test_parse_bundles_detects_gsap_scrolltrigger(tmp_path: Path) -> None:
     assert "scrollTrigger" in kinds, f"expected scrollTrigger in {kinds}"
 
 
+def test_parse_bundles_captures_nested_scrolltrigger_tween(tmp_path: Path) -> None:
+    """The canonical scroll-driven form nests its config:
+    `gsap.to(target, {y, scrollTrigger: {...}})`. A flat-brace pattern cannot
+    match it, so these sites were skipped and the spec came out empty."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text(
+        'gsap.to(e,{y:-100,scrollTrigger:{trigger:e,start:"top bottom",scrub:1}});'
+    )
+    gsap = mod.parse_bundles(tmp_path)["extractions"].get("gsap")
+
+    assert gsap, "nested scrollTrigger tween must be captured"
+    entry = gsap[0]
+    assert entry["kind"] == "tween"
+    assert entry["scrollLinked"] is True
+    assert "scrollTrigger" in entry["config"][0]
+    assert "scrub:1" in entry["config"][0]
+
+
+def test_parse_bundles_captures_fromto_second_object(tmp_path: Path) -> None:
+    """fromTo(target, fromVars, toVars) carries scrollTrigger in the TO object,
+    so reading only the first object loses the scroll linkage."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text(
+        "gsap.fromTo(n,{autoAlpha:0},{autoAlpha:1,scrollTrigger:{trigger:n,scrub:!0}});"
+    )
+    gsap = mod.parse_bundles(tmp_path)["extractions"].get("gsap")
+
+    assert gsap, "fromTo site must be captured"
+    entry = gsap[0]
+    assert len(entry["config"]) == 2, entry["config"]
+    assert "autoAlpha:0" in entry["config"][0]
+    assert "scrollTrigger" in entry["config"][1]
+    assert entry["scrollLinked"] is True
+
+
+def test_parse_bundles_captures_timeline_nested_defaults(tmp_path: Path) -> None:
+    """`gsap.timeline({defaults:{...}})` previously matched with an EMPTY
+    capture group, recording a call site that carried no parameters."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text(
+        'gsap.timeline({defaults:{ease:"none"},scrollTrigger:{trigger:".hero",scrub:!0}});'
+    )
+    gsap = mod.parse_bundles(tmp_path)["extractions"].get("gsap")
+
+    assert gsap
+    entry = gsap[0]
+    assert entry["kind"] == "timeline"
+    assert entry["config"], "timeline config must not be empty"
+    assert 'ease:"none"' in entry["config"][0]
+    assert entry["scrollLinked"] is True
+
+
+def test_parse_bundles_gsap_object_scan_respects_string_literals(tmp_path: Path) -> None:
+    """A brace inside a quoted value must not unbalance the scan."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text('gsap.to(e,{ease:"a}b",y:{v:1}});')
+    gsap = mod.parse_bundles(tmp_path)["extractions"].get("gsap")
+
+    assert gsap
+    assert gsap[0]["config"][0] == '{ease:"a}b",y:{v:1}}'
+
+
+def test_parse_bundles_gsap_bare_timeline_is_low_confidence(tmp_path: Path) -> None:
+    """`gsap.timeline()` with no config carries no parameters, so it must not
+    be reported at the same confidence as a site that parsed one."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text("var t=gsap.timeline();")
+    gsap = mod.parse_bundles(tmp_path)["extractions"].get("gsap")
+
+    assert gsap
+    assert gsap[0]["config"] == []
+    assert gsap[0]["confidence"] == "low"
+
+
+def test_parse_bundles_captures_anime_keyframe_arrays(tmp_path: Path) -> None:
+    """anime keyframes are arrays of objects, so the config cannot be read with
+    a flat brace pattern — the whole construction site was skipped."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text(
+        'anime({targets:".x",translateY:[{value:0},{value:100}],duration:800});'
+    )
+    anime = mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+    assert anime, "anime keyframe site must be captured"
+    assert "translateY" in anime[0]["config"]
+    assert "value:100" in anime[0]["config"]
+
+
+def test_parse_bundles_skips_anime_call_without_object(tmp_path: Path) -> None:
+    """`anime(x)` passes a variable, not a config — it carries no parameters
+    and must not be reported as a construction site."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text("var q=anime(x);")
+    anime = mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+    assert not anime, anime
+
+
+def test_parse_bundles_captures_lenis_with_nested_options(tmp_path: Path) -> None:
+    """A nested option group (`prevent:{wheel:!0}`) previously made the whole
+    Lenis constructor site unmatchable."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "scroll.js").write_text("new Lenis({lerp:.1,prevent:{wheel:!0}});")
+    lenis = mod.parse_bundles(tmp_path)["extractions"].get("lenis")
+
+    assert lenis, "nested Lenis config must still be captured"
+    assert lenis[0]["options"].get("lerp") == ".1"
+
+
+def test_parse_bundles_captures_minified_gsap_binding(tmp_path: Path) -> None:
+    """Bundlers rename the imported `gsap` binding, so production call sites read
+    `o.timeline({...})`. Requiring the literal prefix found only the library's own
+    internals and missed every application tween."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "page.js").write_text(
+        'i=o.timeline({scrollTrigger:{trigger:e,start:()=>"0% 0%",scrub:!0}});'
+        'r.to(m,{y:"10px",duration:.6,ease:"power3.out"});'
+    )
+    gsap = mod.parse_bundles(tmp_path)["extractions"].get("gsap")
+
+    assert gsap, "aliased GSAP call sites must be captured"
+    kinds = sorted(g["kind"] for g in gsap)
+    assert kinds == ["timeline", "tween"], kinds
+    timeline = next(g for g in gsap if g["kind"] == "timeline")
+    assert timeline["binding"] == "o"
+    assert timeline["scrollLinked"] is True
+    assert "scrub:!0" in timeline["config"][0]
+
+
+def test_parse_bundles_captures_minified_scrolltrigger_create(tmp_path: Path) -> None:
+    """ScrollTrigger.create through a renamed binding still describes a scroll
+    range, so the trigger/start/end keys identify it."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "page.js").write_text(
+        'f=w.create({trigger:e,start:()=>"0 50%",end:()=>"+=1",onEnter:()=>{}});'
+    )
+    gsap = mod.parse_bundles(tmp_path)["extractions"].get("gsap")
+
+    assert gsap
+    assert gsap[0]["kind"] == "scrollTrigger"
+    assert gsap[0]["binding"] == "w"
+    assert gsap[0]["scrollLinked"] is True
+
+
+def test_parse_bundles_ignores_unrelated_to_calls(tmp_path: Path) -> None:
+    """A `.to()` on an unrelated object carries no GSAP option keys and must not
+    be reported — the alias match is confirmed by config, not by name alone."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "misc.js").write_text(
+        'db.to({table:"users",where:{id:1}});'
+        'r.to(x,{limit:10,offset:0});'
+        "q.timeline();"
+    )
+    gsap = mod.parse_bundles(tmp_path)["extractions"].get("gsap")
+
+    assert not gsap, gsap
+
+
 def test_main_writes_json_artifact(tmp_path: Path) -> None:
     """End-to-end: main(argv) writes a valid JSON file at the requested path."""
     mod = _load_module()

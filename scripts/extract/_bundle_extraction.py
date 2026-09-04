@@ -60,13 +60,70 @@ def _find_file_for_offset(file_offsets: list[tuple[str, int]], off: int) -> str:
     return fname
 
 
+# Object arguments in real bundles nest: `gsap.to(e,{y:-100,scrollTrigger:{...}})`
+# is the canonical scroll-driven form. A `\{[^{}]*\}` pattern cannot express that
+# — the character class excludes the very braces the nested config needs — so
+# those call sites were skipped entirely and the spec came out under-populated.
+# Scan for the balanced closing brace instead, stepping over string literals so
+# a `{` or `}` inside a quoted value does not unbalance the count.
+_MAX_OBJECT_SPAN = 20000
+
+
+def _balanced_object(text: str, open_index: int, limit: int = _MAX_OBJECT_SPAN) -> str | None:
+    """Return the `{...}` literal starting at `open_index`, or None.
+
+    None when the text does not start with `{`, the braces never balance, or the
+    literal runs past `limit` (a runaway match on a minified megabundle).
+    """
+    if open_index >= len(text) or text[open_index] != "{":
+        return None
+    depth = 0
+    index = open_index
+    end = min(len(text), open_index + limit)
+    quote: str | None = None
+    while index < end:
+        char = text[index]
+        if quote is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "\"'`":
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_index:index + 1]
+        index += 1
+    return None
+
+
+def _object_after(text: str, index: int) -> tuple[str | None, int]:
+    """Skip whitespace from `index` and read a balanced object literal.
+
+    Returns (literal, index just past it); (None, index) when the next
+    non-space character does not open an object.
+    """
+    while index < len(text) and text[index].isspace():
+        index += 1
+    literal = _balanced_object(text, index)
+    if literal is None:
+        return None, index
+    return literal, index + len(literal)
+
+
 def _extract_lenis(all_text: str, file_offsets: list[tuple[str, int]]) -> list[dict]:
     """Find `new Lenis({...})` constructor sites and parse their options."""
     extracts: list[dict] = []
     if not (detect_in_text(all_text, "new Lenis(") or detect_in_text(all_text, "lerp:")):
         return extracts
-    for m in re.finditer(r"new\s+Lenis\s*\(\s*(\{[^{}]{0,500}\})", all_text):
-        opts_raw = m.group(1)
+    for m in re.finditer(r"new\s+Lenis\s*\(", all_text):
+        opts_raw, _ = _object_after(all_text, m.end())
+        if opts_raw is None:
+            continue
         opts: dict = {}
         for key in ("lerp", "duration", "smoothWheel", "smoothTouch", "touchMultiplier", "direction", "easing"):
             km = re.search(rf"{key}\s*:\s*([^,}}\n]+)", opts_raw)
@@ -80,21 +137,121 @@ def _extract_lenis(all_text: str, file_offsets: list[tuple[str, int]]) -> list[d
     return extracts
 
 
+# Bundlers rename the imported `gsap` binding, so production call sites read
+# `o.timeline({...})` / `r.to(el,{...})`, not `gsap.to(...)`. Requiring the
+# literal prefix finds only the library's own internals (`gsap.registerPlugin`,
+# `gsap.scaleX`) and misses every application tween. Match any short identifier
+# and confirm the call is GSAP by the option keys its config carries — those
+# keys are API names and survive minification, unlike the binding.
+_GSAP_TWEEN_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\.(to|from|fromTo)\s*\(")
+_GSAP_TIMELINE_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\.timeline\s*\(")
+_SCROLLTRIGGER_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\.create\s*\(")
+
+# Option names that identify a GSAP config. Deliberately API-specific: a generic
+# `.to()` on an unrelated object will not carry these.
+_GSAP_CONFIG_KEYS = (
+    "scrollTrigger", "ease", "duration", "stagger", "repeat", "yoyo",
+    "autoAlpha", "keyframes", "motionPath", "overwrite", "transformOrigin",
+    "onUpdate", "onComplete", "onStart", "scrub", "delay",
+)
+# A ScrollTrigger.create config always describes a scroll range.
+_SCROLLTRIGGER_CONFIG_KEYS = ("trigger", "start", "end", "scrub", "pin", "onEnter")
+
+
+def _looks_like_gsap_config(configs: list[str], keys: tuple[str, ...]) -> bool:
+    """True when any config object declares one of `keys` as a property."""
+    for config in configs:
+        for key in keys:
+            if re.search(rf"[{{,\s]{key}\s*:", config):
+                return True
+    return False
+
+
+def _gsap_call_entry(
+    kind: str,
+    match_start: int,
+    file_offsets: list[tuple[str, int]],
+    configs: list[str],
+    raw: str,
+) -> dict:
+    """One construction-site row, tagged with the config text actually read."""
+    joined = " ".join(configs)
+    return {
+        "kind": kind,
+        "source": _find_file_for_offset(file_offsets, match_start),
+        "raw": raw[:200],
+        # The full config is what Phase 5d maps to transitions[]; `raw` stays
+        # truncated for readability but must not be the only record, or a
+        # nested scrollTrigger falls off the end of the 200-char window.
+        "config": [c[:2000] for c in configs],
+        "scrollLinked": "scrollTrigger" in joined or "ScrollTrigger" in joined,
+        # A site whose object argument parsed is worth more than a bare name
+        # match: `gsap.timeline()` with no config carries no parameters at all.
+        "confidence": "medium" if configs else "low",
+    }
+
+
 def _extract_gsap(all_text: str, file_offsets: list[tuple[str, int]]) -> list[dict]:
-    """Find GSAP timeline/tween/ScrollTrigger construction sites."""
+    """Find GSAP timeline/tween/ScrollTrigger construction sites.
+
+    Object arguments are read with a balanced-brace scan, so the nested
+    `scrollTrigger: {...}` config that defines scroll-driven motion is captured
+    rather than skipped.
+    """
     calls: list[dict] = []
-    for pattern, kind in [
-        (r"gsap\.timeline\s*\(\s*(\{[^{}]{0,300}\})?", "timeline"),
-        (r"gsap\.(?:to|from|fromTo)\s*\(\s*([^,]+)\s*,\s*(\{[^{}]{0,500}\})", "tween"),
-        (r"ScrollTrigger\.create\s*\(\s*(\{[^{}]{0,500}\})", "scrollTrigger"),
-    ]:
-        for m in re.finditer(pattern, all_text):
-            calls.append({
-                "kind": kind,
-                "source": _find_file_for_offset(file_offsets, m.start()),
-                "raw": m.group(0)[:200],
-                "confidence": "medium",  # minified args hard to fully parse
-            })
+
+    for m in _GSAP_TWEEN_RE.finditer(all_text):
+        binding, verb = m.group(1), m.group(2)
+        cursor = m.end()
+        # Target argument: everything up to the comma that precedes the first
+        # object. Bounded so a malformed site cannot scan the whole bundle.
+        comma = all_text.find(",", cursor, cursor + 400)
+        if comma == -1:
+            continue
+        configs: list[str] = []
+        first, after_first = _object_after(all_text, comma + 1)
+        if first is not None:
+            configs.append(first)
+            if verb == "fromTo":
+                # fromTo(target, fromVars, toVars) — the TO object is the one
+                # that carries scrollTrigger, so reading only the first
+                # argument misses the scroll linkage entirely.
+                comma2 = all_text.find(",", after_first, after_first + 40)
+                if comma2 != -1:
+                    second, _ = _object_after(all_text, comma2 + 1)
+                    if second is not None:
+                        configs.append(second)
+        if binding != "gsap" and not _looks_like_gsap_config(configs, _GSAP_CONFIG_KEYS):
+            continue
+        entry = _gsap_call_entry("tween", m.start(), file_offsets, configs, all_text[m.start():m.end() + 200])
+        entry["binding"] = binding
+        calls.append(entry)
+
+    for m in _GSAP_TIMELINE_RE.finditer(all_text):
+        binding = m.group(1)
+        config, _ = _object_after(all_text, m.end())
+        configs = [config] if config is not None else []
+        # A bare `x.timeline()` carries no evidence it is GSAP at all; only the
+        # literal binding is trusted without config keys.
+        if binding != "gsap" and not _looks_like_gsap_config(configs, _GSAP_CONFIG_KEYS):
+            continue
+        entry = _gsap_call_entry("timeline", m.start(), file_offsets, configs, all_text[m.start():m.end() + 200])
+        entry["binding"] = binding
+        calls.append(entry)
+
+    for m in _SCROLLTRIGGER_RE.finditer(all_text):
+        binding = m.group(1)
+        config, _ = _object_after(all_text, m.end())
+        configs = [config] if config is not None else []
+        if binding != "ScrollTrigger" and not _looks_like_gsap_config(
+            configs, _SCROLLTRIGGER_CONFIG_KEYS
+        ):
+            continue
+        entry = _gsap_call_entry("scrollTrigger", m.start(), file_offsets, configs, all_text[m.start():m.end() + 200])
+        entry["scrollLinked"] = True
+        entry["binding"] = binding
+        calls.append(entry)
+
     return calls
 
 
@@ -231,12 +388,23 @@ def _extract_framer_motion(all_text: str, file_offsets: list[tuple[str, int]]) -
 
 
 def _extract_anime_js(all_text: str, file_offsets: list[tuple[str, int]]) -> list[dict]:
-    """Find anime() construction sites."""
+    """Find anime() construction sites and read their config object.
+
+    Keyframe values are arrays of objects (`translateY:[{value:0},{value:100}]`),
+    so the config has to be read with a balanced scan rather than a flat
+    brace pattern.
+    """
     calls: list[dict] = []
-    for m in re.finditer(r"anime\s*\(\s*(\{[^{}]{0,500}\})", all_text):
+    for m in re.finditer(r"\banime\s*\(", all_text):
+        config, _ = _object_after(all_text, m.end())
+        if config is None:
+            # No object argument — `anime(` here is a call through a variable or
+            # an unrelated identifier, not a construction site with parameters.
+            continue
         calls.append({
             "source": _find_file_for_offset(file_offsets, m.start()),
-            "raw": m.group(0)[:200],
+            "raw": all_text[m.start():m.end() + 200][:200],
+            "config": config[:2000],
             "confidence": "medium",
         })
     return calls
