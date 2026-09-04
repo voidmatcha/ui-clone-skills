@@ -1,0 +1,39 @@
+<!doctype html>
+<html class="lenis lenis-smooth" data-scroll-engine="lenis">
+  <head>
+    <meta charset="utf-8">
+    <title>Replay Track Lenis Shim</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 2000px;
+        background: white;
+      }
+      .lenis-label {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 200px;
+        height: 40px;
+        background: rgb(255, 255, 255);
+        opacity: 1;
+        transform: translateY(0px);
+      }
+    </style>
+  </head>
+  <body data-lenis>
+    <span class="lenis-label">Lenis shim</span>
+    <script>
+      window.__lenis = {
+        scroll: 0,
+        animatedScroll: 0,
+        scrollTo(top) {
+          this.scroll = Number(top);
+          this.animatedScroll = Number(top);
+          window.scrollTo({ top: Number(top), left: 0, behavior: "instant" });
+        },
+      };
+    </script>
+  </body>
+</html>

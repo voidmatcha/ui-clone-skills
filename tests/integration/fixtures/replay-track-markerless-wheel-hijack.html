@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Replay Track Markerless Wheel Hijack</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 2000px;
+        background: white;
+      }
+      .wheel-label {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 200px;
+        height: 40px;
+        background: rgb(255, 255, 255);
+      }
+    </style>
+  </head>
+  <body>
+    <span class="wheel-label">Markerless wheel hijack</span>
+    <script>
+      window.virtualScroll = 0;
+      window.addEventListener("wheel", (event) => {
+        event.preventDefault();
+        window.virtualScroll += event.deltaY;
+      }, { passive: false });
+    </script>
+  </body>
+</html>

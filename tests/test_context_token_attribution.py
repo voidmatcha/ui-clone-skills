@@ -143,7 +143,7 @@ def test_redacts_home_and_macos_temp_paths_from_report_details(tmp_path: Path) -
     analyzer = _load_module()
     repo = tmp_path / "repo"
     repo.mkdir()
-    macos_temp = "/private/var/folders/61/cache/T/pytest-of-yongjae/pytest-1/test_case0/output.txt"
+    macos_temp = "/private/var/folders/61/cache/T/pytest-of-localuser/pytest-1/test_case0/output.txt"
 
     normalized = analyzer.normalize_repo_path(macos_temp, repo)
     normalized_encoded_home = analyzer.normalize_repo_path(
@@ -169,7 +169,7 @@ def test_redacts_home_and_macos_temp_paths_from_report_details(tmp_path: Path) -
     ).to_dict()
 
     assert normalized.startswith("<temp>/")
-    assert "yongjae" not in normalized
+    assert "localuser" not in normalized
     assert Path.home().name not in normalized_encoded_home
     assert "-Users-<user>-Documents-ui-clone-skills" in normalized_encoded_home
     assert command_shape == "tail -<n> <path>"

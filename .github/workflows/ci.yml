@@ -44,6 +44,33 @@ jobs:
           UI_CLONE_PYTEST_WORKERS: "4"
         run: bash scripts/ci/ci-local.sh --quiet
 
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "latest"
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "20"
+
+      - name: Install node dependencies
+        run: npm ci
+
+      # Scoped to the replay-track file: it drives playwright-core directly,
+      # while every other tests/integration/ module needs `agent-browser`,
+      # which this runner does not install. The recorder launches
+      # `channel: "chrome"`, which ubuntu-latest already provides.
+      # Deliberately not in ci-local.sh: that script mirrors the `test` job and
+      # stays npm-free so the local iteration loop does not pay for npm ci.
+      - name: Replay-track integration suite
+        run: >-
+          UI_CLONE_INTEGRATION=1 uv run python -m pytest
+          tests/integration/test_capture_replay_track_integration.py -q
+
   security:
     runs-on: ubuntu-latest
     steps:

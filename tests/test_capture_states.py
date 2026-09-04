@@ -105,6 +105,16 @@ def test_init_sampler_waits_for_document_root_before_computing_state() -> None:
     assert script.index(wait_marker) < script.index("const startedAt = performance.now()")
 
 
+def test_fullscreen_overlay_capture_extends_until_exit() -> None:
+    """Cold-cache loaders may outlive the ordinary 5s observation window."""
+    script = SCRIPT.read_text()
+
+    assert "awaitingInitialOverlayExit ? 15000 : 5000" in script
+    assert "!awaitingInitialOverlayExit && (now - lastChangeAt) >= 2000" in script
+    assert "if (initialOverlayExited) break" in script
+    assert "elapsed >= captureLimitMs" in script
+
+
 def test_overlay_candidate_matches_runtime_probe_visibility_threshold() -> None:
     """Capture overlay detection must mirror the runtime splash probe predicate."""
     script = SCRIPT.read_text()
@@ -693,6 +703,32 @@ def test_invalid_eval_response_exit_3(tmp_path: Path) -> None:
     bin_dir = _make_fake_agent_browser(tmp_path, "not json{{{")
     proc = _run_capture_states(ref_dir, bin_dir)
     assert proc.returncode == 3
+
+
+def test_about_blank_eval_envelope_fails_closed(tmp_path: Path) -> None:
+    """A wrong-origin envelope fails closed and publishes no capture output."""
+    ref_dir = tmp_path / "ref"
+    payload = json.dumps({
+        "success": True,
+        "data": {
+            "origin": "about:blank",
+            "result": {
+                "states": [],
+                "durationMs": 100,
+                "polls": 0,
+                "timedOut": False,
+                "reason": "no-change",
+            },
+        },
+    }).replace("'", "'\\''")
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+
+    proc = _run_capture_states(ref_dir, bin_dir)
+
+    assert proc.returncode == 3
+    assert "lost the page target" in proc.stderr
+    assert not (ref_dir / "states" / "splash" / "summary.json").exists()
+    assert not (ref_dir / "states" / "splash" / "trajectory.json").exists()
 
 
 def test_derived_session_used_by_default(tmp_path: Path) -> None:

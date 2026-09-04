@@ -58,6 +58,11 @@ STATES_SESSION="${SESSION}-states"
 if [ "$REUSE_SESSION" = "true" ]; then
   STATES_SESSION="$SESSION"
 fi
+if [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
+  CAPTURE_NAMESPACE_ID="$(printf '%s' "$SESSION" | cksum | awk '{print $1}')"
+  AGENT_BROWSER_NAMESPACE="ui-clone-${CAPTURE_NAMESPACE_ID}"
+  export AGENT_BROWSER_NAMESPACE
+fi
 CAPTURE_MODE="pre-navigation"
 if [ "$REUSE_SESSION" = "true" ]; then
   CAPTURE_MODE="reuse-session"
@@ -67,7 +72,17 @@ OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/splash"
 mkdir -p "$OUTDIR"
 INIT_SCRIPT=""
 RESPONSE_TMP=""
-trap 'rm -f "${INIT_SCRIPT:-}" "${RESPONSE_TMP:-}"' EXIT
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
+
+cleanup() {
+  rm -f "${INIT_SCRIPT:-}" "${RESPONSE_TMP:-}"
+  if [ "$REUSE_SESSION" = "false" ]; then
+    agent-browser --session "$STATES_SESSION" close >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT
 
 # In-page state-hash poller. Single eval — no CLI round-trip per poll.
 # djb2 hash over a composite of: html/body class + scroll lock + full-screen
@@ -287,11 +302,26 @@ EVAL_JS='(async () => {
   });
   lastHash = initial.hash;
   let baselineDomLength = initial.domLength;
+  const initialOverlayIdentity = initial.overlay.identity || initial.overlay.selector;
+  const awaitingInitialOverlayExit = Boolean(
+    initial.overlay.visible && initial.overlay.coverage >= 0.75
+  );
+  // Ordinary pages retain the 5s ceiling. A page that visibly starts behind a
+  // fullscreen overlay gets a longer evidence window because real loaders are
+  // often gated on media/font readiness and can cross 5s under cold-cache or
+  // network variance. Exit as soon as that same overlay disappears.
+  const captureLimitMs = awaitingInitialOverlayExit ? 15000 : 5000;
 
-  while ((performance.now() - startedAt) < 5000) {
+  while ((performance.now() - startedAt) < captureLimitMs) {
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 100)));
     const cur = computeState();
     const now = performance.now();
+    const currentOverlayIdentity = cur.overlay.identity || cur.overlay.selector;
+    const initialOverlayExited = Boolean(
+      awaitingInitialOverlayExit && (
+        !cur.overlay.visible || currentOverlayIdentity !== initialOverlayIdentity
+      )
+    );
     if (cur.hash !== lastHash) {
       const structuralDelta = Math.abs(cur.domLength - baselineDomLength) / Math.max(baselineDomLength, 1);
       const includeFullHTML = structuralDelta > 0.2;  // >20% delta
@@ -315,9 +345,10 @@ EVAL_JS='(async () => {
       lastHash = cur.hash;
       lastChangeAt = now;
       if (includeFullHTML) baselineDomLength = cur.domLength;
-    } else if ((now - lastChangeAt) >= 2000) {
+    } else if (!awaitingInitialOverlayExit && (now - lastChangeAt) >= 2000) {
       break;
     }
+    if (initialOverlayExited) break;
   }
 
   // Settled state — always full
@@ -358,9 +389,9 @@ EVAL_JS='(async () => {
     states,
     durationMs: Math.round(elapsed),
     polls: states.length,
-    timedOut: elapsed >= 5000,
+    timedOut: elapsed >= captureLimitMs,
     reason: states.length <= 1 ? "no-change" :
-            elapsed >= 5000 ? "wall-clock-cap" :
+            elapsed >= captureLimitMs ? "wall-clock-cap" :
             "stable-2s",
   };
 })();'
@@ -385,6 +416,10 @@ RESPONSE_RAW="$(agent-browser --session "$STATES_SESSION" eval --json "$RUN_EVAL
   echo "$RESPONSE_RAW" >&2
   exit 3
 }
+if ! printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR"; then
+  echo "capture-states: agent-browser eval returned a non-page origin (session=$STATES_SESSION)" >&2
+  exit 3
+fi
 
 # Validate + split into trajectory / summary / per-state files via python.
 # Heredoc + stdin pipe conflict — write response to a temp file the python

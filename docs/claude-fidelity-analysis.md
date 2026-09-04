@@ -14,12 +14,13 @@ User hypothesis: claude's sub-agent dispatch is fragmenting context and losing r
 
 ## Method
 
-Extracted 4 claude session JSONL transcripts directly from `~/.claude/projects/-Users-yongjae-Documents-ui-skills/`:
+Extracted 4 Claude session JSONL transcripts from the local project transcript
+directory (`~/.claude/projects/<project-key>/`):
 
-- juanmora claude → session `ccc128e8` (5.9MB, 507 Bash calls)
-- kayiseisagu claude → session `bf380377` (4.8MB, 147 Bash calls)
-- mersi claude → session `b6262607` (1.8MB, 72 Bash calls)
-- ordrhealth claude → session `e1232d6e` (7.2MB, 277 Bash calls)
+- juanmora claude → session A (5.9MB, 507 Bash calls)
+- kayiseisagu claude → session B (4.8MB, 147 Bash calls)
+- mersi claude → session C (1.8MB, 72 Bash calls)
+- ordrhealth claude → session D (7.2MB, 277 Bash calls)
 
 For each: counted `Task` tool dispatches (sub-agent hypothesis), `compact_boundary` events (context-loss hypothesis), hook-deny rate, anti-cheat hack pattern frequency (`stub|shim|aria-hidden display:none|1px|hidden display:none`), and self-screenshot count.
 

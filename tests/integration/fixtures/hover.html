@@ -33,15 +33,6 @@
       font-weight: 600;
       color: #111;
     }
-    /*
-     * #js-card:hover exists ONLY to make `#js-card` a CSSOM-walk candidate
-     * for capture-hover.sh — the script's design (codex item [3]) is that
-     * the CSSOM `:hover` walk is the entry point for ALL probing, including
-     * the JS-handler path. Without this rule the script never dispatches
-     * synthetic events on #js-card and the JS-signal half of the test would
-     * be dead code.
-     */
-    #js-card:hover { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -51,6 +42,7 @@
       <div class="card-title">Hover me (JS)</div>
       <p>Mouseenter triggers JS-only style change — no CSS :hover rule on this element.</p>
     </div>
+    <div class="card" id="auto-card">Autoplay-only state change — not hover.</div>
   </div>
   <script>
     // JS-handler hover signal. capture-hover dispatches mouseover/mouseenter
@@ -64,6 +56,8 @@
       card.style.transform = '';
       card.style.boxShadow = '';
     });
+    const autoCard = document.getElementById('auto-card');
+    setInterval(() => autoCard.classList.toggle('is-playing'), 120);
   </script>
 </body>
 </html>

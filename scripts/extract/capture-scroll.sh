@@ -21,6 +21,7 @@
 # Output:
 #   <ref_dir>/states/scroll/0pct.json … 100pct.json   — per-pct full DOM + visible-section index
 #   <ref_dir>/states/scroll/trajectory.json           — compact per-pct entries (no outerHTML)
+#   <ref_dir>/states/scroll/dom-mutations.json        — scroll-correlated DOM mutation trace
 #   <ref_dir>/states/scroll/summary.json              — {checked, durationMs, scrollHeight, viewportHeight,
 #                                                       finalScrollHeight, infiniteScroll, static, schemaVersion}
 #
@@ -50,234 +51,124 @@ if [ "$REUSE_SESSION" = "true" ]; then
   SCROLL_SESSION="$SESSION"
 fi
 
-OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/scroll"
-mkdir -p "$OUTDIR"
-
-# Open page in the derived session unless reusing the caller's session.
-if [ "$REUSE_SESSION" = "false" ]; then
-  if ! agent-browser --session "$SCROLL_SESSION" open "$URL" >/dev/null 2>&1; then
-    echo "capture-scroll: agent-browser open failed for $URL (session=$SCROLL_SESSION)" >&2
-    exit 2
-  fi
-  sleep 2  # open --wait is not a supported flag; settle explicitly
+# A shared agent-browser daemon can be restarted by an unrelated concurrent
+# capture and silently reopen this session at about:blank. Keep every capture
+# run in a deterministic namespace while preserving an explicit caller choice.
+if [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
+  CAPTURE_NAMESPACE_ID="$(printf '%s' "$SESSION" | cksum | awk '{print $1}')"
+  AGENT_BROWSER_NAMESPACE="ui-clone-${CAPTURE_NAMESPACE_ID}"
+  export AGENT_BROWSER_NAMESPACE
 fi
 
-# In-page scroll sweep. Single eval — no CLI round-trip per stop.
-#
-# Capture review:
-#   (a) Detect Lenis/Locomotive wrapper scroll — `window.scrollY` may not
-#       reflect engine-driven scroll position. Use engine API when present.
-#   (b) Stability loop per stop — 500ms floor + up to 3 × 200ms hash-stable
-#       polls (max ~1.1s per stop). Pure-fixed-wait pattern is brittle for
-#       IO reveals + GSAP scrub on slow machines.
-#   (d) `infiniteScroll` threshold raised 1.1 → 1.5 (lazy-loaded sections
-#       easily grow 10-15% without being infinite feeds). Always expose
-#       `scrollHeightDeltaPct` as numeric for gate consumers to threshold.
-#   (g) Accepted risk: 7 stops × full outerHTML may be multi-MB. Phase A's
-#       heredoc temp-file pattern handles this transport. State-coverage
-#       gate needs per-pct DOM to detect "section X first visible at 75%".
-EVAL_JS='(async () => {
-  const PCTS = [0, 10, 25, 50, 75, 90, 100];
-  const SETTLE_FLOOR_MS = 500;
-  const STABILITY_POLL_MS = 200;
-  const STABILITY_POLLS = 3;
-  const startedAt = performance.now();
-
-  const initialScrollHeight = document.documentElement.scrollHeight;
-  const viewportHeight = window.innerHeight;
-  const maxScrollable = Math.max(0, initialScrollHeight - viewportHeight);
-
-  const cheapHash = (str) => {
-    let h = 5381;
-    for (let i = 0; i < str.length; i++) h = ((h << 5) + h) + str.charCodeAt(i);
-    return h >>> 0;
-  };
-
-  const fingerprintTopElements = () => {
-    const top = [];
-    const all = document.body ? document.body.querySelectorAll("*") : [];
-    let picked = 0;
-    for (const el of all) {
-      try {
-        const r = el.getBoundingClientRect();
-        if (r.top < window.innerHeight && r.bottom > 0 && r.width > 100 && r.height > 50) {
-          const cs = getComputedStyle(el);
-          top.push([cs.color, cs.opacity, cs.transform, cs.visibility, Math.round(r.top), Math.round(r.height)].join(":"));
-          picked++;
-          if (picked >= 3) break;
-        }
-      } catch (e) {}
-    }
-    return top.join("|");
-  };
-
-  // Enumerate top-level section candidates and record those currently in viewport.
-  const visibleSections = () => {
-    const selectors = ["section", "[data-section]", "main > *", "[class*=\"section\"]", "header", "footer", "nav"];
-    const out = [];
-    const seen = new Set();
-    for (const sel of selectors) {
-      let nodes;
-      try { nodes = document.querySelectorAll(sel); } catch (e) { continue; }
-      for (const el of nodes) {
-        if (seen.has(el)) continue;
-        seen.add(el);
-        try {
-          const r = el.getBoundingClientRect();
-          if (r.bottom > 0 && r.top < window.innerHeight && r.width > 50 && r.height > 50) {
-            // Compose a stable selector signal: tag + id-or-class fragment + dataset section
-            const id = el.id ? "#" + el.id : "";
-            const cls = (el.className && typeof el.className === "string")
-              ? "." + el.className.trim().split(/\s+/).slice(0, 2).join(".") : "";
-            const dataSec = el.dataset && el.dataset.section ? "[data-section=" + el.dataset.section + "]" : "";
-            out.push({
-              selector: el.tagName.toLowerCase() + id + cls + dataSec,
-              top: Math.round(r.top),
-              height: Math.round(r.height),
-            });
-            if (out.length >= 30) break;
-          }
-        } catch (e) {}
-      }
-      if (out.length >= 30) break;
-    }
-    return out;
-  };
-
-  // Review item (a): detect wrapper-scroll engines and use their API for scrolling.
-  // Returns the engine name used and the actual scroll position read from the engine.
-  //
-  // Wrapper-scroll false-negative fix. Checking only window globals
-  // (window.lenis / window.Lenis as object) misses module-loaded engines that
-  // do not expose their instance globally. Also probe DOM markers (Lenis adds
-  // class "lenis" on <html>; Locomotive adds "has-scroll-init") and fall
-  // through on class presence. Instance-less paths return null so downstream
-  // performScroll/readScrollY fall back to native API.
-  // NOTE: this JS lives inside a single-quoted shell string upstream; no
-  // ASCII apostrophes allowed in comments or string literals here.
-  const detectScrollEngine = () => {
-    const html = document.documentElement;
-    const lenisInstance = window.lenis
-      || (typeof window.Lenis === "object" ? window.Lenis : null);
-    if (lenisInstance && typeof lenisInstance.scrollTo === "function") {
-      return { name: "lenis", instance: lenisInstance };
-    }
-    if (html.classList.contains("lenis")) {
-      // DOM marker present (Lenis active even when instance is not on window).
-      return { name: "lenis", instance: null };
-    }
-    const loco = window.locomotive || window.locomotiveScroll
-      || (window.scroll && typeof window.scroll.scrollTo === "function" ? window.scroll : null);
-    if (loco && typeof loco.scrollTo === "function") {
-      return { name: "locomotive", instance: loco };
-    }
-    if (html.classList.contains("has-scroll-init")) {
-      return { name: "locomotive", instance: null };
-    }
-    // Last resort: Lenis CLASS loaded but instance hidden in a closure.
-    // Better to label as lenis (no instance) than falsely report native.
-    if (typeof window.Lenis === "function") {
-      return { name: "lenis", instance: null };
-    }
-    return { name: "native", instance: null };
-  };
-
-  const scrollEngine = detectScrollEngine();
-
-  const performScroll = (targetY) => {
-    if (scrollEngine.name === "lenis") {
-      try { scrollEngine.instance.scrollTo(targetY, { immediate: true, force: true }); return; }
-      catch (e) {}
-    }
-    if (scrollEngine.name === "locomotive") {
-      try { scrollEngine.instance.scrollTo(targetY, { duration: 0, disableLerp: true }); return; }
-      catch (e) {}
-    }
-    try { window.scrollTo({ top: targetY, behavior: "instant" }); }
-    catch (e) { window.scrollTo(0, targetY); }
-  };
-
-  const readScrollY = () => {
-    if (scrollEngine.name === "lenis" && scrollEngine.instance) {
-      const s = scrollEngine.instance.scroll;
-      if (typeof s === "number") return Math.round(s);
-    }
-    if (scrollEngine.name === "locomotive" && scrollEngine.instance) {
-      const s = scrollEngine.instance.scroll && scrollEngine.instance.scroll.instance
-        ? scrollEngine.instance.scroll.instance.scroll : null;
-      if (s && typeof s.y === "number") return Math.round(s.y);
-    }
-    return Math.round(window.scrollY);
-  };
-
-  // Review item (b): per-stop stability loop after the 500ms floor.
-  const stabilityWait = async () => {
-    await new Promise(r => requestAnimationFrame(() => setTimeout(r, SETTLE_FLOOR_MS)));
-    let lastHash = cheapHash(fingerprintTopElements());
-    for (let i = 0; i < STABILITY_POLLS; i++) {
-      await new Promise(r => setTimeout(r, STABILITY_POLL_MS));
-      const cur = cheapHash(fingerprintTopElements());
-      if (cur === lastHash) break;
-      lastHash = cur;
-    }
-  };
-
-  const captureAtPct = (pct) => ({
-    pct,
-    scrollY: readScrollY(),
-    outerHTML: document.documentElement.outerHTML,
-    visibleSections: visibleSections(),
-    compositeDigest: fingerprintTopElements().slice(0, 200),
-  });
-
-  const stops = [];
-  const isStatic = maxScrollable <= 0;
-
-  if (isStatic) {
-    // Page fits in viewport — emit only pct=0 snapshot.
-    stops.push(captureAtPct(0));
-  } else {
-    for (const pct of PCTS) {
-      const targetY = Math.round(maxScrollable * pct / 100);
-      performScroll(targetY);
-      await stabilityWait();
-      stops.push(captureAtPct(pct));
-    }
-  }
-
-  const finalScrollHeight = document.documentElement.scrollHeight;
-  // Review item (d): looser threshold + always expose delta percentage.
-  const scrollHeightDeltaPct = initialScrollHeight > 0
-    ? Math.round(((finalScrollHeight - initialScrollHeight) / initialScrollHeight) * 100)
-    : 0;
-  const scrollHeightGrew = !isStatic && finalScrollHeight > initialScrollHeight;
-  const infiniteScroll = !isStatic && finalScrollHeight > initialScrollHeight * 1.5;
-
-  return {
-    stops,
-    durationMs: Math.round(performance.now() - startedAt),
-    scrollHeight: initialScrollHeight,
-    viewportHeight,
-    finalScrollHeight,
-    scrollHeightDeltaPct,
-    scrollHeightGrew,
-    infiniteScroll,
-    scrollEngine: scrollEngine.name,
-    static: isStatic,
-  };
-})();'
+OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/scroll"
+mkdir -p "$(dirname "$OUTDIR")"
+RESPONSE_TMP=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
+EVAL_JS_FILE="$SCRIPT_DIR/capture-scroll-eval.js"
+INIT_JS_FILE="$SCRIPT_DIR/capture-scroll-init.js"
+[ -f "$EVAL_JS_FILE" ] || {
+  echo "capture-scroll: missing $EVAL_JS_FILE" >&2
+  exit 2
+}
+[ -f "$INIT_JS_FILE" ] || {
+  echo "capture-scroll: missing $INIT_JS_FILE" >&2
+  exit 2
+}
 
 EVAL_ATTEMPTS="${CAPTURE_SCROLL_EVAL_ATTEMPTS:-3}"
+EVAL_TIMEOUT_MS="${CAPTURE_SCROLL_TIMEOUT_MS:-25000}"
 if ! [[ "$EVAL_ATTEMPTS" =~ ^[0-9]+$ ]] || [ "$EVAL_ATTEMPTS" -lt 1 ]; then
   EVAL_ATTEMPTS=1
 fi
+if ! [[ "$EVAL_TIMEOUT_MS" =~ ^[0-9]+$ ]] || [ "$EVAL_TIMEOUT_MS" -lt 1000 ]; then
+  EVAL_TIMEOUT_MS=25000
+fi
+# agent-browser treats launch-affecting environment changes between commands
+# as a reason to restart its daemon. Export before `open`; setting this only on
+# `eval` discards the live page and replays the script against about:blank.
+AGENT_BROWSER_DEFAULT_TIMEOUT="$EVAL_TIMEOUT_MS"
+export AGENT_BROWSER_DEFAULT_TIMEOUT
+
+derived_ready_wait_ms() {
+  local splash_summary="${REF_DIR}/${STATES_PREFIX:-states}/splash/summary.json"
+  # RealFood's first-load splash can remain active beyond 2.6s. A fresh
+  # derived session has no shared lifecycle state, so keep a conservative
+  # floor even when the measured splash summary is shorter.
+  local fallback="${CAPTURE_DERIVED_READY_WAIT_MS:-3500}"
+  local buffer="${CAPTURE_DERIVED_READY_BUFFER_MS:-500}"
+  python3 - "$splash_summary" "$fallback" "$buffer" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+def as_nonnegative_int(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+summary_path = Path(sys.argv[1])
+fallback_ms = as_nonnegative_int(sys.argv[2], 3500)
+buffer_ms = as_nonnegative_int(sys.argv[3], 500)
+wait_ms = fallback_ms
+
+if summary_path.is_file():
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        summary = {}
+    if summary.get("checked") is True:
+        duration_ms = as_nonnegative_int(summary.get("durationMs"), 0)
+        wait_ms = max(wait_ms, duration_ms + buffer_ms)
+
+print(wait_ms)
+PY
+}
+
+wait_for_derived_readiness() {
+  local wait_ms
+  wait_ms="$(derived_ready_wait_ms)"
+  if ! agent-browser --session "$SCROLL_SESSION" wait "$wait_ms" >/dev/null 2>&1; then
+    echo "capture-scroll: agent-browser wait failed (session=$SCROLL_SESSION waitMs=$wait_ms)" >&2
+    exit 2
+  fi
+}
+
+cleanup() {
+  rm -f "${RESPONSE_TMP:-}"
+  if [ "$REUSE_SESSION" = "false" ]; then
+    agent-browser --session "$SCROLL_SESSION" close >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT
+
+# Open page in the derived session unless reusing the caller's session.
+if [ "$REUSE_SESSION" = "false" ]; then
+  if ! OPEN_OUTPUT="$(agent-browser --session "$SCROLL_SESSION" --init-script "$INIT_JS_FILE" open "$URL" 2>&1)"; then
+    echo "capture-scroll: agent-browser open failed for $URL (session=$SCROLL_SESSION)" >&2
+    printf '%s\n' "$OPEN_OUTPUT" >&2
+    exit 2
+  fi
+  wait_for_derived_readiness
+fi
+
+# Keep the browser program in a real JavaScript file. Besides making it
+# lintable, this avoids shell quoting drift and lets agent-browser consume the
+# supported --stdin transport without echoing multi-megabyte DOM payloads.
 
 RESPONSE_RAW=""
 EVAL_OK="false"
 for attempt in $(seq 1 "$EVAL_ATTEMPTS"); do
-  if RESPONSE_RAW="$(agent-browser --session "$SCROLL_SESSION" eval --json "$EVAL_JS" 2>&1)"; then
-    EVAL_OK="true"
-    break
+  if RESPONSE_RAW="$(agent-browser --session "$SCROLL_SESSION" eval --json --stdin < "$EVAL_JS_FILE" 2>&1)"; then
+    if printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR"; then
+      EVAL_OK="true"
+      break
+    fi
   fi
 
   echo "capture-scroll: agent-browser eval failed (session=$SCROLL_SESSION attempt=${attempt}/${EVAL_ATTEMPTS})" >&2
@@ -289,9 +180,9 @@ for attempt in $(seq 1 "$EVAL_ATTEMPTS"); do
     # the next attempt a fresh page target without weakening capture
     # requirements or accepting partial scroll data.
     if [ "$REUSE_SESSION" = "false" ]; then
-      agent-browser --session "$SCROLL_SESSION" open "$URL" >/dev/null 2>&1 || true
+      agent-browser --session "$SCROLL_SESSION" --init-script "$INIT_JS_FILE" open "$URL" >/dev/null 2>&1 || true
     fi
-    sleep 2  # open --wait is not a supported flag; settle explicitly
+    wait_for_derived_readiness
   fi
 done
 
@@ -305,10 +196,12 @@ fi
 # block reads via argv. Also handles multi-MB DOM blobs (7 stops × ~500KB).
 RESPONSE_TMP="$(mktemp -t capture-scroll-resp.XXXX)"
 printf '%s' "$RESPONSE_RAW" > "$RESPONSE_TMP"
-trap 'rm -f "$RESPONSE_TMP"' EXIT
 python3 - "$OUTDIR" "$RESPONSE_TMP" <<'PY'
+import atexit
 import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 outdir = Path(sys.argv[1])
@@ -358,9 +251,39 @@ summary = {
     "scrollHeightGrew": parsed.get("scrollHeightGrew", False),
     "infiniteScroll": parsed.get("infiniteScroll", False),
     "scrollEngine": parsed.get("scrollEngine", "native"),
+    "scrollEngineReason": parsed.get("scrollEngineReason", "not reported"),
+    "scrollTransportProven": parsed.get("scrollTransportProven", True),
+    "scrollControlMethod": parsed.get("scrollControlMethod", "not reported"),
     "static": parsed.get("static", False),
-    "schemaVersion": 1,
+    "domMutationCount": len(parsed.get("domMutations", [])),
+    "domMutationTraceTruncated": parsed.get("domMutationTraceTruncated", False),
+    "scanStepPx": parsed.get("scanStepPx", 0),
+    "alignmentFailures": parsed.get("alignmentFailures", []),
+    "schemaVersion": 2,
 }
+
+if not summary["scrollTransportProven"]:
+    print(
+        "capture-scroll: scroll transport is unproven: "
+        f"{summary['scrollEngine']} ({summary['scrollEngineReason']})",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
+if summary["alignmentFailures"]:
+    print(
+        "capture-scroll: failed to align one or more scroll stops: "
+        + json.dumps(summary["alignmentFailures"], ensure_ascii=False),
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
+if not isinstance(stops, list) or not stops:
+    print("capture-scroll: stops must be a non-empty list", file=sys.stderr)
+    sys.exit(3)
+
+staging = Path(tempfile.mkdtemp(prefix=f".{outdir.name}.tmp-", dir=outdir.parent))
+atexit.register(shutil.rmtree, staging, ignore_errors=True)
 
 # Trajectory entries — drop outerHTML; keep pct + scrollY + visibleSections + digest.
 trajectory = []
@@ -368,12 +291,16 @@ for s in stops:
     entry = {k: v for k, v in s.items() if k != "outerHTML"}
     trajectory.append(entry)
 
-(outdir / "trajectory.json").write_text(
+(staging / "trajectory.json").write_text(
     json.dumps(trajectory, ensure_ascii=False, indent=2),
     encoding="utf-8",
 )
-(outdir / "summary.json").write_text(
+(staging / "summary.json").write_text(
     json.dumps(summary, ensure_ascii=False, indent=2),
+    encoding="utf-8",
+)
+(staging / "dom-mutations.json").write_text(
+    json.dumps(parsed.get("domMutations", []), ensure_ascii=False, indent=2),
     encoding="utf-8",
 )
 
@@ -383,7 +310,7 @@ for s in stops:
     html = s.get("outerHTML")
     if pct is None or not html:
         continue
-    (outdir / f"{pct}pct.json").write_text(
+    (staging / f"{pct}pct.json").write_text(
         json.dumps({
             "pct": pct,
             "scrollY": s.get("scrollY", 0),
@@ -392,6 +319,22 @@ for s in stops:
         }, ensure_ascii=False),
         encoding="utf-8",
     )
+
+backup = None
+try:
+    if outdir.exists():
+        backup = Path(tempfile.mkdtemp(prefix=f".{outdir.name}.previous-", dir=outdir.parent))
+        backup.rmdir()
+        outdir.rename(backup)
+    staging.rename(outdir)
+except Exception:
+    if backup is not None and backup.exists() and not outdir.exists():
+        backup.rename(outdir)
+    shutil.rmtree(staging, ignore_errors=True)
+    raise
+else:
+    if backup is not None:
+        shutil.rmtree(backup, ignore_errors=True)
 
 print(f"capture-scroll: wrote {len(trajectory)} stop(s) to {outdir}/", file=sys.stderr)
 PY

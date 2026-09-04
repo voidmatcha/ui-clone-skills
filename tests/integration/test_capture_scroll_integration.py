@@ -108,10 +108,73 @@ def test_scroll_sweep_captures_seven_stops(tmp_path: Path, http_server: str, rep
         f"expected scrollEngine='native' on plain HTML fixture, got "
         f"{summary.get('scrollEngine')!r}; full summary: {summary}"
     )
+    assert summary.get("scrollTransportProven") is True, summary
     assert summary.get("static") is False, (
         f"fixture is 8000px tall — summary.static should be False, got {summary.get('static')!r}"
     )
-    assert summary.get("schemaVersion") == 1, f"schemaVersion drift: {summary}"
+    assert summary.get("schemaVersion") == 2, f"schemaVersion drift: {summary}"
     assert summary.get("scrollHeight", 0) >= 4000, (
         f"scrollHeight={summary.get('scrollHeight')} — fixture should report at least 4000px"
     )
+
+
+def test_marker_only_lenis_fails_without_publishing_artifacts(
+    tmp_path: Path, http_server: str, repo_root: Path
+) -> None:
+    """A Lenis class without a callable transport is not capture proof."""
+    script = repo_root / "scripts" / "extract" / "capture-scroll.sh"
+    url = f"{http_server}replay-track-lenis-marker-only.html"
+    session = f"itsm-{uuid.uuid4().hex[:8]}"
+    ref_dir = tmp_path / "ref-marker"
+    ref_dir.mkdir()
+
+    proc: subprocess.CompletedProcess[str] | None = None
+    try:
+        proc = subprocess.run(
+            [str(script), url, session, str(ref_dir)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ},
+        )
+    finally:
+        _close_session(f"{session}-scroll")
+
+    assert proc is not None
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert "scroll transport is unproven" in proc.stderr
+    assert not (ref_dir / "states" / "scroll").exists()
+
+
+def test_hidden_lenis_with_root_wheel_listener_is_proven(
+    tmp_path: Path, http_server: str, repo_root: Path
+) -> None:
+    """A pre-navigation root listener probe can prove a closure-hidden engine."""
+    script = repo_root / "scripts" / "extract" / "capture-scroll.sh"
+    url = f"{http_server}replay-track-lenis-wheel.html"
+    session = f"itsw-{uuid.uuid4().hex[:8]}"
+    ref_dir = tmp_path / "ref-wheel"
+    ref_dir.mkdir()
+
+    proc: subprocess.CompletedProcess[str] | None = None
+    try:
+        proc = subprocess.run(
+            [str(script), url, session, str(ref_dir)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ},
+        )
+    finally:
+        _close_session(f"{session}-scroll")
+
+    assert proc is not None
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    summary = json.loads(
+        (ref_dir / "states" / "scroll" / "summary.json").read_text()
+    )
+    assert summary["scrollEngine"] == "lenis"
+    assert summary["scrollTransportProven"] is True
+    assert summary["scrollControlMethod"] == "proven-wheel-engine-with-native-positioning"
+    assert "root non-passive wheel listener" in summary["scrollEngineReason"]
+    assert summary["alignmentFailures"] == []

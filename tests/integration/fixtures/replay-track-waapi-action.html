@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Replay Track WAAPI Action</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 2000px;
+        background: white;
+      }
+      .waapi-label {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 200px;
+        height: 40px;
+        background: rgb(255, 255, 255);
+        opacity: 1;
+        transform: translateY(0px);
+      }
+    </style>
+  </head>
+  <body>
+    <span class="waapi-label">WAAPI action</span>
+    <script>
+      let animation = null;
+      addEventListener("scroll", () => {
+        if (scrollY <= 50 || animation) return;
+        const label = document.querySelector(".waapi-label");
+        animation = label.animate(
+          [
+            { opacity: 1, transform: "translateY(0px)" },
+            { opacity: 0.4, transform: "translateY(80px)" },
+          ],
+          { duration: 640, easing: "linear", fill: "both" },
+        );
+      }, { passive: true });
+    </script>
+  </body>
+</html>

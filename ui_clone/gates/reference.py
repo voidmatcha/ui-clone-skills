@@ -16,6 +16,31 @@ if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
 
 
+def _region_entries(regions: Any) -> list[dict[str, Any]]:
+    """Return trigger-classified entries from either supported regions schema.
+
+    Deterministic projectors emit ``{"regions": [...]}``, while the public
+    ui-capture workflow groups entries under ``scroll``/``hover``/``click`` and
+    related trigger families. Gates must consume the same contract the skill
+    tells agents to write.
+    """
+    entries: list[dict[str, Any]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if isinstance(node.get("triggerType"), str):
+                entries.append(node)
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(regions)
+    return entries
+
+
 def _page_height_bound(regions: dict[str, Any], section_map: Any) -> float | None:
     """Best-effort page height for in-bounds checks.
 
@@ -34,7 +59,15 @@ def _page_height_bound(regions: dict[str, Any], section_map: Any) -> float | Non
     if bounds:
         return max(bounds)
     heights: list[float] = []
-    for r in regions.get("regions") or []:
+    page = regions.get("page")
+    if isinstance(page, dict):
+        try:
+            total_height = float(page.get("totalHeight") or 0)
+        except (TypeError, ValueError):
+            total_height = 0
+        if total_height > 0:
+            return total_height
+    for r in _region_entries(regions):
         if isinstance(r, dict) and "height" in r:
             try:
                 heights.append(float(r["height"]))
@@ -59,20 +92,49 @@ def _region_geometry_problems(entry: dict[str, Any], page_height: float | None) 
     selector = entry.get("selector") or entry.get("target")
     if not _is_valid_selector(selector):
         reasons.append(f"{name}: missing/invalid selector")
-    if any(k in entry for k in ("x", "y", "width", "height")):
+    bounds = entry.get("bounds")
+    bounds = bounds if isinstance(bounds, dict) else {}
+    raw_geometry = {
+        "x": entry.get("x", bounds.get("x")),
+        "y": entry.get("y", bounds.get("y", entry.get("from"))),
+        "width": entry.get("width", bounds.get("width", bounds.get("w"))),
+        "height": entry.get("height", bounds.get("height", bounds.get("h"))),
+    }
+    if any(value is not None for value in raw_geometry.values()):
+        geometry: dict[str, float] = {}
         try:
-            x = float(entry.get("x", 0))
-            y = float(entry.get("y", 0))
-            w = float(entry.get("width", 0))
-            h = float(entry.get("height", 0))
+            geometry = {
+                key: float(value)
+                for key, value in raw_geometry.items()
+                if value is not None
+            }
         except (TypeError, ValueError):
             reasons.append(f"{name}: non-numeric geometry")
             return reasons
-        if x < 0 or y < 0 or w <= 0 or h <= 0:
+        declared_size_keys = any(
+            key in entry for key in ("x", "y", "width", "height")
+        ) or any(key in bounds for key in ("x", "y", "width", "height", "w", "h"))
+        if declared_size_keys and not {"width", "height"} <= geometry.keys():
+            # A region that claims geometry must claim all of it; dropping the
+            # absent keys would skip every size and page-bound check below.
+            reasons.append(f"{name}: incomplete geometry")
+        elif (
+            geometry.get("x", 0) < 0
+            or geometry.get("y", 0) < 0
+            or ("width" in geometry and geometry["width"] <= 0)
+            or ("height" in geometry and geometry["height"] <= 0)
+        ):
             reasons.append(f"{name}: degenerate/negative geometry")
-        elif page_height is not None and y + h > page_height + 1:
+        elif (
+            page_height is not None
+            and "y" in geometry
+            and "height" in geometry
+            and geometry["y"] + geometry["height"] > page_height + 1
+        ):
             reasons.append(
-                f"{name}: geometry y+height={y + h:g} exceeds page bound {page_height:g}"
+                f"{name}: geometry y+height="
+                f"{geometry['y'] + geometry['height']:g} exceeds page bound "
+                f"{page_height:g}"
             )
     return reasons
 
@@ -131,7 +193,7 @@ def _has_live_capture_provenance(self: Gate, regions: dict[str, Any]) -> bool:
     if not isinstance(captured, list) or not captured:
         return False
 
-    entries = [entry for entry in regions.get("regions") or [] if isinstance(entry, dict)]
+    entries = _region_entries(regions)
     by_name = {str(entry.get("name") or ""): entry for entry in entries}
     captured_names: set[str] = set()
     counts = summary.get("counts")
@@ -197,9 +259,75 @@ def _has_live_capture_provenance(self: Gate, regions: dict[str, Any]) -> bool:
 
 def _has_real_detection_provenance(self: Gate, regions: dict[str, Any]) -> bool:
     """Accept deterministic projections or browser-measured live captures."""
-    return _has_derived_detection_provenance(regions) or _has_live_capture_provenance(
-        self, regions
+    return (
+        _has_derived_detection_provenance(regions)
+        or _has_live_capture_provenance(self, regions)
+        or _has_inventory_capture_provenance(self, regions)
     )
+
+
+def _has_inventory_capture_provenance(self: Gate, regions: dict[str, Any]) -> bool:
+    """Validate the public ui-capture artifact-inventory handoff.
+
+    Interactive ui-capture runs are intentionally curated rather than emitted
+    by the deterministic bridge. Their machine-checkable provenance is the
+    inventory report: every declared region and concrete artifact path must be
+    present, non-empty, and reported by the inventory checker.
+    """
+    entries = _region_entries(regions)
+    if not entries:
+        return False
+    inventory = self._load_json("capture-artifact-inventory.json")
+    if not isinstance(inventory, dict) or inventory.get("status") != "pass":
+        return False
+    if inventory.get("regionsChecked") != len(entries):
+        return False
+    missing = inventory.get("missingArtifacts")
+    if not isinstance(missing, list) or missing:
+        return False
+    checked = inventory.get("checkedArtifacts")
+    if not isinstance(checked, list) or not checked:
+        return False
+    checked_rows: set[tuple[str, str, str]] = set()
+    ref_root = self.ref_dir.resolve()
+    for row in checked:
+        if not isinstance(row, dict):
+            return False
+        relative = row.get("path")
+        byte_count = row.get("bytes")
+        if not isinstance(relative, str) or not relative or not isinstance(byte_count, int):
+            return False
+        candidate = (self.ref_dir / relative).resolve()
+        try:
+            candidate.relative_to(ref_root)
+        except ValueError:
+            return False
+        if not candidate.is_file() or byte_count <= 0 or candidate.stat().st_size != byte_count:
+            return False
+        checked_rows.add(
+            (
+                str(row.get("region") or ""),
+                str(row.get("triggerType") or ""),
+                relative,
+            )
+        )
+    for index, entry in enumerate(entries):
+        name = str(entry.get("name") or entry.get("selector") or f"region-{index}")
+        trigger = str(entry.get("triggerType") or "")
+        artifacts = entry.get("artifacts")
+        if not isinstance(artifacts, dict) or not artifacts:
+            return False
+        paths = {value for value in artifacts.values() if isinstance(value, str)}
+        region_rows = {
+            path
+            for row_name, row_trigger, path in checked_rows
+            if row_name == name and row_trigger == trigger
+        }
+        # Extra exploratory inventory rows remain allowed, but every artifact
+        # declared by the region must be present and byte-verified.
+        if not paths or not paths.issubset(region_rows):
+            return False
+    return True
 
 
 def _check_regions_not_placeholder(self: Gate) -> CheckResult | None:
@@ -214,8 +342,7 @@ def _check_regions_not_placeholder(self: Gate) -> CheckResult | None:
     regions = self._load_json("regions.json")
     if not isinstance(regions, dict):
         return None
-    entries = regions.get("regions")
-    entries = entries if isinstance(entries, list) else []
+    entries = _region_entries(regions)
     is_placeholder = bool(regions.get("placeholder")) or (
         regions.get("detectionRan") is False
     )
@@ -277,17 +404,18 @@ def _check_regions_not_placeholder(self: Gate) -> CheckResult | None:
         # The real-detection pass path: a non-placeholder file with triggerType
         # entries claims Phase-2 detection ran. Mere shape (triggerType + valid
         # selector) is forgeable, so require either deterministic projection
-        # provenance or matching live-capture evidence.
+        # provenance or matching capture-inventory evidence.
         if not _has_real_detection_provenance(self, regions):
             return CheckResult(
                 "regions.json real-detection provenance",
                 "fail",
                 "regions.json claims real detection (non-placeholder with "
                 "triggerType entries) but carries neither transition-spec "
-                "derivation nor matching live-capture evidence — fabricated "
+                "derivation nor matching capture-inventory evidence — fabricated "
                 "region bands are rejected.",
                 fix="Re-derive regions.json from transition-spec.json + section-map.json, "
-                "or rerun scripts/extract/capture-region-artifacts.py so the summary "
+                "run the ui-capture artifact inventory check, or rerun "
+                "scripts/extract/capture-region-artifacts.py so the summary "
                 "and measured artifact files match regions.json.",
             )
         return None

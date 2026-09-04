@@ -66,9 +66,71 @@ HOVER_SESSION="${SESSION}-hover"
 if [ "$REUSE_SESSION" = "true" ]; then
   HOVER_SESSION="$SESSION"
 fi
+if [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
+  CAPTURE_NAMESPACE_ID="$(printf '%s' "$SESSION" | cksum | awk '{print $1}')"
+  AGENT_BROWSER_NAMESPACE="ui-clone-${CAPTURE_NAMESPACE_ID}"
+  export AGENT_BROWSER_NAMESPACE
+fi
 
 OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/hover"
 mkdir -p "$OUTDIR"
+RESPONSE_TMP=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
+
+derived_ready_wait_ms() {
+  local splash_summary="${REF_DIR}/${STATES_PREFIX:-states}/splash/summary.json"
+  local fallback="${CAPTURE_DERIVED_READY_WAIT_MS:-3500}"
+  local buffer="${CAPTURE_DERIVED_READY_BUFFER_MS:-500}"
+  python3 - "$splash_summary" "$fallback" "$buffer" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+def as_nonnegative_int(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+summary_path = Path(sys.argv[1])
+fallback_ms = as_nonnegative_int(sys.argv[2], 3500)
+buffer_ms = as_nonnegative_int(sys.argv[3], 500)
+wait_ms = fallback_ms
+
+if summary_path.is_file():
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        summary = {}
+    if summary.get("checked") is True:
+        duration_ms = as_nonnegative_int(summary.get("durationMs"), 0)
+        wait_ms = max(wait_ms, duration_ms + buffer_ms)
+
+print(wait_ms)
+PY
+}
+
+wait_for_derived_readiness() {
+  local wait_ms
+  wait_ms="$(derived_ready_wait_ms)"
+  if ! agent-browser --session "$HOVER_SESSION" wait "$wait_ms" >/dev/null 2>&1; then
+    echo "capture-hover: agent-browser wait failed (session=$HOVER_SESSION waitMs=$wait_ms)" >&2
+    exit 2
+  fi
+}
+
+cleanup() {
+  rm -f "${RESPONSE_TMP:-}"
+  if [ "$REUSE_SESSION" = "false" ]; then
+    agent-browser --session "$HOVER_SESSION" close >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT
 
 # Open page in the derived session unless reusing the caller's session.
 if [ "$REUSE_SESSION" = "false" ]; then
@@ -76,17 +138,30 @@ if [ "$REUSE_SESSION" = "false" ]; then
     echo "capture-hover: agent-browser open failed for $URL (session=$HOVER_SESSION)" >&2
     exit 2
   fi
-  sleep 2  # open --wait is not a supported flag; settle explicitly
+  wait_for_derived_readiness
 fi
 
 # Single in-page eval — CSS rule extraction + JS-handler probing in one
-# Promise loop. Total wall time ~50 × (200ms settle + 50ms restore) ≈ 12.5s
-# worst-case, typically 2-5s for sites with <20 hover targets.
+# Promise loop. Each candidate gets a passive control interval before events,
+# so timer/autoplay changes are not mislabeled as hover. Total wall time
+# ~50 × (200ms control + 200ms settle + 50ms restore) ≈ 22.5s worst-case.
 EVAL_JS='(async () => {
   const CAP = 50;
   const SETTLE_MS = 200;
   const RESTORE_MS = 50;
   const startedAt = performance.now();
+  const boundedFrameWait = (delayMs) => new Promise(resolve => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      resolve();
+    };
+    // Background tabs may suspend requestAnimationFrame indefinitely. Keep
+    // the preferred rendered-frame boundary, but guarantee forward progress.
+    setTimeout(finish, delayMs + 50);
+    requestAnimationFrame(() => setTimeout(finish, delayMs));
+  });
   const normalizeSelector = (selector) => selector.trim()
     .replace(/\s+/g, " ")
     .replace(/\s*([>+~])\s*/g, "$1");
@@ -143,8 +218,44 @@ EVAL_JS='(async () => {
     } else {
       candidates.set(key, { activation: r.activation, affected: r.affected,
                             cssProperties: { ...r.cssProperties },
-                            sourceHrefs: [...r.sourceHrefs] });
+                            sourceHrefs: [...r.sourceHrefs], priority: 1000 });
     }
+  }
+  // CSSOM cannot enumerate pure JavaScript hover handlers. Seed a second,
+  // bounded candidate pool from interactive semantics, pointer cursors, and
+  // declared transitions; the runtime diff below keeps only elements whose
+  // synthetic pointer/mouse events actually change style or DOM state.
+  const runtimeSelector = (el) => {
+    const tag = el.localName || "element";
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    for (const attr of ["data-testid", "data-test", "data-cy", "aria-label", "name"]) {
+      const value = el.getAttribute(attr);
+      if (value) return `${tag}[${attr}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"]`;
+    }
+    const classes = Array.from(el.classList || []).filter(Boolean).slice(0, 3);
+    return classes.length ? `${tag}.${classes.map((name) => CSS.escape(name)).join(".")}` : tag;
+  };
+  for (const el of document.querySelectorAll("*")) {
+    let cs, rect;
+    try {
+      cs = getComputedStyle(el);
+      rect = el.getBoundingClientRect();
+    } catch (e) { continue; }
+    if (rect.width < 20 || rect.height < 20 || cs.display === "none" || cs.visibility === "hidden") continue;
+    const semantic = el.matches("a,button,input,select,textarea,[role=button],[role=link],[tabindex]");
+    const pointer = cs.cursor === "pointer";
+    const hasTransition = cs.transitionDuration.split(",").some((value) => parseFloat(value) > 0);
+    if (!semantic && !pointer && !hasTransition) continue;
+    const activation = runtimeSelector(el);
+    const key = activation + "|" + activation;
+    if (candidates.has(key)) continue;
+    candidates.set(key, {
+      activation,
+      affected: activation,
+      cssProperties: {},
+      sourceHrefs: [],
+      priority: (el.id ? 200 : 0) + (pointer ? 100 : 0) + (hasTransition ? 50 : 0) + (semantic ? 25 : 0),
+    });
   }
   // Validate before applying CAP so unused global stylesheet rules cannot
   // consume the live-page capture budget. Affected selectors only need valid
@@ -169,7 +280,9 @@ EVAL_JS='(async () => {
     presentCandidates.push(cand);
   }
   const candidatesFound = presentCandidates.length;
-  const orderedCandidates = presentCandidates.slice(0, CAP);
+  const orderedCandidates = presentCandidates
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0))
+    .slice(0, CAP);
 
   // Fixed property set for computed-style hash.
   const TRACKED = [
@@ -243,10 +356,33 @@ EVAL_JS='(async () => {
       }
     } catch (e) {}
 
+    const controlStart = new Map();
+    const controlStartDom = new Map();
+    for (const el of observed) controlStart.set(el, csSnapshot(el));
+    for (const el of observed) controlStartDom.set(el, domSnapshot(el));
+
+    // Passive A/B control: identify properties changing without any input.
+    // Those signals belong to autoplay/timers/page-load, not hover.
+    await boundedFrameWait(SETTLE_MS);
     const before = new Map();
     const beforeDom = new Map();
-    for (const el of observed) before.set(el, csSnapshot(el));
-    for (const el of observed) beforeDom.set(el, domSnapshot(el));
+    const passiveStyleChanges = new Map();
+    const passiveDomChanges = new Map();
+    for (const [el, start] of controlStart) {
+      if (!el.isConnected) continue;
+      const current = csSnapshot(el);
+      before.set(el, current);
+      passiveStyleChanges.set(el, new Set(TRACKED.filter((key) => current[key] !== start[key])));
+    }
+    for (const [el, start] of controlStartDom) {
+      if (!el.isConnected) continue;
+      const current = domSnapshot(el);
+      beforeDom.set(el, current);
+      passiveDomChanges.set(el, new Set(
+        ["className", "childElementCount", "textHash", "ariaExpanded", "dataState"]
+          .filter((key) => current[key] !== start[key])
+      ));
+    }
 
     // Dispatch synthetic hover events. Catches JS-attached handlers
     // (GSAP, Framer Motion, vanilla listeners). Does NOT activate CSS
@@ -259,13 +395,14 @@ EVAL_JS='(async () => {
       activationEl.dispatchEvent(new MouseEvent("mousemove", opts));
     } catch (e) {}
 
-    await new Promise(r => requestAnimationFrame(() => setTimeout(r, SETTLE_MS)));
+    await boundedFrameWait(SETTLE_MS);
 
     // Snapshot AFTER + diff.
     for (const [el, b] of before) {
       if (!el.isConnected) continue;
       const a = csSnapshot(el);
-      const changedProps = TRACKED.filter(k => a[k] !== b[k]);
+      const passive = passiveStyleChanges.get(el) || new Set();
+      const changedProps = TRACKED.filter(k => a[k] !== b[k] && !passive.has(k));
       if (changedProps.length > 0) {
         result.jsChanges.push({
           selector: elSelector(el),
@@ -281,8 +418,11 @@ EVAL_JS='(async () => {
       }
       const a = domSnapshot(el);
       const changed = {};
+      const passive = passiveDomChanges.get(el) || new Set();
       for (const key of ["className", "childElementCount", "textHash", "ariaExpanded", "dataState"]) {
-        if (a[key] !== b[key]) changed[key] = { before: b[key], after: a[key] };
+        if (a[key] !== b[key] && !passive.has(key)) {
+          changed[key] = { before: b[key], after: a[key] };
+        }
       }
       if (Object.keys(changed).length > 0) {
         result.domChanges.push({ selector: b.selector, changes: changed });
@@ -295,6 +435,56 @@ EVAL_JS='(async () => {
       activationEl.dispatchEvent(new MouseEvent("mouseleave", optsNoBubble));
     } catch (e) {}
     await new Promise(r => setTimeout(r, RESTORE_MS));
+
+    // Pure runtime candidates need a causal replay. Passive media/timer state
+    // can change once during the event window by coincidence; a real hover
+    // response must restore on leave and reproduce on a second enter.
+    if (
+      Object.keys(cand.cssProperties).length === 0 &&
+      (result.jsChanges.length > 0 || result.domChanges.length > 0)
+    ) {
+      const confirmBefore = new Map();
+      const confirmBeforeDom = new Map();
+      for (const el of observed) {
+        if (!el.isConnected) continue;
+        confirmBefore.set(el, csSnapshot(el));
+        confirmBeforeDom.set(el, domSnapshot(el));
+      }
+      try {
+        activationEl.dispatchEvent(new MouseEvent("mouseover", opts));
+        activationEl.dispatchEvent(new MouseEvent("mouseenter", optsNoBubble));
+        activationEl.dispatchEvent(new MouseEvent("mousemove", opts));
+      } catch (e) {}
+      await boundedFrameWait(SETTLE_MS);
+      result.jsChanges = result.jsChanges.filter((change) => {
+        const el = observed.find((candidate) => elSelector(candidate) === change.selector);
+        if (!el || !el.isConnected || !confirmBefore.has(el)) return false;
+        const replayAfter = csSnapshot(el);
+        const replayBefore = confirmBefore.get(el);
+        return Object.keys(change.computedStyleAfter).some((key) => (
+          replayBefore[key] === change.computedStyleBefore[key] &&
+          replayAfter[key] === change.computedStyleAfter[key] &&
+          replayBefore[key] !== replayAfter[key]
+        ));
+      });
+      result.domChanges = result.domChanges.filter((change) => {
+        if (!change.changes) return false;
+        const el = observed.find((candidate) => elSelector(candidate) === change.selector);
+        if (!el || !el.isConnected || !confirmBeforeDom.has(el)) return false;
+        const replayAfter = domSnapshot(el);
+        const replayBefore = confirmBeforeDom.get(el);
+        return Object.entries(change.changes).some(([key, values]) => (
+          replayBefore[key] === values.before &&
+          replayAfter[key] === values.after &&
+          replayBefore[key] !== replayAfter[key]
+        ));
+      });
+      try {
+        activationEl.dispatchEvent(new MouseEvent("mouseout", opts));
+        activationEl.dispatchEvent(new MouseEvent("mouseleave", optsNoBubble));
+      } catch (e) {}
+      await new Promise(r => setTimeout(r, RESTORE_MS));
+    }
 
     if (result.jsChanges.length > 0) result.kind = "css+js";
 
@@ -325,16 +515,19 @@ EVAL_JS='(async () => {
   };
 })();'
 
-RESPONSE_RAW="$(agent-browser --session "$HOVER_SESSION" eval --json "$EVAL_JS" 2>&1)" || {
+RESPONSE_RAW="$(printf '%s' "$EVAL_JS" | agent-browser --session "$HOVER_SESSION" eval --json --stdin 2>&1)" || {
   echo "capture-hover: agent-browser eval failed (session=$HOVER_SESSION)" >&2
   echo "$RESPONSE_RAW" >&2
   exit 3
 }
+if ! printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR"; then
+  echo "capture-hover: agent-browser eval returned a non-page origin (session=$HOVER_SESSION)" >&2
+  exit 3
+fi
 
 # Validate + split into manifest / summary / per-elem files via python.
 RESPONSE_TMP="$(mktemp -t capture-hover-resp.XXXX)"
 printf '%s' "$RESPONSE_RAW" > "$RESPONSE_TMP"
-trap 'rm -f "$RESPONSE_TMP"' EXIT
 python3 - "$OUTDIR" "$RESPONSE_TMP" "$REF_DIR" <<'PY'
 import hashlib
 import json

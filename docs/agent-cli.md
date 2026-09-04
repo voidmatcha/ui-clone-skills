@@ -6,10 +6,6 @@ compatibility.
 
 ## Install / run
 
-```bash
-npx ui-clone-cli --help
-```
-
 From a checkout, use the local bin directly:
 
 ```bash
@@ -27,6 +23,8 @@ dependencies).
 > `ui-clone-cli` may lag this checkout. During local development prefer
 > `node bin/ui-clone ...` (or `python -m ui_clone.*`) over `npx ui-clone-cli`,
 > which resolves to the published version unless the package is npm-linked.
+> Use `npx ui-clone-cli --help` only when intentionally testing the published
+> package compatibility surface.
 
 ## Codex project hooks
 
@@ -56,7 +54,7 @@ review `/hooks` if prompted and start a fresh session.
 ## Pipeline status
 
 ```bash
-npx ui-clone-cli pipeline <url> <component-or-run-dir> <session> status --json
+node bin/ui-clone pipeline <url> <component-or-run-dir> <session> status --json
 ```
 
 Use this before reading raw artifacts. The JSON response includes:
@@ -71,13 +69,13 @@ Use this before reading raw artifacts. The JSON response includes:
 The pipeline command also supports shorthand:
 
 ```bash
-npx ui-clone-cli <url> <component-or-run-dir> <session> status --json
+node bin/ui-clone <url> <component-or-run-dir> <session> status --json
 ```
 
 ## Next action
 
 ```bash
-npx ui-clone-cli pipeline <url> <component-or-run-dir> <session> next --json
+node bin/ui-clone pipeline <url> <component-or-run-dir> <session> next --json
 ```
 
 Use this to resume interrupted work. It prints the current gate, terminal
@@ -86,7 +84,7 @@ state if any, next action, and safe read paths.
 ## LLM report
 
 ```bash
-npx ui-clone-cli pipeline <url> <component-or-run-dir> <session> report --for-llm
+node bin/ui-clone pipeline <url> <component-or-run-dir> <session> report --for-llm
 ```
 
 Use this for compact handoff context. Prefer it over grepping large raw
@@ -95,7 +93,7 @@ artifacts.
 ## Verify
 
 ```bash
-npx ui-clone-cli pipeline <url> <component-or-run-dir> <session> verify --json
+node bin/ui-clone pipeline <url> <component-or-run-dir> <session> verify --json
 ```
 
 `verify --json` runs post-implementation gates and returns machine-readable
@@ -115,7 +113,7 @@ JSON keys (`status` is always `passed` or `failed` — no other spellings):
 ## Gate
 
 ```bash
-npx ui-clone-cli gate <ref-dir> <gate-name> [--json]
+node bin/ui-clone gate <ref-dir> <gate-name> [--json]
 ```
 
 Runs a single gate (any name from `ui_clone.state.GATE_ORDER`, or `all`)
@@ -124,7 +122,7 @@ against an evidence directory. Exit codes: 0=PASS, 1=BLOCKED, 2=usage error.
 ## Goal
 
 ```bash
-npx ui-clone-cli goal <ref-dir> [--json]
+node bin/ui-clone goal <ref-dir> [--json]
 ```
 
 Prints the goal card (target, progress, hard-cap state) for a run.
@@ -150,7 +148,7 @@ Use terminal state when an evidence run is intentionally over but not
 verified:
 
 ```bash
-npx ui-clone-cli state terminal <ref-dir> \
+node bin/ui-clone state terminal <ref-dir> \
   --status incomplete \
   --category hardening-probe-incomplete \
   --gate section-compare \

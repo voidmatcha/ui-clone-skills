@@ -3,7 +3,7 @@
 # ui_clone.pipeline run`. Standalone wrapper around the agent-browser CLI
 # commands documented in skills/ui-capture/SKILL.md, just enough to pass
 # the `reference` gate. Not a full ui-capture replacement — does not
-# handle splash detection, hover catalogue, parallax/mousemove, or
+# handle hover catalogue, parallax/mousemove, or
 # transition-region segmentation. Those stay in the ui-capture skill for
 # now and can be wired in later from `run --phases 1-5`.
 #
@@ -21,9 +21,11 @@
 # intentional authenticated/session reuse.
 #
 # Produces:
+#   <ref_dir>/states/splash/*                — pre-navigation loader lifecycle
+#   <ref_dir>/states/scroll/*                — 7-stop scroll state trajectory
+#   <ref_dir>/states/hover/*                 — CSS/JS hover signal inventory
 #   <ref_dir>/static/ref/section-{0..4}.png   — 5 evenly-spaced screenshots
 #   <ref_dir>/scroll-video/ref/full-scroll.webm — full-scroll video
-#   <ref_dir>/transitions/ref/placeholder.webm — gate-satisfying placeholder
 #   <ref_dir>/regions.json                    — single full-page region
 #
 # Exits non-zero if agent-browser is missing or any capture step fails.
@@ -54,6 +56,15 @@ fi
 
 CAPTURE_SESSION="$SESSION"
 
+# Isolate this run from unrelated agent-browser clients. All child capture
+# scripts inherit the namespace, while callers can provide their own explicit
+# namespace when coordinating a larger browser workflow.
+if [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
+  CAPTURE_NAMESPACE_ID="$(printf '%s' "$SESSION" | cksum | awk '{print $1}')"
+  AGENT_BROWSER_NAMESPACE="ui-clone-${CAPTURE_NAMESPACE_ID}"
+  export AGENT_BROWSER_NAMESPACE
+fi
+
 command -v agent-browser >/dev/null 2>&1 || {
   echo "capture.sh: agent-browser not found in PATH" >&2
   exit 2
@@ -63,6 +74,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARTIFACTS_PY="$SCRIPT_DIR/_capture_artifacts.py"
 [ -f "$ARTIFACTS_PY" ] || {
   echo "capture.sh: missing $ARTIFACTS_PY" >&2
+  exit 2
+}
+CAPTURE_STATES="$SCRIPT_DIR/capture-states.sh"
+[ -x "$CAPTURE_STATES" ] || {
+  echo "capture.sh: missing executable $CAPTURE_STATES" >&2
+  exit 2
+}
+CAPTURE_SCROLL="$SCRIPT_DIR/capture-scroll.sh"
+[ -x "$CAPTURE_SCROLL" ] || {
+  echo "capture.sh: missing executable $CAPTURE_SCROLL" >&2
+  exit 2
+}
+CAPTURE_HOVER="$SCRIPT_DIR/capture-hover.sh"
+[ -x "$CAPTURE_HOVER" ] || {
+  echo "capture.sh: missing executable $CAPTURE_HOVER" >&2
   exit 2
 }
 
@@ -152,6 +178,55 @@ require_capture_artifact() {
   CAPTURE_MESSAGE=""
 }
 
+settled_capture_wait_ms() {
+  local splash_summary="${ABS_REF}/states/splash/summary.json"
+  local fallback="${CAPTURE_DERIVED_READY_WAIT_MS:-3500}"
+  local buffer="${CAPTURE_DERIVED_READY_BUFFER_MS:-500}"
+  python3 - "$splash_summary" "$fallback" "$buffer" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+def as_nonnegative_int(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+summary_path = Path(sys.argv[1])
+fallback_ms = as_nonnegative_int(sys.argv[2], 3500)
+buffer_ms = as_nonnegative_int(sys.argv[3], 500)
+wait_ms = fallback_ms
+if summary_path.is_file():
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        summary = {}
+    if summary.get("checked") is True:
+        wait_ms = max(
+            wait_ms,
+            as_nonnegative_int(summary.get("durationMs"), 0) + buffer_ms,
+        )
+print(wait_ms)
+PY
+}
+
+# Capture first-load state transitions in a separate, clean session before the
+# settled screenshot pass. Installing the sampler before navigation is what
+# preserves short splash screens that would otherwise finish during `open`.
+run_capture_step "splash-state-capture" "states/splash/contract.json" \
+  bash "$CAPTURE_STATES" "$URL" "$CAPTURE_SESSION" "$ABS_REF"
+require_capture_artifact "splash-state-capture:artifact-check" "states/splash/contract.json"
+run_capture_step "scroll-state-capture" "states/scroll/summary.json" \
+  bash "$CAPTURE_SCROLL" "$URL" "$CAPTURE_SESSION" "$ABS_REF"
+require_capture_artifact "scroll-state-capture:artifact-check" "states/scroll/summary.json"
+run_capture_step "hover-state-capture" "states/hover/summary.json" \
+  bash "$CAPTURE_HOVER" "$URL" "$CAPTURE_SESSION" "$ABS_REF"
+require_capture_artifact "hover-state-capture:artifact-check" "states/hover/summary.json"
+
 # Open + canonical viewport. `set viewport` must follow `open` (the skill
 # notes the reverse order is silently dropped). Keep the same named session
 # alive for downstream Phase 2 extraction, but clear it first by default so
@@ -161,7 +236,8 @@ if [ "$REUSE_SESSION" != "true" ]; then
 fi
 run_capture_step "open" "" agent-browser --session "$CAPTURE_SESSION" open "$URL"
 run_capture_step "viewport" "" agent-browser --session "$CAPTURE_SESSION" set viewport 1440 900
-run_capture_step "initial-wait" "" agent-browser --session "$CAPTURE_SESSION" wait 3000
+SETTLED_WAIT_MS="$(settled_capture_wait_ms)"
+run_capture_step "initial-wait" "" agent-browser --session "$CAPTURE_SESSION" wait "$SETTLED_WAIT_MS"
 
 # Page height for evenly-spaced scroll screenshots. The Python helper
 # handles the agent-browser double-encode + non-numeric fallback so we
@@ -197,13 +273,6 @@ run_capture_step "scroll-video:scroll" "" agent-browser --session "$CAPTURE_SESS
 sleep 5
 run_record_stop "scroll-video:record-stop" "scroll-video/ref/full-scroll.webm"
 require_capture_artifact "scroll-video:artifact-check" "scroll-video/ref/full-scroll.webm"
-
-# Placeholder transition clip so the `transitions/ref/` gate row passes.
-run_capture_step "transition-placeholder:record-start" "transitions/ref/placeholder.webm" agent-browser --session "$CAPTURE_SESSION" record start \
-  "${ABS_REF}/transitions/ref/placeholder.webm"
-sleep 1
-run_record_stop "transition-placeholder:record-stop" "transitions/ref/placeholder.webm"
-require_capture_artifact "transition-placeholder:artifact-check" "transitions/ref/placeholder.webm"
 
 # Single full-page region as the minimal regions.json — proper region
 # segmentation is the ui-capture skill's job; this only unblocks the gate.

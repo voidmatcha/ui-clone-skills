@@ -87,6 +87,18 @@ def test_state_structure_spec_aggregates_browser_observed_states(tmp_path: Path)
     (scroll / "50pct.json").write_text(json.dumps({
         "outerHTML": "<html><body><section class='features is-visible'></section></body></html>"
     }))
+    (scroll / "dom-mutations.json").write_text(json.dumps([{
+        "fromPct": 0,
+        "toPct": 50,
+        "firstScrollY": 420,
+        "lastScrollY": 500,
+        "selector": "section.features",
+        "type": "attributes",
+        "attribute": "class",
+        "oldValue": "features",
+        "newValue": "features is-visible",
+        "count": 1,
+    }]))
 
     (hover / "manifest.json").write_text(json.dumps({
         "entries": [
@@ -149,6 +161,9 @@ def test_state_structure_spec_aggregates_browser_observed_states(tmp_path: Path)
     assert scroll_event["scrollEngine"] == "lenis"
     assert scroll_event["fromPct"] == 0
     assert scroll_event["toPct"] == 50
+    assert scroll_event["domMutation"]["observedMutationCount"] == 1
+    assert scroll_event["domMutation"]["observedMutations"][0]["attribute"] == "class"
+    assert "states/scroll/dom-mutations.json" in scroll_event["artifacts"]
 
     hover_event = next(event for event in events if event["phase"] == "hover")
     assert hover_event["signalKinds"] == ["css", "js", "dom"]

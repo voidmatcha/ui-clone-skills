@@ -308,7 +308,31 @@ print(len(json.loads(raw)))
 echo "  ▸ Hover candidates: $CANDIDATE_COUNT"
 
 if [ "$CANDIDATE_COUNT" = "0" ]; then
-  echo "  No hover candidates found. Exiting."
+  # Zero impl candidates is only benign when the reference has none either.
+  # Otherwise nothing was compared, which is the same unmeasured-pass that the
+  # all_unpaired branch below rejects. Walking the ref here is safe: both
+  # outcomes exit, so the attributes this eval sets cannot reach the later
+  # pairing pass.
+  TMP_REF_WALK=$(mktemp "$TMP_BASE/htd-ref-walk.XXXXXX")
+  agent-browser --session "$REF_SESS" eval "$WALK_JS" > "$TMP_REF_WALK" 2>&1
+  if [ ! -s "$TMP_REF_WALK" ]; then
+    echo "ERROR: ref walk returned empty"; rm -f "$TMP_REF_WALK"; exit 2
+  fi
+  REF_CANDIDATE_COUNT=$(python3 -c "
+import json
+with open('$TMP_REF_WALK') as f: raw = f.read().strip()
+if raw.startswith('\"'): raw = json.loads(raw)
+print(len(json.loads(raw)))
+" 2>/dev/null || echo "unknown")
+  rm -f "$TMP_REF_WALK"
+  if [ "$REF_CANDIDATE_COUNT" = "unknown" ]; then
+    echo "ERROR: ref walk output was not parseable"; exit 2
+  fi
+  if [ "$REF_CANDIDATE_COUNT" != "0" ]; then
+    echo "❌ FAIL hover-tree-diff: ref exposes $REF_CANDIDATE_COUNT hover candidate(s) but impl exposes none, so no hover comparison was measured."
+    exit 1
+  fi
+  echo "  No hover candidates in ref or impl. Exiting."
   exit 0
 fi
 
@@ -914,6 +938,7 @@ SEV_RANK = {"critical": 4, "unpaired": 3, "major": 2, "minor": 1, "ok": 0}
 counts = {"critical": 0, "major": 0, "minor": 0, "ok": 0, "unpaired": 0}
 for r in rows: counts[r["sev"]] += 1
 rows.sort(key=lambda r: -SEV_RANK[r["sev"]])
+all_unpaired = bool(rows) and counts["unpaired"] == len(rows)
 
 # ── Markdown ──
 md = os.path.join(out_dir, "hover-tree-diff.md")
@@ -924,12 +949,18 @@ with open(md, "w") as f:
     f.write(f"**Major**: {counts['major']}  ")
     f.write(f"**Unpaired**: {counts['unpaired']}  ")
     f.write(f"**Match**: {counts['ok']}\n\n")
-    if counts["critical"] or counts["major"]:
-        f.write(
-            f"❌ FAIL hover-tree-diff: {counts['critical']} critical / "
-            f"{counts['major']} major hover mismatch(es). Impl hover motion "
-            "must match ref and must not add extra transform/opacity deltas.\n\n"
-        )
+    if counts["critical"] or counts["major"] or all_unpaired:
+        if all_unpaired:
+            f.write(
+                "❌ FAIL hover-tree-diff: every impl hover candidate was "
+                "unpaired, so no ref/impl hover comparison was measured.\n\n"
+            )
+        else:
+            f.write(
+                f"❌ FAIL hover-tree-diff: {counts['critical']} critical / "
+                f"{counts['major']} major hover mismatch(es). Impl hover motion "
+                "must match ref and must not add extra transform/opacity deltas.\n\n"
+            )
     else:
         f.write(
             f"✅ PASS hover-tree-diff: no critical/major hover mismatches "
@@ -983,7 +1014,7 @@ if counts["critical"] or counts["major"]:
         d = "; ".join(bits) or "(unpaired)"
         print(f"  {sev_label} #{r['i']}  {impl_id}  '{txt}'  | {d}")
 
-sys.exit(1 if (counts["critical"] or counts["major"]) else 0)
+sys.exit(1 if (counts["critical"] or counts["major"] or all_unpaired) else 0)
 PYEOF
 EXIT=$?
 

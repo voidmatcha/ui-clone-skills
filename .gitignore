@@ -11,6 +11,7 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+node_modules/
 *.egg-info/
 .mypy_cache/
 .ruff_cache/
@@ -36,6 +37,9 @@ internal/
 
 # Private maintainer growth/marketing research notes — never committed to public repo
 research/
+
+# Handover session scratch — carries local paths and handshake tokens
+.handover/
 
 # Driver-session bypass marker — local-only maintainer state. Stop hook
 # releases when this file's content matches the current

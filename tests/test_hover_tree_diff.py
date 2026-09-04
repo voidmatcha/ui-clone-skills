@@ -78,7 +78,7 @@ def test_hover_tree_diff_bounds_body_hover_reset_timeout(tmp_path: Path) -> None
         env=env,
         timeout=10,
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.returncode == 1, proc.stdout + proc.stderr
     assert (out_dir / "hover-tree-diff.json").is_file()
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "hover body" in calls
@@ -107,6 +107,7 @@ def test_hover_tree_diff_bounds_body_hover_reset_timeout(tmp_path: Path) -> None
     }
     assert all(index < walk_index for index, _ in stabilize_lines + verify_lines)
     report = (out_dir / "hover-tree-diff.md").read_text(encoding="utf-8")
+    assert "FAIL hover-tree-diff" in report
     assert "UNPAIRED" in report
     raw = (out_dir / "hover-tree-diff.json").read_text(encoding="utf-8")
     assert "semantic pair mismatch" in raw

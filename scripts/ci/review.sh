@@ -247,6 +247,12 @@ else
   err "video-transition-compare.sh FPS default is $FPS_DEFAULT (should be 60)"
 fi
 
+if python3 scripts/ci/check-readme-i18n.py; then
+  ok "localized READMEs match the canonical README contract"
+else
+  err "localized README parity failed"
+fi
+
 # ── 8. Hardcoded paths ──
 section "Hardcoded paths"
 # Detect absolute user-home paths (/Users/<name>/ or /home/<name>/)

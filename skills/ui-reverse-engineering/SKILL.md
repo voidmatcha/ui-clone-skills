@@ -1,6 +1,6 @@
 ---
 name: ui-reverse-engineering
-description: "Recreate a website/page/section visual design in code from a URL: layout, typography, colors, assets, responsive UI."
+description: "Clone or recreate a live website URL, page, or section as React + Tailwind with extracted DOM, CSS, assets, responsive layout, motion, and interactions. Use for live-URL implementation or fidelity repair; not capture-only or diff-only requests."
 metadata:
   filePattern:
     - "**/tmp/ref/**/structure.json"
@@ -25,286 +25,49 @@ Reverse-engineer a live website into a **React + Tailwind** component.
 
 ## Hard Done Criteria
 
-> **Headline rule (2026-05-22):** Section-compare PASS is not done. The completion bar
-> is **runtime fidelity** — the impl must reproduce the ref's DOM, assets, motion,
-> interaction, and state-machine behavior at runtime, with browser-measured proof.
-> Static visual match is necessary but never sufficient.
-
-- **Build pass is not done.** A successful `npm run build`, HTTP 200, page title, or local render only proves the app starts.
-- **Spot check is not done.** A few screenshots or manual visual checks cannot replace required artifacts.
-- **Pipeline verify PASS is required for clean completion.** If it is not PASS, report the failing gate and keep fixing.
-- **Missing artifact is failure.** Do not substitute generic notes, placeholder JSON, proxy mirrors, or source-reference manifests for the required evidence.
+- **Build pass is not done.** It proves only that the app starts.
+- **Spot check is not done.** Manual screenshots cannot replace measurements.
+- **Pipeline verify PASS** is required for clean completion.
+- **Missing artifact is failure.** Report it as `INCOMPLETE`; never substitute
+  notes, placeholder JSON, HTTP 200, page titles, or source strings.
 
 ## Host-neutral subagent dispatch
 
-When a pipeline step names a role, delegate with the host's native mechanism
-before falling back to inline execution. Claude Code uses the matching
-`.claude-plugin/agents/<role>.md` adapter through `Agent(...)`. Codex uses the
-Codex native subagent with the same `agent_type` backed by
-`.codex/agents/<role>.toml` (or an equivalent delegated worker when the runtime
-exposes subagents differently). Inline fallback is allowed only when the host has
-no delegated-worker surface; state that fallback and follow the same shared
-contract file.
+When a pipeline step names a role, use the host native delegated worker and its
+shared contract; fall back inline only when delegation is unavailable, and state
+that fallback. Route `bundle-analyzer` to `js-animation-extraction.md`,
+`source-forensics` to `source-forensics.md`, `generation-planner` to
+`enrichment.md`, `mismatch-diagnoser` to `diagnosis.md`, and
+`visual-debug-iterator` to `iteration-discipline.md`.
 
-Role → contract mapping:
+## Runtime-fidelity completion contract
 
-- `bundle-analyzer` → `js-animation-extraction.md`
-- `source-forensics` → `source-forensics.md`
-- `generation-planner` → `enrichment.md`
-- `mismatch-diagnoser` → `diagnosis.md`
-- `visual-debug-iterator` → `iteration-discipline.md`
+Completion requires static visual, runtime media, transition, state-machine,
+and no-cheat checks to pass. `section-compare`, build success, HTTP 200, source
+strings, or implementation-only screenshots never establish completion.
 
-### Done = all five tiers PASS
+Before reporting success:
 
-Completion requires **runtime + transition + state-machine fidelity**, not just static
-match. Treat anything below as INCOMPLETE.
+- require browser-measured `runtime-proof.json` and `transition-proof.json` with
+  `status=pass`; a measurement-free pass is invalid;
+- require **scroll-scrubbed Lottie frame control** and **scroll state-machine**
+  proof whenever `window.scrollTo`, `scrollYProgress`, `setTimeout`, `velocity`,
+  or a guard ref is observed: prove `initial → active/expanded → settled/returned`;
+- reject copied Swiper classes without Swiper runtime or evidence-backed
+  sizing/translate behavior;
+- never force `is-active` / `is-visible` / `is-show` globally to fake a final
+  transition state;
+- reject direct reference JS/CSS/iframe loading, screenshot-as-page rendering,
+  forced final-state classes, and captured whole-document mirrors;
+- run `pipeline ... verify`, `completion-report.sh --check`, and
+  `ui_clone.goal --check-done`; report `INCOMPLETE` with the failing artifact
+  whenever any command is non-zero; and
+- use the canonical tier, dependency, and gate-to-artifact mapping in repository
+  `docs/gates.md` instead of maintaining a second gate inventory here.
 
-1. **Static visual match**
-   - `section-compare` PASS
-   - `font-parity`, `image-fidelity`, `svg-dom-parity`, `required-media-coverage` PASS
-
-2. **Runtime media fidelity**
-   - Lottie / video / canvas / WebGL etc. must actually `mount → render → play` in
-     the browser — package.json presence, `data-*` attributes, or import-string
-     grep is NOT proof.
-   - Frame/progress change must be observed at runtime (e.g. `currentFrame > 0`
-     after 1s for Lottie; `<canvas>` paint diff between frames; `<video>` time
-     advance).
-   - Gates: `lottie-runtime-check` (schema v2 with `runtimeProof` block),
-     `runtime-image-validity`, `runtime-dom-parity`, `motion-coverage`.
-
-3. **Transition fidelity**
-   - Page-load reveals, scroll reveals, sticky/pinned, parallax, hover/dropdown,
-     text morph/fade — every transition family present in the ref must have a
-     working impl counterpart.
-   - Never force `is-active` / `is-visible` / `is-show` globally at load, and
-     never neutralize dynamic elements with `transition: none`, `opacity: 1`,
-     or `transform: none` final-state patches. That is a static screenshot
-     workaround, not a transition implementation.
-   - **scroll state-machine completion:** if bundle/spec evidence contains
-     `window.scrollTo`, `scrollYProgress`, `setTimeout`, `velocity` /
-     `getVelocity`, a guard ref around scroll-stop behavior, or a
-     ScrollTrigger pin/scrub section, completion requires
-     `initial → active/expanded → settled/returned` runtime proof. A scroll
-     state-machine is INCOMPLETE when it only matches endpoint screenshots or
-     replaces GSAP/Lenis scrub with a bare native scroll handler.
-   - **scroll-scrubbed Lottie frame control:** when the ref connects Lottie /
-     bodymovin to scroll progress, the impl must control frames with
-     `goToAndStop`, `playSegments`, `currentFrame`, `totalFrames`, or equivalent
-     seeking, every named ref Lottie container must be represented, and
-     visible/active Lottie counts must match at 0/25/50/75/100% scroll.
-     `autoplay` / `loop` alone is a failure.
-   - **Swiper runtime fidelity:** copied Swiper classes without Swiper runtime
-     (`swiper-wrapper`, `swiper-slide`) are incomplete when the ref uses
-     Swiper/Splide-style sizing, gap, active-state, or translate behavior.
-     Install/init the same runtime or reproduce the extracted sizing/translate
-     rules explicitly.
-   - Coverage check against `transition-spec.json` is mandatory; missing entries
-     are INCOMPLETE.
-   - **Duration / easing / threshold values are extracted from ref artifacts,
-     bundles, or runtime measurements — never guessed.**
-   - Gates: `transition-spec-coverage`, `spec-implementation-coverage`,
-     `runtime-spec-coverage`, `transition-compare`, `reveal-trigger`,
-     `video-motion-compare`, `keyframes-diff`.
-
-4. **State-machine fidelity**
-   - Header/theme/body/root classes that toggle on scroll/hover/focus must be
-     implemented as a runtime state machine — initial classes hard-coded into the
-     SSR markup with no listener that toggles them is **failure**.
-   - Class/computed-style mutation at multiple scroll/interaction points must be
-     observed in the browser.
-   - Paired live ref/impl scrolling is mandatory at standard verification tier:
-     generic DOM census, image/font inventory, pseudo-element duplication, and
-     geometry/count drift must be checked in both sessions at matched scroll depths.
-   - Gate: `header-state-runtime-check` (added 2026-05-22). When the ref header
-     mutates `className` / `data-*` between `scroll=0` and `scroll=600`, the impl
-     must mutate too.
-
-5. **No-cheat rule**
-   - **DO NOT** drop the ref's raw JS bundle into `public/` and load it from
-     `<script src=...>` to fake runtime behavior.
-   - **DO NOT** paste the ref's screenshot as a `background-image` / `<canvas>` /
-     `<img>` to fake visual match.
-   - Captured HTML may be used as scaffolding, but a runtime controller (React
-     state + listeners) MUST own every class toggle the ref's JS owns — including
-     `is-hide`, `is-active`, `thema-*`, `track-animation`, `js-scroll-animation`.
-   - Gates: `proxy-mirror-check`, `html-paste-check`, `scaffold-residue`,
-     `ref-screenshot-asset` — these enforce the no-cheat boundary.
-
-### Proof artifacts (composite, written at the end of post-implement)
-
-Two roll-up artifacts MUST exist and be `status=pass` before declaring done:
-
-| Artifact | Aggregates | Failure mode it catches |
-|---|---|---|
-| `runtime-proof.json` | Lottie runtime, video play, canvas frame-diff, mounted-container counts, computed-style at multiple scroll states | Static evidence present, runtime never executes |
-| `transition-proof.json` | Per spec entry: file matched + runtime evidence (scroll/hover trigger fired, class/style mutated, duration/easing measured) | Spec entries silently dropped or implemented as no-op |
-
-Each proof entry must include browser-measured frame / class / computed-style
-deltas. A `status=pass` with no measurement is treated as a fake pass.
-
-### Completion-report contract
-
-The final report at `done` gate MUST list:
-- Modified files (full path)
-- Ref-JS direct-load dependency: declared with `false` (clean) or `true` (failure)
-- `runtime-proof.json` summary (per-media verdict)
-- `transition-proof.json` summary (per-spec-entry verdict)
-- Scroll / hover / header state-machine proof excerpts (timestamps + class diffs)
-- Official gate output (`python -m ui_clone.gate <ref-dir> all`)
-- For any approximation or omission: explicit `INCOMPLETE` marker and the
-  specific check that wasn't satisfied — never imply done when proofs are missing.
-
-### Iteration evidence capsule (unattended loops)
-
-For unattended clone / improvement loops, leave one compact run capsule before
-starting the next loop. This is a generalization of external evaluation harnesses:
-keep the comparable state, not any site-specific scoring script.
-
-The capsule may be a markdown or JSON artifact under `.omx/artifacts/`,
-`benchmark/history/`, or the active `<ref-dir>`, but it must include:
-
-- natural prompt shape used for the loop (no gate-specific coaching);
-- ref URL, impl URL, viewport(s), impl root, and artifact root;
-- preview/dev-server port, owning PID, readiness result, and cleanup result;
-- summary artifact paths: `sections/result.txt`, transition report, runtime proof,
-  transition proof, and `python -m ui_clone.gate <ref-dir> all` output;
-- top failing sections/signals by existing severity output, not hard-coded
-  page-specific y-bands;
-- local install / hook refresh result when the loop changed this repository.
-
-Do not launch the next validation loop from an ad-hoc prompt that repeats prior
-findings. Encode the lesson in this repo, install locally when required, then
-rerun the same natural prompt shape so the result measures the skill/hook surface
-rather than prompt coaching.
-
-### Natural prompt contract (skill-owned guardrails)
-
-Benchmark and dogfood runs should work from a one-sentence user-like prompt
-such as `Clone https://example.com into scratch/example/impl.` The outer runner
-may set CLI flags, cwd, plugin roots, ports, and artifact paths, but the prompt
-must not carry internal gate coaching. When a natural prompt is used, this skill
-owns the workflow: infer names, route the canonical pipeline, preserve the
-requested output scope, apply the pipeline/reference-doc rules, gather runtime
-and visual evidence, and close out with completion-report plus
-`ui_clone.goal --check-done`.
-
-Keep concrete implementation rules in the relevant pipeline step, reference doc,
-hook, gate, or test. Do not duplicate those details in validation prompts or in
-this natural-prompt summary.
-
-If a loop only succeeds after the runner injects these details into the prompt,
-that is a skill/hook failure. Move the missing rule into this skill, a reference
-doc, a gate, or a hook, install locally, then rerun the same natural prompt.
-
-### One-line summary
-
-> "Done means runtime-proof + transition-proof PASS — section-compare alone is not enough. Relying on static DOM / screenshots / the original JS is a failure. Leave evidence that Lottie, header, scroll, hover, and parallax actually change at browser runtime."
-
-### Enforcement gate inventory
-
-The 5-tier completion criteria above are enforced by these gates (all are
-required-checks emitted by `verification-plan.sh`, dispatched by
-`scripts/verify/run-required-checks.sh`):
-
-**Composite roll-ups** (read every other gate's artifact; fail when any
-constituent gate has a measurement-free pass or is missing):
-- `runtime-proof.json` (`runtime-proof-rollup.sh`) — Tier 1–5
-- `transition-proof.json` (`transition-proof-rollup.sh`) — Tier 3
-
-**Tier 1 — Static visual** (run before runtime):
-- `hero-composite.json` (`hero-composite-check.sh`) — 4-kind hero composite
-- `font-parity.json`, `image-fidelity.json`, `svg-dom-parity.json`,
-  `svg-provenance.json`, `required-media-coverage.json`,
-  `color-token-grounding.json`, `text-fidelity-check.json`
-
-**Tier 2 — Runtime media** (depends on `runtime-env` passing):
-- `lottie-runtime.json` (`lottie-runtime-check.sh`) — schema v2 with
-  browser-eval frame-change proof
-- `runtime-image-validity.json`, `runtime-dom-parity.json`,
-  `motion-coverage.json`
-- `forced-state-class.json` — blocks reveal-all / final-state patches that
-  force dynamic classes or disable transitions.
-- `lottie-scroll-scrub.json` — requires scroll-scrubbed Lottie frame seeking
-  and the ref's named Lottie containers instead of autoplay/loop or a single
-  mounted animation standing in for many; with ref/impl URLs it also compares
-  visible/active Lottie containers at 0/25/50/75/100% scroll.
-- `swiper-runtime.json` — fails copied Swiper classes without Swiper runtime or
-  extracted sizing/translate logic.
-- `video-play-proof.json` (`video-play-proof-check.sh`) — `<video>` must
-  advance currentTime
-- `runtime-frame-proof.json` (`runtime-frame-proof-check.sh`) — Lottie
-  instance / canvas paint / WebGL drawCount proof
-
-**Tier 3 — Transition** (in addition to spec-coverage / runtime-spec):
-- `transition-spec-coverage.json`, `spec-implementation-coverage.json`,
-  `runtime-spec-coverage.json`, `scroll-completion.json`,
-  `reveal-trigger.json`, `transitions/video-motion-result.txt`,
-  `keyframes-diff.json`
-- `duration-easing-grounding.json` (`duration-easing-grounding-check.sh`)
-  — values must trace to ref artifacts, never guessed
-
-**Tier 4 — State machine**:
-- `header-state-runtime.json` (`header-state-runtime-check.sh`) —
-  className mutation on scroll across header / body / html / framework
-  roots (#root, #__next, #__nuxt, #app, .app-wrapper, .layout-root,
-  [data-theme])
-- `hidden-children.json`
-
-**Tier 5 — No-cheat**:
-- `ref-js-loader.json` (`ref-js-loader-check.sh`) — impl must not load
-  ref's JS / CSS / iframe at build or runtime
-- `impl-scope.json` (`impl-scope-check.sh`) — iteration only writes
-  `<impl-root>/**`; plugin tooling edits (skills/, scripts/,
-  ui_clone/, tests/) are blocked
-- `proxy-mirror.json`, `html-paste.json`, `ref-screenshot-asset.json`,
-  `scaffold-residue.json`
-
-**Environment**:
-- `runtime-env.json` (`runtime-env-check.sh`) — Vite/Next/Vue/Svelte
-  hydration trap detection; port-routing mismatch detection;
-  block-severity gate that most browser-needing gates depend on.
-- `phase2-preflight.sh` — runs `runtime-env-check` early (Phase 2)
-  to fail fast before iterating against a broken dev server.
-
-**Other**:
-- `mobile-viewport-parity.json` (`mobile-viewport-parity-check.sh`) —
-  asserts no h-overflow / mobile-nav / section count at 375x812
-- `boundary-collisions.json`, `tailwind-conflict.json`, `hydration-check.json`,
-  `entry-coherence.json`
-
-**Pre-existing gates** (also emitted by `verification-plan.sh`):
-- `dom-mirror-check.json` — advisory tag-multiset divergence
-- `live-parity.json` — paired ref/impl scroll + DOM census for
-  missing/extra images, visible pseudo duplication, broken assets,
-  missing fonts, and geometry/count drift hidden by masks
-- `transition-compare`, `hover-state-compare`, `click-state-compare` —
-  hover/click idle→state visual + computed-style diffs
-- `asset-transfer.json`, `asset-utilization.json`, `remote-asset-ref.json`,
-  `runtime-image-validity.json` — asset family
-- `css-mirror.json`, `monolithic-impl.json`, `scaffold-warn.json`,
-  `scaffold-residue.json`, `scroll-engine-parity.json`,
-  `bundle-impl-coverage.json` — code-shape checks
-- `tree-diff.json` (advisory), `scroll-coverage.json` (advisory when ref
-  has scroll-driven motion), `scroll-anim-temporal-diff.json` (MANUAL
-  selector required), `keyframes-diff-result.txt` (transitions/) —
-  diff family
-- `invalidation.json` — pipeline-state stamp consistency
-- `runtime-dom-parity.json`, `hidden-children.json` — runtime parity
-  (declare `dependsOn: runtime-env` so they SKIP_DEP on env trap)
-- `runtime-spec-coverage.json` — spec-vs-runtime coverage
-
-**Reports**:
-- `completion-report.sh` — read every artifact, emit the assembled
-  SKILL.md completion-report contract output.
-
-Gate **dependency DAG** is wired via `dependsOn` in verification-plan.
-When `runtime-env` fails, downstream gates that need a healthy page
-(header-state-runtime, video-play-proof, svg-provenance) skip with
-SKIPPED_DEP rather than running and producing misleading verdicts.
-
-**Primary trigger:** Build/route from a live reference into React.
-**Non-goals:** Do not use this as a standalone capture command or post-implementation mismatch diagnosis tool; hand reference capture to the `ui-capture` skill (Claude slash command: `/ui-capture`) and mismatch diagnosis to `visual-debug`.
+For unattended benchmark loops, keep natural user prompts free of gate coaching
+and store comparable evidence in the active ref directory or benchmark history.
+The detailed runner contract remains in **Agent-driven loop** below.
 
 ## How to use this file
 
@@ -637,44 +400,21 @@ This bites hardest right after `<system-reminder>` summaries reactivate a long-r
 
 ## Completion criteria
 
-**⛔ Mandatory before claiming "done":**
+**Do not claim done until all three commands exit 0:**
 
 ```bash
-cd impl && npm run dev -- --host 0.0.0.0 &        # external-reachable
 python -m ui_clone.pipeline <url> <component> <session> verify
+bash scripts/verify/completion-report.sh --check <ref-dir> <impl-root>
+python -m ui_clone.goal <ref-dir> --check-done
 ```
 
-`verify` runs the post-impl GATE_ORDER (post-implement → boundary → font-parity → section-compare) and stamps `verify-stamp.json` on PASS. Iterate until exit 0; the gate output names the exact script to run for each missing artefact.
-
-```
-□ C1 static ✅  □ C2 scroll ✅  □ C3 transitions ✅
-□ D1 Visual Gate pass  □ D2 Numerical mismatches = 0
-□ 10-point audit ≥ 9   □ Step 9 interactions: all ✅
-□ Section compare: all sections PASS, no SVG_TEXT_MISSING
-□ Transition compare: all PASS, no HOVER_*_NOT_APPLIED
-□ All CDN/external image URLs verified 200 (curl -I)
-□ viewport meta present in every layout file
-□ Screenshots taken at 375 / 768 / 1280 and compared against ref — NOT self-reported
-```
-
-**"Done" = `pipeline ... verify` exits 0. NOT "I wrote the code and it looks right to me."** A copied static mirror, HTTP 200 checks, browser title checks, local 404 scans, or screenshots of the implementation alone are not completion evidence unless `pipeline-state.json` exists and `verify` passes.
-
-**Required-check artifacts are not optional.** If `verification-plan.json`
-declares `asset-utilization`, `spec-implementation-coverage`,
-`lottie-runtime`, `tree-diff`, `transition-compare`, or any other block-severity
-row, the corresponding artifact must exist and report `"status": "pass"`.
-Downloaded-but-unused assets, selector-name-only transition coverage, missing
-Lottie runtime/JSON, missing `font-parity.json`, or a `pipeline-state.json`
-stopped before `current_gate == "done"` are all incomplete runs, even when the
-page builds and visual smoke checks look plausible.
-
-**Whole-document static mirrors are invalid.** Do not dump
-`document.documentElement.outerHTML`, `document.body.innerHTML`, or a captured
-`live.html` / `original.html` into `impl/index.html` and serve it as the clone.
-That copies a hydrated end state while losing the original transition runtime.
-Section-level `outerHTML` probes are allowed as extraction evidence; the
-implementation must still be generated from canonical artifacts and verified
-with the motion/runtime gates.
+The verify path must cover static, responsive, asset/font/media, interaction,
+transition, runtime, and no-cheat evidence declared by
+`verification-plan.json`. Missing required artifacts, a non-`done`
+`current_gate`, failed section/transition rows, or an implementation that merely
+builds or serves HTTP is `INCOMPLETE`. Whole-document HTML mirrors and direct
+reference-runtime loading are invalid implementations. See repository
+`docs/gates.md` for the canonical gate and artifact contract.
 
 ## Operational rules
 

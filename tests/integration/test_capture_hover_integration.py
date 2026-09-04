@@ -58,7 +58,7 @@ def test_hover_rule_and_manifest_emitted(tmp_path: Path, http_server: str, repo_
             [str(script), url, session, str(ref_dir)],
             capture_output=True,
             text=True,
-            # Header documents 12.5s worst-case; 60s gives headroom for Chrome boot.
+            # Header documents 22.5s worst-case; 60s gives headroom for Chrome boot.
             timeout=60,
             env={**os.environ},
         )
@@ -112,6 +112,14 @@ def test_hover_rule_and_manifest_emitted(tmp_path: Path, http_server: str, repo_
     assert summary.get("candidatesWithCssRule", 0) >= 1, (
         f"expected candidatesWithCssRule >= 1 from .btn:hover rule, got "
         f"{summary.get('candidatesWithCssRule')!r}; full summary: {summary}"
+    )
+    assert summary.get("candidatesWithJsDiff", 0) >= 1, (
+        "pure JS hover handlers must be discovered without a dummy CSS :hover rule; "
+        f"full summary: {summary}"
+    )
+    assert any("js-card" in (entry.get("selector") or "") for entry in entries)
+    assert not any("auto-card" in (entry.get("selector") or "") for entry in entries), (
+        "passive timer/autoplay mutation must not be promoted to hover evidence"
     )
     assert summary.get("candidatesFound", 0) >= 2, (
         f"candidatesFound={summary.get('candidatesFound')} — expected >= 2 "

@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.7.47] - 2026-09-03
+
+### Added
+
+- Add replay-track capture and comparison evidence for deterministic timed,
+  action-driven, and scroll-driven motion reconstruction.
+- Add capture-artifact inventory validation so reference readiness is backed by
+  decodable, non-blank, state-distinct evidence instead of file presence alone.
+
+### Changed
+
+- Require Node.js 20 or newer, matching the bundled Playwright runtime.
+
+### Fixed
+
+- Keep capture sessions origin-safe and isolated, reject `about:blank` results,
+  wait for measured splash readiness, and prove closure-hidden smooth-scroll
+  engines from navigation-time root wheel listeners before extraction.
+- Preserve scroll-correlated DOM mutations and bound browser evaluations so
+  long animated pages complete within the browser IPC deadline.
+
 ## [0.7.41] - 2026-09-01
 
 ### Fixed

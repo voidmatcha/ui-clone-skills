@@ -25,36 +25,6 @@ cd "$REPO_ROOT" || { echo "ci-local.sh: cannot cd to $REPO_ROOT" >&2; exit 1; }
 # unaffected — the flag only gates review.sh's pytest section.
 export UI_CLONE_REVIEW_SKIP_TESTS=1
 
-# ── Stale-mutation recovery ──
-# test-parity.sh (step 6 below) mutates AGENTS.md + plugin manifests as
-# part of its drift smoke test, then restores from a temp backup. If a
-# prior ci-local run was interrupted between mutation and restore, the
-# working tree ends up with stale drift-test markers. test-parity.sh's
-# own entry-recovery only fires when step 6 actually runs — but if those
-# markers cause an EARLIER check (review.sh's Hangul gate at step 5,
-# manifest-JSON gate, etc.) to fail, ci-local exits at step 5 and step 6
-# never gets to clean up. Result: every subsequent ci-local run blocks
-# at the same step, requiring manual `git checkout AGENTS.md`. Detecting
-# and resetting markers BEFORE any check eliminates this trap.
-if grep -qE 'drift-test' AGENTS.md 2>/dev/null; then
-  [ "$QUIET" = "1" ] || echo "  ⚠️  resetting AGENTS.md (stale drift-test marker from interrupted run)" >&2
-  git checkout -- AGENTS.md 2>/dev/null || true
-fi
-for _p in ".codex-plugin/plugin.json" ".claude-plugin/plugin.json" ".claude-plugin/marketplace.json"; do
-  if [ -f "$_p" ]; then
-    # Reset on invalid JSON OR the 9.9.9 version-drift sentinel. test-parity Case 2
-    # sets a manifest version to "9.9.9" (VALID JSON) — a leaked mutation from an
-    # interrupted run is valid JSON, so the validity check alone missed it and the
-    # drift persisted across runs (self-perpetuating via test-parity's backup).
-    # 9.9.9 is never a real version → safe to reset from HEAD.
-    if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$_p" 2>/dev/null \
-       || grep -q '"9\.9\.9"' "$_p" 2>/dev/null; then
-      [ "$QUIET" = "1" ] || echo "  ⚠️  resetting $_p (stale drift marker from interrupted run)" >&2
-      git checkout -- "$_p" 2>/dev/null || true
-    fi
-  fi
-done
-
 if [ "${UI_RE_SKIP_CI_LOCAL:-}" = "1" ]; then
   echo "⚠️  ci-local skipped via UI_RE_SKIP_CI_LOCAL=1" >&2
   exit 0
@@ -139,17 +109,21 @@ fi
 # 2. Type check (mypy)
 step "Type check"
 if [ "$QUIET" = "1" ]; then
-  run_quiet "mypy" uv run python -m mypy ui_clone/ tests/
+  run_quiet "mypy" uv run python -m mypy ui_clone/ tests/ \
+    skills/visual-debug/scripts/replay-track-compare.py
 else
-  uv run python -m mypy ui_clone/ tests/ || fail "mypy"
+  uv run python -m mypy ui_clone/ tests/ \
+    skills/visual-debug/scripts/replay-track-compare.py || fail "mypy"
 fi
 
 # 3. Lint check (ruff)
 step "Lint check"
 if [ "$QUIET" = "1" ]; then
-  run_quiet "ruff" uv run python -m ruff check ui_clone/ tests/
+  run_quiet "ruff" uv run python -m ruff check ui_clone/ tests/ \
+    skills/visual-debug/scripts/replay-track-compare.py
 else
-  uv run python -m ruff check ui_clone/ tests/ || fail "ruff"
+  uv run python -m ruff check ui_clone/ tests/ \
+    skills/visual-debug/scripts/replay-track-compare.py || fail "ruff"
 fi
 
 # 4. Shell syntax check
@@ -169,7 +143,7 @@ fi
 if [ "${BASH_MAJOR:-0}" -lt 4 ]; then
   fail "shell syntax: bash 4+ required (found $($BASH_BIN --version | head -1)). On macOS: brew install bash"
 fi
-for f in scripts/ci/*.sh scripts/hooks/*.sh scripts/extract/*.sh scripts/verify/*.sh hooks/*.sh skills/visual-debug/scripts/*.sh; do
+for f in install.sh scripts/ci/*.sh scripts/hooks/*.sh scripts/extract/*.sh scripts/verify/*.sh hooks/*.sh skills/visual-debug/scripts/*.sh; do
   "$BASH_BIN" -n "$f" || fail "shell syntax: $f"
 done
 [ "$QUIET" = "1" ] || echo "  ✓ all shell scripts parse (bash $BASH_MAJOR.x at $BASH_BIN)"

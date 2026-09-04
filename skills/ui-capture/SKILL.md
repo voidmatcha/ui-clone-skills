@@ -1,12 +1,12 @@
 ---
 name: ui-capture
-description: "Capture website visuals and behavior: screenshots, scroll, hover, mouse, parallax, timers, and comparison evidence."
+description: "Capture baseline evidence from a live website URL: screenshots, scroll states, hover/click behavior, parallax, timers, and transition recordings. Use when reference artifacts are needed before implementation or comparison; not to build or diagnose a clone."
 metadata:
   filePattern:
     - "**/tmp/ref/**/regions.json"
     - "**/tmp/ref/**/scroll-video/**"
     - "**/tmp/ref/**/transitions/**"
-    - "**/tmp/ref/**/clips/**"
+    - "**/tmp/ref/**/clip/**"
   bashPattern:
     - "agent-browser.*record"
     - "agent-browser.*screenshot"
@@ -102,6 +102,37 @@ or a guard ref around scroll-stop behavior, capture settle/return artifacts in
 addition to the active scroll frame. The required proof shape is
 `initial → active/expanded → settled/returned`; downstream skills must not infer
 the returned phase from a single endpoint frame.
+
+**Scroll-driven DOM mutation evidence:** the canonical Phase 1 capture runs a
+bounded fine-grained sweep between the persisted 0/10/25/50/75/90/100 percent
+bookends. `states/scroll/dom-mutations.json` records scroll-correlated class,
+ARIA/data state, text, and child-node changes with their first/last `scrollY`.
+`states/scroll/summary.json` reports the scan step, trace truncation, and any
+coordinate-alignment failures. It also records the detected scroll engine,
+detection reason, and whether its control transport was proven. A hidden
+smooth-scroll instance is accepted only when a navigation-time probe observes
+a root non-passive wheel listener and every sampled coordinate aligns;
+marker-only detection and coordinate-alignment failures invalidate the capture.
+Use the bookend DOM files for settled structure and the mutation trace for
+transient states that appear and reset between bookends. Continuous computed
+style motion remains visual/trajectory evidence rather than mutation evidence.
+
+**Scroll replay tracks:** for an explicitly declared `scroll-driven` region,
+`replayTrack` evidence is optional but paired: either declare both
+`artifacts.replayTrack` and `artifacts.replayTrackManifest`, or declare neither.
+Use `scroll-progress` tracks when computed style or bounding-box values scrub
+across a scroll range. Use `scroll-action` tracks only when one exact scroll
+action starts CSS/WAAPI animations that Playwright can pause and scrub on a
+fixed time grid. Timer/rAF motion may use the virtual-clock driver only when two
+fresh contexts replay exactly. Debounced scroll-stop logic, velocity-dependent
+paths, and ambiguous one-shot mutations still require state/settle artifacts;
+if they cannot replay deterministically, fail closed instead of guessing.
+For Lenis-owned position progress, use the explicit `lenis-wheel` transport so
+all 21 positions are reached through trusted wheel input; never relabel it as
+native scrolling. Calibrate splash/layout readiness first and persist the same
+`readyWaitMs` in both reference and implementation tracks. Lenis time/action
+motion, Locomotive Scroll, ScrollSmoother, and markerless wheel interception
+remain fail-closed until they have their own truthful transport contract.
 
 The host skill invocation translates positional args to env vars before the pipeline runs:
 
@@ -223,6 +254,10 @@ after Phase 2B-2E and fix any missing files before handing off.
 
 **Phase 2B–2E** (`capture-transitions.md`), per type:
 - **2B** scroll — exploration video → clip verification (before/mid/after); for
+  deterministic scroll-progress or CSS/WAAPI scroll-action style/bbox motion,
+  optionally add paired `replayTrack`/`replayTrackManifest` artifacts; for
+  Lenis-owned position progress, use trusted wheel replay plus the calibrated
+  splash wait; do not use the Lenis adapter for time/action motion; for
   scroll-stop controllers (`window.scrollTo`, `scrollYProgress`, `setTimeout`,
   `velocity`, guard ref), include settle/return artifacts for
   `initial → active/expanded → settled/returned`

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .base import CheckResult
-from .reference import _has_real_detection_provenance
+from .reference import _has_real_detection_provenance, _region_entries
 
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
@@ -164,8 +164,7 @@ def _check_regions_generation_readiness(self: Gate) -> list[CheckResult]:
             )
         ]
 
-    entries = regions.get("regions")
-    entries = entries if isinstance(entries, list) else []
+    entries = _region_entries(regions)
     has_trigger_types = any(
         isinstance(region, dict) and region.get("triggerType") for region in entries
     )
@@ -175,10 +174,11 @@ def _check_regions_generation_readiness(self: Gate) -> list[CheckResult]:
                 "regions.json generation readiness",
                 "fail",
                 "regions.json claims real transition regions, but its "
-                "transition-spec derivation or live-capture evidence is missing, "
+                "transition-spec derivation or capture inventory evidence is missing, "
                 "failed, partial, or does not match the declared region artifacts.",
                 fix="Re-derive regions.json from transition-spec.json + section-map.json, "
-                "or rerun capture-region-artifacts.py until "
+                "run the ui-capture artifact inventory check, or rerun "
+                "capture-region-artifacts.py until "
                 "capture-region-artifacts-summary.json has status=pass and every "
                 "active region is captured.",
             )
@@ -432,13 +432,11 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
     # Accept both shapes so older and newer captures both surface hover/click
     # upstream signals.
     regions_raw = self._load_json("regions.json")
-    region_list: list = []
+    region_list: list[dict[str, Any]] = []
     if isinstance(regions_raw, list):
         region_list = regions_raw
     elif isinstance(regions_raw, dict):
-        nested = regions_raw.get("regions")
-        if isinstance(nested, list):
-            region_list = nested
+        region_list = _region_entries(regions_raw)
     if region_list:
         hover_click = [
             r for r in region_list

@@ -76,7 +76,7 @@ LOCAL_CLI_BIN="$LOCAL_BIN_DIR/ui-clone"
 CODEX_PUBLIC_SKILLS="ui-reverse-engineering ui-capture visual-debug"
 AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 PUBLIC_SKILLS_OWNERSHIP="$HOME/.config/ui-clone-skills/public-skills.json"
-CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex bin hooks scripts ui_clone docs AGENTS.md README.md package.json pyproject.toml uv.lock LICENSE.txt"
+CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex bin hooks scripts ui_clone docs README_detail AGENTS.md README.md package.json pyproject.toml uv.lock LICENSE.txt"
 CODEX_PLUGIN_PROJECTION_KEEP="$CODEX_PLUGIN_PROJECTION_ITEMS skills"
 # Claude and Codex cannot share one source directory. Codex reads its install
 # in place, so symlinks keep it live with the checkout; `claude plugin install`
@@ -241,9 +241,21 @@ ensure_dssim() {
 }
 
 ensure_node_npm() {
-  if have npm; then skip "npm $(npm --version)"; return; fi
-  err "npm not found. Install Node.js 18+ (https://nodejs.org/) and re-run."
-  return 1
+  if ! have node || ! have npm; then
+    err "Node.js 20+ and npm are required. Install them from https://nodejs.org/ and re-run."
+    return 1
+  fi
+
+  local node_version node_major
+  node_version="$(node --version 2>/dev/null || true)"
+  node_major="${node_version#v}"
+  node_major="${node_major%%.*}"
+  if ! [[ "$node_major" =~ ^[0-9]+$ ]] || [ "$node_major" -lt 20 ]; then
+    err "Node.js 20+ is required (found ${node_version:-unknown}). Upgrade from https://nodejs.org/ and re-run."
+    return 1
+  fi
+
+  skip "node $node_version / npm $(npm --version)"
 }
 
 ensure_agent_browser() {
@@ -1304,7 +1316,7 @@ register_codex_marketplace() {
   # pipeline, so pipefail has nothing to observe.
   local codex_listing
   codex_listing="$(codex plugin list 2>/dev/null || true)"
-  if grep -qE "(^|[[:space:]])$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME[[:space:]]+installed" <<<"$codex_listing" &&
+  if grep -qE "(^|[[:space:]])${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME}[[:space:]]+installed" <<<"$codex_listing" &&
      verify_codex_plugin_delivered; then
     skip "Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
   elif codex plugin add "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME" >/dev/null 2>&1; then

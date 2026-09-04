@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Replay Track Scroll Timeline Translation</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 2000px;
+        background: white;
+      }
+      .scroll-translation {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 200px;
+        height: 40px;
+        background: rgb(255, 255, 255);
+        opacity: 1;
+        animation: translate-only 1s linear both;
+        animation-timeline: scroll(root);
+        animation-range: 0 200px;
+      }
+      @keyframes translate-only {
+        from {
+          transform: translateY(0px);
+        }
+        to {
+          transform: translateY(80px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <span class="scroll-translation">Scroll timeline translation</span>
+  </body>
+</html>

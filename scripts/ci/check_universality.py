@@ -12,6 +12,7 @@ from re import Pattern
 
 EXCLUDED_DIRS = {
     ".git",
+    ".handover",
     ".venv",
     "node_modules",
     "tmp",

@@ -264,7 +264,7 @@ Apply in order:
   "capturedAt": "<ISO timestamp>",
   "page": { "totalHeight": 14886, "viewportWidth": 1440, "viewportHeight": 900 },
   "scroll": [
-    { "name": "hero-zoom", "from": 0, "to": 1800, "selector": ".sticky-el", "bounds": { "x": 0, "width": 1440 }, "changedProperties": ["transform"], "triggerType": "scroll-driven", "artifacts": { "before": "clip/ref/hero-zoom-before.png", "mid": "clip/ref/hero-zoom-mid.png", "after": "clip/ref/hero-zoom-after.png" } }
+    { "name": "hero-zoom", "from": 0, "to": 1800, "selector": ".sticky-el", "bounds": { "x": 0, "width": 1440 }, "changedProperties": ["transform"], "triggerType": "scroll-driven", "artifacts": { "before": "clip/ref/hero-zoom-before.png", "mid": "clip/ref/hero-zoom-mid.png", "after": "clip/ref/hero-zoom-after.png", "replayTrack": "clip/ref/hero-zoom-replay-track.json", "replayTrackManifest": "clip/ref/hero-zoom-replay-track.manifest.json" } }
   ],
   "hover": [
     {
@@ -335,4 +335,11 @@ Apply in order:
 
 Every entry with `triggerType` MUST include `artifacts`. These paths are the
 contract consumed by generation and verification; do not rely on filename
-conventions or infer files from the region name.
+conventions or infer files from the region name. For `scroll-driven` entries,
+`replayTrack` is optional deterministic evidence and must be paired with
+`replayTrackManifest` when present. Use `scroll-progress` for continuous
+computed-style or bounding-box scrubbing, and `scroll-action` only for
+CSS/WAAPI animations that can be paused and scrubbed, or the virtual-clock
+driver for timer/rAF motion that repeats exactly across fresh contexts.
+Debounced scroll-stop callbacks, velocity thresholds, and ambiguous one-shot
+class toggles stay unsupported instead of being guessed.

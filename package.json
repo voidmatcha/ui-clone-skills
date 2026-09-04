@@ -1,7 +1,27 @@
 {
   "name": "ui-clone-cli",
-  "version": "0.7.41",
-  "description": "Agent-readable CLI for ui-clone-skills pipeline, gates, and terminal state.",
+  "version": "0.7.47",
+  "description": "Clone live websites into verified React and Tailwind implementations with CSS, asset, responsive, and motion extraction.",
+  "keywords": [
+    "website-to-react",
+    "url-to-react",
+    "ui-cloning",
+    "tailwindcss",
+    "gsap",
+    "framer-motion",
+    "webflow",
+    "visual-regression",
+    "claude-code",
+    "codex"
+  ],
+  "homepage": "https://github.com/voidmatcha/ui-clone-skills#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/voidmatcha/ui-clone-skills.git"
+  },
+  "bugs": {
+    "url": "https://github.com/voidmatcha/ui-clone-skills/issues"
+  },
   "license": "Apache-2.0",
   "bin": {
     "ui-clone": "bin/ui-clone"
@@ -10,11 +30,19 @@
     "bin/",
     "ui_clone/",
     "docs/",
+    "!docs/claude-fidelity-analysis.md",
+    "!docs/clone-reviews/",
+    "!docs/*-E1.md",
+    "!docs/superpowers/",
     "scripts/",
     "hooks/",
     "skills/",
     "AGENTS.md",
     "README.md",
+    "README.ko.md",
+    "README.ja.md",
+    "README.zh-cn.md",
+    "README_detail/",
     "pyproject.toml",
     "uv.lock",
     "LICENSE.txt",
@@ -26,10 +54,11 @@
     "!scripts/**/*.pyc"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "framer-motion": "^13.1.1",
-    "lenis": "^1.3.26"
+    "lenis": "^1.3.26",
+    "playwright-core": "1.62.1"
   }
 }

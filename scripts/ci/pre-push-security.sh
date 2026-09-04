@@ -164,7 +164,7 @@ fi
 syntax_fail=0
 while IFS= read -r f; do
   "$SYNTAX_BASH" -n "$f" 2>/dev/null || { err "syntax error: $f"; syntax_fail=$((syntax_fail + 1)); }
-done < <(find scripts hooks -name '*.sh' -type f 2>/dev/null)
+done < <(find scripts hooks -name '*.sh' -type f 2>/dev/null; [ -f install.sh ] && printf '%s\n' install.sh)
 [ "$syntax_fail" -eq 0 ] && ok "all shell scripts parse"
 
 if command -v shellcheck >/dev/null 2>&1; then
@@ -173,7 +173,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   while IFS= read -r f; do
     e=$(shellcheck -S error "$f" 2>&1 | grep -c '^In ' || true)
     sc_errors=$((sc_errors + e))
-  done < <(find scripts hooks -name '*.sh' -type f 2>/dev/null)
+  done < <(find scripts hooks -name '*.sh' -type f 2>/dev/null; [ -f install.sh ] && printf '%s\n' install.sh)
   [ "$sc_errors" -eq 0 ] && ok "shellcheck error-level clean" || err "shellcheck errors: $sc_errors"
 fi
 

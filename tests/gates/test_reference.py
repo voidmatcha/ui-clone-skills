@@ -112,6 +112,78 @@ def test_gate_reference_fails_out_of_bounds_region_geometry(tmp_path: Path) -> N
     assert failures, "Out-of-bounds region geometry must produce a gate failure"
 
 
+def test_gate_reference_fails_degenerate_bounds_wh_geometry(tmp_path: Path) -> None:
+    """ui-capture emits geometry as bounds:{x,y,w,h} (capture-transitions.md).
+    The validator previously read only width/height, so a zero-area,
+    out-of-page region in the documented shape passed unchecked."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _phase1(ref)
+    (ref / "section-map.json").write_text(json.dumps({
+        "sections": [{"index": 0, "top": 0, "height": 2000}],
+    }))
+    (ref / "regions.json").write_text(json.dumps({
+        "placeholder": False,
+        "detectionRan": True,
+        "regions": [
+            {"name": "bogus", "triggerType": "click-toggle", "selector": ".x",
+             "bounds": {"x": 10, "y": 9999999, "w": 0, "h": 0}},
+        ],
+    }))
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_reference() if r.status == "fail"]
+    blob = " ".join(f"{r.label} {r.message}" for r in failures).lower()
+    assert failures, "Degenerate bounds{w,h} geometry must produce a gate failure"
+    assert "geometr" in blob or "invalid" in blob
+
+
+def test_gate_reference_fails_partial_region_geometry(tmp_path: Path) -> None:
+    """A region that declares x/y but no size must still FAIL. The previous
+    implementation defaulted a missing width to 0 and caught this; dropping
+    absent keys instead would skip every size and page-bound check."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _phase1(ref)
+    (ref / "regions.json").write_text(json.dumps({
+        "placeholder": False,
+        "detectionRan": True,
+        "regions": [
+            {"name": "partial", "triggerType": "click-toggle", "selector": ".x",
+             "x": 10, "y": 20},
+        ],
+    }))
+    gate = Gate(ref)
+    failures = [r for r in gate.gate_reference() if r.status == "fail"]
+    blob = " ".join(f"{r.label} {r.message}" for r in failures).lower()
+    assert failures, "Partial region geometry must produce a gate failure"
+    assert "geometr" in blob
+
+
+def test_gate_reference_passes_valid_bounds_wh_geometry(tmp_path: Path) -> None:
+    """A well-formed in-bounds region in the bounds:{x,y,w,h} shape must not
+    be failed by the geometry validator."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _phase1(ref)
+    (ref / "section-map.json").write_text(json.dumps({
+        "sections": [{"index": 0, "top": 0, "height": 2000}],
+    }))
+    (ref / "regions.json").write_text(json.dumps({
+        "placeholder": False,
+        "detectionRan": True,
+        "regions": [
+            {"name": "tab", "triggerType": "click-toggle", "selector": ".tab",
+             "bounds": {"x": 100, "y": 500, "w": 200, "h": 40}},
+        ],
+    }))
+    gate = Gate(ref)
+    geometry_failures = [
+        r for r in gate.gate_reference()
+        if r.status == "fail" and "geometr" in f"{r.label} {r.message}".lower()
+    ]
+    assert not geometry_failures, geometry_failures
+
+
 def test_gate_reference_passes_selector_only_real_regions(tmp_path: Path) -> None:
     """Real selector-projection regions (selector + triggerType, no pixel
     geometry) on a motion site must PASS — that's the canonical schema the
@@ -293,6 +365,79 @@ def test_gate_reference_passes_live_capture_regions_before_transition_spec_exist
     failures = [r for r in Gate(ref).gate_reference() if r.status == "fail"]
 
     assert failures == [], f"Live-captured regions must not fail: {failures}"
+
+
+def test_gate_reference_passes_categorized_ui_capture_inventory(tmp_path: Path) -> None:
+    """The public ui-capture schema and the reference gate must agree.
+
+    ui-capture groups regions by trigger family instead of duplicating a flat
+    ``regions`` list. Its successful artifact inventory is the deterministic
+    handoff proving that every curated entry names concrete capture evidence.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _phase1(ref)
+    clip_dir = ref / "clip" / "ref"
+    clip_dir.mkdir(parents=True)
+    before = "clip/ref/hero-before.png"
+    mid = "clip/ref/hero-mid.png"
+    after = "clip/ref/hero-after.png"
+    for relative in (before, mid, after):
+        (ref / relative).write_bytes(b"\x89PNG\r\n\x1a\nreal-capture")
+    artifacts = {"before": before, "mid": mid, "after": after}
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"signals": {"hasScrollScrub": True}}), encoding="utf-8"
+    )
+    (ref / "regions.json").write_text(
+        json.dumps(
+            {
+                "url": "https://example.test/",
+                "capturedAt": "2026-09-03T00:00:00Z",
+                "page": {"totalHeight": 5000},
+                "scroll": [
+                    {
+                        "name": "hero",
+                        "triggerType": "scroll-driven",
+                        "selector": ".hero",
+                        "artifacts": artifacts,
+                    }
+                ],
+                "hover": [],
+                "click": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "capture-artifact-inventory.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "regionsChecked": 1,
+                "missingArtifacts": [],
+                "checkedArtifacts": [
+                    {
+                        "region": "hero",
+                        "triggerType": "scroll-driven",
+                        "path": relative,
+                        "bytes": (ref / relative).stat().st_size,
+                    }
+                    for relative in (before, mid, after)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    failures = [result for result in Gate(ref).gate_reference() if result.status == "fail"]
+
+    assert failures == [], f"Categorized capture inventory must pass: {failures}"
+
+    (ref / after).write_bytes((ref / after).read_bytes() + b"stale")
+    failures = [result for result in Gate(ref).gate_reference() if result.status == "fail"]
+
+    assert [result.label for result in failures] == [
+        "regions.json real-detection provenance"
+    ]
 
 
 def test_gate_reference_fails_live_capture_when_summary_failed_or_region_skipped(

@@ -158,8 +158,15 @@ JS
 RAW_FILE="$(mktemp)"
 trap 'rm -f "$RAW_FILE"' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
+
 if ! agent-browser --session "$SESSION" eval --json "$EVAL_JS" >"$RAW_FILE"; then
   echo "element-evidence: agent-browser eval failed (session=$SESSION)" >&2
+  exit 3
+fi
+if ! python3 "$ORIGIN_VALIDATOR" < "$RAW_FILE"; then
+  echo "element-evidence: agent-browser eval returned a non-page origin (session=$SESSION)" >&2
   exit 3
 fi
 

@@ -1,0 +1,33 @@
+<!doctype html>
+<html data-scroll-engine="locomotive">
+  <head>
+    <meta charset="utf-8">
+    <title>Replay Track Locomotive v5 Global</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 2000px;
+        background: white;
+      }
+      .transport-label {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 200px;
+        height: 40px;
+        background: rgb(255, 255, 255);
+      }
+    </style>
+  </head>
+  <body>
+    <span class="transport-label">Locomotive v5 global</span>
+    <script>
+      window.__locomotiveScroll = {
+        scrollTo(top) {
+          window.scrollTo({ top: Number(top), left: 0, behavior: "instant" });
+        },
+      };
+    </script>
+  </body>
+</html>

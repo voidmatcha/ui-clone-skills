@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -40,3 +42,58 @@ def test_element_evidence_embedded_eval_is_valid_javascript(tmp_path: Path) -> N
     result = subprocess.run(["node", "--check", str(js_path)], check=False, capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
+
+
+def _make_fake_agent_browser(tmp_path: Path, eval_payload: str) -> Path:
+    """Fake `agent-browser` that echoes a fixed eval payload on `eval`."""
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "agent-browser"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        "cmd=\"\"\n"
+        'while [ $# -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        '    --session) shift 2 ;;\n'
+        '    eval) cmd="eval"; shift; break ;;\n'
+        '    *) shift ;;\n'
+        "  esac\n"
+        "done\n"
+        'if [ "$cmd" = "eval" ]; then\n'
+        f"  echo '{eval_payload}'\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return bin_dir
+
+
+def test_element_evidence_rejects_non_page_origin(tmp_path: Path) -> None:
+    """An about:blank envelope must fail closed instead of writing evidence.
+
+    element-evidence.sh produces an artifact with no verdict of its own, so a
+    lost page target would otherwise be published as empty evidence.
+    """
+    payload = json.dumps(
+        {"success": True, "data": {"origin": "about:blank", "result": {}}}
+    ).replace("'", "'\\''")
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+    out = tmp_path / "evidence.json"
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    script = Path(__file__).resolve().parents[1] / "scripts" / "extract" / "element-evidence.sh"
+    proc = subprocess.run(
+        [str(script), "sess1", ".hero", str(out)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert proc.returncode == 3, f"{proc.stdout}\n{proc.stderr}"
+    assert "lost the page target" in proc.stderr
+    assert not out.exists()

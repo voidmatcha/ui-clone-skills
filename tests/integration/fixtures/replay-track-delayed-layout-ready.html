@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Replay Track Delayed Layout Ready</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 2000px;
+        background: white;
+      }
+      .delayed-ready-box {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 200px;
+        height: 40px;
+        background: rgb(255, 255, 255);
+        opacity: 1;
+        transform: translateY(0px);
+      }
+      body.ready-late .delayed-ready-box {
+        height: 90px;
+        transform: translateY(20px);
+      }
+    </style>
+  </head>
+  <body>
+    <span class="delayed-ready-box">Delayed ready</span>
+    <script>
+      setTimeout(() => {
+        document.body.classList.add("ready-late");
+      }, 300);
+    </script>
+  </body>
+</html>

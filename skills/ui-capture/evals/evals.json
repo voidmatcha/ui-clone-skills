@@ -31,13 +31,13 @@
     {
       "id": 3,
       "prompt": "capture hover effects from a site with interactive buttons and cards",
-      "expected_output": "regions.json with hover array listing verified hover elements. Videos recorded in in/hold/out sequence for each element. Total regions ≤ 20.",
+      "expected_output": "regions.json with hover array listing verified hover elements. Idle and active PNG clips captured for each element. Total regions ≤ 20.",
       "files": [],
       "expectations": [
         "Detects elements with transitionDuration !== '0s'",
         "Verifies hover actually changes computed styles before including",
         "Groups sibling elements with same transition under parent",
-        "Records hover in/hold/out video for each verified element",
+        "Captures idle and active PNG clips for each verified element",
         "Keeps total regions ≤ 20"
       ]
     },
@@ -152,27 +152,27 @@
     {
       "id": 12,
       "prompt": "capture a card that uses a JS class toggle for its hover effect",
-      "expected_output": "Hover video shows the card animation triggered by toggling the correct CSS class via eval, not by a simple hover command. regions.json has triggerType 'js-class' with triggerClass field.",
+      "expected_output": "Idle and active PNG clips show the card state toggled with the correct CSS class via eval, not by a simple hover command. regions.json has triggerType 'js-class' with triggerClass field.",
       "files": [],
       "expectations": [
         "Detects that the effect is JS-driven (class toggle), not CSS :hover",
         "Tags region with triggerType 'js-class' and triggerClass in regions.json",
         "Activates effect by adding the class via eval (not agent-browser hover)",
-        "Records in/hold/out sequence using class add/remove",
-        "Video shows actual animation, not a blank or wrong-state recording"
+        "Captures idle and active PNG clips around class add/remove",
+        "Active clip shows the intended state, not a blank or wrong element"
       ]
     },
     {
       "id": 13,
       "prompt": "capture a section that fades in when scrolled into view (IntersectionObserver-triggered animation)",
-      "expected_output": "Video shows the element animating as it enters the viewport. regions.json has triggerType 'intersection'. Activation uses smooth scroll into view, not agent-browser hover.",
+      "expected_output": "Idle and active PNG clips show the element before and after it enters the viewport. regions.json has triggerType 'intersection'. Activation uses smooth scroll into view, not agent-browser hover.",
       "files": [],
       "expectations": [
         "Detects intersection trigger via data-in-view attribute or in-view/inview class pattern",
         "Tags region with triggerType 'intersection' in regions.json",
-        "Resets in-view state before recording (removes in-view classes)",
+        "Resets in-view state before capture (removes in-view classes)",
         "Activates by smooth-scrolling element into viewport (not hover command)",
-        "Video shows entry animation playing as element scrolls into view"
+        "Active clip shows the entered state after smooth scrolling"
       ]
     },
     {

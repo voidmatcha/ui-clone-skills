@@ -14,9 +14,10 @@
 
 ## Problem
 
-The current capture pipeline (`scripts/extract/extract-dom.sh`,
-`scripts/extract/capture.sh`) takes a **single DOM snapshot** at one
-"settled" moment after `agent-browser open`. juanmora ref dir evidence:
+Before the A/B/C integration, the capture pipeline
+(`scripts/extract/extract-dom.sh`, `scripts/extract/capture.sh`) took a
+**single DOM snapshot** at one "settled" moment after `agent-browser open`.
+juanmora ref dir evidence:
 
 ```
 tmp/ref/juanmora/
@@ -127,12 +128,12 @@ full DOM 50×):
 - On structural mutations only (DOM length delta > 20%): full snapshot
   `states/splash/<NNNms>.json`. Otherwise just the trajectory entry.
 
-**Session handling** (codex item d): use `${SESSION}-states` derived
-session name. Either:
-- Run capture-states.sh from within capture.sh at a deterministic point
-  (same parent session, sequential), OR
-- Standalone caller passes a unique session name; capture-states.sh
-  opens its own page navigation.
+**Session handling** (codex item d): `capture.sh` runs A/B/C sequentially
+before its settled screenshot pass. Each phase uses and closes its own derived
+session (`${SESSION}-states`, `${SESSION}-scroll`, `${SESSION}-hover`) so a
+short pre-navigation splash cannot race with scroll or hover mutations. A
+standalone caller may pass `--reuse-session` only when it owns that session's
+lifecycle.
 
 **Output metadata** (codex item e): `states/splash/summary.json` with
 `{checked: true, durationMs, polls, timedOut, reason}` so downstream
@@ -145,11 +146,21 @@ After Phase A signals "splash settled":
 
 1. Compute scroll depth: `document.documentElement.scrollHeight - window.innerHeight`
 2. For each percentage in [0, 10, 25, 50, 75, 90, 100]:
-   - `window.scrollTo(0, depth * pct / 100)` + 500ms settle
-   - Snapshot DOM → `html/scroll-<pct>pct.json`
-   - Snapshot computed style of viewport-visible sections → `scroll-state-<pct>pct.json`
-3. Emit `scroll-state-trajectory.json` linking scroll percentage to
-   visible section selectors + computed style deltas
+   - Sweep toward the target in bounded fine-grained steps (minimum 120px,
+     maximum 180 steps across the page), allowing scroll/IO handlers to run
+   - Verify the actual scroll position converges to the target; fail the
+     capture if any percentage label would be inaccurate
+   - Settle, then snapshot full DOM → `states/scroll/<pct>pct.json`
+3. Emit `states/scroll/trajectory.json` linking scroll percentage to visible
+   section selectors + computed style digest
+4. Observe semantic DOM mutations during each sweep and emit
+   `states/scroll/dom-mutations.json` with selector, mutation kind,
+   first/last `scrollY`, before/after values or node signatures, and count
+
+The mutation observer tracks structural/state signals (class, common
+ARIA/data state, hidden/open, text, and child nodes). Per-frame inline style
+changes remain the responsibility of transition video and visual trajectory
+capture, avoiding a noisy duplicate stream of animation-frame writes.
 
 **Why 7 stops not 5**: 0 and 10 differentiate "above the fold" from
 "first scroll" (which often triggers IO reveals); 90 and 100 differentiate
@@ -262,11 +273,11 @@ Few, isolated:
   *DOM* state, not canvas frame parity. Canvas-replay mode design
   (`docs/canvas-replay-mode-design.md`) handles that orthogonally.
 
-- **Splash never ends** (broken site): Phase A wall-clock cap stops at
-  5s, emits `states/splash/settled.json` with whatever the class was
-  at 5s + a warning marker `"splash_timed_out": true`. Downstream gate
-  surfaces this as "ref has a stuck splash; treat sections that don't
-  appear as out-of-scope."
+- **Splash never ends** (broken site): ordinary pages retain the 5s ceiling,
+  but a fullscreen overlay observed at navigation start gets an adaptive 15s
+  ceiling and exits immediately when that overlay disappears. If it still has
+  not exited, Phase A emits the final state with `timedOut: true`; downstream
+  consumers must treat that as inconclusive, not as proof that no splash exists.
 
 ## Implementation surface (as shipped)
 
@@ -296,10 +307,11 @@ since v0.6.0. Justified by:
 
 ## Risks
 
-1. **Phase A timing flakiness**: 100ms polling may miss fast transitions
-   on slow machines, or trigger false positives on transitions that
-   happen pre-render. Mitigation: each snapshot includes a
-   `requestAnimationFrame` settle + computed-style diff threshold.
+1. **Phase A timing variance**: 100ms polling may miss very fast transitions,
+   while cold-cache media/font readiness can keep real loaders alive beyond
+   5s. Mitigation: the sampler is installed before navigation, each poll uses a
+   `requestAnimationFrame` settle, and a fullscreen initial overlay extends the
+   bounded window to 15s until its identity disappears.
 
 2. **Phase B scroll triggers may double-fire**: scroll-driven animations
    that fire on entering AND leaving viewport produce ambiguous mid-scroll
@@ -320,7 +332,9 @@ since v0.6.0. Justified by:
 
 ## Codex review checklist (pre-implementation)
 
-- [ ] capture-states.sh sequence safe under agent-browser session reuse?
+- [x] capture-states.sh sequence safe under agent-browser session reuse; the
+  default derived session is closed, while `--reuse-session` preserves the
+  caller-owned session.
 - [ ] state-coverage gate's "splash hook absent in impl" detection sound?
   (similar shape to F1 anti-cheat + F spec-bundle-grounding)
 - [ ] GATE_ORDER insertion point — between `pre-generate` and

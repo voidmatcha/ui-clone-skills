@@ -157,6 +157,63 @@ agent-browser --session <project> screenshot '<selector>' \
 
 **Repeat identically for impl** (change ref → impl in paths, use the same y values).
 
+For continuous scroll-position motion, add a `scroll-progress` replay track
+after the before/mid/after images. For an exact scroll action that starts a
+CSS/WAAPI animation, add a `scroll-action` track only when the recorder can
+pause that animation and scrub its time deterministically. Replay tracks are
+optional, but `replayTrack` and `replayTrackManifest` must be declared together
+for the same region. Deterministic timer/rAF motion may use the virtual-clock
+driver; debounced callbacks, velocity thresholds, and other paths that do not
+repeat exactly across two fresh contexts remain state evidence and fail closed.
+
+Choose the replay driver from observed runtime behavior, not from a library
+name alone:
+
+| Runtime behavior | Replay contract | Common producers |
+|---|---|---|
+| Values are a direct function of scroll position | `scroll-progress` | CSS ScrollTimeline, GSAP ScrollTrigger scrub, Framer `useScroll`/`useTransform`, Webflow `SCROLLING_IN_VIEW`, scroll-bound Anime `seek`, frame-controlled Lottie |
+| An action starts CSS/WAAPI animation objects | `scroll-action` + `animation-pause` | CSS transitions/animations, explicit WAAPI |
+| An action starts timer/rAF motion with no controllable animation object | `scroll-action` + `virtual-clock` | Framer springs, plain GSAP/Anime timelines, Webflow one-shot motion |
+| Lenis owns position-based scroll progress | `scroll-progress` + `lenis-wheel` | Lenis/ReactLenis with a callable instance or a Lenis marker plus a proven root wheel listener |
+| Another custom engine owns scroll transport, or Lenis drives time/action motion | engine adapter or fail closed | Locomotive Scroll, GSAP ScrollSmoother, markerless root wheel interception, Lenis action/spring motion |
+| Autonomous media/canvas playback | outside replay-track | autoplay Lottie/video/canvas loops |
+
+Bundle detection only selects a probe. A framework is supported for replay
+only after two fresh reference contexts produce the same canonical track and a
+wrong trigger, duration, or easing fails comparison. Do not silently fall back
+to native `window.scrollTo` when a custom transport owns the page.
+Lenis pages with a callable instance, or a Lenis marker plus a proven root
+wheel listener, may use the explicit `lenis-wheel` adapter for settled position
+progress. The recorder drives each of the 21 target positions through
+trusted Playwright wheel input, requires the actual scroll position to align,
+and records that actual value. It does not interpolate missing positions.
+Marker-only Locomotive pages and root-level non-passive wheel interception still
+count as unsupported custom ownership; element-local wheel handlers such as
+carousels do not. Until an engine-specific adapter reproduces the real input
+path, keep those regions outside replay-track instead of recording a
+false-native trace.
+
+Calibrate splash/layout readiness before recording and pass the measured wait:
+
+```bash
+bash scripts/extract/capture-replay-track.sh \
+  "$REF_URL" '<selector>' "$OUT_DIR/clip/ref/<name>-replay-track.json" \
+  <start-px> <end-px> \
+  --mode scroll-progress \
+  --transport lenis-wheel \
+  --ready-wait-ms <measured-splash-duration-plus-buffer>
+```
+
+The wait is persisted as `trigger.readyWaitMs`, propagated to implementation
+capture, and compared exactly. Do not increase it speculatively: use the
+splash calibration from Phase 1.
+
+Replay-track v1 covers translateX/translateY, opacity, clip-path,
+background-color, height, CSS position, and the bounding box. Rotation, scale,
+3D transforms, filters, text effects, canvas, video, and autonomous Lottie
+playback stay on their existing visual/state gates; never approximate them into
+the v1 property set.
+
 The screenshot command accepts `screenshot [selector] [path]`; keep the selector
 before the output path. If the changing visual region has no selector of its
 own (for example, a canvas subregion), capture the viewport and crop it
@@ -176,7 +233,9 @@ Update that region in `regions.json` with:
 "artifacts": {
   "before": "clip/ref/<name>-before.png",
   "mid": "clip/ref/<name>-mid.png",
-  "after": "clip/ref/<name>-after.png"
+  "after": "clip/ref/<name>-after.png",
+  "replayTrack": "clip/ref/<name>-replay-track.json",
+  "replayTrackManifest": "clip/ref/<name>-replay-track.manifest.json"
 }
 ```
 

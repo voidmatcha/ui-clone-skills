@@ -299,7 +299,8 @@ def test_runtime_capture_contract_is_bounded_and_explicit() -> None:
     assert "scrollAudit" in source
     assert "[0, 0.05, 0.1, 0.2, 0.35, 0.55, 0.75, 1]" in source
     assert "SETTLE_MAX_POLLS = 3" in source
-    assert "MAX_ADAPTIVE_POSITIONS = 24" in source
+    assert "MAX_ADAPTIVE_POSITIONS = 8" in source
+    assert "30-second IPC read ceiling" in source
     assert "querySelectorAll(\"[style]\")" in source
     assert 'querySelectorAll("*")' not in source
     assert "requested" in source

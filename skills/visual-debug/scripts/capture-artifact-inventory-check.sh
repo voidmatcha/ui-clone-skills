@@ -29,8 +29,11 @@ python3 - "$REF_DIR" "$REGIONS" "$OUT" <<'PY'
 import json
 import os
 import sys
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, UnidentifiedImageError
 
 from ui_clone.gates.spec import (
     _reference_media_is_decodable,
@@ -99,9 +102,21 @@ required_by_trigger = {
     "scroll-driven": {"before", "mid", "after"},
     "click-toggle": {"idle", "active"},
     "click-content-swap": {"video", "idle", "active"},
+    "swiper-next": {"idle", "active"},
     "mousemove": {"video"},
     "auto-timer": {"video"},
 }
+raster_state_keys = {
+    "css-hover": {"idle", "active"},
+    "js-class": {"idle", "active"},
+    "hover": {"idle", "active"},
+    "intersection": {"before", "after"},
+    "scroll-driven": {"before", "mid", "after"},
+    "click-toggle": {"idle", "active"},
+    "click-content-swap": {"idle", "active"},
+    "swiper-next": {"idle", "active"},
+}
+raster_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
 checked: list[dict[str, Any]] = []
 missing: list[dict[str, Any]] = []
@@ -179,6 +194,44 @@ def validate_reference_frame_field(frame: dict[str, Any]) -> None:
         checked_reference_frames.append({**token_base, "resolvedPath": path.relative_to(ref_dir.resolve()).as_posix(), "bytes": path.stat().st_size})
 
 
+def inspect_raster(path: Path) -> tuple[str | None, str | None]:
+    """Return a stable visible-pixel digest or a fail-closed reason."""
+    try:
+        with Image.open(path) as source:
+            source.load()
+            rgba = source.convert("RGBA")
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        return None, f"artifact raster not decodable: {exc}"
+
+    if rgba.width <= 1 or rgba.height <= 1:
+        return None, "artifact raster is blank"
+    extrema = rgba.getextrema()
+    alpha = extrema[3]
+    if alpha[1] == 0 or all(low == high for low, high in extrema):
+        return None, "artifact raster is blank"
+
+    digest = sha256()
+    digest.update(f"{rgba.width}x{rgba.height}:RGBA\0".encode())
+    digest.update(rgba.tobytes())
+    return digest.hexdigest(), None
+
+
+def record_identical(
+    name: str,
+    trigger: str,
+    states: list[str],
+    reason: str,
+) -> None:
+    missing.append(
+        {
+            "region": name,
+            "triggerType": trigger,
+            "states": states,
+            "reason": reason,
+        }
+    )
+
+
 if transition_spec_path.is_file():
     try:
         transition_spec = json.loads(transition_spec_path.read_text(encoding="utf-8"))
@@ -215,10 +268,30 @@ for index, region in enumerate(regions):
         if not required:
             required = set(artifacts)
 
-    for key in sorted(required):
+    if trigger == "click-cycle":
+        expected_rasters = {key for key in required if key.startswith("state-")}
+    elif trigger in raster_state_keys:
+        expected_rasters = raster_state_keys[trigger]
+    else:
+        # An unrecognized triggerType must not skip raster validation entirely;
+        # anything already claiming an image extension still has to decode.
+        expected_rasters = {
+            key
+            for key in required
+            if isinstance(artifacts.get(key), str)
+            and Path(artifacts[key]).suffix.lower() in raster_suffixes
+        }
+    raster_digests: dict[str, str] = {}
+    raster_paths: dict[str, str] = {}
+
+    # Report every declared artifact, not just the per-trigger required set:
+    # the reference gate requires each declared path to appear as a checked row,
+    # so omitting an extra key deadlocks it against a checker that keeps passing.
+    for key in sorted(set(required) | set(artifacts)):
         value = artifacts.get(key)
         if not isinstance(value, str) or not value.strip():
-            missing.append({"region": name, "triggerType": trigger, "state": key, "reason": "missing artifact path"})
+            if key in required:
+                missing.append({"region": name, "triggerType": trigger, "state": key, "reason": "missing artifact path"})
             continue
         rel = Path(value)
         if rel.is_absolute() or ".." in rel.parts:
@@ -238,7 +311,113 @@ for index, region in enumerate(regions):
         if size <= 0:
             missing.append({"region": name, "triggerType": trigger, "state": key, "path": value, "reason": "artifact file empty"})
             continue
+        if key in expected_rasters:
+            if path.suffix.lower() not in raster_suffixes:
+                missing.append({"region": name, "triggerType": trigger, "state": key, "path": value, "reason": "artifact state must reference a raster image"})
+                continue
+            digest, raster_error = inspect_raster(path)
+            if raster_error is not None or digest is None:
+                missing.append({"region": name, "triggerType": trigger, "state": key, "path": value, "reason": raster_error or "artifact raster not decodable"})
+                continue
+            raster_digests[key] = digest
+            raster_paths[key] = rel.as_posix()
         checked.append({"region": name, "triggerType": trigger, "state": key, "path": value, "bytes": size})
+
+    paths_to_states: dict[str, list[str]] = {}
+    for state, path_value in raster_paths.items():
+        paths_to_states.setdefault(path_value, []).append(state)
+    for reused_states in paths_to_states.values():
+        if len(reused_states) > 1:
+            record_identical(
+                name,
+                trigger,
+                sorted(reused_states),
+                "artifact path reused across required states",
+            )
+
+    if trigger == "scroll-driven":
+        if (
+            "before" in raster_digests
+            and "after" in raster_digests
+            and raster_digests["before"] == raster_digests["after"]
+        ):
+            record_identical(
+                name,
+                trigger,
+                ["before", "after"],
+                "scroll endpoint rasters are identical",
+            )
+    elif trigger == "click-cycle":
+        digest_to_states: dict[str, list[str]] = {}
+        for state, digest in raster_digests.items():
+            digest_to_states.setdefault(digest, []).append(state)
+        for duplicate_states in digest_to_states.values():
+            if len(duplicate_states) > 1:
+                record_identical(
+                    name,
+                    trigger,
+                    sorted(duplicate_states),
+                    "required state rasters are identical",
+                )
+    else:
+        comparison_pair = {
+            "css-hover": ("idle", "active"),
+            "js-class": ("idle", "active"),
+            "hover": ("idle", "active"),
+            "intersection": ("before", "after"),
+            "click-toggle": ("idle", "active"),
+            "click-content-swap": ("idle", "active"),
+        }.get(trigger)
+        if comparison_pair and all(state in raster_digests for state in comparison_pair):
+            first, second = comparison_pair
+            if raster_digests[first] == raster_digests[second]:
+                record_identical(
+                    name,
+                    trigger,
+                    [first, second],
+                    "required state rasters are identical",
+                )
+
+    if trigger == "scroll-driven" and (
+        "replayTrack" in artifacts or "replayTrackManifest" in artifacts
+    ):
+        replay_keys = ("replayTrack", "replayTrackManifest")
+        for key in replay_keys:
+            if key not in artifacts:
+                missing.append(
+                    {
+                        "region": name,
+                        "triggerType": trigger,
+                        "state": key,
+                        "reason": "missing paired replay artifact",
+                    }
+                )
+                continue
+            value = artifacts.get(key)
+            if not isinstance(value, str) or not value.strip():
+                missing.append({"region": name, "triggerType": trigger, "state": key, "reason": "missing artifact path"})
+                continue
+            rel = Path(value)
+            if rel.is_absolute() or ".." in rel.parts:
+                missing.append({"region": name, "triggerType": trigger, "state": key, "path": value, "reason": "artifact path must be relative under ref-dir"})
+                continue
+            path = ref_dir / rel
+            try:
+                path.resolve().relative_to(ref_dir.resolve())
+            except ValueError:
+                missing.append({"region": name, "triggerType": trigger, "state": key, "path": value, "reason": "artifact path must be relative under ref-dir"})
+                continue
+            if not path.is_file():
+                missing.append({"region": name, "triggerType": trigger, "state": key, "path": value, "reason": "artifact file missing"})
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            if size <= 0:
+                missing.append({"region": name, "triggerType": trigger, "state": key, "path": value, "reason": "artifact file empty"})
+                continue
+            checked.append({"region": name, "triggerType": trigger, "state": key, "path": value, "bytes": size})
 
 status = "fail" if missing else "pass"
 payload = {

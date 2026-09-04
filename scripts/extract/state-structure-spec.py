@@ -180,6 +180,10 @@ def _build_scroll_events(ref_dir: Path) -> list[dict[str, Any]]:
     trajectory_path = scroll_dir / "trajectory.json"
     summary = _load_json(summary_path)
     trajectory = _load_json(trajectory_path)
+    mutation_path = scroll_dir / "dom-mutations.json"
+    mutation_trace = _load_json(mutation_path)
+    if not isinstance(mutation_trace, list):
+        mutation_trace = []
     if not isinstance(summary, dict) or not isinstance(trajectory, list) or len(trajectory) < 2:
         return []
     events: list[dict[str, Any]] = []
@@ -194,6 +198,13 @@ def _build_scroll_events(ref_dir: Path) -> list[dict[str, Any]]:
             before_file if before_file.is_file() else None,
             after_file if after_file.is_file() else None,
         )
+        leg_mutations = [
+            mutation
+            for mutation in mutation_trace
+            if isinstance(mutation, dict)
+            and mutation.get("fromPct") == from_pct
+            and mutation.get("toPct") == to_pct
+        ]
         visible_before = before.get("visibleSections", [])
         visible_after = after.get("visibleSections", [])
         changed = bool(
@@ -201,11 +212,14 @@ def _build_scroll_events(ref_dir: Path) -> list[dict[str, Any]]:
             or visible_before != visible_after
             or dom_delta["addedSignatures"]
             or dom_delta["removedSignatures"]
+            or leg_mutations
         )
         artifacts = [summary_path, trajectory_path]
         for file in (before_file, after_file):
             if file.is_file():
                 artifacts.append(file)
+        if mutation_path.is_file():
+            artifacts.append(mutation_path)
         events.append({
             "id": f"scroll:{from_pct}->{to_pct}",
             "phase": "scroll",
@@ -220,7 +234,12 @@ def _build_scroll_events(ref_dir: Path) -> list[dict[str, Any]]:
             "scrollEngine": summary.get("scrollEngine", "native"),
             "visibleSectionsBefore": visible_before,
             "visibleSectionsAfter": visible_after,
-            "domMutation": {"changed": changed, **dom_delta},
+            "domMutation": {
+                "changed": changed,
+                **dom_delta,
+                "observedMutationCount": len(leg_mutations),
+                "observedMutations": leg_mutations[:40],
+            },
             "artifacts": [_rel(ref_dir, path) for path in artifacts],
         })
     return events

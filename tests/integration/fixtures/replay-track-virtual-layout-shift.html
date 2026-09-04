@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Replay Track Virtual Layout Shift</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 2000px;
+        background: white;
+      }
+      .spacer {
+        height: 20px;
+      }
+      .layout-box {
+        display: block;
+        position: relative;
+        width: 220px;
+        height: 40px;
+        background: rgb(255, 255, 255);
+        opacity: 1;
+        transform: translateY(0px);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="spacer"></div>
+    <span class="layout-box">Layout shift</span>
+    <script>
+      let startedAt = null;
+      function render(now) {
+        if (startedAt === null) startedAt = now;
+        const progress = Math.min(Math.max((now - startedAt) / 640, 0), 1);
+        const spacer = document.querySelector(".spacer");
+        const box = document.querySelector(".layout-box");
+        spacer.style.height = `${20 + progress * 60}px`;
+        box.style.height = `${40 + progress * 40}px`;
+        if (progress < 1) {
+          requestAnimationFrame(render);
+        }
+      }
+      addEventListener("scroll", () => {
+        startedAt = performance.now();
+        requestAnimationFrame(render);
+      }, { passive: true });
+    </script>
+  </body>
+</html>

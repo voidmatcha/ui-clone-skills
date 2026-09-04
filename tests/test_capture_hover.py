@@ -57,6 +57,14 @@ def test_browser_eval_records_css_stylesheet_href() -> None:
     assert "sourceHrefs: sourceHref ? [sourceHref] : []" in source
 
 
+def test_browser_eval_frame_wait_has_background_tab_fallback() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "const boundedFrameWait" in source
+    assert "setTimeout(finish, delayMs + 50)" in source
+    assert "await boundedFrameWait(SETTLE_MS)" in source
+    assert "new Promise(r => requestAnimationFrame" not in source
+
+
 def _make_fake_agent_browser(
     tmp_path: Path,
     eval_payload: str,
@@ -97,6 +105,38 @@ def _run_capture_hover(
     if reuse_session:
         args.append("--reuse-session")
     return subprocess.run(args, capture_output=True, text=True, env=env, timeout=20)
+
+
+def test_derived_session_wait_uses_splash_summary_duration(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    summary_dir = ref_dir / "states" / "splash"
+    summary_dir.mkdir(parents=True)
+    (summary_dir / "summary.json").write_text(
+        json.dumps({"checked": True, "durationMs": 2700}),
+        encoding="utf-8",
+    )
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload([]))
+
+    proc = _run_capture_hover(ref_dir, bin_dir, reuse_session=False)
+
+    assert proc.returncode == 0, proc.stderr
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert "--session sess1-hover wait" in calls
+    open_index = calls.index("--session sess1-hover open")
+    wait_index = calls.index("--session sess1-hover wait")
+    eval_index = calls.index("--session sess1-hover eval")
+    assert open_index < wait_index < eval_index
+
+
+def test_about_blank_eval_envelope_fails_closed(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    payload = json.dumps({"success": True, "data": {"origin": "about:blank", "result": {}}})
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+
+    proc = _run_capture_hover(ref_dir, bin_dir)
+
+    assert proc.returncode == 3
+    assert "lost the page target" in proc.stderr
 
 
 def _result(
@@ -557,6 +597,7 @@ def test_derived_session_used_by_default(tmp_path: Path) -> None:
     assert proc.returncode == 0
     calls = (tmp_path / "calls.log").read_text()
     assert "sess1-hover" in calls
+    assert "--session sess1-hover close" in calls
     bare_lines = [
         line
         for line in calls.splitlines()
@@ -573,6 +614,7 @@ def test_reuse_session_flag_uses_callers_session(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text()
     assert "--session sess1 " in (calls + " ")
     assert "sess1-hover" not in calls
+    assert "--session sess1 close" not in calls
 
 
 def test_summary_carries_cap_metadata(tmp_path: Path) -> None:

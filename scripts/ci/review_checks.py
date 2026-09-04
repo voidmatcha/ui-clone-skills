@@ -180,6 +180,7 @@ def check_trigger_fixtures() -> int:
 
 def find_hangul() -> int:
     hangul = re.compile(r"[\uAC00-\uD7AF]")
+    readme_korean_link = '<a href="README.ko.md">🇰🇷 \ud55c\uad6d\uc5b4</a>'
     roots = ["skills", "CHANGELOG.md", "README.md", "AGENTS.md", "CLAUDE.md"]
     hits = []
     for root in roots:
@@ -193,7 +194,10 @@ def find_hangul() -> int:
         )
         for path in paths:
             try:
-                if hangul.search(path.read_text(encoding="utf-8", errors="ignore")):
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                if path == pathlib.Path("README.md"):
+                    text = text.replace(readme_korean_link, "")
+                if hangul.search(text):
                     hits.append(str(path))
             except OSError:
                 pass

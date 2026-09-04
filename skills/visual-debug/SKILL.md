@@ -1,6 +1,6 @@
 ---
 name: visual-debug
-description: "Compare reference vs implementation with AE/SSIM/pixel diff; find visual mismatches when UI looks off or doesn't match."
+description: "Diagnose why an existing implementation differs from reference evidence using AE/SSIM, pixel, section, computed-style, and transition diffs. Use for post-implementation mismatch or repair guidance; not baseline capture or full clone generation."
 metadata:
   filePattern:
     - "**/tmp/ref/**/static/**"

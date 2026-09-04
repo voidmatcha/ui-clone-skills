@@ -173,7 +173,10 @@
   // two short polls, less than the fixed wait this replaced.
   const SETTLE_POLL_MS = 120;
   const SETTLE_MAX_POLLS = 3;
-  const MAX_ADAPTIVE_POSITIONS = 24;
+  // The agent-browser CLI has a 30-second IPC read ceiling. Eight adaptive
+  // positions plus the base and return sweeps keep this single eval bounded;
+  // dense 60fps construction evidence belongs to capture-replay-track.
+  const MAX_ADAPTIVE_POSITIONS = 8;
   const frameSignature = frame => JSON.stringify(
     Object.entries(frame || {}).map(([id, rec]) => [
       id, rec.sel, rec.transform, rec.opacity, rec.width, rec.height, rec.borderRadius, rec.filter,

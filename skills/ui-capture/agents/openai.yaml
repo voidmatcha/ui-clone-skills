@@ -1,8 +1,8 @@
 interface:
   display_name: "UI Capture"
-  short_description: "Capture reference screenshots, scroll states, hovers, and transitions from a live website."
+  short_description: "Capture baseline screenshots, scroll states, interactions, and transitions from a live URL."
   brand_color: "#10A37F"
-  default_prompt: "Use ui-capture to capture baseline screenshots and transitions for a live URL."
+  default_prompt: "Use ui-capture to collect baseline screenshots, scroll states, interactions, and transition evidence from this live URL."
 
 policy:
   allow_implicit_invocation: true

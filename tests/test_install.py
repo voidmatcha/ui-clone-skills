@@ -117,6 +117,11 @@ def test_codex_install_projects_and_installs_native_agents() -> None:
         'CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex bin hooks scripts'
         in text
     )
+    projection_match = re.search(
+        r'^CODEX_PLUGIN_PROJECTION_ITEMS="([^"]+)"', text, re.MULTILINE
+    )
+    assert projection_match is not None
+    assert "README_detail" in projection_match.group(1).split()
     assert "install_codex_native_agents" in text
     assert "for item in $CODEX_PLUGIN_PROJECTION_ITEMS" in text
     assert "for item in .codex-plugin .codex skills hooks scripts" not in text

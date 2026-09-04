@@ -1,10 +1,44 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_distributed_readme_links_and_capture_contracts_are_packaged_consistently() -> None:
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    assert "README_detail/" in package["files"]
+
+    skill = (ROOT / "skills" / "ui-capture" / "SKILL.md").read_text(encoding="utf-8")
+    assert '"**/tmp/ref/**/clip/**"' in skill
+    assert '"**/tmp/ref/**/clips/**"' not in skill
+
+    evals = json.loads(
+        (ROOT / "skills" / "ui-capture" / "evals" / "evals.json").read_text(
+            encoding="utf-8"
+        )
+    )["evals"]
+    static_state_evals = {entry["id"]: entry for entry in evals if entry["id"] in {3, 12, 13}}
+    assert set(static_state_evals) == {3, 12, 13}
+    for entry in static_state_evals.values():
+        contract = " ".join([entry["expected_output"], *entry["expectations"]]).lower()
+        assert "png" in contract
+        assert "video" not in contract
+
+
+def test_node_runtime_contract_matches_playwright_requirement() -> None:
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
+    install = (ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert package["engines"]["node"] == ">=20"
+    assert lock["packages"][""]["engines"]["node"] == ">=20"
+    assert lock["packages"]["node_modules/playwright-core"]["engines"]["node"] == ">=20"
+    assert "Node.js 20+ and npm are required" in install
+    assert 'node_major" -lt 20' in install
 
 
 def test_github_ci_uses_ci_local_as_single_source_of_truth() -> None:
@@ -36,8 +70,22 @@ def test_github_ci_uses_node24_action_majors() -> None:
 
     assert "actions/checkout@v4" not in workflow
     assert "astral-sh/setup-uv@v4" not in workflow
-    assert workflow.count("actions/checkout@v7.0.1") == 4
-    assert workflow.count("astral-sh/setup-uv@v10.0.1") == 2
+    # setup-node v4 runs on the node20 runtime; v7 is the node24 line.
+    assert "actions/setup-node@v4" not in workflow
+
+    # Assert the intent — every usage is pinned — rather than a job count, so
+    # adding a job does not require editing a magic number here.
+    for action, pinned in (
+        ("actions/checkout@", "actions/checkout@v7.0.1"),
+        ("astral-sh/setup-uv@", "astral-sh/setup-uv@v10.0.1"),
+        ("actions/setup-node@", "actions/setup-node@v7.0.0"),
+    ):
+        total = workflow.count(action)
+        assert total > 0, f"{action} disappeared from the workflow"
+        assert workflow.count(pinned) == total, (
+            f"every {action} usage must be pinned to {pinned}: "
+            f"{total} usages, {workflow.count(pinned)} pinned"
+        )
 
 
 def test_docs_directory_is_not_globally_ignored() -> None:

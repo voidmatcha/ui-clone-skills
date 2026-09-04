@@ -712,6 +712,20 @@ add_check() {
   CHECK_COUNT=$((CHECK_COUNT + 1))
 }
 
+# Record a check that cannot dispatch because its evidence was never captured.
+# Same reasoning as the tier-dropped branch of add_check: a check that does not
+# run must appear in the plan as tracked debt, otherwise a consumer reads the
+# missing row as coverage rather than as an untested gap.
+record_evidence_gap() {
+  local id="$1" severity="$2" reason="$3"
+  if [ "$DEFERRED_COUNT" -gt 0 ]; then
+    printf ',\n' >> "$DEFERRED_FILE"
+  fi
+  printf '    { "id": "%s", "severity": "%s", "unmetEvidence": "%s" }' \
+    "$id" "$severity" "$reason" >> "$DEFERRED_FILE"
+  DEFERRED_COUNT=$((DEFERRED_COUNT + 1))
+}
+
 # Universal local-port guard — must run before any agent-browser comparison
 # that opens <impl-url>. runtime-env still performs deeper browser checks, but
 # this cheap lsof/cwd guard prevents stale dev servers from making direct
@@ -1295,6 +1309,21 @@ if contains_pattern "$REGIONS_JSON" '"triggerType":\s*"'; then
             "Every ui-capture regions.json triggerType entry must enumerate the concrete ref clip/video artifacts it produced" \
             "block" \
             "quick"
+fi
+
+if contains_pattern "$REGIONS_JSON" '"replayTrack":\s*"' \
+   || contains_pattern "$REGIONS_JSON" '"replayTrackManifest":\s*"'; then
+  add_check "replay-track-compare" \
+            "skills/visual-debug/scripts/replay-track-compare.py" \
+            "transitions/replay-track-compare.json" \
+            "regions.json declares replayTrack evidence — impl must reproduce every deterministic scroll replay track against the validated reference baseline" \
+            "block" \
+            "quick" \
+            "" \
+            "{impl_url} {ref_dir}"
+elif contains_pattern "$REGIONS_JSON" '"triggerType":\s*"scroll-driven"'; then
+  record_evidence_gap "replay-track-compare" "block" \
+    "regions.json declares scroll-driven regions but no replayTrack or replayTrackManifest evidence, so no deterministic scroll replay was captured to compare against"
 fi
 
 # Every site with a transition-spec.json should verify each entry is wired

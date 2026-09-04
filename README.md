@@ -1,145 +1,180 @@
-# ui-clone-skills — Motion forensics for the animated web
+<h1 align="center">UI Clone Skills</h1>
 
-**ui-clone-skills** is motion forensics for the animated web: an agent skill for [Claude Code](https://code.claude.com/) and [Codex](https://developers.openai.com/codex/) by [@voidmatcha](https://github.com/voidmatcha) that investigates a live URL the way a forensic analyst investigates a binary — extracts real CSS and real animation parameters from JS bundles (GSAP, Framer Motion, Lenis, anime.js), then either explains them, emits production React + Tailwind code, or scores an existing impl against the original via AE/SSIM pixel diff. No screenshot input, no vision tokens for routine verification.
+<p align="center">
+  <strong>Clone how a website moves, not only how it looks.</strong>
+</p>
 
-### Four jobs against a live URL
+<p align="center">
+  <a href="#skills"><img alt="Agent Skills" src="https://img.shields.io/badge/Agent_Skills-3-1FC07C?style=flat-square&amp;labelColor=black"></a>
+  <a href="https://claude.com/product/claude-code"><img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-compatible-D97757?style=flat-square&amp;labelColor=black&amp;logo=anthropic&amp;logoColor=white"></a>
+  <a href="https://github.com/openai/codex"><img alt="Codex" src="https://img.shields.io/badge/Codex-compatible-412991?style=flat-square&amp;labelColor=black&amp;logo=openai&amp;logoColor=white"></a>
+  <a href="#what-it-recovers"><img alt="Input" src="https://img.shields.io/badge/input-live_URL-2EAD33?style=flat-square&amp;labelColor=black"></a>
+  <a href="https://github.com/voidmatcha/ui-clone-skills/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/voidmatcha/ui-clone-skills/ci.yml?branch=main&amp;label=CI&amp;style=flat-square"></a>
+  <a href="./LICENSE.txt"><img alt="License" src="https://img.shields.io/github/license/voidmatcha/ui-clone-skills?style=flat-square"></a>
+</p>
 
-| Command | Job |
-|---|---|
-| **`decode <url>`** | Analyse motion + build: which animation library, which scroll engine, what timings. Educational — no code emitted. |
-| **`clone <url>`** | Generate React + Tailwind components against the captured DOM + extracted animation params. |
-| **`verify <url> <impl>`** | Score an existing impl against the ref with AE/SSIM + motion-parity. Third-party clone audit. |
-| **`extract <url>`** | Raw JSON dump (structure, styles, animations, bundles) for downstream tooling. |
+<p align="center">
+  <strong>🇺🇸 English</strong> | <a href="README.ko.md">🇰🇷 한국어</a> | <a href="README.ja.md">🇯🇵 日本語</a> | <a href="README.zh-cn.md">🇨🇳 简体中文</a>
+</p>
 
-[![License](https://img.shields.io/github/license/voidmatcha/ui-clone-skills)](./LICENSE.txt)
-[![CI](https://img.shields.io/github/actions/workflow/status/voidmatcha/ui-clone-skills/ci.yml?branch=main&label=CI)](https://github.com/voidmatcha/ui-clone-skills/actions/workflows/ci.yml)
+`ui-clone-skills` turns a live website into an evidence-backed React + Tailwind implementation. It captures the rendered page, downloads the real CSS and assets, reads responsive and computed styles, recovers animation parameters from JavaScript bundles, and verifies the result across viewports and interaction states.
 
-Screenshot-to-code and prompt-driven UI tools generate components that *look* like the original at a glance but ship the wrong transitions, wrong scroll behavior, and broken responsive breakpoints — visible parity, hidden divergence. Input is a live URL, not a screenshot or design file. Supports Next.js, Tailwind v4, Webflow IX2, and scroll-driven animations.
+This is motion forensics for the animated web. It is built for pages where a screenshot-to-code model misses what matters: GSAP timelines, Framer Motion springs, Webflow IX2 interactions, Lenis smooth scrolling, Lottie playback, hover states, scroll reveals, sticky sections, and responsive transitions.
 
-- **Uses the original CSS directly** — downloads stylesheets, keeps original class names. No re-implementing from extracted values.
-- **Near-zero vision tokens for verification** — AE/SSIM image diff instead of reading screenshots with the LLM. Vision tokens only used in Phase E (final LLM review) when automated checks pass but semantic verification is needed.
-- **Extracts real values from JS bundles** — GSAP timelines, Framer Motion springs, anime.js timelines, Lenis scroll params, scroll-driven keyframes. No guessing.
-- **Falls back to `getComputedStyle`** when CSS is obfuscated (Tailwind, CSS-in-JS). Auto-detects site type.
+| One live URL in | What the pipeline does | What comes out |
+| --- | --- | --- |
+| **Capture** | Records desktop, tablet, mobile, scroll, hover, click, and transition evidence | Reference frames, videos, DOM and section maps |
+| **Decode** | Extracts stylesheets, computed values, assets, fonts, bundles, and motion parameters | `transition-spec.json`, runtime evidence, measured layout data |
+| **Recreate** | Builds from observed structure and values instead of inventing a look | React/TSX, Tailwind, preserved CSS, local assets |
+| **Verify** | Compares reference and implementation with layout gates, absolute error (AE), structural similarity (SSIM), and motion checks | Reproducible pass/fail evidence and scoped fixes |
 
-### Contents
+## Try it
 
-- [When to use this](#when-to-use-this--decision-tree) · [Design principles](#design-principles) · [Skills](#skills) · [Install](#install) · [Requirements](#requirements) · [Quickstart](#quickstart)
-- Deep dives: [`ui-reverse-engineering`](./README_detail/ui-reverse-engineering.md) · [`ui-capture`](./README_detail/ui-capture.md) · [`visual-debug`](./README_detail/visual-debug.md)
-- Operations: [Pipeline hooks, goal card, gates](./README_detail/pipeline.md) · [Token management](./README_detail/token-management.md) · [Security](./README_detail/security.md) · [Responsible use](./README_detail/responsible-use.md) · [FAQ](./README_detail/faq.md) · [Changelog](./CHANGELOG.md)
+Install the plugin, then give your coding agent a live URL, a target, and an output directory:
 
-## When to use this — decision tree
+```text
+Clone the hero and pricing sections from https://example.com into React + Tailwind.
+Preserve the responsive layout, scroll reveals, and hover motion. Output to ./out/.
+```
 
-Different inputs need different tools. Pick by what you have:
+Start with `ui-reverse-engineering`. It detects an existing run, resumes from the last proven pipeline state, and routes capture, extraction, generation, verification, or mismatch diagnosis without throwing away usable evidence.
 
-| What you have | Use |
-|---|---|
-| **A live URL** and want pixel-faithful React + Tailwind (real CSS, real animation params, scroll/hover behavior) | `ui-clone-skills` ← you are here |
-| A **Figma file** | [Builder.io](https://www.builder.io/) / [Anima](https://www.animaapp.com/) / [Plasmic](https://www.plasmic.app/) |
-| A **screenshot** (no source available) | [screenshot-to-code](https://github.com/abi/screenshot-to-code) / [v0](https://v0.dev/) |
-| A **text description** (no reference) | [Claude Code](https://code.claude.com/) / [v0](https://v0.dev/) / [Lovable](https://lovable.dev/) / [Bolt.new](https://bolt.new/) |
-| A live URL and just want **static HTML mirror** (no React) | `wget --mirror` / [HTTrack](https://www.httrack.com/) |
+## Why it is different
 
-> **Why this exists:** prompt-/screenshot-driven tools approximate what's visible. `ui-clone-skills` downloads the actual stylesheet, runs `getComputedStyle` against the rendered DOM, greps the JS bundle for GSAP/Framer Motion/anime.js/Lenis parameters, and verifies the result against the original via AE/SSIM — so the output matches transitions and responsive behavior, not just the static layout.
+Screenshot-to-code tools infer an implementation from pixels in one or more frames. `ui-clone-skills` can inspect the live source of truth behind those pixels, then test whether the recreated page behaves the same way.
 
-**When NOT to use:** general "build me a UI from scratch" tasks (use v0/Lovable or Claude Design), Figma-driven workflows (use Builder/Anima), one-off CSS help (just ask Claude directly).
+| Typical visual generator | `ui-clone-skills` |
+| --- | --- |
+| Approximates layout from screenshots | Downloads CSS and measures the rendered DOM |
+| Guesses easing, duration, and trigger timing | Extracts values from CSS and JavaScript bundles |
+| Recreates the visible desktop frame | Captures desktop, tablet, mobile, and scroll positions |
+| Treats motion as polish added later | Produces a shared motion specification before implementation |
+| Stops when the page builds or looks plausible | Requires rendered, structural, asset, and motion evidence |
 
-## Design principles
+The goal is not a plausible imitation. The goal is a clone whose visible assets, DOM structure, responsive behavior, and motion can be compared against the reference.
 
-These are the decisions that shape how the plugin is structured. They aim to keep agent sessions focused and bounded.
+## How it compares with open-source alternatives
 
-- **Real values, not guesses.** Every number — font-size, easing curve, scroll offset, stagger delay — comes from `getComputedStyle`, raw CSS, or a JS bundle grep. The plugin refuses to ship approximations.
-- **Near-zero vision tokens for comparison.** AE and SSIM CLI tools handle pixel diff — the LLM never reads ref vs impl screenshots side-by-side. Vision tokens are only used when: (1) reading a single diff image on AE/SSIM failure, (2) Phase E final semantic review (~44K tokens, mandatory).
-- **Progressive-disclosure sub-docs.** Each SKILL.md contains only the pipeline and core rules (~5.9K tokens total across 3 skills). Detailed procedures live in 51 focused sub-docs loaded only when that step runs. Common paths stay lean; specialized paths expand on demand.
-- **Single source of truth for transitions.** `transition-spec.json` is produced once from bundle analysis. Implementation reads the spec, never re-greps the bundle — avoiding wasted work and the risk of picking the wrong conditional branch.
-- **Automation over introspection.** CLI gates (`python -m ui_clone.*` / `node bin/ui-clone`, published: `npx ui-clone-cli`, plus `scripts/verify/auto-verify.sh`) decide whether a step is complete. Agents don't self-certify "looks good enough."
-- **No judgment, data only.** Every decision must be backed by extracted data, captured screenshots, or script output. "Probably", "close enough", and "just a content difference" are forbidden — each has a documented failure case.
+Open-source website recreation tools start from different evidence and stop at different outputs. Choose by the result you need:
+
+| Project | Best fit | Boundary compared with `ui-clone-skills` |
+| --- | --- | --- |
+| [Screenshot to Code](https://github.com/abi/screenshot-to-code) | Turn screenshots, mockups, Figma designs, or screen recordings into HTML, React, or Vue | Generates from visual input; `ui-clone-skills` starts from a live URL and inspects CSS, bundles, runtime state, and interaction evidence |
+| [AI Website Cloner Template](https://github.com/JCodesMore/ai-website-cloner-template) | Build a Next.js clone with computed-style research, interaction sweeps, real assets, and parallel builder agents | The closest overlap in this set; `ui-clone-skills` adds reusable capture, diagnosis, and audit workflows, bundle-derived motion specs, resumable gates, and deterministic visual and motion checks |
+| [Open Lovable](https://github.com/firecrawl/open-lovable) | Use a chat application and Firecrawl to recreate a website as a React app | Focuses on the app-generation experience; `ui-clone-skills` focuses on forensic artifacts and measured parity across an agent pipeline |
+| [GoClone](https://github.com/goclone-dev/goclone) | Download HTML, CSS, JavaScript, images, and links as a browsable static mirror | Preserves site files for offline browsing; `ui-clone-skills` produces a React + Tailwind implementation and tests responsive and interactive behavior |
+
+Choose `ui-clone-skills` when animation parameters hidden in JavaScript bundles matter, when you need to audit an existing implementation, or when completion must be demonstrated by reproducible gates instead of a build and visual spot check.
+
+<a id="what-it-recovers"></a>
+
+## What it recovers
+
+- **Real visual values:** typography, spacing, colors, borders, transforms, breakpoints, CSS custom properties, and original class names
+- **Responsive structure:** viewport-dependent layout, fluid `vw`/`rem` behavior, sticky positioning, grid placement, and mobile reflow
+- **Motion parameters:** GSAP and ScrollTrigger timelines, Framer Motion springs, anime.js timing, Webflow IX2 interactions, Lenis and Locomotive scroll settings, CSS keyframes, and Web Animations API state
+- **Interactive states:** scroll reveals and scrubs, hover and click transitions, preloaders, page transitions, sliders, tabs, menus, and timed sequences
+- **Media and scenes:** images, fonts, video, Lottie, Rive, Spline, canvas, and WebGL references with playback or interaction evidence where available
+- **Obfuscated output:** computed-style extraction when Tailwind, CSS Modules, CSS-in-JS, or minified bundles hide authored values
+
+The extraction engine writes shared artifacts, especially `transition-spec.json`, so implementation and verification use the same observed contract instead of independently guessing.
+
+## Verification that can fail
+
+A successful build, HTTP 200, matching page title, or convincing screenshot is not completion. The pipeline checks the rendered result with the evidence appropriate to the page:
+
+- Layout health and DOM/section structure
+- Text, font, visible asset, and responsive parity
+- Absolute error (AE), SSIM, and section-level visual comparison
+- Scroll-end, reveal-trigger, hover, click, and transition-state comparison
+- 60 fps frame-by-frame motion comparison for comprehensive verification
+- Static coverage of extracted motion entries against implementation hooks
+
+Fast iteration can use `quick` or `standard` verification tiers. The default `comprehensive` tier keeps the full browser and motion sweep.
+
+Routine comparison uses deterministic scripts instead of asking a model to judge every screenshot. Vision is reserved for the final semantic review and scoped diagnosis when metrics alone cannot explain a mismatch.
+
+<a id="skills"></a>
 
 ## Skills
 
-| User intent | Skill | Owned responsibility | Non-goal | Handoff/next action |
-|---|---|---|---|---|
-| Build/route | **`ui-reverse-engineering`** | Run the website-to-React pipeline and route the next phase from pipeline status. | Not a standalone capture utility or mismatch diagnosis tool. | Calls `ui-capture` for reference artifacts; uses `visual-debug` for visual verification. |
-| Capture/reference | **`ui-capture`** | Capture reference screenshots, scroll/transition evidence, and optional implementation clips for the caller. | Not the primary post-implementation mismatch diagnosis tool. | Handoff failing diffs or mismatch investigation to `visual-debug`. |
-| Diagnose mismatch | **`visual-debug`** | Compare original vs implementation, run AE/SSIM/computed-style diagnosis, and identify fixes. | Not the build pipeline or baseline capture owner. | Return concrete findings/fixes to `ui-reverse-engineering` or the caller. |
+| You need to | Use | Owned result |
+| --- | --- | --- |
+| Recreate a live site or resume a run | **`ui-reverse-engineering`** | An evidence-routed website-to-React pipeline through capture, extraction, generation, and verification |
+| Capture reference behavior | **`ui-capture`** | Screenshots and scroll, hover, click, transition, and optional implementation evidence |
+| Diagnose why a clone differs | **`visual-debug`** | AE/SSIM, computed-style, structure, and motion findings with concrete fixes |
 
-Start with `ui-reverse-engineering` when the request begins with a live URL, when you're unsure which skill fits, or when a run is partial, failed, or already complete. It checks the current state first, then routes to capture, generation, verification, or mismatch diagnosis without discarding usable artifacts.
+Use `ui-reverse-engineering` as the default entry point. Call `ui-capture` directly when you only need fresh reference evidence. Call `visual-debug` when reference and implementation artifacts already exist and the task is to explain a mismatch.
 
-Call `ui-capture` directly only when you need fresh reference evidence. Call `visual-debug` directly only when reference and implementation evidence already exist and the task is to diagnose a mismatch.
+Claude Code and Codex expose the same three public skills. The host adapters share the same scripts, gates, artifacts, and hook behavior.
 
-The public surface stays small: Claude Code and Codex expose the same three skills from shared `skills/`; each host adapter points back to the same core scripts, gates, and hooks.
+## When to use it
+
+| Your source | Best fit |
+| --- | --- |
+| A **live URL** with real CSS, assets, responsive behavior, and motion | **`ui-clone-skills`** |
+| A **Figma file** | Builder.io, Anima, Plasmic, or another Figma implementation tool |
+| A **screenshot only** | A screenshot-to-code tool such as screenshot-to-code or v0 |
+| A **text description only** | A design generator such as v0, Lovable, or Bolt |
+| A live URL that only needs a **static mirror** | `wget --mirror` or HTTrack |
+
+Do not use it to invent a new design, bypass access controls, or publish a third party's protected design without permission. It works best when the page is reachable in a real browser and the goal is learning, prototyping, internal tooling, or rebuilding a site you are authorized to reproduce.
 
 ## Install
+
+Run the installer once. It registers the plugin for every supported host CLI found on your `PATH`:
 
 ```bash
 tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"
 ```
 
-The default install registers **both** Claude Code and Codex marketplaces in one pass; each registration is skipped silently if that host's CLI is not on PATH. Neither host is pointed at the development checkout, so `tmp/`, `scratch/`, `.venv`, and other local artifacts are never copied into plugin caches. The two hosts need **different** sources: Codex reads its install in place, so it gets the symlink projection under `~/plugins/ui-clone-skills` and stays live with the checkout; Claude Code *copies* its marketplace source into a per-version cache without following symlinks, so it gets a real-file source under `~/.local/share/ui-clone-skills-claude-src` (override with `UI_CLONE_CLAUDE_SRC_DIR`; it must resolve outside the checkout, and the installer refuses it otherwise). For Claude Code, the installer also installs the plugin (`ui-clone-skills@voidmatcha`, user scope) — new Claude Code sessions load it automatically. The Codex plugin is globally skills-only; the `ui-reverse-engineering` skill automatically configures hooks only in the active clone workspace. Installation and updates remove legacy global ui-clone hook entries from older releases.
+Use `--claude-only` or `--codex-only` to target one host. Claude Code receives the plugin and lifecycle hooks. Codex receives the three public skills and enables project-local hooks when `ui-reverse-engineering` first runs in a workspace.
 
-After installing, the installer **runs one of the installed hooks out of Claude's plugin cache** and fails if it does not execute. An install can otherwise report success while delivering an empty plugin — that failure is invisible to `claude plugin list`, which reports such a plugin as installed and enabled. If the probe itself misbehaves on your host, `UI_CLONE_SKIP_HOOK_PROBE=1` skips it; do not use it to get past a genuine delivery failure, because the result is a plugin that silently enforces nothing.
-
-For one-host installs, using a local development checkout as the plugin source, the manual git-clone path, the SKILL.md-only no-hooks copy, and the manual system-deps recipe, see [`README_detail/install.md`](./README_detail/install.md).
+See the [installation guide](./README_detail/install.md) for checkout installs, manual dependency setup, host-specific flags, and the skill-only path.
 
 ## Requirements
 
-**Tested on:** macOS 14+ (primary), Ubuntu 22.04+ via WSL2 or native Linux. Windows native is **not supported** — use WSL2.
+**Tested on:** macOS 14+ (primary) and Ubuntu 22.04+ natively or through WSL2. Windows native is not supported.
 
-| Dep | Why |
-|---|---|
-| `agent-browser` | Browser automation for extraction + comparison |
-| `imagemagick` | AE pixel comparison |
-| `dssim` | Structural visual similarity (perceptual diff) |
-| `ffmpeg` | Video capture + frame extraction |
-| `uv` + Python 3.11+ | Gate / hook system (`ui_clone/`) |
+| Dependency | Purpose |
+| --- | --- |
+| `agent-browser` | Browser capture, extraction, and interaction comparison |
+| ImageMagick | AE pixel comparison |
+| `dssim` | Structural visual similarity |
+| `ffmpeg` | Video capture and frame extraction |
+| `uv` + Python 3.11+ | Pipeline state, gates, hooks, and metrics |
 
-Pipeline hooks register through the Claude Code plugin source's `hooks/hooks.json`. Codex uses project-local `.codex/hooks.json` files configured automatically by `ui-reverse-engineering`, so unrelated sessions load no ui-clone hooks. For the full hook table, manual `ui-clone hooks` commands, the goal-driven continuation pattern, and the gate-system CLI, see [`README_detail/pipeline.md`](./README_detail/pipeline.md).
+## How the pipeline works
 
-## Quickstart
+1. **Capture the reference** at desktop, tablet, mobile, and relevant interaction states.
+2. **Extract the page** into DOM, CSS, asset, font, section, bundle, and runtime evidence.
+3. **Decode motion** into a source-backed transition specification with triggers and measured parameters.
+4. **Generate the implementation** from captured structure and values, preserving source CSS when freehand reconstruction would lose fidelity.
+5. **Verify the rendered result** with structural, visual, responsive, and motion gates.
+6. **Iterate on measured mismatches** and stop only when the requested completion contract is satisfied or a real blocker is reported.
 
-After installing, give the agent a URL and a target. Use `ui-reverse-engineering` as the default entrypoint for live URL work, uncertain routing, partial runs, failed verification, or completed-state follow-up:
+From a checkout, inspect state with `python -m ui_clone.pipeline live_url component_name session_name status --json` or `node bin/ui-clone pipeline live_url component_name session_name status --json`. npm publishing is paused, so prefer the in-checkout commands unless `ui-clone-cli` is npm-linked to this repository.
 
-```
-Clone the hero section from https://stripe.com/payments into React + Tailwind. Output to ./out/
-```
+## Documentation
 
-The pipeline runs automatically. `python -m ui_clone.pipeline ... status --json` (or `node bin/ui-clone ... status --json`; published: `npx ui-clone-cli`) detects the current phase and prints the next action; you don't invoke phases manually. See `docs/agent-cli.md` for the agent-readable CLI contract.
+The three routing skills stay compact and load 51 focused sub-docs only when a pipeline step needs them. Start with the task-level pages, then open operational contracts when you need exact commands or gate behavior.
 
-**What happens:**
+- [Installation and host setup](./README_detail/install.md)
+- [Full reverse-engineering pipeline](./README_detail/ui-reverse-engineering.md)
+- [Reference and transition capture](./README_detail/ui-capture.md)
+- [Visual and motion debugging](./README_detail/visual-debug.md)
+- [Pipeline hooks, state, and gates](./README_detail/pipeline.md)
+- [Agent-readable CLI contract](./docs/agent-cli.md)
+- [Token and prompt-cache management](./README_detail/token-management.md)
+- [Security model](./README_detail/security.md)
+- [Responsible use](./README_detail/responsible-use.md)
+- [FAQ and framework support](./README_detail/faq.md)
 
-1. Reference capture → `tmp/ref/payments-hero/{full,desktop,tablet,mobile}.png` + scroll video
-2. DOM/CSS/JS extraction → `tmp/ref/payments-hero/{structure,styles,assets}.json` + `transition-spec.json`
-3. Component generation → `./out/PaymentsHero.tsx` (CSS-first, original class names)
-4. Visual verification → `scripts/verify/auto-verify.sh` → D0 layout health + AE/SSIM diff
+## Scope
 
-If verification fails, the pipeline iterates up to 3 rounds (Phase H self-healing loop) before asking for human review.
+The generated result is production-oriented React + Tailwind code, not an automatic guarantee that a cloned third-party site is licensed or ready for public deployment. Dynamic or protected assets, authentication, anti-bot systems, randomized scenes, and inaccessible source bundles can limit extraction. The pipeline records these gaps rather than silently treating them as matched.
 
-Claude Code hooks are registered on install. Codex hooks are configured automatically on first `ui-reverse-engineering` use in each workspace and route through the same `hooks/shim.sh`, so premature-write blocks and unverified-completion warnings stay shared without affecting unrelated sessions. The first Codex enable or a manifest change may require `/hooks` review and a fresh session. Manage the boundary directly with `ui-clone hooks status|enable|disable [--project-root <path>]`.
-
-**Recovering a stalled run.** Symptom: a session goes quiet for >15 min showing "N shells still running", but `ps`/`pgrep` find no live processes. Cause: a background-shell completion wake-up was lost at the runtime level — the completion event failed to re-invoke the agent and was not retried. Nothing is corrupted. Recovery: **send any message** — the pipeline resumes losslessly from `pipeline-state.json` and the on-disk artifacts. To shrink the exposure window, long verification sweeps are split into sub-8-minute, idempotent chunks with persisted intermediate state: the video-motion scroll sweep checkpoints each captured position to `scroll-chunk-manifest.json` (`UI_CLONE_VMC_SCROLL_CHUNK` bounds positions per invocation), so a resumed run re-captures at most one in-flight chunk instead of restarting the whole sweep, and the aggregated verdict is identical to a monolithic run.
-
-## Skill deep dives
-
-Each skill ships with a dedicated detail page documenting its pipeline phases, automation scripts, and input modes:
-
-- [`ui-reverse-engineering`](./README_detail/ui-reverse-engineering.md) — full website-to-React pipeline (Phase 0 → 9), repo automation scripts, visual-debug script reference, input modes
-- [`ui-capture`](./README_detail/ui-capture.md) — baseline screenshots, per-trigger transition capture, optional implementation evidence handoff
-- [`visual-debug`](./README_detail/visual-debug.md) — quick comparison vs full verification, Phase E semantic review
-
-## Operations
-
-- [Pipeline hooks, goal card, gates](./README_detail/pipeline.md) — what every hook does, how the goal card drives continuation, gate CLI reference
-- [Token management](./README_detail/token-management.md) — built-in mitigations, `ENABLE_PROMPT_CACHING_1H=1` setup per shell + plan, `rtk` integration
-- [Security](./README_detail/security.md) — prompt-injection defense, post-extraction sanitization, content-boundary enforcement
-- [Responsible use](./README_detail/responsible-use.md) — copyright, ToS, font licensing, trademarks; intended vs disallowed use cases
-- [FAQ](./README_detail/faq.md) — comparisons with v0/Lovable/screenshot-to-code/Anima, framework support, vision-token policy, error/abort behavior
-
-## Evals
-
-All skills include eval suites following [skill-creator](https://github.com/anthropics/skills/tree/main/skills/skill-creator) conventions, at `skills/*/evals/`.
-
-## Changelog
-
-See [CHANGELOG.md](./CHANGELOG.md).
+All three skills include eval fixtures following the [Agent Skills](https://agentskills.io/) format. See [CHANGELOG.md](./CHANGELOG.md) for release history.
 
 ## License
 

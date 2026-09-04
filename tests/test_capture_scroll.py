@@ -12,6 +12,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "extract" / "capture-scroll.sh"
+EVAL_SCRIPT = REPO_ROOT / "scripts" / "extract" / "capture-scroll-eval.js"
 
 
 def _make_fake_agent_browser(
@@ -31,6 +32,7 @@ def _make_fake_agent_browser(
         f"echo \"$@\" >> '{tmp_path / 'calls.log'}'\n"
         "# Find the subcommand position — after --session NAME comes 'open' or 'eval'.\n"
         "shift 2  # consume --session NAME\n"
+        'while [ "$1" = "--init-script" ]; do shift 2; done\n'
         'if [ "$1" = "open" ]; then\n'
         f"  exit {open_returncode}\n"
         'elif [ "$1" = "eval" ]; then\n'
@@ -81,7 +83,12 @@ def _eval_payload(stops: list[dict], duration_ms: int = 3500,
                   final_scroll_height: int | None = None,
                   infinite_scroll: bool = False,
                   scroll_engine: str = "native",
-                  static: bool = False) -> str:
+                  scroll_engine_reason: str = "native window scrolling",
+                  scroll_transport_proven: bool = True,
+                  static: bool = False,
+                  dom_mutations: list[dict] | None = None,
+                  scan_step_px: int = 120,
+                  alignment_failures: list[dict] | None = None) -> str:
     """Return a JSON-as-stdout payload matching the script's expected shape."""
     final = final_scroll_height if final_scroll_height is not None else scroll_height
     delta_pct = (
@@ -89,6 +96,10 @@ def _eval_payload(stops: list[dict], duration_ms: int = 3500,
     )
     payload = {
         "stops": stops,
+        "domMutations": dom_mutations or [],
+        "domMutationTraceTruncated": False,
+        "scanStepPx": scan_step_px,
+        "alignmentFailures": alignment_failures or [],
         "durationMs": duration_ms,
         "scrollHeight": scroll_height,
         "viewportHeight": viewport_height,
@@ -97,6 +108,9 @@ def _eval_payload(stops: list[dict], duration_ms: int = 3500,
         "scrollHeightGrew": (final > scroll_height) and not static,
         "infiniteScroll": infinite_scroll,
         "scrollEngine": scroll_engine,
+        "scrollEngineReason": scroll_engine_reason,
+        "scrollTransportProven": scroll_transport_proven,
+        "scrollControlMethod": "engine-api" if scroll_engine != "native" else "native-window-scroll",
         "static": static,
     }
     return json.dumps(payload, ensure_ascii=False).replace("'", "'\\''")
@@ -182,6 +196,91 @@ def test_normal_scroll_emits_seven_snapshots(tmp_path: Path) -> None:
         assert f"data-pct='{pct}'" in snap["outerHTML"]
 
 
+def test_scroll_dom_mutations_are_preserved_with_scroll_range(tmp_path: Path) -> None:
+    """Transient DOM state changes must survive even when bookend HTML matches."""
+    ref_dir = tmp_path / "ref"
+    stops = [_stop(pct, pct * 70) for pct in (0, 10, 25, 50, 75, 90, 100)]
+    mutations = [{
+        "fromPct": 10,
+        "toPct": 25,
+        "firstScrollY": 1200,
+        "lastScrollY": 1200,
+        "selector": "header.site-header",
+        "type": "attributes",
+        "attribute": "class",
+        "oldValue": "site-header",
+        "newValue": "site-header is-scrolled",
+        "count": 1,
+    }]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path,
+        _eval_payload(stops, dom_mutations=mutations),
+    )
+
+    proc = _run_capture_scroll(ref_dir, bin_dir)
+    assert proc.returncode == 0, proc.stderr
+
+    scroll_dir = ref_dir / "states" / "scroll"
+    assert json.loads((scroll_dir / "dom-mutations.json").read_text()) == mutations
+    summary = json.loads((scroll_dir / "summary.json").read_text())
+    assert summary["schemaVersion"] == 2
+    assert summary["domMutationCount"] == 1
+    assert summary["scanStepPx"] == 120
+
+
+def test_scroll_eval_uses_bounded_fine_grained_sweep() -> None:
+    """Mutation thresholds need intermediate scroll frames, not seven teleports."""
+    script = EVAL_SCRIPT.read_text(encoding="utf-8")
+    assert "MAX_SCAN_STEPS = 90" in script
+    assert "MIN_SCAN_STEP_PX = 120" in script
+    assert "await sweepTo(targetY)" in script
+    assert "await alignToTarget(targetY)" in script
+    assert "new MutationObserver" in script
+    assert "renderedFrame" in script
+    wrapper = SCRIPT.read_text(encoding="utf-8")
+    assert 'CAPTURE_SCROLL_TIMEOUT_MS:-25000' in wrapper
+    assert "AGENT_BROWSER_NAMESPACE" in wrapper
+
+
+def test_alignment_failure_fails_closed(tmp_path: Path) -> None:
+    """A mislabeled percentage snapshot must not be accepted as evidence."""
+    ref_dir = tmp_path / "ref"
+    stops = [_stop(0, 4300)]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path,
+        _eval_payload(
+            stops,
+            alignment_failures=[{"pct": 0, "targetY": 0, "actualY": 4300}],
+        ),
+    )
+    proc = _run_capture_scroll(ref_dir, bin_dir)
+    assert proc.returncode == 3
+    assert "failed to align" in proc.stderr
+    assert not (ref_dir / "states" / "scroll").exists(), (
+        "failed captures must not publish partially checked artifacts"
+    )
+
+
+def test_unproven_smooth_scroll_transport_fails_closed(tmp_path: Path) -> None:
+    """A CSS/class marker alone must not certify Lenis transport fidelity."""
+    ref_dir = tmp_path / "ref"
+    bin_dir = _make_fake_agent_browser(
+        tmp_path,
+        _eval_payload(
+            [_stop(0, 0)],
+            scroll_engine="lenis-unproven",
+            scroll_engine_reason="lenis marker without callable instance",
+            scroll_transport_proven=False,
+        ),
+    )
+
+    proc = _run_capture_scroll(ref_dir, bin_dir)
+
+    assert proc.returncode == 3
+    assert "scroll transport is unproven" in proc.stderr
+    assert not (ref_dir / "states" / "scroll").exists()
+
+
 def test_infinite_scroll_marked_in_summary(tmp_path: Path) -> None:
     """When finalScrollHeight > initial * 1.5 → summary.infiniteScroll=true.
     Codex item (d): threshold raised from 1.1 because lazy-loaded sections
@@ -243,6 +342,7 @@ def test_lenis_scroll_engine_recorded_in_summary(tmp_path: Path) -> None:
         (ref_dir / "states" / "scroll" / "summary.json").read_text()
     )
     assert summary["scrollEngine"] == "lenis"
+    assert summary["scrollTransportProven"] is True
 
 
 def test_agent_browser_open_failure_exit_2(tmp_path: Path) -> None:
@@ -279,6 +379,7 @@ def test_eval_channel_failure_reopens_and_retries(tmp_path: Path) -> None:
         "#!/usr/bin/env bash\n"
         f"echo \"$@\" >> '{tmp_path / 'calls.log'}'\n"
         "shift 2\n"
+        'while [ "$1" = "--init-script" ]; do shift 2; done\n'
         'if [ "$1" = "open" ]; then\n'
         "  exit 0\n"
         "fi\n"
@@ -317,6 +418,7 @@ def test_derived_session_used_by_default(tmp_path: Path) -> None:
     assert proc.returncode == 0
     calls = (tmp_path / "calls.log").read_text()
     assert "sess1-scroll" in calls
+    assert "--session sess1-scroll close" in calls
     # Caller's bare session "sess1" should NOT appear on its own (only
     # embedded as a prefix of "sess1-scroll").
     bare_session_lines = [
@@ -324,6 +426,38 @@ def test_derived_session_used_by_default(tmp_path: Path) -> None:
         if "--session sess1 " in (line + " ") and "sess1-scroll" not in line
     ]
     assert not bare_session_lines, f"derived session must be used: {calls}"
+
+
+def test_derived_session_wait_uses_splash_summary_duration(tmp_path: Path) -> None:
+    """Scroll capture must not sample a fresh derived session before a measured
+    splash has had time to settle.
+    """
+    ref_dir = tmp_path / "ref"
+    summary_dir = ref_dir / "states" / "splash"
+    summary_dir.mkdir(parents=True)
+    (summary_dir / "summary.json").write_text(
+        json.dumps({"checked": True, "durationMs": 2700}),
+        encoding="utf-8",
+    )
+    stops = [_stop(0, 0)]
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload(stops))
+
+    proc = _run_capture_scroll(ref_dir, bin_dir, reuse_session=False)
+
+    assert proc.returncode == 0, proc.stderr
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert "--session sess1-scroll wait 3500" in calls
+    open_index = next(
+        i for i, line in enumerate(calls)
+        if line.endswith(" open https://example.test")
+        and line.startswith("--session sess1-scroll ")
+    )
+    wait_index = calls.index("--session sess1-scroll wait 3500")
+    eval_index = next(
+        i for i, line in enumerate(calls)
+        if line.startswith("--session sess1-scroll eval ")
+    )
+    assert open_index < wait_index < eval_index
 
 
 def test_reuse_session_flag_uses_callers_session(tmp_path: Path) -> None:
@@ -343,6 +477,7 @@ def test_reuse_session_flag_uses_callers_session(tmp_path: Path) -> None:
         f"reuse-session must invoke caller's session: {calls}"
     )
     assert "sess1-scroll" not in calls
+    assert "--session sess1 close" not in calls
 
 
 def test_unexpected_payload_shape_exit_3(tmp_path: Path) -> None:
@@ -354,3 +489,17 @@ def test_unexpected_payload_shape_exit_3(tmp_path: Path) -> None:
     bin_dir = _make_fake_agent_browser(tmp_path, bad_payload)
     proc = _run_capture_scroll(ref_dir, bin_dir)
     assert proc.returncode == 3
+
+
+def test_about_blank_eval_envelope_retries_then_fails(tmp_path: Path) -> None:
+    """A daemon restart must not turn about:blank into a static-page success."""
+    ref_dir = tmp_path / "ref"
+    payload = json.dumps({"success": True, "data": {"origin": "about:blank", "result": {}}})
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+
+    proc = _run_capture_scroll(ref_dir, bin_dir)
+
+    assert proc.returncode == 3
+    assert "lost the page target" in proc.stderr
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert sum(" eval " in f" {line} " for line in calls) == 3

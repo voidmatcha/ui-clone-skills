@@ -405,6 +405,14 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
         )
         + REF_CAPTURE_FRAME_INVENTORY,
     ),
+    "replay-track-compare": _ci(
+        SRC,
+        (
+            "regions.json",
+            "clip/ref/*.json",
+            "transitions/ref/*.json",
+        ),
+    ),
     # ── asset checks ──
     "asset-transfer": _ci(PUBLIC, REF_IMAGES + REF_ASSET_SUB),
     "asset-utilization": _ci(SRC, REF_IMAGES + REF_ASSET_SUB),
