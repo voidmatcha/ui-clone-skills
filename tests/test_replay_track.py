@@ -711,6 +711,43 @@ def test_rejects_track_with_fewer_than_five_samples_in_change_band() -> None:
     assert any("change band" in error for error in errors)
 
 
+def test_change_band_accepts_delay_dominated_contiguous_motion() -> None:
+    """A transition whose delay eats most of endTime still samples contiguously,
+    so the changed pairs stay adjacent and the >=4-pairs rule cannot reject what
+    the >=5-span rule accepts. Guards against 'fixing' the count rule for a
+    delay case that cannot actually reach it.
+
+    The scroll-action denominator is getComputedTiming().endTime, which includes
+    transition-delay, so a delay-heavy transition concentrates all motion in the
+    tail of the sample sweep.
+    """
+    track = _valid_track()
+    samples = track["samples"]
+    assert isinstance(samples, list)
+    n = len(samples)
+    motion_fraction = 0.20  # 80% delay — the tightest case the span rule allows
+
+    for index, sample in enumerate(samples):
+        progress = index / (n - 1)
+        start = 1.0 - motion_fraction
+        phase = 0.0 if progress <= start else (progress - start) / motion_fraction
+        properties = sample["properties"]
+        box = sample["box"]
+        assert isinstance(properties, dict)
+        assert isinstance(box, dict)
+        transform = properties["transform"]
+        assert isinstance(transform, dict)
+        transform["translateY"] = -40.0 * phase
+        properties["opacity"] = 1.0 - (0.2 * phase)
+        properties["height"] = 80.0 - (20.0 * phase)
+        properties["position"] = "relative"
+        box["height"] = 80.0 - (20.0 * phase)
+
+    errors = validate_track(track)
+
+    assert not [e for e in errors if "change band" in e], errors
+
+
 def test_recording_manifest_rejects_empty_file_list(tmp_path: Path) -> None:
     """A manifest binding zero recorder sources must not verify — the manifest
     exists precisely to pin the track to the sources that produced it."""

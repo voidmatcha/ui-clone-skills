@@ -265,6 +265,37 @@ def test_replay_track_compare_captures_declared_track_and_writes_aggregate() -> 
         assert (ref / "transitions" / "replay-tracks" / "impl" / "hero-replay-track.manifest.json").is_file()
 
 
+def test_replay_track_compare_does_not_reuse_stale_candidate() -> None:
+    """A wrapper that exits 0 without writing must not have the previous run's
+    candidate track read as this run's fresh capture."""
+    with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as tmp_name:
+        tmp_root = Path(tmp_name)
+        ref = tmp_root / "ref"
+        ref.mkdir()
+        reference_path = _write_ref_track(ref)
+        candidate = json.loads(reference_path.read_text(encoding="utf-8"))
+        wrapper = _write_fake_capture(tmp_root, candidate)
+        log_path = tmp_root / "fake-capture.log"
+
+        # First run writes a passing candidate.
+        first = _run_compare(ref, wrapper, log_path)
+        assert first.returncode == 0, first.stdout + first.stderr
+        impl_track = ref / "transitions" / "replay-tracks" / "impl" / "hero-replay-track.json"
+        assert impl_track.is_file()
+
+        # Second run uses a wrapper that succeeds but writes nothing.
+        silent = tmp_root / "silent-capture.py"
+        silent.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        silent.chmod(0o755)
+
+        second = _run_compare(ref, silent, log_path)
+
+        assert second.returncode != 0, second.stdout
+        report = json.loads((ref / "transitions" / "replay-track-compare.json").read_text())
+        assert report["status"] == "fail", report
+        assert not impl_track.is_file(), "stale candidate track must be cleared"
+
+
 def test_replay_track_compare_derives_scroll_action_capture_args_from_reference_trigger() -> None:
     with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as tmp_name:
         tmp_root = Path(tmp_name)

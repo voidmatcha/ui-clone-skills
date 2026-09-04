@@ -255,6 +255,25 @@ def _compare_one(
 
     out_path = _candidate_path(ref_dir, region_name, reference_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Clear last run's candidate first: a wrapper that exits 0 without writing
+    # would otherwise have its stale track and manifest read as this run's
+    # fresh capture.
+    for stale in (out_path, _manifest_for_track(out_path)):
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            return {
+                "region": region_name,
+                "reference": str(reference_path.relative_to(ref_dir)),
+                "candidate": str(out_path.relative_to(ref_dir)),
+                "status": "fail",
+                "matchedPairs": 0,
+                "totalPairs": 1,
+                "score": 0.0,
+                "failures": [f"could not clear stale candidate {stale.name}: {error}"],
+            }
     command = _capture_command(capture, _capture_args(impl_url, reference, out_path))
     try:
         proc = subprocess.run(command, cwd=_REPO_ROOT, capture_output=True, text=True, timeout=180)

@@ -97,3 +97,31 @@ def test_element_evidence_rejects_non_page_origin(tmp_path: Path) -> None:
     assert proc.returncode == 3, f"{proc.stdout}\n{proc.stderr}"
     assert "lost the page target" in proc.stderr
     assert not out.exists()
+
+
+def test_element_evidence_rejects_failure_envelope(tmp_path: Path) -> None:
+    """A `success: false` envelope carries no page evidence, so it must not be
+    published. Only the data.origin shape was checked before, so an explicit
+    failure envelope passed straight through."""
+    payload = json.dumps(
+        {"success": False, "error": "target closed"}
+    ).replace("'", "'\\''")
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+    out = tmp_path / "evidence.json"
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    script = Path(__file__).resolve().parents[1] / "scripts" / "extract" / "element-evidence.sh"
+    proc = subprocess.run(
+        [str(script), "sess1", ".hero", str(out)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert proc.returncode == 3, f"{proc.stdout}\n{proc.stderr}"
+    assert "reported failure" in proc.stderr
+    assert not out.exists()

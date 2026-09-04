@@ -190,7 +190,6 @@ PY
     scripts/extract/capture-replay-track.mjs \
     scripts/extract/capture-replay-track.sh \
     ui_clone/replay_track.py \
-    package.json \
     --browser-version "$BROWSER_VERSION" \
     --tool-version "$TOOL_VERSION" >/dev/null
   python3 -m ui_clone.replay_track manifest-verify "$REPO_ROOT" "$MANIFEST_TMP" >/dev/null

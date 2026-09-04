@@ -369,6 +369,28 @@ class TestPreGenerateCloseoutProvenanceGuard:
         result = self._run(tmp_path, self._write_input(path, json.dumps({"summary": {"fail": 0}})))
         self._assert_denied(result)
 
+    # ── capture-artifact-inventory.json ──
+    # The reference gate's _has_inventory_capture_provenance trusts this file's
+    # "status": "pass" and re-checks only path containment and byte sizes; the
+    # raster decode / blank / identical-state verdicts stay in the checker. A
+    # hand-written pass next to two real images therefore buys "real detection"
+    # without the checker ever running.
+
+    def test_write_capture_artifact_inventory_denied(self, tmp_path: Path) -> None:
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        path = str(ref_dir / "capture-artifact-inventory.json")
+        content = json.dumps({"schemaVersion": 1, "status": "pass", "regionsChecked": 1})
+        result = self._run(tmp_path, self._write_input(path, content))
+        self._assert_denied(result)
+
+    def test_edit_capture_artifact_inventory_denied(self, tmp_path: Path) -> None:
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        path = str(ref_dir / "capture-artifact-inventory.json")
+        result = self._run(tmp_path, self._edit_input(path, '"fail"', '"pass"'))
+        self._assert_denied(result)
+
     def test_write_bare_result_txt_outside_sections_allowed(self, tmp_path: Path) -> None:
         """Path-qualified: a result.txt NOT under sections/ is not closeout
         evidence and must not be over-blocked."""

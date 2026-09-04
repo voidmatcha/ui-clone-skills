@@ -87,6 +87,15 @@ _CLOSEOUT_PROVENANCE_RE = re.compile(
 # forge an all-PASS before verify stamps it. Path-qualified so a build/result.txt
 # (or transitions/result.txt, a different evidence file) is not over-matched.
 _SECTION_RESULT_RE = re.compile(r"(?:^|/)sections/result\.(?:txt|json)$", re.IGNORECASE)
+# capture-artifact-inventory.json is produced by
+# skills/visual-debug/scripts/capture-artifact-inventory-check.sh and is trusted
+# by the reference gate's _has_inventory_capture_provenance as proof that real
+# capture artifacts exist. The gate re-checks path containment and byte sizes but
+# NOT raster decode / blank / identical-state — those verdicts live in the
+# checker. So a hand-written "status": "pass" next to any two real image files
+# buys "real detection" without the checker ever running. Same shape as
+# sections/result.txt: script-produced verdict, no hand-edit path.
+_CAPTURE_INVENTORY_NAME = "capture-artifact-inventory.json"
 # gateSkipAck/deferredAck in verification-plan.json dissolve closeout blockers
 # (gate_skip_blocker / deferred_checks_blocker). An agent-set ack self-releases an
 # un-enforced/deferred run, so a tool write touching either key is denied; an
@@ -174,6 +183,16 @@ def _closeout_provenance_block_reason(
                 "here forges an all-PASS that the verify stamp would then bless. "
                 "Re-run section-compare (skills/visual-debug/scripts/section-compare.sh) "
                 "to regenerate it honestly."
+            )
+        if name == _CAPTURE_INVENTORY_NAME:
+            return (
+                "UI Reverse Engineering: capture-artifact-inventory.json is the "
+                "capture-artifact-inventory-check.sh verdict that the reference "
+                "gate trusts as real-detection provenance. The gate does not "
+                "re-run the raster decode / blank / identical-state checks, so a "
+                "tool write here forges captured evidence. Re-run "
+                "skills/visual-debug/scripts/capture-artifact-inventory-check.sh "
+                "<ref-dir> to regenerate it honestly."
             )
         if name == _VERIFY_STAMP_NAME:
             return (

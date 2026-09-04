@@ -637,7 +637,12 @@ DEFERRED_FILE="$(mktemp "${TMPDIR:-/tmp}/verification-plan-deferred.XXXXXX")" ||
   exit 2
 }
 DEFERRED_COUNT=0
-trap 'rm -f "$CHECKS_FILE" "$DEFERRED_FILE"' EXIT
+GAPS_FILE="$(mktemp "${TMPDIR:-/tmp}/verification-plan-gaps.XXXXXX")" || {
+  echo "ERROR: cannot create temporary evidence-gaps file" >&2
+  exit 2
+}
+GAPS_COUNT=0
+trap 'rm -f "$CHECKS_FILE" "$DEFERRED_FILE" "$GAPS_FILE"' EXIT
 
 # add_check id script produces reason severity [min_tier]
 #   min_tier: quick | standard | comprehensive (default: standard)
@@ -712,18 +717,23 @@ add_check() {
   CHECK_COUNT=$((CHECK_COUNT + 1))
 }
 
-# Record a check that cannot dispatch because its evidence was never captured.
-# Same reasoning as the tier-dropped branch of add_check: a check that does not
-# run must appear in the plan as tracked debt, otherwise a consumer reads the
-# missing row as coverage rather than as an untested gap.
+# Record a check that cannot dispatch because its evidence was never captured,
+# so the plan states the gap instead of silently omitting the row.
+#
+# These go in `evidenceGaps`, NOT `deferredChecks`. deferredChecks means
+# "this check exists and was dropped for cost at a lower tier", and
+# deferred_checks_blocker() blocks closeout on it — releasable by re-running at
+# a higher tier. An uncaptured-evidence gap is a different condition: raising
+# the tier cannot produce the missing artifact, so routing it there would
+# deadlock closeout with advice that cannot work.
 record_evidence_gap() {
   local id="$1" severity="$2" reason="$3"
-  if [ "$DEFERRED_COUNT" -gt 0 ]; then
-    printf ',\n' >> "$DEFERRED_FILE"
+  if [ "$GAPS_COUNT" -gt 0 ]; then
+    printf ',\n' >> "$GAPS_FILE"
   fi
   printf '    { "id": "%s", "severity": "%s", "unmetEvidence": "%s" }' \
-    "$id" "$severity" "$reason" >> "$DEFERRED_FILE"
-  DEFERRED_COUNT=$((DEFERRED_COUNT + 1))
+    "$id" "$severity" "$reason" >> "$GAPS_FILE"
+  GAPS_COUNT=$((GAPS_COUNT + 1))
 }
 
 # Universal local-port guard — must run before any agent-browser comparison
@@ -1311,8 +1321,14 @@ if contains_pattern "$REGIONS_JSON" '"triggerType":\s*"'; then
             "quick"
 fi
 
-if contains_pattern "$REGIONS_JSON" '"replayTrack":\s*"' \
-   || contains_pattern "$REGIONS_JSON" '"replayTrackManifest":\s*"'; then
+# Per-region, not per-file: a single region declaring a track must not hide the
+# gap for its scroll-driven siblings that declare none, since
+# replay-track-compare only compares the tracks that were actually declared.
+REPLAY_TRACK_SCAN="$(python3 "$SCRIPT_DIR/replay-track-gap-scan.py" "$REGIONS_JSON")"
+REPLAY_TRACK_DECLARED="${REPLAY_TRACK_SCAN%%$'\t'*}"
+REPLAY_TRACK_MISSING="${REPLAY_TRACK_SCAN#*$'\t'}"
+
+if [ "${REPLAY_TRACK_DECLARED:-0}" -gt 0 ] 2>/dev/null; then
   add_check "replay-track-compare" \
             "skills/visual-debug/scripts/replay-track-compare.py" \
             "transitions/replay-track-compare.json" \
@@ -1321,9 +1337,10 @@ if contains_pattern "$REGIONS_JSON" '"replayTrack":\s*"' \
             "quick" \
             "" \
             "{impl_url} {ref_dir}"
-elif contains_pattern "$REGIONS_JSON" '"triggerType":\s*"scroll-driven"'; then
+fi
+if [ -n "$REPLAY_TRACK_MISSING" ]; then
   record_evidence_gap "replay-track-compare" "block" \
-    "regions.json declares scroll-driven regions but no replayTrack or replayTrackManifest evidence, so no deterministic scroll replay was captured to compare against"
+    "scroll-driven region(s) declare no replayTrack or replayTrackManifest evidence, so no deterministic scroll replay was captured for them: $REPLAY_TRACK_MISSING"
 fi
 
 # Every site with a transition-spec.json should verify each entry is wired
@@ -2008,6 +2025,9 @@ FRESH_PLAN="$(mktemp "${TMPDIR:-/tmp}/verification-plan-fresh.XXXXXX")" || {
   printf '\n  ],\n'
   printf '  "deferredChecks": [\n'
   cat "$DEFERRED_FILE"
+  printf '\n  ],\n'
+  printf '  "evidenceGaps": [\n'
+  cat "$GAPS_FILE"
   printf '\n  ],\n'
   printf '  "viewports": [\n'
   printf '    { "w": 375,  "h": 812,  "label": "mobile" },\n'
