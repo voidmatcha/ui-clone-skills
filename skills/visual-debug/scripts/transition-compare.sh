@@ -49,8 +49,21 @@ if [ "$_DEFAULT_MAX_IMPL_TRANSITIONS" -lt 300 ]; then
 fi
 MAX_IMPL_TRANSITIONS="${MAX_IMPL_TRANSITIONS:-$_DEFAULT_MAX_IMPL_TRANSITIONS}"
 # CSS selector(s) to exclude from ref detection (e.g. third-party SDK overlays not in the clone).
-# Default skips Finsweet Cookie Consent (`.fs-cc_*`) — the clone never replicates the consent SDK.
-EXCLUDE_SELECTORS="${EXCLUDE_SELECTORS:-[class*=fs-cc], [id*=cookie], [class*=cookie-banner], [class*=consent]}"
+# Default skips Finsweet Cookie Consent (`.fs-cc_*`) plus the CMP vendors from
+# ui_clone.section_capture — the clone never replicates a consent SDK.
+#
+# The previous default also carried [id*=cookie], [class*=cookie-banner] and
+# [class*=consent]. Those are role words, not vendor names: a page's own cookie
+# or consent section was excluded from ref detection, so its transitions never
+# entered the spec and the clone was never asked to implement them — a silent
+# under-population rather than a reported gap.
+_CMP_EXCLUDE=$(PYTHONPATH="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}" \
+  python3 -m ui_clone.section_capture --print-cmp-selectors 2>/dev/null || echo "")
+if [ -z "$_CMP_EXCLUDE" ]; then
+  echo "transition-compare: cannot read CMP selectors from ui_clone.section_capture" >&2
+  exit 2
+fi
+EXCLUDE_SELECTORS="${EXCLUDE_SELECTORS:-[class*=fs-cc], $_CMP_EXCLUDE}"
 
 ORIG_URL="${1:?Usage: transition-compare.sh <orig-url> <impl-url> <session> [output-dir]}"
 IMPL_URL="${2:?Usage: transition-compare.sh <orig-url> <impl-url> <session> [output-dir]}"

@@ -964,10 +964,23 @@ fi
 DISMISS_OVERLAYS='(() => {
   // First sweep: vendor-specific consent/cookie SDKs that always render fixed UIs
   try { document.querySelectorAll("'"$_CMP_SELECTORS"'").forEach(el => el.remove()); } catch (e) {}
-  // Second sweep: heuristic match by class keywords for big fixed/absolute popups
+  // Second sweep: heuristic match by class keywords for big popups.
+  //
+  // Fixed only. The keywords are role words, not vendor names, so they match
+  // the sites own markup constantly -- and an absolutely positioned element that
+  // large is normally page content, not an overlay: a hero gradient, a banner
+  // section, a marquee fade. Measured on three production pages, `absolute`
+  // caught only real content (navercorp .banner__img with two images and
+  // .banner__info with 97 characters of copy; webflow .marquee-overlay) and
+  // `fixed` caught nothing at all, so this loses no measured coverage. Removal
+  // runs on the reference AND the implementation, so deleting content here is
+  // invisible: both sides lose it and the section compares equal.
+  //
+  // A real popup or consent modal is fixed. A per-site absolute overlay that
+  // genuinely needs removing belongs in SECTION_FIXED_OVERLAY_SELECTORS.
   document.querySelectorAll("[class*=popup], [class*=modal], [class*=cookie], [class*=banner], [class*=overlay], [class*=signup]").forEach(el => {
     const s = getComputedStyle(el);
-    if (s.position === "fixed" || s.position === "absolute") {
+    if (s.position === "fixed") {
       if (el.offsetWidth > window.innerWidth * 0.3 && el.offsetHeight > window.innerHeight * 0.2) {
         el.remove();
       }

@@ -1,6 +1,6 @@
 {
   "name": "ui-clone-cli",
-  "version": "0.7.51",
+  "version": "0.7.52",
   "description": "Clone live websites into verified React and Tailwind implementations with CSS, asset, responsive, and motion extraction.",
   "keywords": [
     "website-to-react",

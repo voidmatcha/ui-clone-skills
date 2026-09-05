@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [0.7.52] - 2026-09-05
+
+### Fixed
+
+- Restrict section-compare's heuristic overlay sweep to `position: fixed`. It
+  removed any element over 30% x 20% of the viewport whose class contained
+  `popup|modal|cookie|banner|overlay|signup` at fixed OR absolute position --
+  and those are role words, not vendor names. Measured on three production
+  pages, the `absolute` half caught only real content (navercorp
+  `.banner__img` carrying two images and `.banner__info` carrying 97 characters
+  of copy; webflow `.marquee-overlay`) while the `fixed` half caught nothing at
+  all, so this loses no measured coverage. The removal runs on the reference
+  and the implementation alike, so the deletion was invisible: both sides lost
+  the content and the section compared equal. A per-site absolute overlay that
+  genuinely needs removing belongs in `SECTION_FIXED_OVERLAY_SELECTORS`.
+- Drop `[id*=cookie]`, `[class*=cookie-banner]` and `[class*=consent]` from
+  transition-compare's default `EXCLUDE_SELECTORS`. Those excluded a page's own
+  cookie or consent section from reference transition detection, so its
+  transitions never entered the spec and the clone was never asked to implement
+  them -- a silent under-population rather than a reported gap. The default now
+  reads the vendor list from `ui_clone.section_capture`, leaving Finsweet
+  (`.fs-cc_*`) as the only extra entry.
+
+### Verified
+
+- Cookiebot, Didomi and Complianz container ids confirmed on live pages running
+  those CMPs. Usercentrics and Quantcast remain documented but unobserved --
+  neither rendered a banner during the probe. usercentrics.com incidentally
+  confirmed why the proposed `#uc-banner` was dropped: the site uses `uc-` as
+  its own namespace (`#uc-main`, `#uc-ask-ai-modal`).
+
 ## [0.7.51] - 2026-09-05
 
 ### Fixed
