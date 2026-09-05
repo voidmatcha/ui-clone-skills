@@ -505,9 +505,10 @@ def _bundle_scroll_sites(extraction: dict[str, Any]) -> list[dict[str, str]]:
         return []
     sites: list[dict[str, str]] = []
     seen: set[str] = set()
-    for rows in extractions.values():
+
+    def collect(rows: Any) -> None:
         if not isinstance(rows, list):
-            continue
+            return
         for row in rows:
             if not isinstance(row, dict) or not row.get("scrollLinked"):
                 continue
@@ -515,7 +516,17 @@ def _bundle_scroll_sites(extraction: dict[str, Any]) -> list[dict[str, str]]:
             if not source_id or source_id in seen:
                 continue
             seen.add(source_id)
-            sites.append({"sourceId": source_id, "kind": str(row.get("kind") or "")})
+            kind = row.get("kind") or row.get("eventType") or ""
+            sites.append({"sourceId": source_id, "kind": str(kind)})
+
+    for value in extractions.values():
+        if isinstance(value, list):
+            collect(value)
+        elif isinstance(value, dict):
+            # Webflow IX2 reports a summary object whose rows live under keys
+            # such as `events`, so a list-only scan would drop them silently.
+            for nested in value.values():
+                collect(nested)
     return sites
 
 

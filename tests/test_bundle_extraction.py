@@ -261,6 +261,261 @@ def test_parse_bundles_ignores_unrelated_to_calls(tmp_path: Path) -> None:
     assert not gsap, gsap
 
 
+def test_parse_bundles_marks_framer_scroll_hooks_scroll_linked(tmp_path: Path) -> None:
+    """useScroll binds element progress to scroll position, so the spec must
+    declare it — spec-bundle-site-coverage keys on sourceId + scrollLinked."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "page.js").write_text(
+        "const {scrollYProgress: p} = useScroll({target: ref, offset: ['start end']});"
+    )
+    rows = mod.parse_bundles(tmp_path)["extractions"].get("framerMotion")
+
+    assert rows, "useScroll site must be captured"
+    hook = next(r for r in rows if r["kind"] == "useScroll")
+    assert hook["scrollLinked"] is True
+    assert hook["sourceId"].startswith("framer:page.js:")
+
+
+def test_parse_bundles_marks_use_in_view_not_scroll_linked(tmp_path: Path) -> None:
+    """useInView is an intersection reveal, covered by the IO signal rather than
+    by scroll-linked site coverage."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "page.js").write_text("useInView(ref, {margin: '0px', amount: 0.5});")
+    rows = mod.parse_bundles(tmp_path)["extractions"].get("framerMotion")
+
+    assert rows
+    hook = next(r for r in rows if r["kind"] == "useInView")
+    assert hook["scrollLinked"] is False
+    assert hook["sourceId"].startswith("framer:page.js:")
+
+
+def test_parse_bundles_gsap_site_ids_are_stable_across_runs(tmp_path: Path) -> None:
+    """sourceId keys the spec citation, so re-parsing identical bundles must
+    reproduce it exactly."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text(
+        'gsap.to(e,{y:-100,scrollTrigger:{trigger:e,scrub:1}});'
+        'gsap.to(f,{x:10,scrollTrigger:{trigger:f,scrub:1}});'
+    )
+    first = [g["sourceId"] for g in mod.parse_bundles(tmp_path)["extractions"]["gsap"]]
+    second = [g["sourceId"] for g in mod.parse_bundles(tmp_path)["extractions"]["gsap"]]
+
+    assert first == second
+    assert len(set(first)) == len(first), f"ids must be unique per site: {first}"
+
+
+def test_parse_bundles_marks_ix2_scroll_events_scroll_linked(tmp_path: Path) -> None:
+    """IX2 scroll linkage comes from eventTypeId (the trigger), not actionTypeId
+    (what changes). SCROLLING_IN_VIEW is scroll-progress driven."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "webflow.js").write_text(
+        '{eventTypeId:"SCROLLING_IN_VIEW",actionTypeId:"TRANSFORM_MOVE"}'
+    )
+    ix2 = mod.parse_bundles(tmp_path)["extractions"].get("webflowIX2")
+
+    assert ix2, "IX2 markers must be captured"
+    event = ix2["events"][0]
+    assert event["eventType"] == "SCROLLING_IN_VIEW"
+    assert event["scrollLinked"] is True
+    assert event["sourceId"].startswith("ix2:webflow.js:")
+
+
+def test_parse_bundles_ix2_click_event_is_not_scroll_linked(tmp_path: Path) -> None:
+    """A click trigger drives the same action types but is not scroll motion."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "webflow.js").write_text(
+        '{eventTypeId:"MOUSE_CLICK",actionTypeId:"STYLE_OPACITY"}'
+    )
+    ix2 = mod.parse_bundles(tmp_path)["extractions"].get("webflowIX2")
+
+    assert ix2
+    assert ix2["events"][0]["scrollLinked"] is False
+
+
+def test_parse_bundles_anime_is_not_scroll_linked_by_default(tmp_path: Path) -> None:
+    """anime is time-driven; assuming scroll linkage would demand spec entries
+    for timed animations and mismap them as scrub motion."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text('anime({targets:".x",translateY:100,duration:800});')
+    rows = mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+    assert rows
+    assert rows[0]["scrollLinked"] is False
+    assert rows[0]["sourceId"].startswith("anime:anim.js:")
+
+
+def test_parse_bundles_anime_onscroll_is_scroll_linked(tmp_path: Path) -> None:
+    """anime v4 binds a timeline to scroll through onScroll / ScrollObserver."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "anim.js").write_text(
+        'anime({targets:".x",translateY:100,autoplay:onScroll({sync:!0})});'
+    )
+    rows = mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+    assert rows
+    assert rows[0]["scrollLinked"] is True
+
+
+def test_parse_bundles_ix2_event_vocabulary_from_real_bundle(tmp_path: Path) -> None:
+    """The event vocabulary a production IX2 bundle actually ships.
+
+    Taken from webflow.com's own bundle: SCROLLING_IN_VIEW is continuous
+    scroll-progress motion, while SCROLL_INTO_VIEW fires once on entry and is an
+    intersection reveal — the IO signal covers that, the same way Framer's
+    useInView is excluded from scroll-linked site coverage.
+    """
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "webflow.js").write_text(
+        '{eventTypeId:"SCROLLING_IN_VIEW"},{eventTypeId:"SCROLL_INTO_VIEW"},'
+        '{eventTypeId:"MOUSE_CLICK"},{eventTypeId:"MOUSE_OVER"},'
+        '{eventTypeId:"TAB_ACTIVE"},{eventTypeId:"DROPDOWN_OPEN"}'
+    )
+    ix2 = mod.parse_bundles(tmp_path)["extractions"].get("webflowIX2")
+
+    assert ix2
+    linked = {e["eventType"] for e in ix2["events"] if e["scrollLinked"]}
+    unlinked = {e["eventType"] for e in ix2["events"] if not e["scrollLinked"]}
+
+    assert linked == {"SCROLLING_IN_VIEW"}, linked
+    assert "SCROLL_INTO_VIEW" in unlinked, unlinked
+    assert {"MOUSE_CLICK", "MOUSE_OVER", "TAB_ACTIVE", "DROPDOWN_OPEN"} <= unlinked
+
+
+def test_parse_bundles_captures_anime_v4_through_minified_binding(tmp_path: Path) -> None:
+    """v4 renamed the entry points and bundlers rename the namespace, so real
+    call sites read `O.animate(target, {...})`. Taken from animejs.com's own
+    docs.js, where every app-level animation uses this shape."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "docs.js").write_text(
+        'O.animate(m,{opacity:[1,0],duration:225,ease:"outQuad"});'
+    )
+    rows = mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+    assert rows, "aliased v4 call site must be captured"
+    assert rows[0]["api"] == "v4"
+    assert rows[0]["binding"] == "O"
+    assert 'ease:"outQuad"' in rows[0]["config"]
+    assert rows[0]["scrollLinked"] is False
+
+
+def test_parse_bundles_anime_v4_target_array_holds_a_comma(tmp_path: Path) -> None:
+    """`animate(["#a","#b"], {...})` puts a comma inside the target, so scanning
+    to the first comma would split the call at the wrong place."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "docs.js").write_text(
+        'O.animate(["#docs-info","#path-animation"],{opacity:0,duration:75,ease:"in"});'
+    )
+    rows = mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+    assert rows
+    assert rows[0]["config"] == '{opacity:0,duration:75,ease:"in"}'
+
+
+def test_parse_bundles_ignores_waapi_element_animate(tmp_path: Path) -> None:
+    """Element.animate() shares the name. anime spells the option `ease`, WAAPI
+    spells it `easing`, so the config keys keep them apart."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "misc.js").write_text(
+        'el.animate([{opacity:0},{opacity:1}],{duration:300,easing:"ease-in",fill:"both"});'
+        'node.animate(kf,{duration:200,iterations:2,direction:"alternate"});'
+    )
+    assert not mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+
+def test_parse_bundles_anime_v4_onscroll_is_scroll_linked(tmp_path: Path) -> None:
+    """Only an onScroll / ScrollObserver binding makes an anime site scroll
+    driven; everything else is time driven."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "docs.js").write_text(
+        'O.animate(".x",{y:100,ease:"out",autoplay:onScroll({sync:1})});'
+    )
+    rows = mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+    assert rows
+    assert rows[0]["scrollLinked"] is True
+
+
+def test_parse_bundles_scans_esm_and_cjs_bundles(tmp_path: Path) -> None:
+    """ES-module bundles ship as .mjs. Globbing only "*.js" made them invisible
+    to every extractor — measured on godotengine.org, whose app code is a .mjs
+    and produced zero extractions while plainly using anime v4."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "app.mjs").write_text(
+        'animate(el,{opacity:0,duration:500,ease:"outCirc"});'
+    )
+    (bundles / "legacy.cjs").write_text(
+        'animate(other,{opacity:1,duration:200,ease:"inQuad"});'
+    )
+    rows = mod.parse_bundles(tmp_path)["extractions"].get("animeJs")
+
+    assert rows, "an .mjs bundle must be scanned"
+    sources = {r["source"].rsplit("/", 1)[-1] for r in rows}
+    assert sources == {"app.mjs", "legacy.cjs"}, sources
+
+
+def test_parse_bundles_resolves_anime_autoplay_scroll_observer(tmp_path: Path) -> None:
+    """Real code assigns the observer and passes the binding, so the config
+    carries only `autoplay:t` and the assignment must be resolved in scope.
+
+    Both shapes are taken from godotengine.org's release page bundle.
+    """
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "app.mjs").write_text(
+        'const t=onScroll({trigger:e.element,enter:{target:"top"}});'
+        'animate(e.element,{y:{from:"+=50px"},duration:500,autoplay:t,ease:"outCirc"});'
+        'scrollObserver=onScroll({target:".hdr"});'
+        'animate(".hdr",{autoplay:scrollObserver,ease:"outCirc"});'
+        'animate("#x",{opacity:{to:0},duration:500,ease:"in"});'
+    )
+    rows = mod.parse_bundles(tmp_path)["extractions"]["animeJs"]
+
+    linked = [r for r in rows if r["scrollLinked"]]
+    unlinked = [r for r in rows if not r["scrollLinked"]]
+    assert len(linked) == 2, [r["config"] for r in rows]
+    assert len(unlinked) == 1, [r["config"] for r in unlinked]
+    assert "opacity" in unlinked[0]["config"]
+
+
+def test_parse_bundles_autoplay_boolean_is_not_scroll_linked(tmp_path: Path) -> None:
+    """`autoplay:false` is a paused timed animation, not a scroll binding."""
+    mod = _load_module()
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "app.mjs").write_text(
+        'animate(el,{opacity:1,duration:300,ease:"out",autoplay:false});'
+    )
+    rows = mod.parse_bundles(tmp_path)["extractions"]["animeJs"]
+    assert rows[0]["scrollLinked"] is False
+
+
 def test_main_writes_json_artifact(tmp_path: Path) -> None:
     """End-to-end: main(argv) writes a valid JSON file at the requested path."""
     mod = _load_module()

@@ -35,7 +35,15 @@ def _build_text_index(bundles_dir: Path, ref_dir: Path) -> tuple[str, list[tuple
     used by find_file_for_offset to attribute regex matches to their
     source bundle.
     """
-    js_files = sorted(bundles_dir.rglob("*.js"))
+    # ES-module bundles ship as .mjs and CommonJS as .cjs. Globbing only
+    # "*.js" made every such bundle invisible to the whole extractor —
+    # measured on godotengine.org, whose app code lives in a .mjs and
+    # produced zero extractions while plainly using anime v4.
+    js_files = sorted(
+        path
+        for pattern in ("*.js", "*.mjs", "*.cjs")
+        for path in bundles_dir.rglob(pattern)
+    )
     all_text_parts: list[str] = []
     file_offsets: list[tuple[str, int]] = []
     offset = 0
@@ -167,6 +175,15 @@ def _looks_like_gsap_config(configs: list[str], keys: tuple[str, ...]) -> bool:
     return False
 
 
+def _site_id(prefix: str, source: str, offset: int) -> str:
+    """Stable id for a construction site so transition-spec.json can cite it.
+
+    Keyed on file + byte offset: re-running the parser over the same bundles
+    reproduces it, and two sites in one file never collide.
+    """
+    return f"{prefix}:{Path(source).name}:{offset}"
+
+
 def _gsap_call_entry(
     kind: str,
     match_start: int,
@@ -181,7 +198,7 @@ def _gsap_call_entry(
     # the same way it cites animation-runtime-dump.json scrollLinkedStyles rows.
     # Keyed on file + byte offset: re-running the parser over the same bundles
     # reproduces it, and two calls in one file never collide.
-    source_id = f"gsap:{Path(source).name}:{match_start}"
+    source_id = _site_id("gsap", source, match_start)
     return {
         "sourceId": source_id,
         "kind": kind,
@@ -353,6 +370,10 @@ def _extract_framer_motion(all_text: str, file_offsets: list[tuple[str, int]]) -
             for t in tf_re.finditer(window)
         ]
         uses.append({
+            "sourceId": _site_id("framer", _find_file_for_offset(file_offsets, m.start()), m.start()),
+            # useScroll binds element progress to the scroll position, so every
+            # transform it drives is scroll-linked motion the spec must declare.
+            "scrollLinked": True,
             "kind": "useScroll",
             "progressVar": progress_var,
             "target": tgt.group(1) if tgt else None,
@@ -369,6 +390,10 @@ def _extract_framer_motion(all_text: str, file_offsets: list[tuple[str, int]]) -
     # plain `el.addEventListener("change", ...)`.
     for m in re.finditer(r"\(0,[\w$.]+\)\(\s*(\w+)\s*,\s*[\"']change[\"']\s*,", all_text):
         uses.append({
+            "sourceId": _site_id("framer", _find_file_for_offset(file_offsets, m.start()), m.start()),
+            # Threshold callbacks on a scroll progress value drive per-word /
+            # per-line scroll reveals — scroll-linked, not a one-shot.
+            "scrollLinked": True,
             "kind": "useMotionValueEvent",
             "valueVar": m.group(1),
             "event": "change",
@@ -384,14 +409,85 @@ def _extract_framer_motion(all_text: str, file_offsets: list[tuple[str, int]]) -
         (r"\buseInView\s*\(\s*[^,]+,\s*(\{[^{}]{0,200}\})", "useInView"),
     ]:
         for m in re.finditer(pattern, all_text):
+            source = _find_file_for_offset(file_offsets, m.start())
             uses.append({
+                "sourceId": _site_id("framer", source, m.start()),
+                # useInView is an intersection reveal, not scroll-progress
+                # motion, so it is covered by the IO signal rather than by
+                # scroll-linked site coverage.
+                "scrollLinked": kind in ("useScroll", "useTransform"),
                 "kind": kind,
-                "source": _find_file_for_offset(file_offsets, m.start()),
+                "source": source,
                 "raw": m.group(0)[:200],
                 "confidence": "medium",
             })
 
     return uses
+
+
+_ANIME_CALL_RE = re.compile(r"\b(?:([A-Za-z_$][\w$]*)\.)?(animate|createTimeline)\s*\(")
+
+# v4 option names that WAAPI's Element.animate() never uses. `ease` is the
+# discriminator that matters: anime spells it `ease`, WAAPI spells it `easing`,
+# so requiring it separates a real anime call from every `el.animate(kf, opts)`
+# in the same bundle.
+_ANIME_V4_KEYS = (
+    "ease", "loop", "alternate", "composition", "modifier",
+    "onComplete", "onUpdate", "onBegin", "playbackEase", "autoplay",
+)
+
+_CLOSERS = {"{": "}", "[": "]", "(": ")"}
+
+
+def _skip_argument(text: str, index: int, limit: int = 2000) -> int:
+    """Return the index just past one call argument starting at `index`.
+
+    Targets are not always simple: `animate(["#a","#b"], {...})` puts a comma
+    inside the first argument, so scanning to the first comma would split the
+    call in the wrong place. Step over balanced brackets and quoted spans
+    instead.
+    """
+    end = min(len(text), index + limit)
+    while index < end and text[index].isspace():
+        index += 1
+    if index >= end:
+        return index
+    char = text[index]
+    if char in _CLOSERS:
+        depth = 0
+        quote: str | None = None
+        while index < end:
+            current = text[index]
+            if quote is not None:
+                if current == "\\":
+                    index += 2
+                    continue
+                if current == quote:
+                    quote = None
+            elif current in "\"'`":
+                quote = current
+            elif current in _CLOSERS:
+                depth += 1
+            elif current in ("}", "]", ")"):
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+            index += 1
+        return index
+    if char in "\"'`":
+        quote = char
+        index += 1
+        while index < end:
+            if text[index] == "\\":
+                index += 2
+                continue
+            if text[index] == quote:
+                return index + 1
+            index += 1
+        return index
+    while index < end and text[index] not in ",)":
+        index += 1
+    return index
 
 
 def _extract_anime_js(all_text: str, file_offsets: list[tuple[str, int]]) -> list[dict]:
@@ -400,6 +496,11 @@ def _extract_anime_js(all_text: str, file_offsets: list[tuple[str, int]]) -> lis
     Keyframe values are arrays of objects (`translateY:[{value:0},{value:100}]`),
     so the config has to be read with a balanced scan rather than a flat
     brace pattern.
+
+    Covers v3 `anime({...})` here and delegates v4 to `_extract_anime_v4`:
+    v4 renamed the entry points to `animate(target, ...)` and
+    `createTimeline()`, so a v3-only scan finds nothing on a current site —
+    animejs.com carries zero `anime(` call sites.
     """
     calls: list[dict] = []
     for m in re.finditer(r"\banime\s*\(", all_text):
@@ -408,18 +509,107 @@ def _extract_anime_js(all_text: str, file_offsets: list[tuple[str, int]]) -> lis
             # No object argument — `anime(` here is a call through a variable or
             # an unrelated identifier, not a construction site with parameters.
             continue
+        source = _find_file_for_offset(file_offsets, m.start())
         calls.append({
-            "source": _find_file_for_offset(file_offsets, m.start()),
+            "sourceId": _site_id("anime", source, m.start()),
+            # anime is time-driven by default. Only v4's onScroll / ScrollObserver
+            # binding — or an explicit autoplay:false seek driver — makes a site
+            # scroll-linked, so the flag is set from the config, never assumed.
+            "scrollLinked": _anime_scroll_linked(config, all_text, m.start()),
+            "source": source,
             "raw": all_text[m.start():m.end() + 200][:200],
             "config": config[:2000],
+            "api": "v3",
+            "confidence": "medium",
+        })
+
+    calls.extend(_extract_anime_v4(all_text, file_offsets))
+    return calls
+
+
+_AUTOPLAY_VAR_RE = re.compile(r"[{,\s]autoplay\s*:\s*([A-Za-z_$][\w$]*)")
+
+
+def _anime_scroll_linked(config: str, all_text: str = "", call_start: int = 0) -> bool:
+    """True when the config binds playback to scroll rather than to time.
+
+    Real code rarely inlines the observer. It assigns one and passes the
+    binding: `const t = onScroll({...}); animate(el, {autoplay: t, ...})`. The
+    config then carries only `autoplay:t`, so the assignment has to be resolved
+    in the surrounding scope — the same aliasing problem the GSAP scan has.
+    """
+    if re.search(r"\bonScroll\s*\(", config) or re.search(r"scrollObserver", config, re.I):
+        return True
+    match = _AUTOPLAY_VAR_RE.search(config)
+    if not match or not all_text:
+        return False
+    name = match.group(1)
+    if re.fullmatch(r"(?:true|false|!0|!1)", name):
+        return False
+    # Look back over the enclosing function-sized window for the assignment.
+    window = all_text[max(0, call_start - 6000):call_start]
+    return bool(
+        re.search(rf"\b{re.escape(name)}\s*=\s*(?:[\w$.]+\.)?onScroll\s*\(", window)
+    )
+
+
+def _extract_anime_v4(all_text: str, file_offsets: list[tuple[str, int]]) -> list[dict]:
+    """Find anime v4 `animate()` / `createTimeline()` construction sites.
+
+    v4 renamed the entry points and bundlers rename the namespace binding, so
+    production call sites read `O.animate(target, {...})`. `.animate(` alone is
+    ambiguous — WAAPI's Element.animate() shares the name — so a site counts
+    only when its config declares a v4 option. `ease` is the cleanest signal:
+    anime spells it `ease`, WAAPI spells it `easing`.
+    """
+    calls: list[dict] = []
+    for m in _ANIME_CALL_RE.finditer(all_text):
+        binding, verb = m.group(1), m.group(2)
+        cursor = m.end()
+        if verb == "animate":
+            # First argument is the target and may itself contain commas
+            # (`animate(["#a","#b"], {...})`), so step over it as one span.
+            cursor = _skip_argument(all_text, cursor)
+            while cursor < len(all_text) and all_text[cursor] in ", ":
+                cursor += 1
+        config, _ = _object_after(all_text, cursor)
+        if config is None:
+            continue
+        if not any(re.search(rf"[{{,\s]{key}\s*:", config) for key in _ANIME_V4_KEYS):
+            continue
+        source = _find_file_for_offset(file_offsets, m.start())
+        calls.append({
+            "sourceId": _site_id("anime", source, m.start()),
+            "scrollLinked": _anime_scroll_linked(config, all_text, m.start()),
+            "source": source,
+            "raw": all_text[m.start():m.end() + 200][:200],
+            "config": config[:2000],
+            "api": "v4",
+            "binding": binding or "",
+            "kind": verb,
             "confidence": "medium",
         })
     return calls
 
 
+# IX2 scroll linkage comes from the TRIGGER, not the action: actionTypeId says
+# what changes (TRANSFORM, STYLE_OPACITY), eventTypeId says what drives it.
+# Only these event types are scroll-progress driven.
+_IX2_SCROLL_EVENTS = frozenset({
+    "SCROLLING_IN_VIEW",
+    "PAGE_SCROLL",
+    "PAGE_SCROLL_UP",
+    "PAGE_SCROLL_DOWN",
+})
+
+
 def _extract_webflow_ix2(all_text: str, file_offsets: list[tuple[str, int]]) -> dict | None:
-    """Find Webflow IX2 actionTypeId markers. Returns dict or None when absent."""
-    if not (detect_in_text(all_text, "actionTypeId") or detect_in_text(all_text, "ix2")):
+    """Find Webflow IX2 action and trigger markers. Returns dict or None."""
+    if not (
+        detect_in_text(all_text, "actionTypeId")
+        or detect_in_text(all_text, "eventTypeId")
+        or detect_in_text(all_text, "ix2")
+    ):
         return None
     actions: list[dict] = []
     for m in re.finditer(r"actionTypeId\s*:\s*['\"]([^'\"]+)['\"]", all_text):
@@ -428,11 +618,24 @@ def _extract_webflow_ix2(all_text: str, file_offsets: list[tuple[str, int]]) -> 
             "source": _find_file_for_offset(file_offsets, m.start()),
             "confidence": "high",  # actionTypeId is a clear marker
         })
-    if not actions:
+    events: list[dict] = []
+    for m in re.finditer(r"eventTypeId\s*:\s*['\"]([^'\"]+)['\"]", all_text):
+        event_type = m.group(1)
+        source = _find_file_for_offset(file_offsets, m.start())
+        events.append({
+            "sourceId": _site_id("ix2", source, m.start()),
+            "scrollLinked": event_type in _IX2_SCROLL_EVENTS,
+            "eventType": event_type,
+            "source": source,
+            "confidence": "high",
+        })
+    if not actions and not events:
         return None
     return {
         "actions": actions[:50],  # cap to avoid huge output
         "totalActions": len(actions),
+        "events": events[:50],
+        "totalEvents": len(events),
     }
 
 

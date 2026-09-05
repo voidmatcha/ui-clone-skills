@@ -1529,3 +1529,30 @@ def test_gate_spec_skips_bundle_coverage_without_artifact(tmp_path: Path) -> Non
         f"{r.label} {r.message}" for r in Gate(ref).gate_spec() if r.status == "fail"
     )
     assert "spec-bundle-site-coverage" not in blob, blob
+
+
+def test_gate_spec_covers_ix2_scroll_events_nested_in_dict(tmp_path: Path) -> None:
+    """Webflow IX2 reports a summary object, not a list, so a list-only scan of
+    bundle-extraction.json would drop its scroll triggers silently."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_min_spec_artifacts(ref, transitions=[{"id": "one", "trigger": "scroll"}])
+    (ref / "bundle-extraction.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "extractions": {
+            "webflowIX2": {
+                "actions": [{"actionType": "TRANSFORM_MOVE"}],
+                "events": [{
+                    "sourceId": "ix2:webflow.js:42",
+                    "eventType": "SCROLLING_IN_VIEW",
+                    "scrollLinked": True,
+                }],
+            }
+        },
+    }), encoding="utf-8")
+
+    blob = " ".join(
+        f"{r.label} {r.message}" for r in Gate(ref).gate_spec() if r.status == "fail"
+    )
+    assert "spec-bundle-site-coverage" in blob, blob
+    assert "ix2:webflow.js:42" in blob, blob
