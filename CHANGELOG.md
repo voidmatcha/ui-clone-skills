@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [0.7.50] - 2026-09-05
+
+### Fixed
+
+- Replace two CMP overlay selectors that were removing the wrong elements at
+  capture time. `[class*=cookieconsent]` matched no consent container at all --
+  Osano/Insites never puts that string in a class -- while Cookiebot's `uc.js`
+  sets `cookieconsent-optin-marketing` on consent-gated iframes and their
+  containers, so the reference lost real embeds and the clone lost its copy:
+  an empty-vs-empty compare that passes. `[id^=cky-]` matched only
+  `<style id="cky-style">` on a CookieYes page, stripping the banner's
+  stylesheet and leaving it reflowing as unstyled block text. Verified against
+  `consent.cookiebot.com/uc.js`, the `cookieconsent` build, and the CookieYes
+  frontend bundle. Replaced by `.cc-window` and the `.cky-*` container trio,
+  which are the real containers for the two most prevalent CMPs.
+- Wrap the overlay removal in `try/catch`. `querySelectorAll` throws on a
+  malformed selector list, which aborted the whole pause IIFE before it could
+  pause animations or video -- and `_run_agent_eval` discards output with
+  `check=False`, so every capture would have run unpaused with no signal.
+
+### Added
+
+- Extend CMP coverage to Cookiebot, Usercentrics, Didomi, Quantcast Choice and
+  Complianz using vendor-namespaced container ids only. A persistent consent
+  banner occludes content and inflates every section's AE uniformly.
+- `CMP_OVERLAY_SELECTORS` is now a single source of truth, read by
+  `section-compare.sh` through `--print-cmp-selectors`. The shell path kept its
+  own copy plus `#cookie, [class~=cookie], [class*=cookie_]`; those bare matches
+  are gone. Drift mattered because the ref-calib capture applies only
+  `_pause_js`, so a selector in one path and not the other made ref and
+  ref-calib disagree and downgraded the section to layout-only parity.
+- `tests/test_capture_pause_consent.py` pins the invariant as a grammar over the
+  tuple rather than a substring search over the emitted JS, and asserts the
+  grammar rejects the ten bad shapes that were shipped or proposed here --
+  including both selectors removed above.
+
 ## [0.7.49] - 2026-09-05
 
 ### Fixed

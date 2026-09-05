@@ -951,9 +951,19 @@ ref_browser wait "$WAIT_REF" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" wait "$WAIT_IMPL" > /dev/null 2>&1
 
 # Remove common overlays (cookie banners, newsletter popups)
+# The vendor list comes from ui_clone.section_capture so this path and the
+# _pause_js path cannot drift. Drift is not cosmetic: the ref-calib capture
+# applies only _pause_js, so an overlay stripped here but not there makes ref
+# and ref-calib disagree and downgrades the section to layout-only parity.
+_CMP_SELECTORS=$(PYTHONPATH="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}" \
+  python3 -m ui_clone.section_capture --print-cmp-selectors 2>/dev/null || echo "")
+if [ -z "$_CMP_SELECTORS" ]; then
+  echo "section-compare: cannot read CMP selectors from ui_clone.section_capture" >&2
+  exit 2
+fi
 DISMISS_OVERLAYS='(() => {
   // First sweep: vendor-specific consent/cookie SDKs that always render fixed UIs
-  document.querySelectorAll("#iubenda-cs-banner, [id^=iubenda-], [class*=iubenda], [id^=onetrust-], [class*=onetrust], [id^=osano-], [class*=osano], [id^=cky-], [class*=cookieconsent], #cookie, [class~=cookie], [class*=cookie_]").forEach(el => el.remove());
+  try { document.querySelectorAll("'"$_CMP_SELECTORS"'").forEach(el => el.remove()); } catch (e) {}
   // Second sweep: heuristic match by class keywords for big fixed/absolute popups
   document.querySelectorAll("[class*=popup], [class*=modal], [class*=cookie], [class*=banner], [class*=overlay], [class*=signup]").forEach(el => {
     const s = getComputedStyle(el);

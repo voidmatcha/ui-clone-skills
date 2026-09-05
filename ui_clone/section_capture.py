@@ -131,6 +131,60 @@ def _fixed_overlay_toggle_js(active: bool) -> str:
 }})()
 """
 
+# Consent/privacy (CMP) overlay containers removed during the capture settle.
+#
+# A persistent CMP banner occludes content and inflates EVERY section's AE
+# uniformly. Removal is applied identically to the reference and to the
+# implementation, so it cannot favour a faithful or a broken clone.
+#
+# Every entry must be a vendor-namespaced container id/class. A substring match
+# on a generic word is banned: it deletes the page's own content and yields a
+# doctored reference. Two such entries were removed after being measured --
+#   [class*=cookieconsent]  Cookiebot's uc.js sets cookieconsent-optin-marketing
+#                           on consent-gated iframes and their containers, so
+#                           this stripped real embeds; meanwhile Osano/Insites
+#                           cookieconsent -- its intended target -- never puts
+#                           that string in a class, so it covered nothing.
+#                           Replaced by .cc-window.
+#   [id^=cky-]              On a CookieYes frontend the only cky- ids are
+#                           <style id="cky-style"> and cky-style-inline, so this
+#                           stripped the banner's stylesheet and left the banner
+#                           reflowing as unstyled block text. The containers are
+#                           classes. Replaced by the .cky-* trio.
+# Per-site needs belong in SECTION_FIXED_OVERLAY_SELECTORS, not here.
+CMP_OVERLAY_SELECTORS: tuple[str, ...] = (
+    # iubenda
+    "#iubenda-cs-banner",
+    "[id^=iubenda-]",
+    "[class*=iubenda]",
+    # OneTrust
+    "[id^=onetrust-]",
+    "[class*=onetrust]",
+    # Osano
+    "[id^=osano-]",
+    "[class*=osano]",
+    # Osano / Insites cookieconsent
+    ".cc-window",
+    # CookieYes
+    ".cky-consent-container",
+    ".cky-overlay",
+    ".cky-modal",
+    # Cookiebot
+    "#CybotCookiebotDialog",
+    "#CybotCookiebotDialogBodyUnderlay",
+    "#CookiebotWidget",
+    # Usercentrics
+    "#usercentrics-root",
+    "#usercentrics-cmp-ui",
+    # Didomi
+    "#didomi-host",
+    # Quantcast Choice
+    ".qc-cmp2-container",
+    # Complianz
+    "#cmplz-cookiebanner-container",
+)
+
+
 def _pause_js() -> str:
     css = (
         "*, *::before, *::after { animation-play-state: paused !important; "
@@ -138,6 +192,7 @@ def _pause_js() -> str:
         + os.environ.get("SECTION_CAPTURE_DYNAMIC_PAUSE_EXTRA", "")
     )
     css_literal = json.dumps(css)
+    cmp_literal = json.dumps(", ".join(CMP_OVERLAY_SELECTORS))
     return (
         "(() => {"
         "const s = document.getElementById('__sc-pause__');"
@@ -148,7 +203,9 @@ def _pause_js() -> str:
         "document.head.appendChild(ns);"
         "}"
         "document.querySelectorAll('video').forEach(v => { try { v.pause(); v.autoplay = false; if (v.readyState >= 1) v.currentTime = 0; } catch(e){} });"
-        "document.querySelectorAll('#iubenda-cs-banner, [id^=iubenda-], [class*=iubenda], [id^=onetrust-], [class*=onetrust], [id^=osano-], [class*=osano], [id^=cky-], [class*=cookieconsent]').forEach(el => el.remove());"
+        # try/catch: querySelectorAll throws on a malformed list, which would
+        # abort the IIFE before `return 'paused'` and silently skip the pause.
+        f"try {{ document.querySelectorAll({cmp_literal}).forEach(el => el.remove()); }} catch (e) {{}}"
         "return 'paused';"
         "})()"
     )
@@ -960,10 +1017,17 @@ def main(argv: list[str] | None = None) -> int:
         # H9: expose the derived settle for section-compare.sh (and tests).
         print(derive_settle_seconds(args[1]))
         return 0
+    if len(args) == 1 and args[0] == "--print-cmp-selectors":
+        # Single source of truth: section-compare.sh removes the same overlays at
+        # the same stage, and a second hand-maintained copy drifts. Drift matters
+        # because the ref-calib capture applies only _pause_js, so a selector
+        # present in one path and not the other makes ref and ref-calib disagree.
+        print(", ".join(CMP_OVERLAY_SELECTORS))
+        return 0
     if len(args) != 1:
         print(
             "usage: python -m ui_clone.section_capture <matches.json> | "
-            "--print-settle <transition-spec.json>",
+            "--print-settle <transition-spec.json> | --print-cmp-selectors",
             file=sys.stderr,
         )
         return 2
