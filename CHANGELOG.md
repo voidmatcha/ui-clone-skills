@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [0.7.48] - 2026-09-05
+
+### Fixed
+
+- Extract GSAP construction sites through minified bindings and nested config
+  objects. Flat brace patterns could not span a nested `scrollTrigger`, and
+  requiring the literal `gsap.` prefix matched only the vendored library's own
+  internals, so a scroll-driven reference could yield an empty
+  `bundle-extraction.json`. The same nesting defect affected anime keyframe
+  arrays and nested Lenis options.
+- Reject a non-page or explicit-failure `agent-browser` eval envelope in
+  `capture-states.sh` and `element-evidence.sh` before any artifact is written.
+- Read region geometry from the `bounds {x, y, w, h}` shape ui-capture emits,
+  and fail a partial geometry claim instead of skipping the size and page-bound
+  checks.
+- Validate rasters for unrecognized `triggerType` values and report every
+  declared artifact, which also clears a checker-passes/gate-fails deadlock.
+- Require the replay-track change band to be populated, not merely wide, and
+  reject an empty recording manifest.
+- Clear the previous run's replay candidate before capture so a wrapper that
+  exits without writing cannot have stale output read as fresh.
+
+### Added
+
+- `spec-bundle-site-coverage`: every scroll-linked `bundle-extraction.json`
+  construction site must be cited by a `transitions[]` entry
+  (`sourceArtifact` + exact `sourceId`) or carry a structured `skipped[]`
+  reason. Signal-class coverage alone let a single entry naming "scroll"
+  certify a reference whose bundles declared many separate scroll timelines.
+- Deny tool writes to `capture-artifact-inventory.json`, the checker verdict the
+  reference gate trusts as real-detection provenance.
+- Run the replay-track integration suite in CI; it had no coverage because the
+  suite is gated behind `UI_CLONE_INTEGRATION=1`.
+
+### Changed
+
+- Record an uncaptured-evidence gap in `verification-plan.json` `evidenceGaps`
+  rather than `deferredChecks`, which blocks closeout and advises a tier bump
+  that cannot produce missing evidence.
+- Correct the Step 5d claim that `gate spec` cross-counts every
+  `bundle-extraction.json` site and every `interactions-detected.json` row; name
+  the checks that actually enforce each input.
+
 ## [0.7.47] - 2026-09-03
 
 ### Added

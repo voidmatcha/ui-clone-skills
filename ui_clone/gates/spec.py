@@ -493,6 +493,90 @@ def _check_runtime_site_spec_coverage(
     )
 
 
+def _bundle_scroll_sites(extraction: dict[str, Any]) -> list[dict[str, str]]:
+    """Scroll-linked motion construction sites from bundle-extraction.json.
+
+    Only scroll-linked rows are required to appear in the spec. A bundle also
+    carries the vendored library's own internal tweens, and demanding a spec
+    entry for those would force noise rather than coverage.
+    """
+    extractions = extraction.get("extractions")
+    if not isinstance(extractions, dict):
+        return []
+    sites: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for rows in extractions.values():
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("scrollLinked"):
+                continue
+            source_id = str(row.get("sourceId") or "").strip()
+            if not source_id or source_id in seen:
+                continue
+            seen.add(source_id)
+            sites.append({"sourceId": source_id, "kind": str(row.get("kind") or "")})
+    return sites
+
+
+def _bundle_site_cited(entry: Any, source_id: str) -> bool:
+    return (
+        isinstance(entry, dict)
+        and entry.get("sourceArtifact") == "bundle-extraction.json"
+        and entry.get("sourceId") == source_id
+    )
+
+
+def _check_bundle_scroll_site_coverage(
+    self: Gate, spec: dict[str, Any] | None
+) -> CheckResult | None:
+    """Every scroll-linked bundle construction site must reach the spec.
+
+    Signal-class coverage alone lets one entry that name-checks "scroll" certify
+    a site whose bundles declare many separate scroll-driven timelines, which is
+    exactly the under-populated spec this gate exists to reject.
+    """
+    extraction = self._load_json("bundle-extraction.json")
+    if not isinstance(extraction, dict):
+        return None
+    sites = _bundle_scroll_sites(extraction)
+    if not sites:
+        return None
+
+    transitions = spec.get("transitions") if isinstance(spec, dict) else None
+    transitions = transitions if isinstance(transitions, list) else []
+    transitions = [t for t in transitions if not _is_stub_entry(t)]
+    skipped = spec.get("skipped") if isinstance(spec, dict) else None
+    skipped = skipped if isinstance(skipped, list) else []
+
+    uncovered = [
+        site
+        for site in sites
+        if not any(_bundle_site_cited(t, site["sourceId"]) for t in transitions)
+        and not any(
+            _bundle_site_cited(entry, site["sourceId"])
+            and str(entry.get("reason", "")).strip()
+            for entry in skipped
+        )
+    ]
+    if not uncovered:
+        return None
+    details = ", ".join(f"{site['sourceId']} ({site['kind']})" for site in uncovered[:8])
+    more = "" if len(uncovered) <= 8 else f" (+{len(uncovered) - 8} more)"
+    return CheckResult(
+        "spec-bundle-site-coverage",
+        "fail",
+        f"transition-spec.json does not cover {len(uncovered)} of {len(sites)} "
+        f"scroll-linked construction site(s) in bundle-extraction.json: "
+        f"{details}{more}. Each needs a transitions[] entry with "
+        "`sourceArtifact: bundle-extraction.json` plus the exact sourceId, or a "
+        "structured skipped[] entry with the same sourceArtifact/sourceId and a "
+        "nonempty reason (use that for a vendored library's own internals or a "
+        "site already covered by another entry). Mine the parameters from "
+        "bundle-extraction.json rather than inventing them.",
+    )
+
+
 def _check_runtime_motion_spec_coverage(self: Gate) -> CheckResult | None:
     dump = self._load_json("animation-runtime-dump.json")
     if not dump:
@@ -875,6 +959,9 @@ def gate_spec(self: Gate) -> list[CheckResult]:
     runtime_site_result = _check_runtime_site_spec_coverage(self, spec)
     if runtime_site_result is not None:
         results.append(runtime_site_result)
+    bundle_site_result = _check_bundle_scroll_site_coverage(self, spec)
+    if bundle_site_result is not None:
+        results.append(bundle_site_result)
     results.extend(_check_spec_selectors_present_in_dom(self, spec))
     if spec is not None:
         transitions = spec.get("transitions")

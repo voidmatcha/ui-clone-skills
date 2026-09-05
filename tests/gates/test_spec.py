@@ -1425,3 +1425,107 @@ def test_spec_selectors_present_in_dom_silent_without_structure(tmp_path: Path) 
     spec = {"transitions": [{"id": "x", "target": ".whatever-absent"}]}
     gate = Gate(ref)
     assert _check_spec_selectors_present_in_dom(gate, spec) == []
+
+
+def _bundle_extraction(ref: Path, sites: list[dict[str, object]]) -> None:
+    (ref / "bundle-extraction.json").write_text(
+        json.dumps({"schemaVersion": 1, "extractions": {"gsap": sites}}),
+        encoding="utf-8",
+    )
+
+
+def _scroll_site(source_id: str, kind: str = "scrollTrigger") -> dict[str, object]:
+    return {
+        "sourceId": source_id,
+        "kind": kind,
+        "scrollLinked": True,
+        "config": ["{trigger:e,scrub:!0}"],
+    }
+
+
+def test_gate_spec_fails_uncovered_bundle_scroll_sites(tmp_path: Path) -> None:
+    """One entry that name-checks "scroll" satisfied signal-class coverage while
+    every other detected scroll-driven construction site stayed unmapped."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_min_spec_artifacts(ref, transitions=[{"id": "one", "trigger": "scroll"}])
+    _bundle_extraction(ref, [_scroll_site("gsap:page.js:100"), _scroll_site("gsap:page.js:200")])
+
+    results = Gate(ref).gate_spec()
+    failures = [r for r in results if r.status == "fail"]
+    blob = " ".join(f"{r.label} {r.message}" for r in failures)
+
+    assert "spec-bundle-site-coverage" in blob, blob
+    assert "gsap:page.js:200" in blob, blob
+
+
+def test_gate_spec_accepts_cited_bundle_scroll_site(tmp_path: Path) -> None:
+    """A transition citing sourceArtifact + exact sourceId covers the site."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_min_spec_artifacts(ref, transitions=[{
+        "id": "one",
+        "trigger": "scroll",
+        "sourceArtifact": "bundle-extraction.json",
+        "sourceId": "gsap:page.js:100",
+    }])
+    _bundle_extraction(ref, [_scroll_site("gsap:page.js:100")])
+
+    blob = " ".join(
+        f"{r.label} {r.message}" for r in Gate(ref).gate_spec() if r.status == "fail"
+    )
+    assert "spec-bundle-site-coverage" not in blob, blob
+
+
+def test_gate_spec_accepts_structured_skip_for_bundle_site(tmp_path: Path) -> None:
+    """A structured skipped[] entry with a reason is the documented escape for
+    a vendored library's internals or a site another entry already covers."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "bundle-map.json").write_text(json.dumps({}))
+    (ref / "external-sdks.json").write_text(json.dumps({}))
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "transitions": [{"id": "one", "trigger": "scroll"}],
+        "skipped": [{
+            "sourceArtifact": "bundle-extraction.json",
+            "sourceId": "gsap:page.js:100",
+            "reason": "vendored gsap internal, not app motion",
+        }],
+    }))
+    _bundle_extraction(ref, [_scroll_site("gsap:page.js:100")])
+
+    blob = " ".join(
+        f"{r.label} {r.message}" for r in Gate(ref).gate_spec() if r.status == "fail"
+    )
+    assert "spec-bundle-site-coverage" not in blob, blob
+
+
+def test_gate_spec_ignores_non_scroll_bundle_sites(tmp_path: Path) -> None:
+    """Only scroll-linked sites are required. A bundle also carries the vendored
+    library's own tweens, and demanding entries for those forces noise."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_min_spec_artifacts(ref, transitions=[{"id": "one", "trigger": "scroll"}])
+    _bundle_extraction(ref, [{
+        "sourceId": "gsap:vendor.js:10",
+        "kind": "tween",
+        "scrollLinked": False,
+        "config": ["{ease:\"expo\",duration:1}"],
+    }])
+
+    blob = " ".join(
+        f"{r.label} {r.message}" for r in Gate(ref).gate_spec() if r.status == "fail"
+    )
+    assert "spec-bundle-site-coverage" not in blob, blob
+
+
+def test_gate_spec_skips_bundle_coverage_without_artifact(tmp_path: Path) -> None:
+    """No bundle-extraction.json (static site) means nothing to cover."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_min_spec_artifacts(ref, transitions=[{"id": "one", "trigger": "scroll"}])
+
+    blob = " ".join(
+        f"{r.label} {r.message}" for r in Gate(ref).gate_spec() if r.status == "fail"
+    )
+    assert "spec-bundle-site-coverage" not in blob, blob

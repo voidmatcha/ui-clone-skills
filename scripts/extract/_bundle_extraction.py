@@ -176,9 +176,16 @@ def _gsap_call_entry(
 ) -> dict:
     """One construction-site row, tagged with the config text actually read."""
     joined = " ".join(configs)
+    source = _find_file_for_offset(file_offsets, match_start)
+    # Stable id so transition-spec.json can cite a specific construction site,
+    # the same way it cites animation-runtime-dump.json scrollLinkedStyles rows.
+    # Keyed on file + byte offset: re-running the parser over the same bundles
+    # reproduces it, and two calls in one file never collide.
+    source_id = f"gsap:{Path(source).name}:{match_start}"
     return {
+        "sourceId": source_id,
         "kind": kind,
-        "source": _find_file_for_offset(file_offsets, match_start),
+        "source": source,
         "raw": raw[:200],
         # The full config is what Phase 5d maps to transitions[]; `raw` stays
         # truncated for readability but must not be the only record, or a
