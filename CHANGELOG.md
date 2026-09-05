@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.7.51] - 2026-09-05
+
+### Fixed
+
+- Stop deleting the site's own iubenda footer links at capture time.
+  `[class*=iubenda]` also matched the badge anchor a site renders in its footer
+  (`class="iubenda-white iubenda-embed"`), so the privacy/cookie policy links
+  vanished from the reference and, symmetrically, from the clone -- a clone
+  could omit them entirely and still pass. The two badge classes appear 0 times
+  in the CMP core bundle, so excluding them cannot weaken banner removal.
+  `[id^=iubenda-]` is replaced by the three ids the core actually reaches for;
+  the prefix bought nothing and did catch the badge's `id=iubenda-embed`
+  fallback. The class match stays broad on purpose: iubenda's overlay roots are
+  not all under `-cs-` (`iubenda-alert-dialog`, `iubenda-iframe-popup`,
+  `iubenda-floatable-*`), so narrowing to `[class*=iubenda-cs]` would have
+  missed three full-screen modals. Verified in a browser against real markup:
+  old selector removed 4 overlays plus both footer links, new one removes the
+  same 4 overlays and no links.
+
 ## [0.7.50] - 2026-09-05
 
 ### Fixed

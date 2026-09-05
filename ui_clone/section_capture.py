@@ -153,10 +153,19 @@ def _fixed_overlay_toggle_js(active: bool) -> str:
 #                           classes. Replaced by the .cky-* trio.
 # Per-site needs belong in SECTION_FIXED_OVERLAY_SELECTORS, not here.
 CMP_OVERLAY_SELECTORS: tuple[str, ...] = (
-    # iubenda
+    # iubenda. The CMP core (cookie_solution/iubenda_cs core-<lang>.js) reaches
+    # for exactly three ids, so a [id^=iubenda-] prefix bought nothing and did
+    # catch the badge script's id="iubenda-embed" fallback. Its overlay roots are
+    # NOT all under -cs- (iubenda-alert-dialog, iubenda-iframe-popup,
+    # iubenda-floatable-*), so the class match stays broad; the two exclusions are
+    # the badge anchor the SITE renders in its own footer
+    # (class="iubenda-white iubenda-embed"), which is page content and must
+    # survive into the reference so the clone is held to reproducing it. Verified:
+    # those two classes appear 0 times in the CMP core.
     "#iubenda-cs-banner",
-    "[id^=iubenda-]",
-    "[class*=iubenda]",
+    "#iubenda-iframe-popup",
+    "#iubenda_cs_rejection_recovery_popup",
+    "[class*=iubenda]:not(.iubenda-embed):not(.iubenda-ibadge)",
     # OneTrust
     "[id^=onetrust-]",
     "[class*=onetrust]",

@@ -58,6 +58,15 @@ _ROLE_TOKENS = frozenset(
 _MIN_NAMESPACE_LEN = 3
 
 
+_NOT_CLAUSE = re.compile(r":not\(([^)]*)\)")
+
+
+def _split_exclusions(selector: str) -> tuple[str, list[str]]:
+    """Split `base:not(.a):not(.b)` into its base and its excluded selectors."""
+    excluded = _NOT_CLAUSE.findall(selector)
+    return _NOT_CLAUSE.sub("", selector), excluded
+
+
 def _value_of(selector: str) -> str:
     return selector.lstrip("#.").split("=")[-1].rstrip("]").lower()
 
@@ -67,7 +76,15 @@ def _is_substring_match(selector: str) -> bool:
 
 
 def reject_reason(selector: str) -> str | None:
-    """Return why this selector may delete a page's own content, else None."""
+    """Return why this selector may delete a page's own content, else None.
+
+    A :not() exclusion only ever narrows the match, so each excluded token is
+    checked for well-formedness but not for breadth.
+    """
+    selector, exclusions = _split_exclusions(selector)
+    for excluded in exclusions:
+        if not _SELECTOR_GRAMMAR.match(excluded):
+            return f"exclusion {excluded!r} is not a well-formed selector"
     if not _SELECTOR_GRAMMAR.match(selector):
         return "not a well-formed id/class/attribute container selector"
 
@@ -133,6 +150,9 @@ def test_selector_cannot_delete_page_content(selector: str) -> None:
         "#uc-banner",
         "[id^=foo",
         "*",
+        "[class*=iubenda]:not(",
+        "[class*=iubenda]:not(*)",
+        "[class*=cookie]:not(.iubenda-embed)",
     ],
 )
 def test_grammar_rejects_known_bad_shapes(selector: str) -> None:
