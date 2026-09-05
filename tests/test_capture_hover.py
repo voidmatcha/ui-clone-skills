@@ -82,10 +82,21 @@ def _make_fake_agent_browser(
         'if [ "$1" = "open" ]; then\n'
         f"  exit {open_returncode}\n"
         'elif [ "$1" = "eval" ]; then\n'
-        # capture-hover.sh pipes the eval script in on stdin. Consume it: a
-        # reader that exits without draining makes the writer's exit status
-        # depend on scheduling, and `set -o pipefail` in capture-hover.sh turns
-        # that into a spurious "agent-browser eval failed".
+        # capture-hover.sh pipes a ~14.5 KB eval script in on stdin. Consume
+        # it, or the writer takes SIGPIPE and `set -o pipefail` reports a
+        # spurious "agent-browser eval failed" (exit 3).
+        #
+        # The pipe buffer does NOT make this safe. 14,522 bytes fits a 64 KiB
+        # pipe, but that only protects the writer while the READER holds the
+        # read end open. A reader that echoes and exits closes it, buffered
+        # data is discarded, and the outstanding write() takes SIGPIPE — so the
+        # outcome is a race between printf's write and the fake's exit.
+        #
+        # Measured on linux/arm64 with 4 CPUs, payload 14,522 B, pipe capacity
+        # 65,536 B: idle, the writer won 200/200; under CPU load it lost
+        # 35/200 (exit 141 = 128 + SIGPIPE). Draining won 200/200 in both.
+        # End to end, the same box ran this file 25x at -n 4 under load:
+        # 0/25 failures with the drain, 24/25 without.
         '  cat >/dev/null 2>/dev/null || true\n'
         f"  echo '{eval_payload}'\n"
         f"  exit {eval_returncode}\n"
