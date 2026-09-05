@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [0.7.49] - 2026-09-05
+
+### Fixed
+
+- Extract motion construction sites the bundle parser could not previously
+  reach. Bundlers rename the imported binding, so production call sites read
+  `o.timeline({...})` rather than `gsap.timeline({...})`; anime v4 renamed its
+  entry points to `animate()` / `createTimeline()`; Webflow IX2 declares its
+  trigger in `eventTypeId`, which was not extracted at all. Measured on
+  production bundles for each library.
+- Scan `.mjs` and `.cjs` bundles. Globbing only `*.js` made every ES-module
+  bundle invisible to every extractor, so a site shipping its page code as
+  `.mjs` produced an empty `bundle-extraction.json`.
+- Resolve anime's scroll binding through the assignment that produced it, since
+  real code passes `autoplay: <observer>` rather than inlining `onScroll(...)`.
+- Traverse dict-valued extractions in `_bundle_scroll_sites`, so IX2's summary
+  object reaches `spec-bundle-site-coverage` instead of being skipped.
+
+### Added
+
+- `inline-scripts.sh` materializes inline `<script>` bodies into `bundles/`.
+  Chunk download follows `script[src]` only, so a site declaring its motion
+  inline shipped no bundle evidence at all — on one production page the inline
+  scripts alone carry 24 GSAP construction sites, one scroll-linked. The
+  collector also walks shadow roots. Wired into Step 5c-a.
+- Mark Framer `useScroll` / `useMotionValueEvent` as scroll-linked sites, so
+  `spec-bundle-site-coverage` covers Framer references and not only GSAP.
+
 ## [0.7.48] - 2026-09-05
 
 ### Fixed

@@ -33,7 +33,9 @@ W.   Webflow IX2 detection     — MANDATORY if <meta name=generator> contains "
                                  (incl. inline <style>). data-text attribute scan. Hover video recording.
                                  JS hover timing + child cascade
 5b.  Capture C3 (deferred)     — interaction/transition videos using selectors from Step 5
-5c.  Bundle analysis           — ALL loaded chunks, scroll engine, hover event listeners. ⛔ gate: bundle
+5c.  Bundle analysis           — ALL loaded chunks, scroll engine, hover event listeners.
+5c-a. Inline script collection — inline <script> bodies (incl. shadow roots) materialized into
+                                 bundles/ so every extractor reads them like a chunk. ⛔ gate: bundle
 5d.  Transition spec           — transition-spec.json + bundle-map.json. ⛔ gate: spec
 5e.  Capture verification      — record original, extract frames, verify spec spatial values
 6.   Detect animations         — Phase A idle / B scroll (wheel events for smooth scroll) / C per-element
@@ -61,6 +63,7 @@ W.   Webflow IX2 detection     — MANDATORY if <meta name=generator> contains "
 | `scripts/extract/extract-assets.sh` | Downloads video backgrounds, Typekit fonts, CDN fonts. Extracts video poster frames |
 | `scripts/extract/extract-section-html.sh` | Per-section HTML + computed CSS + media element extraction |
 | `scripts/extract/download-chunks.sh` | Downloads ALL loaded chunks, detects animation libs, produces skeleton bundle-map.json |
+| `scripts/extract/inline-scripts.sh` | Materializes inline `<script>` bodies (including shadow roots) into `bundles/inline-NNN.js` so bundle extractors see motion that ships no chunk |
 | `scripts/extract/gsap-to-css.sh` | GSAP easing → CSS cubic-bezier (lookup, full table, or bundle scan) |
 | `scripts/extract/extract-dynamic-styles.sh` | Classifies GSAP inline styles: layout (keep) vs animation (remove) |
 | `scripts/verify/freeze-animations.sh` | Freeze CSS animations, JS timers, canvas, Lottie before screenshot capture |
