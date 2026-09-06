@@ -218,15 +218,38 @@ def test_stop_offpipeline_demoted_to_advisory_under_headless_driver(tmp_path: Pa
 
 
 def test_stop_respects_reentrancy(tmp_path: Path) -> None:
+    """A re-entrant stop is retried a bounded number of times, then released.
+
+    Cap pinned to 0 here so this stays a test of the release path itself; the
+    budget behaviour is covered in tests/test_stop_retry_budget.py.
+    """
     _write_crumb(tmp_path, "sess-re")
     _write_clone_writes(tmp_path, "sess-re")
     r = run_hook(
         "ui_clone.hooks.section_gate",
         _stop_payload("sess-re", active=True),
-        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "0"},
     )
     out = r.stdout + r.stderr
     assert r.returncode == 0 and '"decision": "block"' not in out
+
+
+def test_stop_reentrancy_retries_before_releasing(tmp_path: Path) -> None:
+    """Off-pipeline activation must also get retries, not a single nudge."""
+    _write_crumb(tmp_path, "sess-re2")
+    _write_clone_writes(tmp_path, "sess-re2")
+    env = {"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "1"}
+
+    first = run_hook(
+        "ui_clone.hooks.section_gate", _stop_payload("sess-re2", active=True), env=env
+    )
+    assert '"decision": "block"' in first.stdout
+
+    second = run_hook(
+        "ui_clone.hooks.section_gate", _stop_payload("sess-re2", active=True), env=env
+    )
+    assert '"decision": "block"' not in second.stdout
+    assert "UNFINISHED" in second.stderr
 
 
 # ── 3. pre_generate widened write guard ─────────────────────────────────────

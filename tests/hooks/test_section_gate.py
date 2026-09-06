@@ -751,26 +751,73 @@ class TestSectionGate:
         assert receipt is not None
         assert receipt["state"] == cc.STATE_RUNNING
 
-    def test_stop_hook_active_releases_even_when_gate_would_block(
-        self, tmp_path: Path
-    ) -> None:
-        """When the Stop payload carries stop_hook_active=true the hook must
-        allow the turn to end (exit 0, no block) even though the gate would
-        otherwise block — otherwise it loops until the consecutive-block cap and
-        wastes hours of churn per round."""
+    def test_stop_hook_active_retries_then_releases(self, tmp_path: Path) -> None:
+        """A re-entrant stop is retried a bounded number of times, then released.
+
+        The invariant here is that the hook cannot loop forever — the original
+        comment cites hours of wasted churn. That still holds; the bound just
+        moved off 1. Releasing on the FIRST re-entrant stop meant a failing gate
+        got exactly one nudge before the session stopped in silence, observed in
+        the field as a ten-hour stall in which section-compare had recorded
+        critical failures and nothing ever acted on them. A gate failure
+        normally needs several edit/re-run rounds, so one is too few.
+        """
         search_root = make_search_root(tmp_path)
         ref_dir = make_ref_dir(search_root)
         set_active_marker(ref_dir)  # would block (no result.txt)
 
+        payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": True})
+        env = {"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "2"}
+
+        for attempt in (1, 2):
+            result = run_hook(self.MODULE, stdin_data=payload, env=env)
+            assert result.returncode == 0
+            assert '"decision": "block"' in result.stdout, (
+                f"retry {attempt} should still block while budget remains"
+            )
+
+        spent = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert spent.returncode == 0
+        assert spent.stdout.strip() == "", (
+            f"a spent budget must release without a block; got: {spent.stdout!r}"
+        )
+        assert "UNFINISHED" in spent.stderr, (
+            "releasing in silence is the stall this bound exists to prevent"
+        )
+
+    def test_stop_hook_active_cannot_loop_unboundedly(self, tmp_path: Path) -> None:
+        """The churn guard: blocking must stop after a bounded number of rounds."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+
+        payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": True})
+        env = {"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "1"}
+
+        blocks = 0
+        for _ in range(6):
+            result = run_hook(self.MODULE, stdin_data=payload, env=env)
+            if '"decision": "block"' in result.stdout:
+                blocks += 1
+            else:
+                break
+        assert blocks == 1, f"expected exactly cap blocks before release, got {blocks}"
+
+    def test_stop_hook_active_cap_zero_matches_old_behaviour(
+        self, tmp_path: Path
+    ) -> None:
+        """An operator who wants the previous single-nudge release can still have it."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+
         result = run_hook(
             self.MODULE,
             stdin_data=json.dumps({"hook_event_name": "Stop", "stop_hook_active": True}),
-            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "0"},
         )
         assert result.returncode == 0
-        assert result.stdout.strip() == "", (
-            f"stop_hook_active must release without a block; got: {result.stdout!r}"
-        )
+        assert result.stdout.strip() == ""
 
     def test_stop_hook_inactive_still_blocks(self, tmp_path: Path) -> None:
         """Sanity: with stop_hook_active=false the gate still blocks normally."""

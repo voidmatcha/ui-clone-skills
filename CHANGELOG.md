@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.7.53] - 2026-09-06
+
+### Fixed
+
+- Give a failing gate more than one chance, and never stop in silence. The Stop
+  hook released the turn the first time Claude Code reported
+  `stop_hook_active`, handing closeout to "the driver's STATUS marker + stall
+  watchdog" -- machinery that exists only in the benchmark harness. In an
+  ordinary interactive session that meant the agent was nudged exactly once and
+  then stopped, with gates still failing and nothing said about it. Observed in
+  the field as a ten-hour stall: `section-compare` had recorded critical
+  failures across every viewport at 00:55 and the session sat idle at 0% CPU
+  until it was inspected by hand; the only evidence was a file mtime.
+
+  A re-entrant stop is now retried up to `UI_RE_STOP_RETRY_CAP` times (default
+  3, `0` restores the previous single-release behaviour) before the turn is
+  released. The bound the original guard existed to protect -- no unbounded
+  block loop -- still holds; it simply moved off 1, because a gate failure
+  normally needs several edit/re-run rounds.
+
+  When the budget is spent the run still ends, but it now prints which gate is
+  failing and states plainly that the output is incomplete. A silently
+  unfinished clone is indistinguishable from a finished one, which is the same
+  class of defect as a gate false-pass.
+
 ## [0.7.52] - 2026-09-05
 
 ### Fixed

@@ -620,6 +620,56 @@ def _find_active_markers(search_root: Path) -> list[Path]:
 # ref it is deciding the staleness of.
 _HOOK_BOOKKEEPING_NAMES = frozenset({".ui-re-sessions", ".ui-re-active"})
 
+# How many times the Stop hook may re-block the same stop before it gives up and
+# says so. One nudge (the previous behaviour) is too few: a gate failure usually
+# needs several edit/re-run rounds. Unbounded is worse -- it burns the user's
+# tokens on a loop that is not converging. Override with UI_RE_STOP_RETRY_CAP.
+_STOP_RETRY_CAP_DEFAULT = 3
+_STOP_ATTEMPTS_NAME = ".ui-re-stop-attempts.json"
+
+# Set when the retry budget is spent: the run's reason text is still computed,
+# but it is printed for the user instead of blocking the stop.
+_ADVISORY_ONLY = False
+
+
+def _stop_retry_cap() -> int:
+    raw = os.environ.get("UI_RE_STOP_RETRY_CAP", "").strip()
+    if not raw:
+        return _STOP_RETRY_CAP_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _STOP_RETRY_CAP_DEFAULT
+    return max(0, value)
+
+
+def _stop_attempts_path(project_root: Path) -> Path:
+    return project_root / "tmp" / "ref" / _STOP_ATTEMPTS_NAME
+
+
+def _read_stop_attempts(project_root: Path) -> dict[str, int]:
+    """Best-effort; a missing or corrupt ledger simply means "no attempts yet"."""
+    try:
+        raw = _stop_attempts_path(project_root).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, int)}
+
+
+def _write_stop_attempts(project_root: Path, attempts: dict[str, int]) -> None:
+    path = _stop_attempts_path(project_root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(attempts, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        # Losing the counter degrades to the old single-nudge behaviour rather
+        # than crashing a Stop hook, which would look like a broken install.
+        pass
+
+
 
 def _pipeline_state_epoch(ref_dir: Path) -> float | None:
     """Authoritative activity timestamp: pipeline-state.json's last_updated,
@@ -755,6 +805,20 @@ def _emit_block(reason: str) -> None:
     # iterations, so the block adds no enforcement it does not already have —
     # demote to an advisory that still reaches the driver log via stderr.
     if os.environ.get("UI_RE_HEADLESS_DRIVER") == "1":
+        print(reason, file=sys.stderr)
+        return
+    if _ADVISORY_ONLY:
+        # Retry budget spent. Stopping is allowed, but never in silence: this is
+        # the last thing the user sees, and without it an unfinished clone is
+        # indistinguishable from a finished one.
+        print(
+            "\n⛔ ui-clone-skills: STOPPING WITH THE PIPELINE UNFINISHED.\n"
+            f"Continued {_stop_retry_cap()} time(s) and the gate below still "
+            "fails, so the run is being handed back to you rather than looped "
+            "further. The clone is INCOMPLETE — do not treat the current output "
+            "as the finished result.\n",
+            file=sys.stderr,
+        )
         print(reason, file=sys.stderr)
         return
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
@@ -1540,8 +1604,29 @@ def main() -> None:
     # then a forced turn-end with no STATUS marker, read as a stall).
     # Allow the stop: the agent was already nudged once, and the driver's STATUS
     # marker + stall watchdog own round closeout. Matches Claude Code guidance.
+    attempts_key = stop_scope_session_id or session_id_from_payload or "_nosid"
     if stop_hook_active:
-        sys.exit(0)
+        cap = _stop_retry_cap()
+        attempts = _read_stop_attempts(project_root)
+        used = attempts.get(attempts_key, 0)
+        if used < cap:
+            # Budget left: fall through and let the gate decide again. The old
+            # code exited here, which is why one nudge was the whole budget.
+            attempts[attempts_key] = used + 1
+            _write_stop_attempts(project_root, attempts)
+        else:
+            # Spent. Still evaluate, so the user is told WHICH gate is failing
+            # instead of getting a bare stop, but do not block again.
+            global _ADVISORY_ONLY
+            _ADVISORY_ONLY = True
+            attempts.pop(attempts_key, None)
+            _write_stop_attempts(project_root, attempts)
+    else:
+        # A stop that is not itself the product of a block starts a fresh
+        # budget, so a later unrelated failure gets its full allowance.
+        attempts = _read_stop_attempts(project_root)
+        if attempts.pop(attempts_key, None) is not None:
+            _write_stop_attempts(project_root, attempts)
 
     # Driver-session bypass — maintainer running parallel loops as an
     # observer/orchestrator, not a clone agent. Production users never
