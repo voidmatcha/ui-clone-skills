@@ -2,6 +2,239 @@
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-09-11
+
+### Fixed
+
+- Preserve source section tags outside the selected section map when generating JSX with reference CSS, without changing duplicate-node pruning.
+
+- Classify section and transition text results during targeted repair instead of
+  treating them as missing JSON; changed failure rows reset the no-progress counter.
+- Preserve site-owned overlays during splash capture instead of removing elements
+  by generic class names, fixed positioning, or high z-index.
+- Distinguish observed splash presence from authored choreography in generation
+  guidance and require source recovery before implementing an intro timeline.
+- Preserve shared positioned ancestors for painted backdrops with explicit
+  inset/edge offsets, without adding measured-height floors.
+- Allow bounded early delegated visual diagnosis from existing matched pairs,
+  with a separate noncanonical artifact and mandatory full final review retained.
+- Keep successful `goal --check-done` output quiet for desktop-only completion;
+  verification scope remains available in the structured report and stamp.
+- Resolve local scroll-trajectory targets by their linked runtime `sourceId`, not
+  exact selector text, and stop hard-failing on bundle- or class-toggle-sourced
+  targets that structurally can never carry an inline-style sample — fall back to
+  the global scroll points for those instead of blocking every dependent motion
+  check on unrecoverable "missing" evidence.
+- Distinguish confirmed time-only motion from an unresolved, scroll-attributable
+  residual in the scroll-end completion probe using a duration-matched control
+  sample, so a healthy continuously-moving element no longer blocks the whole
+  probe and a genuinely stuck element is reported as a measured failure instead
+  of an inconclusive error.
+- Register `section-compare` in the per-check staleness registry so its
+  repeated-failure guard can actually pause for diagnosis instead of retrying
+  forever, while excluding its own self-written `sections/matches.json` from
+  that registration so ordinary live-measurement jitter can't defeat the guard.
+- Stop the default desktop verification scope from rewriting the `MANUAL`
+  dispatch sentinel into a real, always-failing check row.
+- Make `section-compare` a real declared dependency of the checks that read its
+  output instead of a positional row reorder, so the dispatcher's topological
+  order can no longer silently run them against a stale match set.
+- Gate motion checks (hover/video/click/transition-compare) on `section-compare`
+  having actually produced evidence, not on its pass/fail verdict, so one
+  failing static section no longer blocks every motion measurement; the
+  canonical pass/fail verdict for the clone is unchanged.
+- Add a lockstep check between the two places `desktop-band-fluidity` is
+  registered so they can't silently drift out of sync.
+- Fingerprint every `*_TIMEOUT_SEC` override and give an unavailable declared
+  check input a distinct sentinel, so raising a per-check timeout or repairing
+  an unreadable input can actually reset a stuck retry pause.
+- Backfill verification scope onto a plan minted before scope support existed
+  instead of leaving it scope-less across every future `--amend`.
+- Always write a real (possibly empty) uncovered-section component during
+  generation instead of silently skipping one, so a future empty render can't
+  leave a dangling import in the generated app.
+- Wire the maintainer's push-time version-bump and post-push cache-refresh
+  automation into Codex sessions opened in this checkout, matching what Claude
+  Code sessions already get, without touching the distributed plugin manifest
+  any end user's Codex install loads.
+- Enforce that a release push actually bumps the version when this machine
+  already has that version installed, since both hosts' plugin caches are
+  keyed by version and silently go stale on an unbumped push otherwise.
+- Compare a release push's version-sync and skills/CHANGELOG checks against
+  the actual push target branch, not the checked-out branch's own upstream, so
+  an explicit refspec push (e.g. `git push origin HEAD:main`) can no longer
+  bypass either check.
+
+## [0.8.8] - 2026-09-09
+
+### Fixed
+
+- Check content, runtime, geometry, and section evidence before exhaustive
+  transition probes; foundation failures block dependent motion sweeps.
+- Remove blanket measured-height floors and arbitrary whitespace corrections
+  from generation guidance. Restore source sizing and actual pin mechanics.
+- Trace missing text through capture, generation, and rendered state before
+  visual refinement, and validate each repair with its relevant failure signal.
+- Separate targeted repair from comprehensive closeout, including media-region
+  mismatches that require reference evidence rather than an automatic pass.
+
+## [0.8.7] - 2026-09-09
+
+### Fixed
+
+- Preserve authored inline media sizing and fit through capture and component
+  generation instead of replacing parent-relative sizing with snapshot pixels.
+- Preserve shared positioned ancestors when a section and uncovered backdrop
+  content are emitted as separate components.
+- Retain every observed scroll-linked motion row instead of silently truncating
+  runtime capture to the first 30 targets.
+- Verify intermediate scroll states within captured motion intervals, and require
+  trajectory and section checks before expensive motion comparison sweeps.
+- Distinguish targeted repair evidence from mandatory full closeout verification;
+  fired events and matching DOM dimensions are not visual parity evidence.
+
+## [0.8.6] - 2026-09-09
+
+### Fixed
+
+- Require targeted repair of known runtime and geometry failures before repeating
+  expensive visual sweeps; preserve mandatory canonical verification for closeout.
+- Stop the verification umbrella after required checks fail instead of continuing
+  into additional visual capture; make runtime and geometry prerequisites part of
+  the dispatch dependency graph so targeted selection preserves their checks.
+
+## [0.8.5] - 2026-09-09
+
+### Changed
+
+- Route unavailable specialized roles to generic native workers using the same
+  evidence contract before considering inline fallback.
+- Bound enrichment and diagnostic reads to current gate failures and referenced
+  artifacts; avoid repeated whole-document reads and rejected role retries.
+- Distinguish missing producer artifacts and normal enrichment from persistent
+  pipeline failures; keep fresh-run discovery and site evidence inside its workspace.
+
+## [0.8.4] - 2026-09-09
+
+### Changed
+
+- Preserve source responsive structure from initial generation independently of
+  desktop-first verification: retain media/container queries, fluid expressions,
+  layout variants, and responsive asset choices.
+- Make responsive implementation policy explicit in generation plans and shared
+  analysis, enrichment, and component-generation guidance.
+
+### Fixed
+
+- Recognize CSS width range media queries when restoring authored responsive
+  font sizing instead of keeping capture-time inline pixel values.
+
+## [0.8.3] - 2026-09-09
+
+### Changed
+
+- Default to desktop verification with bounded live layout probes; keep full
+  responsive scope explicit and offer additional layouts after desktop completion.
+- Reuse validated, expiring reference/calibration captures across implementation edits.
+- Support targeted repair checks with dependency closure and explicit partial receipts.
+- Classify failures and stop repeated unchanged failures until diagnosis or new inputs.
+- Bind completion stamps to verification scope and reject partial iteration closeout.
+
+## [0.8.2] - 2026-09-09
+
+### Fixed
+
+- Preserve collapsed word separators when collecting visible runtime text.
+- Follow rendered local React child components when checking asset placement.
+- Reacquire declared scroll-transition targets after React remounts.
+- Render advisory tree-diff rows without aborting report generation.
+- Honor explicitly declared font-family substitutions in masked-region checks
+  without suppressing unrelated style differences.
+- Avoid orphan continuation locks on absent receipt reads and pass large
+  implementation-scope file inventories through a temporary file.
+- Distinguish time-driven motion from scroll endpoint failures with fixed-scroll
+  control samples; contaminated measurements remain inconclusive.
+
+## [0.8.1] - 2026-09-08
+
+### Fixed
+
+- Run verification prerequisites and required checks before the post-implement
+  completion gate, and stop closeout when those checks fail.
+- Keep implementation font verification results out of generation-plan inputs
+  while retaining invalidation for captured font sources and substitutions.
+
+## [0.8.0] - 2026-09-08
+
+### Changed
+
+- Use the deterministic pipeline driver as the standalone capture default and
+  resolve installed helper scripts independently of the caller's cwd. A
+  successful driver run ends capture instead of repeating the manual runbook.
+- Accept transition videos or distinct captured image states backed by matching
+  live-capture or artifact-inventory provenance. Full-scroll recording remains
+  a separate requirement.
+- Update all four README editions with installation, reference evidence,
+  Phase 2 recovery, and off-pipeline Stop guidance.
+
+### Fixed
+
+- Collect long hover evaluations through bounded start-and-poll requests,
+  retaining the full candidate budget without replaying timed-out evaluations.
+- Keep splash initialization options stable across browser commands and close
+  owned sessions before removing their initialization script.
+- Preserve individual subprocess attempt logs alongside the latest log so
+  retries do not erase earlier capture failures.
+- Validate transient splash transition targets against captured splash DOM
+  snapshots as well as the settled page structure, without treating spec or
+  reconciliation declarations alone as evidence of a live element.
+- Bound frozen comparison session names for macOS UNIX socket paths while
+  preserving run isolation and exact cleanup ownership.
+- Preserve explicit empty structural-only section lists instead of expanding
+  them to wildcard substitutions, and resolve paid-asset evidence from the
+  reference root during per-viewport comparison.
+- Keep browser namespace and launch settings stable across capture producers,
+  pin viewport and color scheme before navigation, and preserve caller-owned
+  sessions when reusing them.
+- Bind redirected navigation evidence to the requested URL, session, and
+  namespace. Reject unrelated origins during extraction and after bridge
+  screenshots before publishing captured artifacts.
+- Restore viewport and media settings during scroll recording, preserve saved
+  browser state for subsequent extraction, and clean up recording resources
+  while retaining the capture driver's failure status.
+- Defer provisional or failed reference evidence only when Phase 2 runs later
+  in the same invocation. Phase 2 repairs the evidence and reruns the reference
+  gate. Resumes recheck current evidence when a baseline or earlier reference
+  completion exists, and fail if a previously completed baseline is missing.
+- Count only baseline PNG files in the reference screenshot check, excluding
+  unrelated files and nested artifacts.
+- Reassemble `extracted.json` after live region capture changes its interaction
+  inputs, refresh preserved hover inventory ordering, and forbid output pipes
+  that can mask the capture driver's exit code.
+- Preserve scope when recovering functional hover selectors, support
+  pseudo-element owners, and exclude unsupported multi-element hover conditions
+  instead of dropping required states. Preserve same-element conditions across
+  equivalent hover selector orders and case-insensitive legacy pseudo-elements.
+  Preserve quoted attribute values and escapes when resolving pseudo-element
+  owners for hover verification.
+  Keep a bounded top-50 candidate budget,
+  including transition-bearing runtime targets, and skip Node-dependent parser
+  tests when Node is unavailable.
+- Capture hover evidence from stable viewport pairs before cropping the same
+  box, so element screenshots cannot silently erase a real hover delta.
+- Wait for recorded splash completion in fresh region-capture sessions before
+  classifying delayed elements as absent.
+- Preserve legitimate fixed page content during section comparison and avoid
+  replay-track candidate collisions, including generated names that overlap
+  existing basenames and repeated declarations.
+- Reject stale same-version Claude cache contents and remove legacy skill
+  symlinks only when they point to known project-owned locations. Installed
+  Claude sessions use the normal launcher without a duplicate `--plugin-dir`.
+- Explain that the off-pipeline Stop guard requires both external browsing and
+  markup/style write attempts, including earlier or denied attempts. Markdown
+  alone does not activate it, and matching this heuristic does not establish
+  clone intent.
+
 ## [0.7.53] - 2026-09-06
 
 ### Fixed
