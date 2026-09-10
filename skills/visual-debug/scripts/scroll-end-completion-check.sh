@@ -26,7 +26,9 @@
 #        scroll-driven elements on this page.
 #     3. Sample each candidate's style at [maxScroll-150, maxScroll-50, maxScroll].
 #        Settled iff delta(maxScroll-50, maxScroll) is tiny on every axis.
-#     4. Any candidate not settled at any viewport → FAIL.
+#     4. Repeat the last two positions without scrolling. Time-dependent
+#        changes make the probe inconclusive (exit 2), never a settled pass.
+#     5. Any remaining candidate not settled at any viewport → FAIL.
 #
 # Usage:
 #   bash scroll-end-completion-check.sh <session> <impl-url> <ref-dir>
@@ -42,9 +44,9 @@
 #   TRANSFORM_EPS_PX  — transform translate delta epsilon in px (default 1)
 #
 # Exit: 0 = all settled across all viewports, 1 = stuck elements found,
-#       2 = setup error
+#       2 = setup error or time-contaminated measurement
 # Output: <ref-dir>/scroll-completion.json with shape:
-#   { "status": "pass"|"fail",
+#   { "status": "pass"|"fail"|"error",
 #     "viewports": [
 #       { "w":W, "h":H, "stuck": [{ "selector":"...", "delta": {...} }, ... ] }
 #     ],
@@ -218,16 +220,83 @@ for VP in "${VPS[@]}"; do
     await sleep(SETTLE);
     const probeAtMinus150 = await sampleAt(Math.max(0, liveMax() - 150));
     const probeAtMinus50  = await sampleAt(Math.max(0, liveMax() - 50));
+    // Fixed-position controls distinguish elapsed-time motion from a scroll
+    // endpoint delta. Contamination remains inconclusive, never an exemption.
+    const controlAtMinus50 = await sampleAt(window.scrollY);
     const probeAtMax       = await sampleAt(liveMax());
+    const controlAtMax = await sampleAt(window.scrollY);
+    // Duration-matched idle control: a->b (raw) spans TWO sampleAt-driven
+    // SETTLE intervals (a->controlAtMinus50->b). A single-interval control
+    // (just controlAtMax, one SETTLE after b) spans only HALF that duration —
+    // subtracting two mismatched-duration one-interval deltas can badly
+    // over-explain an OSCILLATING (not monotonic) continuous motion whose
+    // period aliases against SETTLE (e.g. period ~= 2*SETTLE puts
+    // controlAtMinus50/controlAtMax at opposite phase peaks, each reading a
+    // full amplitude swing, while the real a->b span nets close to zero
+    // oscillation contribution — the two peak swings would then get
+    // subtracted from a genuinely STUCK, non-oscillating delta and silently
+    // clear it). controlAtMaxFull is fixed at max for the SAME two-interval
+    // span as raw, so it measures what time alone contributes over an
+    // identical-length window instead of composing two quarter-strength
+    // measurements.
+    const controlAtMaxFull = await sampleAt(window.scrollY);
 
     const stuck = [];
+    const temporalMotion = [];
+    const unmeasurableTargets = [];
+    const axisDeltas = (x, y) => ({
+      opacity: Math.abs(y.opacity - x.opacity),
+      tx: Math.abs(y.tx - x.tx),
+      ty: Math.abs(y.ty - x.ty),
+    });
+    const exceeds = (d) => d.opacity > OPACITY_EPS || d.tx > TRANSFORM_EPS_PX || d.ty > TRANSFORM_EPS_PX;
     for (const c of candidates) {
       const a = probeAtMinus50[c.idx];
       const b = probeAtMax[c.idx];
-      if (!a || !b) continue;
-      const dOpacity = Math.abs(b.opacity - a.opacity);
-      const dY = Math.abs(b.ty - a.ty);
-      const dX = Math.abs(b.tx - a.tx);
+      const ca = controlAtMinus50[c.idx];
+      const cb = controlAtMax[c.idx];
+      const cbFull = controlAtMaxFull[c.idx];
+      if (!a || !b || !ca || !cb || !cbFull) {
+        unmeasurableTargets.push({selector: c.selector, reason: 'target missing during end-position probe'});
+        continue;
+      }
+      // A continuous timer/rAF-driven element drifts style at a FIXED scroll
+      // position. That drift also shows up in the minus50->max delta even
+      // though it has nothing to do with scroll progress. Subtract the
+      // time-explained component — measured over the SAME two-SETTLE-interval
+      // duration as raw (see controlAtMaxFull comment above; using two
+      // mismatched one-interval deltas here previously let an oscillating,
+      // not just monotonic, continuous motion falsely cancel a real stuck
+      // delta) — so a healthy continuously-moving element (e.g. a ticker)
+      // doesn't become permanently unmeasurable by this check. A residual
+      // that still exceeds epsilon means scroll progress is ALSO changing
+      // this element and it hasn't settled — a real defect, not an artifact
+      // of the timer.
+      const timeDeltaStart = axisDeltas(a, ca);
+      const matchedControl = axisDeltas(b, cbFull);
+      const rawDelta = axisDeltas(a, b);
+      const residual = {
+        opacity: Math.max(0, rawDelta.opacity - matchedControl.opacity),
+        tx: Math.max(0, rawDelta.tx - matchedControl.tx),
+        ty: Math.max(0, rawDelta.ty - matchedControl.ty),
+      };
+      const isContinuous = exceeds(timeDeltaStart) || exceeds(axisDeltas(b, cb)) || exceeds(matchedControl);
+      const residualExceeds = exceeds(residual);
+      if (isContinuous) {
+        temporalMotion.push({
+          selector: c.selector,
+          reason: residualExceeds
+            ? 'continuous time-driven motion with an unresolved scroll-attributable residual'
+            : 'continuous time-driven motion fully explains the observed delta; not a stuck scroll endpoint',
+          confirmedTimeOnly: !residualExceeds,
+          residual,
+          probe: { minus50: a, minus50Control: ca, max: b, maxControl: cb, maxControlFull: cbFull },
+        });
+        if (!residualExceeds) continue;
+      }
+      const dOpacity = isContinuous ? residual.opacity : rawDelta.opacity;
+      const dY = isContinuous ? residual.ty : rawDelta.ty;
+      const dX = isContinuous ? residual.tx : rawDelta.tx;
       if (dOpacity > OPACITY_EPS || dY > TRANSFORM_EPS_PX || dX > TRANSFORM_EPS_PX) {
         const before = probeAtMinus150[c.idx];
         stuck.push({
@@ -248,6 +317,8 @@ for VP in "${VPS[@]}"; do
       maxScroll,
       candidates: candidates.length,
       stuck,
+      temporalMotion,
+      unmeasurableTargets,
     });
   })()" 2>/dev/null)
 
@@ -274,6 +345,8 @@ for VP in "${VPS[@]}"; do
       maxScroll: d.maxScroll || 0,
       candidates: d.candidates || 0,
       stuck: d.stuck || [],
+      temporalMotion: d.temporalMotion || [],
+      unmeasurableTargets: d.unmeasurableTargets || [],
       skipped: d.skipped || null,
     };
     process.stdout.write(JSON.stringify(out) + '\\n');
@@ -284,7 +357,33 @@ for VP in "${VPS[@]}"; do
     process.stdout.write(String((d.stuck || []).length));
   " "$DATA")
 
-  if [ -n "$STUCK_COUNT" ] && [ "$STUCK_COUNT" -gt 0 ]; then
+  # Confirmed time-only motion (residual fully explained by the fixed-position
+  # control samples) is informational, not a blocker — see the probe comment
+  # above. An UNRESOLVED residual is a MEASURED, quantified defect — the JS
+  # probe always pushes it into `stuck` too (same exceeds() predicate on the
+  # same residual values), so it already surfaces as a real FAIL via
+  # STUCK_COUNT below. Counting it here as well used to force status "error"/
+  # exit 2 (inconclusive) instead of "fail"/exit 1 for a genuinely measured
+  # defect, and check_iteration.classify() then mis-filed it as
+  # "infrastructure" instead of "implementation" (fable-20260910 follow-up
+  # review round 3, LOW). Only a target that vanished mid-probe — where no
+  # residual could be measured at all — leaves the run truly inconclusive.
+  TEMPORAL_COUNT=$(node -e "
+    const d = JSON.parse(process.argv[1]);
+    process.stdout.write(String((d.unmeasurableTargets || []).length));
+  " "$DATA")
+  CONFIRMED_TIME_ONLY_COUNT=$(node -e "
+    const d = JSON.parse(process.argv[1]);
+    process.stdout.write(String((d.temporalMotion || []).filter((t) => t.confirmedTimeOnly).length));
+  " "$DATA")
+  if [ "$CONFIRMED_TIME_ONLY_COUNT" -gt 0 ]; then
+    echo "   ℹ️  ${CONFIRMED_TIME_ONLY_COUNT} target(s) have confirmed time-only motion (not scroll-attributable) — excluded from the settle check"
+  fi
+  if [ "$TEMPORAL_COUNT" -gt 0 ]; then
+    GLOBAL_STATUS=1
+    PROBE_ERROR=1
+    echo "   ❌ ${TEMPORAL_COUNT} target(s) have unresolved time-dependent motion or missing samples — scroll completion is inconclusive"
+  elif [ -n "$STUCK_COUNT" ] && [ "$STUCK_COUNT" -gt 0 ]; then
     GLOBAL_STATUS=1
     echo "   ❌ ${STUCK_COUNT} stuck element(s) at ${W}x${H}"
   else
@@ -327,7 +426,7 @@ else
   echo "        'Viewport-aware scroll-scrub offsets'"
 fi
 
-# exit 2 distinguishes a probe error (eval timeout/crash — nothing measured)
+# exit 2 distinguishes a probe error (timeout/crash or time contamination)
 # from exit 1 (a real stuck element was found), mirroring the setup-error exit 2
 # above so the dispatcher never reads an unrun probe as a settled pass.
 if [ "$PROBE_ERROR" -eq 1 ]; then

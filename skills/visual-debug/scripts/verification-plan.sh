@@ -34,6 +34,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 VERIFICATION_PLAN_HELPER="$SCRIPT_DIR/lib/verification_plan_helpers.py"
 
 TIER="${UI_CLONE_VERIFY_TIER:-comprehensive}"
+SCOPE="${UI_CLONE_VERIFY_SCOPE:-desktop}"
 REF_DIR=""
 # --amend: after generation-plan.sh derives plan-specific rows (signatureEffects
 # / scrollScrub), re-evaluate ONLY those plan-conditional add_check rows and
@@ -44,6 +45,7 @@ AMEND=0
 for arg in "$@"; do
   case "$arg" in
     --amend) AMEND=1 ;;
+    --scope=*) SCOPE="${arg#--scope=}" ;;
     --tier=*) TIER="${arg#--tier=}" ;;
     --tier)
       echo "ERROR: --tier requires =value form (e.g. --tier=quick)" >&2
@@ -68,6 +70,11 @@ if [ -z "$REF_DIR" ]; then
   echo "Usage: verification-plan.sh <ref-dir> [--tier=quick|standard|comprehensive]" >&2
   exit 2
 fi
+
+case "$SCOPE" in
+  desktop|all) ;;
+  *) echo "ERROR: invalid --scope: $SCOPE" >&2; exit 2 ;;
+esac
 
 case "$TIER" in
   quick|standard|comprehensive) ;;
@@ -1441,6 +1448,14 @@ sys.exit(0 if isinstance(n, int) and n >= 2 else 1)" 2>/dev/null; then
   # flags the width-baked signature (ref reflows, impl constant). Same
   # responsive gating as resize-behavior. Self-describing argsRecipe ->
   # no SIGNATURES entry.
+  #
+  # This row is ALSO added unconditionally under --scope=desktop by
+  # ui_clone/verification_scope.py's apply_scope() (bypassing the
+  # >=2-breakpoints gate below on purpose for the default desktop scope —
+  # apply_scope's `not any(...)` guard skips re-adding it if this gate already
+  # fired). script/produces/severity/tier/dependsOn/argsRecipe must stay
+  # identical between the two; tests/test_verification_scope.py::
+  # test_desktop_band_fluidity_definitions_stay_in_lockstep enforces it.
   add_check "desktop-band-fluidity" \
             "skills/visual-debug/scripts/desktop-band-fluidity-check.sh" \
             "desktop-band-fluidity.json" \
@@ -2038,6 +2053,8 @@ FRESH_PLAN="$(mktemp "${TMPDIR:-/tmp}/verification-plan-fresh.XXXXXX")" || {
   printf '  ]\n'
   printf '}\n'
 } > "$FRESH_PLAN"
+
+PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -m ui_clone.verification_scope "$REF_DIR" "$FRESH_PLAN" --scope "$SCOPE" || exit 2
 
 if [ "$AMEND" = "1" ] && [ -n "$AMEND_BASE" ]; then
   # Append-only merge: keep the base plan authoritative for every existing row;

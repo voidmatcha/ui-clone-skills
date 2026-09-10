@@ -99,7 +99,7 @@ def _write_python_recorder(tmp_path: Path, real_python: Path | str) -> tuple[Pat
         "#!/usr/bin/env bash\n"
         "set -eu\n"
         f"printf '%s\\n' \"$*\" >> {str(log_path)!r}\n"
-        f"exec {str(real_python)!r} \"$@\"\n",
+        f'exec {str(real_python)!r} "$@"\n',
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
@@ -166,7 +166,7 @@ def test_run_required_checks_rejects_a_concurrent_run_for_the_same_ref(
         "set -eu\n"
         'touch "${HOLD_STARTED:?}"\n'
         'while [ ! -f "${HOLD_RELEASE:?}" ]; do sleep 0.05; done\n'
-        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"pass"}\' '
         '> "$1/concurrency-hold.json"\n',
         encoding="utf-8",
     )
@@ -256,7 +256,7 @@ def test_dispatched_children_cannot_consume_later_dispatch_rows(tmp_path: Path) 
         "set -eu\n"
         'IFS= read -r stolen || stolen=""\n'
         'printf "%s" "$stolen" > "$1/stdin-observed.txt"\n'
-        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"pass"}\' '
         '> "$1/stdin-drainer.json"\n',
         encoding="utf-8",
     )
@@ -265,7 +265,7 @@ def test_dispatched_children_cannot_consume_later_dispatch_rows(tmp_path: Path) 
     follower.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
-        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"pass"}\' '
         '> "$1/follower.json"\n',
         encoding="utf-8",
     )
@@ -429,10 +429,7 @@ def test_run_required_checks_dry_run_dispatches_splash_lifecycle_recipe(
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert (
-        "DRY|DISPATCH|splash-lifecycle|"
-        "splash-dispatch-test-"
-    ) in proc.stdout
+    assert ("DRY|DISPATCH|splash-lifecycle|splash-dispatch-test-") in proc.stdout
     assert "-splash https://ref.example.test http://127.0.0.1:4173 " in proc.stdout
     assert f" {ref}|splash-lifecycle.json|block" in proc.stdout
 
@@ -456,7 +453,7 @@ def test_run_required_checks_rejects_python_bin_below_minimum(tmp_path: Path) ->
     fake_python = tmp_path / "python3.9"
     fake_python.write_text(
         "#!/usr/bin/env bash\n"
-        "if [ \"${1:-}\" = \"-c\" ]; then\n"
+        'if [ "${1:-}" = "-c" ]; then\n'
         "  case \"${2:-}\" in *'raise SystemExit'*) exit 1 ;; esac\n"
         "  printf '%s\\n' '3.9.6'\n"
         "  exit 0\n"
@@ -506,7 +503,7 @@ def test_run_required_checks_child_rows_inherit_selected_python_first_on_path(
         "python3 -c 'import json, sys; "
         'open(sys.argv[1], "w", encoding="utf-8").write('
         'json.dumps({"schemaVersion": 1, "status": "pass"}))'
-        "' \"$1/child-python.json\"\n",
+        '\' "$1/child-python.json"\n',
         encoding="utf-8",
     )
     producer.chmod(0o755)
@@ -572,7 +569,7 @@ def test_run_required_checks_prefers_virtualenv_python_for_dispatch_and_children
         "python3 -c 'import json, sys; "
         'open(sys.argv[1], "w", encoding="utf-8").write('
         'json.dumps({"schemaVersion": 1, "status": "pass"}))'
-        "' \"$1/venv-python.json\"\n",
+        '\' "$1/venv-python.json"\n',
         encoding="utf-8",
     )
     producer.chmod(0o755)
@@ -597,9 +594,7 @@ def test_run_required_checks_prefers_virtualenv_python_for_dispatch_and_children
     fake_host_bin.mkdir()
     fake_host_python = fake_host_bin / "python3"
     fake_host_python.write_text(
-        "#!/usr/bin/env bash\n"
-        "echo host-python-must-not-run >&2\n"
-        "exit 99\n",
+        "#!/usr/bin/env bash\necho host-python-must-not-run >&2\nexit 99\n",
         encoding="utf-8",
     )
     fake_host_python.chmod(0o755)
@@ -701,13 +696,18 @@ def test_run_required_checks_persists_effective_impl_root_override(
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert Path((ref / ".impl-root").read_text(encoding="utf-8").strip()).resolve() == new_impl.resolve()
+    assert (
+        Path((ref / ".impl-root").read_text(encoding="utf-8").strip()).resolve()
+        == new_impl.resolve()
+    )
     state = json.loads((ref / "pipeline-state.json").read_text(encoding="utf-8"))
     assert Path(state["implRoot"]).resolve() == new_impl.resolve()
     assert Path(state["impl_root"]).resolve() == new_impl.resolve()
     assert state["terminalState"] == old_terminal
     assert state["terminal_state"] == old_terminal
-    assert Path((new_impl / ".ref-dir").read_text(encoding="utf-8").strip()).resolve() == ref.resolve()
+    assert (
+        Path((new_impl / ".ref-dir").read_text(encoding="utf-8").strip()).resolve() == ref.resolve()
+    )
 
     resolver_env = os.environ.copy()
     resolver_env["PLUGIN_ROOT"] = str(root)
@@ -837,8 +837,8 @@ def test_run_required_checks_replaces_stale_pass_sidecar_with_fresh_fail(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
         "printf '%s\\n' "
-        "'{\"schemaVersion\":1,\"status\":\"fail\",\"violations\":[{\"kind\":\"missing-dep\"}]}' "
-        "> \"$1/bundle-impl-coverage.json\"\n"
+        '\'{"schemaVersion":1,"status":"fail","violations":[{"kind":"missing-dep"}]}\' '
+        '> "$1/bundle-impl-coverage.json"\n'
         "exit 1\n",
         encoding="utf-8",
     )
@@ -963,8 +963,8 @@ def test_run_required_checks_keeps_fresh_error_artifact_stale(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
         "printf '%s\\n' "
-        "'{\"schemaVersion\":1,\"status\":\"error\",\"violations\":[{\"kind\":\"crash\"}]}' "
-        "> \"$1/bundle-impl-coverage.json\"\n"
+        '\'{"schemaVersion":1,"status":"error","violations":[{"kind":"crash"}]}\' '
+        '> "$1/bundle-impl-coverage.json"\n'
         "exit 2\n",
         encoding="utf-8",
     )
@@ -1161,9 +1161,7 @@ def test_run_required_checks_accepts_and_caches_valid_partial_hover(
     assert (ref / "hover-runs.log").read_text(encoding="utf-8") == "run\n"
     expected_hash = compute_check_input_hash(impl, ref, "hover-state-compare")
     assert expected_hash
-    assert sidecar_path(ref, "hover-state-compare").read_text(
-        encoding="utf-8"
-    ) == expected_hash
+    assert sidecar_path(ref, "hover-state-compare").read_text(encoding="utf-8") == expected_hash
 
 
 def test_hover_state_cache_helper_accepts_complete_semantic_result(
@@ -1243,9 +1241,7 @@ def test_required_text_cache_helper_uses_canonical_plan_gate(
                 "requiredChecks": [
                     {
                         "id": "transition-compare",
-                        "script": (
-                            "skills/visual-debug/scripts/transition-compare.sh"
-                        ),
+                        "script": ("skills/visual-debug/scripts/transition-compare.sh"),
                         "produces": "transitions/result.txt",
                         "severity": "block",
                     }
@@ -1255,8 +1251,7 @@ def test_required_text_cache_helper_uses_canonical_plan_gate(
         encoding="utf-8",
     )
     artifact.write_text(
-        "Transition compare: 1 PASS, 0 FAIL\n"
-        "✅ PASS .card\n",
+        "Transition compare: 1 PASS, 0 FAIL\n✅ PASS .card\n",
         encoding="utf-8",
     )
     fingerprint = compute_check_input_hash(impl, ref, "transition-compare")
@@ -1525,7 +1520,6 @@ def test_run_required_checks_skips_dependents_after_failed_dependency(tmp_path: 
     assert not (ref / "runtime-dom-parity.json").exists()
 
 
-
 def test_run_required_checks_has_hero_composite_signature() -> None:
     """codex-18 (2026-05-22) discovered hero-composite-check.sh was added to
     verification-plan.sh as a required row but never wired into the dispatcher
@@ -1545,8 +1539,7 @@ def test_run_required_checks_has_runtime_text_sequence_signature() -> None:
     """Runtime text parity needs both live URLs and its own browser session."""
     dispatcher = _dispatcher_source()
     assert (
-        '"runtime-text-sequence-check.sh":\n'
-        '        "{session}-rts {ref_url} {impl_url} {ref_dir}",'
+        '"runtime-text-sequence-check.sh":\n        "{session}-rts {ref_url} {impl_url} {ref_dir}",'
     ) in dispatcher
 
 
@@ -1584,12 +1577,12 @@ def test_dispatcher_contains_large_child_heredocs_on_modern_bash(
     producer.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        "if [ \"${BASH_VERSINFO[0]}\" -gt 5 ] "
-        "|| { [ \"${BASH_VERSINFO[0]}\" -eq 5 ] "
-        "&& [ \"${BASH_VERSINFO[1]}\" -ge 1 ]; }; then\n"
-        "  [ \"${BASH_COMPAT:-}\" = \"5.0\" ] || exit 91\n"
+        'if [ "${BASH_VERSINFO[0]}" -gt 5 ] '
+        '|| { [ "${BASH_VERSINFO[0]}" -eq 5 ] '
+        '&& [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; then\n'
+        '  [ "${BASH_COMPAT:-}" = "5.0" ] || exit 91\n'
         "fi\n"
-        "[ \"${PROBE_ENV:-}\" = \"1\" ] || exit 92\n"
+        '[ "${PROBE_ENV:-}" = "1" ] || exit 92\n'
         "python3 - \"$1/heredoc-compat-probe.json\" <<'PY'\n"
         + padding
         + "import json, sys\n"
@@ -1619,7 +1612,7 @@ def test_dispatcher_contains_large_child_heredocs_on_modern_bash(
     )
 
     version = subprocess.run(
-        ["bash", "-c", "printf '%s %s' \"${BASH_VERSINFO[0]}\" \"${BASH_VERSINFO[1]}\""],
+        ["bash", "-c", 'printf \'%s %s\' "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
         check=True,
         capture_output=True,
         text=True,
@@ -1692,10 +1685,10 @@ def test_dispatcher_never_reuses_or_seeds_status_error_artifact(
         "set -u\n"
         f"count_file={str(count_path)!r}\n"
         "count=0\n"
-        "[ -f \"$count_file\" ] && count=$(cat \"$count_file\")\n"
-        "printf '%s\\n' \"$((count + 1))\" > \"$count_file\"\n"
+        '[ -f "$count_file" ] && count=$(cat "$count_file")\n'
+        'printf \'%s\\n\' "$((count + 1))" > "$count_file"\n'
         f"printf '%s\\n' {error_artifact!r} "
-        "> \"$1/runtime-text-sequence.json\"\n"
+        '> "$1/runtime-text-sequence.json"\n'
         "exit 2\n",
         encoding="utf-8",
     )
@@ -1916,16 +1909,20 @@ def test_dispatcher_runtime_text_provenance_binds_each_fresh_artifact(
     )
     producer.chmod(0o755)
     (ref / "verification-plan.json").write_text(
-        json.dumps({
-            "schemaVersion": 1,
-            "requiredChecks": [{
-                "id": "runtime-text-sequence",
-                "script": str(producer),
-                "argsRecipe": "{ref_dir}",
-                "produces": "runtime-text-sequence.json",
-                "severity": "warn",
-            }],
-        }),
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "runtime-text-sequence",
+                        "script": str(producer),
+                        "argsRecipe": "{ref_dir}",
+                        "produces": "runtime-text-sequence.json",
+                        "severity": "warn",
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     env = os.environ.copy()
@@ -1939,12 +1936,8 @@ def test_dispatcher_runtime_text_provenance_binds_each_fresh_artifact(
         str(ref),
     ]
 
-    first = subprocess.run(
-        command, cwd=root, env=env, capture_output=True, text=True, timeout=120
-    )
-    second = subprocess.run(
-        command, cwd=root, env=env, capture_output=True, text=True, timeout=120
-    )
+    first = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=120)
+    second = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=120)
 
     assert first.returncode == 0, first.stdout + first.stderr
     assert second.returncode == 0, second.stdout + second.stderr
@@ -1955,9 +1948,7 @@ def test_dispatcher_runtime_text_provenance_binds_each_fresh_artifact(
     )
     assert provenance["refUrl"] == "https://ref.example.test/path"
     assert provenance["implUrl"] == "http://impl.example.test/app"
-    assert provenance["artifactSha256"] == hashlib.sha256(
-        artifact_path.read_bytes()
-    ).hexdigest()
+    assert provenance["artifactSha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
     assert "▶ runtime-text-sequence" in first.stdout
     assert "▶ runtime-text-sequence" in second.stdout
 
@@ -1991,12 +1982,12 @@ def test_dispatcher_strict_failure_is_not_cached(
         "set -u\n"
         f"count_file={str(count_path)!r}\n"
         "count=0\n"
-        "[ -f \"$count_file\" ] && count=$(cat \"$count_file\")\n"
-        "printf '%s\\n' \"$((count + 1))\" > \"$count_file\"\n"
+        '[ -f "$count_file" ] && count=$(cat "$count_file")\n'
+        'printf \'%s\\n\' "$((count + 1))" > "$count_file"\n'
         "printf '%s\\n' "
-        "'{\"schemaVersion\":1,\"status\":\"fail\","
-        "\"violations\":[{\"kind\":\"missing-text\"}]}' "
-        "> \"$1/runtime-text-sequence.json\"\n"
+        '\'{"schemaVersion":1,"status":"fail",'
+        '"violations":[{"kind":"missing-text"}]}\' '
+        '> "$1/runtime-text-sequence.json"\n'
         "exit 2\n",
         encoding="utf-8",
     )
@@ -2089,8 +2080,8 @@ def test_dispatcher_strict_warnings_redispatches_non_pass_artifact(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
         f"printf '1\\n' > {str(count_path)!r}\n"
-        "printf '%s\\n' '{\"status\":\"pass\",\"violations\":[]}' "
-        "> \"$1/runtime-text-sequence.json\"\n",
+        'printf \'%s\\n\' \'{"status":"pass","violations":[]}\' '
+        '> "$1/runtime-text-sequence.json"\n',
         encoding="utf-8",
     )
     producer.chmod(0o755)
@@ -2151,12 +2142,36 @@ def test_run_required_checks_has_anti_cheat_signatures() -> None:
     for script_path, script, artifact in (
         ("scripts/verify/capacity-check.sh", "capacity-check.sh", "capacity-report.json"),
         ("scripts/verify/impl-url-guard.sh", "impl-url-guard.sh", "impl-url-guard.json"),
-        ("skills/visual-debug/scripts/blank-viewport-check.sh", "blank-viewport-check.sh", "blank-viewport.json"),
-        ("skills/visual-debug/scripts/bundle-paste-check.sh", "bundle-paste-check.sh", "bundle-paste-check.json"),
-        ("skills/visual-debug/scripts/geometry-sanity-check.sh", "geometry-sanity-check.sh", "geometry-sanity.json"),
-        ("skills/visual-debug/scripts/hover-tree-diff.sh", "hover-tree-diff.sh", "hover-tree-diff.md"),
-        ("skills/visual-debug/scripts/live-parity-sweep.sh", "live-parity-sweep.sh", "live-parity.json"),
-        ("skills/visual-debug/scripts/mobile-responsive-coverage-check.sh", "mobile-responsive-coverage-check.sh", "mobile-responsive-coverage.json"),
+        (
+            "skills/visual-debug/scripts/blank-viewport-check.sh",
+            "blank-viewport-check.sh",
+            "blank-viewport.json",
+        ),
+        (
+            "skills/visual-debug/scripts/bundle-paste-check.sh",
+            "bundle-paste-check.sh",
+            "bundle-paste-check.json",
+        ),
+        (
+            "skills/visual-debug/scripts/geometry-sanity-check.sh",
+            "geometry-sanity-check.sh",
+            "geometry-sanity.json",
+        ),
+        (
+            "skills/visual-debug/scripts/hover-tree-diff.sh",
+            "hover-tree-diff.sh",
+            "hover-tree-diff.md",
+        ),
+        (
+            "skills/visual-debug/scripts/live-parity-sweep.sh",
+            "live-parity-sweep.sh",
+            "live-parity.json",
+        ),
+        (
+            "skills/visual-debug/scripts/mobile-responsive-coverage-check.sh",
+            "mobile-responsive-coverage-check.sh",
+            "mobile-responsive-coverage.json",
+        ),
     ):
         assert (root / script_path).is_file(), (
             f"{script} missing on disk — dispatcher would NOSCRIPT-skip it."
@@ -2201,19 +2216,13 @@ def test_section_compare_dispatches_before_alignment_consumers(
                 "requiredChecks": [
                     {
                         "id": "alignment-parity",
-                        "script": (
-                            "skills/visual-debug/scripts/"
-                            "alignment-parity-check.sh"
-                        ),
+                        "script": ("skills/visual-debug/scripts/alignment-parity-check.sh"),
                         "produces": "alignment-parity.json",
                         "severity": "block",
                     },
                     {
                         "id": "alignment-sweep",
-                        "script": (
-                            "skills/visual-debug/scripts/"
-                            "alignment-sweep-check.sh"
-                        ),
+                        "script": ("skills/visual-debug/scripts/alignment-sweep-check.sh"),
                         "produces": "alignment-sweep.json",
                         "severity": "block",
                     },
@@ -2252,9 +2261,112 @@ def test_section_compare_dispatches_before_alignment_consumers(
     rows = [line for line in proc.stdout.splitlines() if line.startswith("DRY|")]
     section_index = next(i for i, row in enumerate(rows) if "|section-compare|" in row)
     alignment_indices = [
-        i
-        for i, row in enumerate(rows)
-        if "|alignment-parity|" in row or "|alignment-sweep|" in row
+        i for i, row in enumerate(rows) if "|alignment-parity|" in row or "|alignment-sweep|" in row
+    ]
+    assert len(alignment_indices) == 2, rows
+    assert section_index < min(alignment_indices), rows
+
+
+def test_section_compare_precedes_alignment_even_when_foundations_are_emitted_later(
+    tmp_path: Path,
+) -> None:
+    """fable-20260910 follow-up review round 3 (MAJOR): on a REAL generated
+    plan, verification-plan.sh emits alignment-parity/alignment-sweep BEFORE
+    the content-prerequisite rows (runtime-text-sequence/asset-transfer/
+    required-media-coverage). The old fix reordered section-compare ahead of
+    the alignment rows TEXTUALLY, then a later loop gave section-compare a
+    dependency on those content prerequisites — but the stable topological
+    sort dispatches by READINESS, so with the content prerequisites still
+    textually last (and thus not yet "emitted" when the sort scans for a
+    ready row), alignment-parity/alignment-sweep (no deps) were ready FIRST
+    and dispatched before section-compare, running against stale
+    sections/matches.json. Reproduce that exact ordering here (alignment rows
+    first, foundations last) and assert section-compare still dispatches
+    before both alignment consumers now that it's a real declared dependency
+    instead of a textual reorder.
+    """
+    root = _project_root()
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (ref / "static" / "ref").mkdir(parents=True)
+    (ref / "static" / "ref" / "desktop.png").write_bytes(b"png")
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "alignment-parity",
+                        "script": "skills/visual-debug/scripts/alignment-parity-check.sh",
+                        "produces": "alignment-parity.json",
+                        "severity": "block",
+                    },
+                    {
+                        "id": "alignment-sweep",
+                        "script": "skills/visual-debug/scripts/alignment-sweep-check.sh",
+                        "produces": "alignment-sweep.json",
+                        "severity": "block",
+                    },
+                    # Content prerequisites emitted LAST, matching real
+                    # verification-plan.sh row order (runtime-text-sequence,
+                    # asset-transfer, required-media-coverage all come after
+                    # alignment-parity/alignment-sweep in the real script).
+                    {
+                        "id": "runtime-text-sequence",
+                        "script": "skills/visual-debug/scripts/runtime-text-sequence-check.sh",
+                        "produces": "runtime-text.json",
+                        "severity": "block",
+                    },
+                    {
+                        "id": "asset-transfer",
+                        "script": "skills/visual-debug/scripts/asset-transfer-check.sh",
+                        "produces": "asset-transfer.json",
+                        "severity": "block",
+                    },
+                    {
+                        "id": "required-media-coverage",
+                        "script": "skills/visual-debug/scripts/required-media-coverage-check.sh",
+                        "produces": "required-media-coverage.json",
+                        "severity": "block",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PLUGIN_ROOT": str(root),
+            "UI_CLONE_DISPATCH_DRY": "1",
+            "UI_CLONE_IMPL_ROOT": str(impl),
+            "UI_CLONE_VERIFY_TIER": "quick",
+        }
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "scripts" / "verify" / "run-required-checks.sh"),
+            "section-order-test-2",
+            "https://example.test",
+            "http://127.0.0.1:1",
+            str(ref),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rows = [line for line in proc.stdout.splitlines() if line.startswith("DRY|")]
+    section_index = next(i for i, row in enumerate(rows) if "|section-compare|" in row)
+    alignment_indices = [
+        i for i, row in enumerate(rows) if "|alignment-parity|" in row or "|alignment-sweep|" in row
     ]
     assert len(alignment_indices) == 2, rows
     assert section_index < min(alignment_indices), rows
@@ -2269,18 +2381,18 @@ def test_section_compare_verify_path_tier_gated_frozen_wrapper() -> None:
     """
     dispatcher = _dispatcher_source()
     # tier gating selects the frozen wrapper for comprehensive
-    assert 'UI_CLONE_VERIFY_TIER' in dispatcher
-    assert 'section-compare-frozen.sh' in dispatcher
+    assert "UI_CLONE_VERIFY_TIER" in dispatcher
+    assert "section-compare-frozen.sh" in dispatcher
     assert 'if tier == "comprehensive"' in dispatcher
     # frozen row carries its own timeout (review F3), parsed by the consumer
-    assert 'ROW_TIMEOUT_SEC=' in dispatcher
+    assert "ROW_TIMEOUT_SEC=" in dispatcher
     assert 'row_timeout="${_kv#ROW_TIMEOUT_SEC=}"' in dispatcher
     # multi-viewport enforcement preserved on BOTH paths (the frozen wrapper is
     # viewport-aware): VIEWPORTS is computed once and composed into the frozen ENV
-    assert 'viewport_env = [f"VIEWPORTS={\',\'.join(vps)}"]' in dispatcher
-    assert '*viewport_env' in dispatcher  # frozen path composes VIEWPORTS in
+    assert "viewport_env = [f\"VIEWPORTS={','.join(vps)}\"]" in dispatcher
+    assert "*viewport_env" in dispatcher  # frozen path composes VIEWPORTS in
     # the rejected ref-path quick-calib wiring is removed
-    assert 'SECTION_REF_CALIB=1' not in dispatcher
+    assert "SECTION_REF_CALIB=1" not in dispatcher
 
 
 def test_section_compare_frozen_wrapper_exists_and_valid() -> None:
@@ -2308,9 +2420,7 @@ def test_dispatcher_reaps_owned_sessions_after_each_row() -> None:
     assert 'bash "$_SCRIPT_DIR/cleanup-sessions.sh" "$SESSION"' in dispatcher
     assert 'agent-browser --session "$SESSION" set viewport' not in dispatcher
     # The final call is inside the dispatch loop (before its run-owned file).
-    assert dispatcher.rindex(cleanup_call) < dispatcher.index(
-        'done 3< "$DISPATCH_FILE"'
-    )
+    assert dispatcher.rindex(cleanup_call) < dispatcher.index('done 3< "$DISPATCH_FILE"')
 
 
 def _write_cleanup_agent_browser_stub(
@@ -2419,13 +2529,13 @@ def test_cleanup_sessions_bounds_each_hung_close_and_fails_if_registry_remains(
     agent_browser = bin_dir / "agent-browser"
     agent_browser.write_text(
         "#!/usr/bin/env bash\n"
-        "if [ \"${1:-}\" = session ] && [ \"${2:-}\" = list ]; then\n"
+        'if [ "${1:-}" = session ] && [ "${2:-}" = list ]; then\n'
         "  sleep 0.1\n"
         "  echo 'Active sessions:'\n"
         "  echo '  hung-owned'\n"
         "  exit 0\n"
         "fi\n"
-        "if [ \"${1:-}\" = --session ] && [ \"${3:-}\" = close ]; then\n"
+        'if [ "${1:-}" = --session ] && [ "${3:-}" = close ]; then\n'
         "  sleep 5\n"
         "  exit 0\n"
         "fi\n"
@@ -2501,7 +2611,7 @@ def test_cleanup_sessions_bounds_hung_session_list(tmp_path: Path) -> None:
     agent_browser = bin_dir / "agent-browser"
     agent_browser.write_text(
         "#!/usr/bin/env bash\n"
-        "if [ \"${1:-}\" = session ] && [ \"${2:-}\" = list ]; then\n"
+        'if [ "${1:-}" = session ] && [ "${2:-}" = list ]; then\n'
         "  sleep 5\n"
         "  exit 0\n"
         "fi\n"
@@ -2565,14 +2675,14 @@ def test_cleanup_sessions_treats_prefix_as_literal(tmp_path: Path) -> None:
     agent_browser = bin_dir / "agent-browser"
     agent_browser.write_text(
         "#!/usr/bin/env bash\n"
-        "if [ \"${1:-}\" = session ] && [ \"${2:-}\" = list ]; then\n"
+        'if [ "${1:-}" = session ] && [ "${2:-}" = list ]; then\n'
         "  echo 'Active sessions:'\n"
         "  for name in run.a-child run.a-nested-ref runXa-child other; do\n"
         f"    [ -e {str(state_dir)!r}/$name.closed ] || printf '  %s\\n' \"$name\"\n"
         "  done\n"
         "  exit 0\n"
         "fi\n"
-        "if [ \"${1:-}\" = --session ] && [ \"${3:-}\" = close ]; then\n"
+        'if [ "${1:-}" = --session ] && [ "${3:-}" = close ]; then\n'
         f"  printf '%s\\n' \"$2\" >> {str(close_log)!r}\n"
         f"  touch {str(state_dir)!r}/$2.closed\n"
         "  exit 0\n"
@@ -2616,9 +2726,9 @@ def test_dispatcher_stops_after_owned_session_cleanup_failure(tmp_path: Path) ->
     first.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
-        "printf '  %s-owned\\n' \"$1\" > \"$STUB_STATE\"\n"
-        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
-        "> \"$2/first.json\"\n",
+        'printf \'  %s-owned\\n\' "$1" > "$STUB_STATE"\n'
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"pass"}\' '
+        '> "$2/first.json"\n',
         encoding="utf-8",
     )
     first.chmod(0o755)
@@ -2626,8 +2736,8 @@ def test_dispatcher_stops_after_owned_session_cleanup_failure(tmp_path: Path) ->
     second.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
-        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
-        "> \"$1/second.json\"\n",
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"pass"}\' '
+        '> "$1/second.json"\n',
         encoding="utf-8",
     )
     second.chmod(0o755)
@@ -2659,16 +2769,16 @@ def test_dispatcher_stops_after_owned_session_cleanup_failure(tmp_path: Path) ->
     agent_browser.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
-        "if [ \"${1:-}\" = session ] && [ \"${2:-}\" = list ]; then\n"
-        "  if [ -f \"$STUB_STATE\" ]; then\n"
+        'if [ "${1:-}" = session ] && [ "${2:-}" = list ]; then\n'
+        '  if [ -f "$STUB_STATE" ]; then\n'
         "    echo 'Active sessions:'\n"
-        "    cat \"$STUB_STATE\"\n"
+        '    cat "$STUB_STATE"\n'
         "  else\n"
         "    echo 'No active sessions.'\n"
         "  fi\n"
         "  exit 0\n"
         "fi\n"
-        "if [ \"${1:-}\" = --session ] && [ \"${3:-}\" = close ]; then\n"
+        'if [ "${1:-}" = --session ] && [ "${3:-}" = close ]; then\n'
         "  exit 1\n"
         "fi\n"
         "exit 2\n",
@@ -2722,8 +2832,8 @@ def test_dispatcher_rejects_non_finite_row_timeout(tmp_path: Path) -> None:
     producer.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
-        "printf '%s\\n' '{\"schemaVersion\":1,\"status\":\"pass\"}' "
-        "> \"$1/producer.json\"\n",
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"pass"}\' '
+        '> "$1/producer.json"\n',
         encoding="utf-8",
     )
     producer.chmod(0o755)
@@ -2781,14 +2891,14 @@ def test_dispatcher_gives_browser_sweep_rows_scoped_timeouts() -> None:
     five targets, so its larger budget must not weaken the other heavy rows."""
     dispatcher = _dispatcher_source()
     assert "hover-state-compare)" in dispatcher
-    assert 'RUN_REQUIRED_HOVER_TIMEOUT_SEC:-1800' in dispatcher
+    assert "RUN_REQUIRED_HOVER_TIMEOUT_SEC:-1800" in dispatcher
     assert "transition-compare|click-state-compare|video-motion-compare" in dispatcher
-    assert 'RUN_REQUIRED_HEAVY_TIMEOUT_SEC:-540' in dispatcher
+    assert "RUN_REQUIRED_HEAVY_TIMEOUT_SEC:-540" in dispatcher
     # explicit per-row ENV override must still win: the ENV scan runs AFTER
     # both scoped defaults are applied
     hover_at = dispatcher.index("RUN_REQUIRED_HOVER_TIMEOUT_SEC")
     heavy_at = dispatcher.index("RUN_REQUIRED_HEAVY_TIMEOUT_SEC")
-    env_scan_at = dispatcher.index('ROW_TIMEOUT_SEC=*) row_timeout=')
+    env_scan_at = dispatcher.index("ROW_TIMEOUT_SEC=*) row_timeout=")
     assert hover_at < env_scan_at and heavy_at < env_scan_at
 
 
@@ -2805,7 +2915,7 @@ def test_dispatcher_gives_known_slow_rows_scoped_timeouts() -> None:
     assert 'row_timeout="${RUN_REQUIRED_TRANSITION_FIRES_TIMEOUT_SEC:-900}"' in dispatcher
     assert "breakpoint-collision)" in dispatcher
     assert 'row_timeout="${RUN_REQUIRED_BREAKPOINT_COLLISION_TIMEOUT_SEC:-300}"' in dispatcher
-    env_scan_at = dispatcher.index('ROW_TIMEOUT_SEC=*) row_timeout=')
+    env_scan_at = dispatcher.index("ROW_TIMEOUT_SEC=*) row_timeout=")
     for marker in [
         "RUN_REQUIRED_MASKED_STATIC_TIMEOUT_SEC",
         "RUN_REQUIRED_TRANSITION_FIRES_TIMEOUT_SEC",
@@ -2837,3 +2947,319 @@ def test_frozen_section_row_budget_includes_pass_factor() -> None:
     5-viewport comprehensive dispatch, three runs in a row."""
     dispatcher = _dispatcher_source()
     assert "str(800 * 3 * max(1, len(vps)))" in dispatcher
+
+
+@pytest.mark.parametrize("prerequisite", ["preview-runtime-health", "geometry-sanity"])
+@pytest.mark.parametrize("producer_rc,outcome", [(0, "fail"), (1, "fail"), (0, "missing"), (0, "malformed"), (0, "pass")])
+def test_failed_render_prerequisite_stops_expensive_rows_only(
+    tmp_path: Path,
+    prerequisite: str,
+    producer_rc: int,
+    outcome: str,
+) -> None:
+    root = _project_root()
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl))
+    rows = []
+    check_ids = [prerequisite]
+    if prerequisite == "preview-runtime-health":
+        check_ids.append("geometry-sanity")
+    check_ids.extend(cid for cid in ["section-compare", "video-motion-compare", "independent-diagnostic"] if cid not in check_ids)
+    for cid in check_ids:
+        script = tmp_path / f"{cid}.sh"
+        status = outcome if cid == prerequisite else "pass"
+        rc = producer_rc if cid == prerequisite else 0
+        write_artifact = f'printf \'{{"status":"{status}"}}\' > "$1/{cid}.json"\n'
+        if status == "missing":
+            write_artifact = ""
+        elif status == "malformed":
+            write_artifact = f'echo broken > "$1/{cid}.json"\n'
+        script.write_text(
+            "#!/bin/bash\n"
+            f'echo {cid} >> "$1/executed"\n'
+            + write_artifact + f"exit {rc}\n"
+        )
+        rows.append(
+            {
+                "id": cid,
+                "script": str(script),
+                "argsRecipe": "{ref_dir}",
+                "produces": cid + ".json",
+                "severity": "block",
+            }
+        )
+    # Deliberately place the expensive consumer before its prerequisite.
+    rows = [row for row in rows if row["id"] == "section-compare"] + [row for row in rows if row["id"] != "section-compare"]
+    (ref / "verification-plan.json").write_text(json.dumps({"requiredChecks": rows}))
+    env = {**os.environ, "PLUGIN_ROOT": str(root), "PYTHON_BIN": sys.executable}
+    result = subprocess.run(
+        [
+            "bash",
+            str(root / "scripts/verify/run-required-checks.sh"),
+            "phase-barrier-test",
+            "https://example.test",
+            "http://localhost:1",
+            str(ref),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if outcome == "pass":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (ref / "executed").read_text().splitlines() == check_ids
+        assert json.loads((ref / "iteration-receipt.json").read_text())["status"] == "completed"
+        return
+    assert result.returncode == 1, result.stdout + result.stderr
+    expected = [prerequisite, "independent-diagnostic"]
+    if prerequisite in {"transition-trajectory", "scroll-state-machine"}:
+        expected.insert(0, "section-compare")
+    assert (ref / "executed").read_text().splitlines() == expected
+    if prerequisite in {"preview-runtime-health", "geometry-sanity"}:
+        assert not (ref / "section-compare.json").exists()
+    assert not (ref / "video-motion-compare.json").exists()
+    assert json.loads((ref / "iteration-receipt.json").read_text())["status"] != "completed"
+    assert "SKIPPED_DEP" in result.stdout
+    if prerequisite == "preview-runtime-health" and outcome == "fail" and producer_rc == 0:
+        # Explicit heavy-check iteration must select its runtime prerequisites,
+        # even though the original plan omitted these edges.
+        (ref / 'executed').unlink()
+        env['UI_CLONE_ITERATION_CHECKS'] = 'section-compare'
+        targeted = subprocess.run(result.args, env=env, capture_output=True, text=True, timeout=30)
+        assert targeted.returncode == 1, targeted.stdout + targeted.stderr
+        assert (ref / 'executed').read_text().splitlines() == [prerequisite]
+        assert not (ref / 'section-compare.json').exists()
+        assert json.loads((ref / 'iteration-receipt.json').read_text())['status'] == 'partial'
+
+
+def test_whitespace_only_iteration_env_does_not_block_a_full_pass(tmp_path: Path) -> None:
+    """fable-20260910 follow-up review round 3 (LOW): run-required-checks.sh
+    used to decide "is this an iteration-scoped run" from raw
+    `${UI_CLONE_ITERATION_CHECKS:-}${UI_CLONE_CHANGED_FILES:-}` non-emptiness,
+    while check_iteration.py's `select` command splits on "," and drops
+    empties before deciding `active`. A value like "," is non-empty to bash
+    but parses to an EMPTY requested set in Python — `select` writes
+    mode="final" (a genuinely full run), but the old bash check still treated
+    the run as iteration-scoped, skipped `check_iteration finish`, and left
+    iteration-receipt.json stuck at status="running" after every check
+    passed. The bash side must defer to what `select` actually decided
+    (iteration-receipt.json's `mode` field) instead of re-deriving it.
+    """
+    root = _project_root()
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl))
+    script = tmp_path / "check.sh"
+    script.write_text(
+        '#!/bin/bash\nprintf \'{"status":"pass"}\' > "$1/check.json"\nexit 0\n'
+    )
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "requiredChecks": [
+                    {
+                        "id": "independent-diagnostic",
+                        "script": str(script),
+                        "argsRecipe": "{ref_dir}",
+                        "produces": "check.json",
+                        "severity": "block",
+                    }
+                ]
+            }
+        )
+    )
+    env = {**os.environ, "PLUGIN_ROOT": str(root), "PYTHON_BIN": sys.executable}
+    env["UI_CLONE_ITERATION_CHECKS"] = ","
+    result = subprocess.run(
+        [
+            "bash", str(root / "scripts/verify/run-required-checks.sh"),
+            "whitespace-iteration-test", "https://example.test", "http://localhost:1", str(ref),
+        ],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CHECKS_PASSED" in result.stdout
+    assert "ITERATION_CHECKS_FINISHED" not in result.stdout
+    receipt = json.loads((ref / "iteration-receipt.json").read_text())
+    assert receipt["mode"] == "final"
+    assert receipt["status"] == "completed"
+
+
+def test_render_dependency_cycle_is_setup_failure_before_execution(tmp_path: Path) -> None:
+    root = _project_root()
+    ref, impl = tmp_path / 'ref', tmp_path / 'impl'
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / '.impl-root').write_text(str(impl))
+    (ref / 'iteration-receipt.json').write_text(json.dumps({'mode': 'final', 'status': 'completed'}))
+    script = tmp_path / 'must-not-run.sh'
+    script.write_text('#!/bin/bash\ntouch "$1/executed"\n')
+    rows = [
+        {'id': cid, 'script': str(script), 'argsRecipe': '{ref_dir}', 'produces': cid + '.json', 'severity': 'block', 'dependsOn': deps}
+        for cid, deps in [('preview-runtime-health', ['section-compare']), ('section-compare', [])]
+    ]
+    (ref / 'verification-plan.json').write_text(json.dumps({'requiredChecks': rows}))
+    result = subprocess.run(
+        ['bash', str(root / 'scripts/verify/run-required-checks.sh'), 'cycle-test', 'https://example.test', 'http://localhost:1', str(ref)],
+        env={**os.environ, 'PLUGIN_ROOT': str(root), 'PYTHON_BIN': sys.executable},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'dependencies contain a cycle' in result.stderr
+    assert not (ref / 'executed').exists()
+    assert json.loads((ref / 'iteration-receipt.json').read_text())['status'] == 'setup-failed'
+
+
+@pytest.mark.parametrize("prerequisite", ["transition-trajectory", "scroll-state-machine", "section-compare"])
+def test_matched_state_and_section_failures_precede_expensive_motion(tmp_path: Path, prerequisite: str) -> None:
+    test_failed_render_prerequisite_stops_expensive_rows_only(tmp_path, prerequisite, 1, "fail")
+
+
+def _run_foundation_barrier_plan(
+    tmp_path: Path, *, failure: str = "", missing: bool = False, targeted: str = "",
+    section_text: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    root = _project_root()
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl))
+    rows = []
+    # Consumers deliberately precede the cheap evidence they require.
+    for cid in [
+        "transition-fires", "spec-implementation-coverage", "transition-trajectory",
+        "scroll-state-machine", "transition-compare", "video-motion-compare",
+        "hover-state-compare", "click-state-compare", "scroll-anim-temporal",
+        "section-compare", "geometry-sanity", "runtime-text-sequence",
+        "required-media-coverage", "asset-transfer", "runtime-env",
+        "preview-runtime-health", "impl-url-guard", "independent-diagnostic",
+    ]:
+        artifact = {"status": "fail" if cid == failure else "pass"}
+        if cid == "runtime-text-sequence" and cid != failure:
+            artifact = _valid_runtime_text_artifact("https://example.test", "http://localhost:1")
+        produces = cid + ".json"
+        payload = json.dumps(artifact)
+        if cid == "section-compare" and section_text is not None:
+            produces = "sections/result.txt"
+            payload = section_text
+        script = tmp_path / f"{cid}.sh"
+        script.write_text(
+            '#!/bin/bash\nmkdir -p "$1/sections"\n'
+            f'echo {cid} >> "$1/executed"\n'
+            + ("" if cid == failure and missing else
+               f"cat > \"$1/{produces}\" <<'JSON'\n{payload}\nJSON\n")
+            # Simulate all 247 transition trigger probes without a browser.
+            + ('seq 247 > "$1/probes"\n' if cid == "transition-fires" else "")
+        )
+        rows.append({
+            "id": cid, "script": str(script), "argsRecipe": "{ref_dir}",
+            "produces": produces, "severity": "block",
+        })
+    (ref / "verification-plan.json").write_text(json.dumps({"requiredChecks": rows}))
+    env = {**os.environ, "PLUGIN_ROOT": str(root), "PYTHON_BIN": sys.executable}
+    if targeted:
+        env["UI_CLONE_ITERATION_CHECKS"] = targeted
+    result = subprocess.run(
+        ["bash", str(root / "scripts/verify/run-required-checks.sh"), "foundation-test",
+         "https://example.test", "http://localhost:1", str(ref)],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    return result, ref
+
+
+@pytest.mark.parametrize("failure", ["runtime-text-sequence", "required-media-coverage", "asset-transfer"])
+def test_content_foundation_failure_blocks_geometry_section_and_motion(tmp_path: Path, failure: str) -> None:
+    result, ref = _run_foundation_barrier_plan(tmp_path, failure=failure)
+    assert result.returncode == 1, result.stdout + result.stderr
+    executed = (ref / "executed").read_text().splitlines()
+    assert "independent-diagnostic" in executed
+    for cid in ["geometry-sanity", "section-compare", "transition-fires", "video-motion-compare"]:
+        assert cid not in executed
+        assert not (ref / f"{cid}.json").exists()
+    assert not (ref / "probes").exists()
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_section_failure_blocks_all_transition_probes_and_video(tmp_path: Path, missing: bool) -> None:
+    result, ref = _run_foundation_barrier_plan(tmp_path, failure="section-compare", missing=missing)
+    assert result.returncode == 1, result.stdout + result.stderr
+    executed = (ref / "executed").read_text().splitlines()
+    assert "section-compare" in executed
+    assert "independent-diagnostic" in executed
+    for cid in ["transition-fires", "spec-implementation-coverage", "transition-trajectory",
+                "scroll-state-machine", "transition-compare", "video-motion-compare",
+                "hover-state-compare", "click-state-compare", "scroll-anim-temporal"]:
+        assert cid not in executed
+        assert not (ref / f"{cid}.json").exists()
+    assert not (ref / "probes").exists()
+
+
+def test_successful_foundations_precede_section_then_full_motion(tmp_path: Path) -> None:
+    result, ref = _run_foundation_barrier_plan(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    executed = (ref / "executed").read_text().splitlines()
+    for cid in ["runtime-text-sequence", "required-media-coverage", "asset-transfer"]:
+        assert executed.index(cid) < executed.index("geometry-sanity")
+    assert executed.index("geometry-sanity") < executed.index("section-compare")
+    for cid in ["transition-fires", "transition-trajectory", "scroll-state-machine"]:
+        assert executed.index("section-compare") < executed.index(cid)
+    assert len((ref / "probes").read_text().splitlines()) == 247
+
+
+def test_targeted_text_closure_excludes_full_motion(tmp_path: Path) -> None:
+    result, ref = _run_foundation_barrier_plan(tmp_path, targeted="runtime-text-sequence")
+    assert result.returncode == 0, result.stdout + result.stderr
+    executed = (ref / "executed").read_text().splitlines()
+    assert set(executed) == {"impl-url-guard", "runtime-env", "preview-runtime-health", "runtime-text-sequence"}
+    assert executed[-1] == "runtime-text-sequence"
+    assert not (ref / "probes").exists()
+
+
+@pytest.mark.parametrize("section_text,passes", [
+    ("**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**", True),
+    # fable-20260910 follow-up review round 3 (deferred item C, FIXED): a
+    # genuine section FAIL is now only a prerequisite for MATERIALIZATION
+    # (section-compare actually ran and produced parseable, non-empty
+    # evidence), not for the canonical PASS/FAIL verdict — none of the four
+    # motion-consumer scripts read sections/matches.json or declare it as an
+    # input, so the old "any fail_count > 0 blocks all motion evidence"
+    # coupling was policy, not data. Motion checks now dispatch alongside a
+    # real (even failing) section verdict; the overall clone's canonical
+    # pass/fail still comes from _check_sections_result_health inside the
+    # real post-implement gate, unchanged.
+    ("**Result: 1 PASS, 1 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**", True),
+    ("**Result: 0 PASS, 0 FAIL, 0 SKIP, 1 STRUCTURAL_ONLY**", True),
+    ("malformed section result", False),
+])
+def test_canonical_section_verdict_controls_motion_dispatch(
+    tmp_path: Path, section_text: str, passes: bool
+) -> None:
+    result, ref = _run_foundation_barrier_plan(tmp_path, section_text=section_text)
+    assert result.returncode == (0 if passes else 1), result.stdout + result.stderr
+    executed = (ref / "executed").read_text().splitlines()
+    assert "section-compare" in executed
+    assert "independent-diagnostic" in executed
+    assert ("transition-fires" in executed) == passes
+    assert (ref / "probes").exists() == passes
+    assert (ref / "video-motion-compare.json").exists() == passes
+
+
+@pytest.mark.parametrize("section_text", [
+    "**Result: 0 PASS, 0 FAIL, 5 SKIP, 0 STRUCTURAL_ONLY**",
+    "",
+])
+def test_zero_materialized_sections_still_blocks_motion_dispatch(
+    tmp_path: Path, section_text: str
+) -> None:
+    # A parseable-but-empty result (all SKIP, or a truly empty file) means
+    # section-compare produced NO usable evidence at all — this must still
+    # block motion dispatch, unlike a genuine (even failing) verdict above.
+    result, ref = _run_foundation_barrier_plan(tmp_path, section_text=section_text)
+    assert result.returncode == 1, result.stdout + result.stderr
+    executed = (ref / "executed").read_text().splitlines()
+    assert "transition-fires" not in executed
+    assert not (ref / "video-motion-compare.json").exists()

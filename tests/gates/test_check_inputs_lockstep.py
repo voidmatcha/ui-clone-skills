@@ -24,19 +24,30 @@ from ui_clone.check_inputs import (
 
 from ._helpers import _project_root
 
+# section-compare's row is NOT emitted by verification-plan.sh's `add_check`
+# helper — it is synthesized directly in build_required_dispatch.py (F3,
+# fable-20260910: this row was invisible to both lockstep tests below, so
+# CHECK_INPUTS had no entry for it at all and its repeated-failure guard could
+# never fire). Fold it in here so both tests keep covering it.
+_SYNTHESIZED_CHECK_SCRIPTS = {
+    "section-compare": "skills/visual-debug/scripts/section-compare.sh",
+}
+
 
 def _check_id_to_script() -> dict[str, str]:
     sh = (
         _project_root() / "skills" / "visual-debug" / "scripts" / "verification-plan.sh"
     ).read_text(encoding="utf-8")
-    return dict(re.findall(r'add_check\s+"([^"]+)"\s*\\\s*\n\s*"([^"]+)"', sh))
+    mapping = dict(re.findall(r'add_check\s+"([^"]+)"\s*\\\s*\n\s*"([^"]+)"', sh))
+    mapping.update(_SYNTHESIZED_CHECK_SCRIPTS)
+    return mapping
 
 
 def _add_check_ids() -> set[str]:
     sh = (
         _project_root() / "skills" / "visual-debug" / "scripts" / "verification-plan.sh"
     ).read_text(encoding="utf-8")
-    return set(re.findall(r'add_check\s+"([^"]+)"', sh))
+    return set(re.findall(r'add_check\s+"([^"]+)"', sh)) | set(_SYNTHESIZED_CHECK_SCRIPTS)
 
 
 def _cli(*args: str) -> str:
@@ -131,10 +142,19 @@ _SIGNIFICANT_REF = {
 # plan for unrelated scripts that only mention dispatcher metadata.
 _GLOBAL_ALLOW = {"verification-plan.json"}
 # Per-check exceptions: artifact textually present in the script but NOT a real
-# staleness input (only a comment, or the check writes it). Empty today — add
-# WITH a justification comment if a future audit failure is a genuine false
-# positive rather than a missing input.
-_CHECK_ALLOW: dict[str, set[str]] = {}
+# staleness input (only a comment, or the check writes it). Add WITH a
+# justification comment if a future audit failure is a genuine false positive
+# rather than a missing input.
+_CHECK_ALLOW: dict[str, set[str]] = {
+    # fable-20260910 follow-up review (LOW A): section-compare.sh writes
+    # sections/matches.json itself each run (a live getBoundingClientRect()
+    # probe) then reads it back later in the SAME run — self-produced, not an
+    # external staleness input. Declaring it as a ref input would feed each
+    # run's own live-measurement jitter into the next retry's fingerprint,
+    # defeating check_iteration's repeated-failure pause guard. See
+    # ui_clone/check_inputs.py's section-compare entry for the full comment.
+    "section-compare": {"matches.json"},
+}
 
 
 def _ref_covers(check_id: str, name: str) -> bool:

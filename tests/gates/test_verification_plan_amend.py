@@ -131,3 +131,45 @@ def test_amend_regenerates_stale_plan_after_hover_manifest_refresh(
     assert proc.returncode == 0, proc.stderr
     after = json.loads((ref / "verification-plan.json").read_text())
     assert after["signals"]["hasHover"] is True
+
+
+def test_amend_backfills_verification_scope_onto_a_legacy_plan(tmp_path: Path) -> None:
+    # fable-20260910 follow-up review round 3 (unconfirmed item, now
+    # verified and fixed): amend_plan only merges plan-derived CHECK rows
+    # from the fresh build into the old base plan — every other top-level
+    # field (verificationScope, viewports) came from `base` unchanged. A
+    # base plan minted before ui_clone.verification_scope existed (no
+    # "verificationScope" key at all) would stay scope-less forever across
+    # every future --amend. Simulate that legacy shape by stripping the key
+    # from an otherwise-real minted plan, then confirm --amend backfills it.
+    ref = tmp_path / "ref"
+    _seed(ref)
+    assert _mint(ref).returncode == 0
+    plan = json.loads((ref / "verification-plan.json").read_text())
+    assert "verificationScope" in plan, "test assumes fresh mints always include scope"
+    del plan["verificationScope"]
+    del plan["viewports"]
+    (ref / "verification-plan.json").write_text(json.dumps(plan))
+
+    (ref / "generation-plan.json").write_text(json.dumps(_SIG_EFFECTS_PLAN))
+    proc = _mint(ref, "--amend")
+    assert proc.returncode == 0, proc.stderr
+    after = json.loads((ref / "verification-plan.json").read_text())
+    assert "verificationScope" in after
+    assert after["verificationScope"]["mode"] == "desktop"
+    assert after["viewports"]
+
+
+def test_amend_never_overwrites_an_existing_verification_scope(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _seed(ref)
+    assert _mint(ref).returncode == 0
+    plan = json.loads((ref / "verification-plan.json").read_text())
+    plan["verificationScope"]["mode"] = "all"  # simulate a user's prior customization
+    (ref / "verification-plan.json").write_text(json.dumps(plan))
+
+    (ref / "generation-plan.json").write_text(json.dumps(_SIG_EFFECTS_PLAN))
+    proc = _mint(ref, "--amend")
+    assert proc.returncode == 0, proc.stderr
+    after = json.loads((ref / "verification-plan.json").read_text())
+    assert after["verificationScope"]["mode"] == "all"

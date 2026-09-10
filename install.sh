@@ -76,7 +76,16 @@ LOCAL_CLI_BIN="$LOCAL_BIN_DIR/ui-clone"
 CODEX_PUBLIC_SKILLS="ui-reverse-engineering ui-capture visual-debug"
 AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 PUBLIC_SKILLS_OWNERSHIP="$HOME/.config/ui-clone-skills/public-skills.json"
-CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex bin hooks scripts ui_clone docs README_detail AGENTS.md README.md package.json pyproject.toml uv.lock LICENSE.txt"
+# fable-20260910 (Codex dev-hook parity design): ".codex/agents" not the bare
+# ".codex" — the only tracked/shipped content under .codex/ is .codex/agents/
+# (`git ls-files .codex`); the bare item projected/copied the WHOLE directory
+# into the Codex plugin symlink farm (line ~871), the Claude plugin staging
+# copy (line ~947, real files via cp -RL, not symlinks), and the uninstall
+# removal loop (line ~2018). A maintainer-only, this-repo-local dev file like
+# `.codex/hooks.json` (see that file's own header comment) must never be
+# swept into any of those three paths — narrowing to .codex/agents makes that
+# structural rather than incidental.
+CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex/agents bin hooks scripts ui_clone docs README_detail AGENTS.md README.md package.json pyproject.toml uv.lock LICENSE.txt"
 CODEX_PLUGIN_PROJECTION_KEEP="$CODEX_PLUGIN_PROJECTION_ITEMS skills"
 # Claude and Codex cannot share one source directory. Codex reads its install
 # in place, so symlinks keep it live with the checkout; `claude plugin install`
@@ -408,9 +417,10 @@ loop_setup_notice() {
   printf "\n%sOptional: enable goal-driven continuation (loop until done)%s\n" "$C_WARN" "$C_RST"
   cat <<EOF
 
-  Claude Code — open a session with the plugin loaded, then describe the goal.
-  The ui-reverse-engineering skill is auto-loaded so the prompt can be terse:
-      claude --plugin-dir "$CODEX_PLUGIN_DIR"
+  Claude Code — restart after installation, then open a normal session and
+  describe the goal. The installed user-scope plugin loads automatically; do
+  not add --plugin-dir, which would load a second development copy:
+      claude
       > Drive the ui-clone-skills pipeline for tmp/ref/<component> until
       > python -m ui_clone.goal tmp/ref/<component> --check-done exits 0.
 
@@ -460,6 +470,7 @@ register_marketplace() {
 
   prepare_plugin_projection || return
   prepare_claude_plugin_source || return
+  remove_legacy_claude_skill_links || return
   install_public_agent_skills || return
   install_local_cli_bin || return
 
@@ -481,6 +492,35 @@ register_marketplace() {
   else
     skip "marketplace '$MARKETPLACE_NAME' already registered (or CLI declined re-add)"
   fi
+}
+
+remove_legacy_claude_skill_links() {
+  # Pre-plugin releases installed the three public skills directly under
+  # ~/.claude/skills. Claude resolves those skills ahead of the marketplace
+  # plugin, so they silently shadow the installed cache and make an external
+  # dogfood session read the checkout (or an old projection) instead. Remove
+  # only symlinks whose resolved target is one of this project's known roots;
+  # real directories and unknown links remain user-owned.
+  local legacy_root="$HOME/.claude/skills"
+  local skill dst resolved expected
+  [ -d "$legacy_root" ] || return 0
+
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    dst="$legacy_root/$skill"
+    [ -L "$dst" ] || continue
+    resolved="$(cd "$dst" 2>/dev/null && pwd -P)" || continue
+    for expected in \
+      "$REPO_ROOT/skills/$skill" \
+      "$CODEX_PLUGIN_DIR/skills/$skill" \
+      "$CLAUDE_PLUGIN_SRC/skills/$skill"; do
+      [ -e "$expected" ] || continue
+      if [ "$resolved" = "$(cd "$expected" && pwd -P)" ]; then
+        rm -f "$dst"
+        ok "removed legacy Claude skill shadow $dst"
+        break
+      fi
+    done
+  done
 }
 
 # Claude Code keys an installation by marketplace, not by plugin name, so the
@@ -603,6 +643,56 @@ verify_claude_plugin_delivery() {
     err "  symlinked source caches as an empty shell and the plugin loads nothing."
     err "  This is a real delivery failure — fix the source, do not skip the probe."
     err "  (override, for a broken probe only: UI_CLONE_SKIP_HOOK_PROBE=1)"
+    return 1
+  fi
+
+  # File presence proves only that *some* copy was delivered. Claude keys its
+  # cache by version and may report `plugin update` as successful while keeping
+  # the old bytes when a developer reuses that version. Compare every shipped
+  # source file against the cache before running the hook so a stale same-version
+  # install cannot be reported as refreshed. Also reject removed source files
+  # left under shipped directories; those can still be imported or discovered.
+  # Root host metadata and the staging policy's runtime/build residue are allowed.
+  local content_mismatch
+  content_mismatch="$(
+    SOURCE_ROOT="$CLAUDE_PLUGIN_SRC" CACHE_ROOT="$cache_dir" \
+      RUNTIME_NAMES="$CLAUDE_PLUGIN_SRC_PRUNE" python3 - <<'PY'
+import hashlib
+import os
+from pathlib import Path
+
+source = Path(os.environ["SOURCE_ROOT"])
+cache = Path(os.environ["CACHE_ROOT"])
+
+for src in sorted(path for path in source.rglob("*") if path.is_file()):
+    rel = src.relative_to(source)
+    dst = cache / rel
+    if not dst.is_file():
+        print(f"missing:{rel}")
+        continue
+    if hashlib.sha256(src.read_bytes()).digest() != hashlib.sha256(dst.read_bytes()).digest():
+        print(f"changed:{rel}")
+
+# Limit the reverse comparison to directories owned by the shipped source.
+# Claude may add private metadata at the cache root. Prune environments before
+# walking them: a uv environment contains many legitimate cache-only sources.
+runtime_names = set(os.environ["RUNTIME_NAMES"].split())
+for directory in sorted(path for path in source.iterdir() if path.is_dir()):
+    cached_directory = cache / directory.name
+    for root, dirs, files in os.walk(cached_directory):
+        dirs[:] = sorted(name for name in dirs if name not in runtime_names)
+        for name in sorted(files):
+            if name in runtime_names or name.endswith((".pyc", ".pyo")):
+                continue
+            rel = (Path(root) / name).relative_to(cache)
+            if not (source / rel).is_file():
+                print(f"unexpected:{rel}")
+PY
+  )" || return 1
+  if [ -n "$content_mismatch" ]; then
+    err "Hook delivery probe FAILED: Claude kept stale bytes for $PLUGIN_NAME $version."
+    err "  first mismatch: $(printf '%s\n' "$content_mismatch" | head -1)"
+    err "  The cache is version-keyed. Bump all six version files, reinstall, and restart Claude."
     return 1
   fi
 
@@ -1934,6 +2024,24 @@ remove_plugin_projection() {
     return 0
   fi
 
+  # fable-20260910 (Codex dev-hook parity review, finding 6): a legacy
+  # install from before CODEX_PLUGIN_PROJECTION_ITEMS was narrowed from the
+  # bare ".codex" to ".codex/agents" left $CODEX_PLUGIN_DIR/.codex ITSELF as
+  # a symlink to $REPO_ROOT/.codex (a whole-directory link, not a per-item
+  # one) — remove_owned_symlink below only knows about the new per-item path
+  # ($CODEX_PLUGIN_DIR/.codex/agents) and safely no-ops on a dst that isn't a
+  # symlink at that exact path, leaving the legacy link behind forever.
+  if [ -L "$CODEX_PLUGIN_DIR/.codex" ]; then
+    local legacy_codex_target
+    legacy_codex_target="$(readlink "$CODEX_PLUGIN_DIR/.codex")"
+    if [ "$legacy_codex_target" = "$REPO_ROOT/.codex" ]; then
+      rm -f "$CODEX_PLUGIN_DIR/.codex"
+      ok "removed legacy projection symlink $CODEX_PLUGIN_DIR/.codex"
+    else
+      warn "preserving user-owned path: $CODEX_PLUGIN_DIR/.codex"
+    fi
+  fi
+
   for item in $CODEX_PLUGIN_PROJECTION_ITEMS; do
     src="$REPO_ROOT/$item"
     dst="$CODEX_PLUGIN_DIR/$item"
@@ -1947,6 +2055,13 @@ remove_plugin_projection() {
   done
 
   rmdir "$CODEX_PLUGIN_DIR/skills" 2>/dev/null || true
+  # ".codex/agents" is a per-item symlink one level DEEPER than every other
+  # projection item, so its now-empty real parent directory ($CODEX_PLUGIN_DIR
+  # /.codex, created by `mkdir -p "$(dirname "$dst")"` at install time) needs
+  # its own rmdir — without this, $CODEX_PLUGIN_DIR itself is never empty and
+  # the final rmdir below always falls into the misleading "preserving
+  # user-owned path" warning even on a fully-owned, cleanly uninstalled tree.
+  rmdir "$CODEX_PLUGIN_DIR/.codex" 2>/dev/null || true
   if ! rmdir "$CODEX_PLUGIN_DIR" 2>/dev/null && path_present "$CODEX_PLUGIN_DIR"; then
     warn "preserving user-owned path: $CODEX_PLUGIN_DIR"
   fi

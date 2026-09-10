@@ -48,6 +48,50 @@ def test_input_independent_check_returns_empty(tmp_path: Path) -> None:
     assert _h(tmp_path, tmp_path, "capacity-probe") == ""
 
 
+def test_section_compare_is_registered_with_a_real_fingerprint(tmp_path: Path) -> None:
+    """F3 (fable-20260910): section-compare had NO CHECK_INPUTS entry, so
+    compute_check_input_hash returned None (UNREGISTERED) for it. That made
+    check_iteration.main's fingerprint always "" for section-compare, and
+    should_pause's `bool(fingerprint and ...)` guard could then never trip —
+    three identical section-compare failures in a row never paused for
+    diagnosis. A registered check must produce a real, non-empty hex
+    fingerprint from concrete impl/ref content, not None or ""."""
+    impl = tmp_path / "impl"
+    ref = tmp_path / "ref"
+    _impl_tree(impl)
+    ref.mkdir()
+    (ref / "section-map.json").write_text("{}\n")
+    assert get_check_inputs("section-compare") is not None
+    fingerprint = _h(impl, ref, "section-compare")
+    assert fingerprint not in (None, "")
+
+
+def test_section_compare_fingerprint_ignores_its_own_self_written_matches_json(
+    tmp_path: Path,
+) -> None:
+    """fable-20260910 follow-up review (LOW A): section-compare.sh writes
+    sections/matches.json itself each run from a live getBoundingClientRect()
+    probe, then reads it back later in the SAME run. If matches.json were
+    declared as one of section-compare's ref inputs, ordinary run-to-run
+    live-measurement jitter in that self-written file (sub-pixel rect drift,
+    timing) would change the retry fingerprint on every attempt even with a
+    completely unchanged impl/ref, defeating check_iteration's repeated-
+    failure pause guard. The fingerprint must be stable across matches.json
+    content changes."""
+    impl = tmp_path / "impl"
+    ref = tmp_path / "ref"
+    _impl_tree(impl)
+    ref.mkdir()
+    (ref / "section-map.json").write_text("{}\n")
+    (ref / "sections").mkdir()
+    (ref / "sections" / "matches.json").write_text('[{"ref": 0, "impl": 0}]\n')
+    before = _h(impl, ref, "section-compare")
+    (ref / "sections" / "matches.json").write_text('[{"ref": 0, "impl": 1, "jitter": 1.0001}]\n')
+    after = _h(impl, ref, "section-compare")
+    assert before == after
+    assert before not in (None, "")
+
+
 def test_declared_side_with_zero_matches_is_unavailable(tmp_path: Path) -> None:
     """A declared side with no matches is not canonical cache evidence."""
     impl = tmp_path / "impl"
@@ -463,3 +507,15 @@ def test_real_unreadable_traversal_is_unavailable(tmp_path: Path) -> None:
         assert newest_input_mtime(impl, None, "hydration-check") is None
     finally:
         src.chmod(0o700)
+
+
+def test_masked_static_font_declaration_change_invalidates_hash(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "App.tsx").write_text("export default () => null")
+    declaration = ref / "asset-substitution.json"
+    declaration.write_text('{"fonts": [{"original": "Original", "replacement": "Inter"}]}')
+    before = compute_check_input_hash(tmp_path, ref, "masked-region-static")
+    declaration.write_text('{"fonts": [{"original": "Original", "replacement": "Arial"}]}')
+    assert compute_check_input_hash(tmp_path, ref, "masked-region-static") != before

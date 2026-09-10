@@ -11,9 +11,12 @@
 #
 # 2. Release-discipline (gated on push to main / master, or --all/--mirror
 #    which touches every branch including main):
-#    - Version sync: 5 versioned files (.claude-plugin/plugin.json,
+#    - Version sync: 6 versioned files (.claude-plugin/plugin.json,
 #      .claude-plugin/marketplace.json, .codex-plugin/plugin.json,
-#      pyproject.toml, ui_clone/__init__.py) must all match.
+#      package.json, pyproject.toml, ui_clone/__init__.py) must all match.
+#    - Version-bump enforcement: the matching version must also differ from
+#      whatever version is recorded as installed on THIS machine (Claude/
+#      Codex plugin caches are version-keyed; see the check itself, below).
 #    - skills/ + CHANGELOG/manifest coupling: if skills/ changed,
 #      CHANGELOG.md and the 3 plugin manifests must be bumped together.
 #
@@ -32,9 +35,31 @@
 #   UI_RE_SKIP_RELEASE_CHECKS=1 git push  # skip release-discipline tier
 #                                          (still useful when patching
 #                                          the release flow itself)
+#
+# Testing: UI_CLONE_INSTALLED_PLUGINS_JSON=<path> overrides the
+# installed_plugins.json path the version-bump-enforcement check reads
+# (default ~/.claude/plugins/installed_plugins.json).
 
 input=$(cat)
-echo "$input" | grep -qE '"command":"[^"]*git[[:space:]]+push' || exit 0
+# Extract tool_input.command via JSON parsing rather than a raw-text grep
+# expecting compact `"command":"..."` (no space after the colon) — Claude
+# Code's PreToolUse payload happens to serialize that way, but Codex's
+# PreToolUse/exec_command payload shape is not guaranteed to match byte-for-
+# byte (fable-20260910, Codex dev-hook parity design). Falls back to the
+# original compact-JSON grep if python3 or JSON parsing is unavailable, so
+# this never regresses the Claude-only path it replaces.
+hook_command=$(GUARD_INPUT="$input" python3 -c '
+import json, os, sys
+try:
+    print(json.loads(os.environ.get("GUARD_INPUT", "{}")).get("tool_input", {}).get("command", ""))
+except Exception:
+    sys.exit(1)
+' 2>/dev/null) || hook_command=""
+if [ -n "$hook_command" ]; then
+  echo "$hook_command" | grep -qE '\bgit[[:space:]]+push\b' || exit 0
+else
+  echo "$input" | grep -qE '"command":\s*"[^"]*git[[:space:]]+push' || exit 0
+fi
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
@@ -117,6 +142,34 @@ if [ "$is_release_target" != "1" ] || [ "${UI_RE_SKIP_RELEASE_CHECKS:-}" = "1" ]
   exit 0
 fi
 
+# fable-20260910 (Codex dev-hook parity review, finding 4): the comparison
+# base for "what changed on this release push" must be the REMOTE branch
+# actually being pushed to ($target_branch, already resolved above from the
+# refspec), not @{upstream} of whatever branch happens to be checked out
+# locally. `git push origin HEAD:main` or `git push origin feature:main`
+# from a feature branch resolves @{upstream} to origin/feature (or nothing)
+# — comparing against that silently let both the version-bump-enforcement
+# check below AND the skills/CHANGELOG coupling check pass a push that puts
+# real, unbumped content on origin/main. Only fall back to @{upstream} when
+# the push target IS the checked-out branch (the common `git push` /
+# `git push origin <branch>` case, where @{upstream} is the right answer and
+# a detached-HEAD or first-push branch may have no origin/$target_branch yet).
+_release_push_base() {
+  local current
+  current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || current=""
+  if [ -n "$current" ] && [ "$current" != "HEAD" ] && [ "$current" != "$target_branch" ]; then
+    echo "origin/$target_branch"
+    return
+  fi
+  local up
+  up=$(git rev-parse --abbrev-ref --symbolic-full-name @{upstream} 2>/dev/null) || up=""
+  if [ -n "$up" ]; then
+    echo "$up"
+  else
+    echo "origin/$target_branch"
+  fi
+}
+
 # Version sync: Claude Code plugin, Codex plugin, package metadata, and
 # ui_clone/__init__.py must all match.
 plugin_v=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])" 2>/dev/null || echo "")
@@ -134,13 +187,50 @@ if [ "$unique" != "1" ]; then
   exit 2
 fi
 
-# skills/ + CHANGELOG/manifest coupling
-upstream=$(git rev-parse --abbrev-ref --symbolic-full-name @{upstream} 2>/dev/null) || upstream=""
-if [ -z "$upstream" ]; then
-  current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || current_branch=""
-  [ -n "$current_branch" ] && upstream="origin/$current_branch"
+# Version-bump enforcement: both Claude Code's and Codex's plugin caches are
+# VERSION-KEYED (~/.claude/plugins/cache/<owner>/<plugin>/<version>,
+# ~/.codex/plugins/cache/<owner>/<plugin>/<version>). post-push-refresh.sh
+# re-runs install.sh after every push, but `claude plugin update` / `codex
+# plugin add` are no-ops when the manifest version matches a version already
+# recorded as installed on this machine — the live cache silently stays
+# stale even though the marketplace source updated. Verified 2026-09-10:
+# install.sh's cache-population steps only copy fresh bytes into a NEW
+# version-named directory; an unchanged version reuses the existing one.
+# Block a release push that reuses a version already installed HERE when
+# there is real content to push, so post-push-refresh can always deliver a
+# genuinely new cache dir. Best-effort: skip silently if this machine has
+# never installed the plugin (installed_plugins.json absent/unparseable) —
+# this is a local-dev convenience check, not something CI machines need.
+current_version="$plugin_v"
+_installed_plugins_json="${UI_CLONE_INSTALLED_PLUGINS_JSON:-$HOME/.claude/plugins/installed_plugins.json}"
+deployed_version=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$_installed_plugins_json'))
+except Exception:
+    sys.exit(0)
+for entry in d.get('plugins', {}).get('ui-clone-skills@voidmatcha') or []:
+    v = entry.get('version')
+    if v:
+        print(v)
+        break
+" 2>/dev/null)
+if [ -n "$deployed_version" ] && [ "$deployed_version" = "$current_version" ]; then
+  _bump_upstream=$(_release_push_base)
+  _bump_base=$(git rev-parse "$_bump_upstream" 2>/dev/null) || _bump_base=""
+  if [ -n "$_bump_base" ] && [ "$_bump_base" != "$(git rev-parse HEAD)" ] \
+     && [ -n "$(git diff --name-only "$_bump_base" HEAD)" ]; then
+    echo "⚠️ Version unchanged ($current_version) but content differs from $_bump_upstream, and $current_version is already installed on this machine." >&2
+    echo "Claude/Codex plugin caches are version-keyed — pushing without a bump leaves the live local install stale." >&2
+    echo "Bump the 6 version files together (see AGENTS.md 'Version sync') before pushing to $target_branch." >&2
+    echo "Bypass (emergency only): UI_RE_SKIP_RELEASE_CHECKS=1 git push" >&2
+    echo "decision: block" >&2
+    exit 2
+  fi
 fi
-[ -z "$upstream" ] && upstream="origin/master"
+
+# skills/ + CHANGELOG/manifest coupling
+upstream=$(_release_push_base)
 base=$(git rev-parse "$upstream" 2>/dev/null) || {
   echo "⚠️  Cannot resolve upstream ref ($upstream) — skipping skills/ coupling check" >&2
   exit 0

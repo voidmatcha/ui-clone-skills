@@ -297,8 +297,16 @@ TOTAL=0; PASS=0; FAIL=0; WARN=0; SKIP=0; STALE=0
 # Build the list of (id, script, produces, args-mode) tuples from the plan.
 # args-mode is determined by the script basename — kept small and
 # explicit so adding a new gate means updating this table.
-"$PYTHON_BIN" "$REPO_ROOT/scripts/verify/build_required_dispatch.py" "$PLAN" "$REF_DIR" "$REPO_ROOT" "$IMPL_ROOT" "$IMPL_SRC" "$IMPL_PUBLIC" "$REF_URL" "$IMPL_URL" "$SESSION" > "$DISPATCH_FILE"
+if ! "$PYTHON_BIN" "$REPO_ROOT/scripts/verify/build_required_dispatch.py" "$PLAN" "$REF_DIR" "$REPO_ROOT" "$IMPL_ROOT" "$IMPL_SRC" "$IMPL_PUBLIC" "$REF_URL" "$IMPL_URL" "$SESSION" > "$DISPATCH_FILE"; then
+  echo "Required-check dependency resolution failed; no checks dispatched." >&2
+  "$PYTHON_BIN" -c 'import json, pathlib, sys; (pathlib.Path(sys.argv[1]) / "iteration-receipt.json").write_text(json.dumps({"schemaVersion": 1, "mode": "final", "status": "setup-failed", "canonical": False}) + "\n")' "$REF_DIR"
+  exit 2
+fi
 
+if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration select "$REF_DIR" "$DISPATCH_FILE"; then
+  echo "Invalid iteration selection; no checks dispatched." >&2
+  exit 2
+fi
 
 SETUP_FAILURE=0
 FAILED_IDS=""
@@ -330,6 +338,11 @@ while IFS=$'\t' read -r kind cid script_path args produces severity deps <&3; do
     continue
   fi
   case "$kind" in
+    DEFERRED)
+      echo "~ $cid: DEFERRED (iteration only; no completion evidence)"
+      SKIP=$((SKIP + 1))
+      continue
+      ;;
     SKIP)
       echo -e "${YELLOW}~${NC} $cid: $kind"
       SKIP=$((SKIP + 1))
@@ -339,6 +352,7 @@ while IFS=$'\t' read -r kind cid script_path args produces severity deps <&3; do
       echo -e "${RED}!${NC} $cid: $kind — wire the script into run-required-checks.sh SIGNATURES table"
       SKIP=$((SKIP + 1))
       SETUP_FAILURE=1
+      mark_failed "$cid"
       continue
       ;;
   esac
@@ -355,6 +369,8 @@ while IFS=$'\t' read -r kind cid script_path args produces severity deps <&3; do
     if [ -n "$failing_dep" ]; then
       echo -e "${YELLOW}~${NC} $cid: SKIPPED_DEP (depends on failed: $failing_dep)"
       SKIP=$((SKIP + 1))
+      mark_failed "$cid"
+      FAIL=$((FAIL + 1))
       continue
     fi
   fi
@@ -473,6 +489,17 @@ except Exception:
       fi
     fi
   fi
+  PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration guard "$REF_DIR" "$cid" "$IMPL_ROOT" "$script_path" "$REF_URL" "$IMPL_URL"
+  _retry_guard=$?
+  if [ "$_retry_guard" -eq 3 ]; then
+    echo "  → $cid: NO_PROGRESS — two identical failures with unchanged inputs; inspect iteration-retries/*.json and diagnose before retrying." >&2
+    FAIL=$((FAIL + 1))
+    mark_failed "$cid"
+    continue
+  elif [ "$_retry_guard" -ne 0 ]; then
+    SETUP_FAILURE=1
+    break
+  fi
   # Dispatch the check. Record the artifact mtime first so the B1 sidecar seed
   # can prove the artifact was FRESHLY written this run (not an old one left in
   # place by a check that exited non-zero).
@@ -584,6 +611,63 @@ except Exception:
   if [ -f "$art" ] && [ "$(_mtime_ns "$art")" != "$art_mtime_ns_before" ]; then
     _artifact_fresh=1
   fi
+  # Some producers exit zero while reporting an explicit failed verdict.
+  # These phase prerequisites must be judged by their artifact as well as the
+  # process status, otherwise the expensive dependent rows would still run.
+  case "$cid" in
+    preview-runtime-health|impl-url-guard|runtime-env|runtime-text-sequence|required-media-coverage|asset-transfer|geometry-sanity|section-compare)
+      if [ "$rc" -eq 0 ] && [ -f "$art" ]; then
+        if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" - "$art" "$cid" "$REF_DIR" <<'PY_PREREQUISITE'
+import json
+import sys
+from pathlib import Path
+
+artifact, cid, ref = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+if cid == "section-compare" and artifact == ref / "sections/result.txt":
+    # fable-20260910 follow-up review round 3 (deferred item C, now FIXED):
+    # this used to reuse _check_sections_result_health, the GATE's canonical
+    # pass/fail verdict (fails on ANY fail_count > 0). That made one failing
+    # static section a hard prerequisite failure for every motion-consumer
+    # check (hover/video/click/transition-compare) via motion_consumers in
+    # build_required_dispatch.py, even though none of those four scripts
+    # read sections/matches.json or declare it as an input — the edge was
+    # policy, not data. A genuinely failing-but-MEASURED section run starved
+    # an agent of ALL motion evidence and re-ran the full frozen wrapper on
+    # every impl edit during motion iteration. Gate this prerequisite on
+    # MATERIALIZATION only (section-compare actually ran and produced
+    # parseable, non-empty evidence) — the FINAL pass/fail verdict for the
+    # overall clone still comes from _check_sections_result_health inside the
+    # real post-implement gate, unchanged.
+    import re
+
+    try:
+        text = artifact.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        sys.exit(1)
+    m = re.search(
+        r"Result:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL"
+        r"(?:,\s*\d+\s+SKIP)?(?:,\s*(\d+)\s+STRUCTURAL_ONLY)?",
+        text,
+    )
+    if not m:
+        sys.exit(1)
+    pass_count, fail_count, structural_count = int(m[1]), int(m[2]), int(m[3] or 0)
+    sys.exit(0 if pass_count + fail_count + structural_count > 0 else 1)
+try:
+    data = json.loads(artifact.read_text())
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(data, dict) and data.get("status") in ("pass", "warn", "skip") else 1)
+PY_PREREQUISITE
+        then
+          rc=1
+        fi
+      fi
+      if [ "$rc" -ne 0 ]; then
+        mark_failed "$cid"
+      fi
+      ;;
+  esac
   _hover_partial_note=""
   if [ "$cid" = "hover-state-compare" ] && [ "$_artifact_fresh" = "1" ]; then
     _hover_partial_note=$(_hover_state_partial_valid "$art" 2>/dev/null) || _hover_partial_note=""
@@ -632,6 +716,10 @@ except Exception:
 " "$art" 2>/dev/null)
       [ "$_artifact_status" = "fail" ] && _seed_ok=1
     fi
+  fi
+  if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration record "$REF_DIR" "$cid" "$IMPL_ROOT" "$script_path" "$REF_URL" "$IMPL_URL" "$art" "$rc" "$_artifact_fresh"; then
+    SETUP_FAILURE=1
+    break
   fi
   # Seed/update the per-check input-hash sidecar (B1) only when the artifact was
   # freshly written this run and is reusable evidence: pass, cacheable advisory,
@@ -705,5 +793,34 @@ if [ "$FAIL" -gt 0 ]; then
   echo -e "${RED}Run \`uv run python -m ui_clone.gate $REF_DIR post-implement\` for the canonical verdict and per-check fix commands.${NC}"
   exit 1
 fi
-echo -e "${GREEN}CHECKS_PASSED count=$PASS dispatched=$TOTAL.${NC}"
+# fable-20260910 follow-up review round 3 (LOW): re-deriving "is this an
+# iteration-scoped run" from raw env-var non-emptiness diverges from
+# check_iteration.select's own parsing (splits UI_CLONE_ITERATION_CHECKS on
+# "," and drops empties before deciding `active`, ui_clone/check_iteration.py
+# select command). A value like "," or whitespace-only left this branch
+# treating a genuinely FULL dispatch as iteration-scoped: `finish` was never
+# called, the receipt stayed status=running, and hooks/_common.py's
+# quick_tier_blocker then refused closeout after a real full pass. Defer to
+# the SAME decision `select` already wrote to iteration-receipt.json instead
+# of re-deriving it here.
+_iteration_mode=$(PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -c "
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1]) / 'iteration-receipt.json'
+try:
+    d = json.loads(p.read_text())
+    print(d.get('mode', 'final') if isinstance(d, dict) else 'final')
+except Exception:
+    print('final')
+" "$REF_DIR")
+if [ "$_iteration_mode" = "iteration" ]; then
+  echo "ITERATION_CHECKS_FINISHED — selected checks only; run full dispatch before canonical completion."
+else
+  if [ "${UI_CLONE_DISPATCH_DRY:-0}" != "1" ]; then
+    if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration finish "$REF_DIR"; then
+      exit 2
+    fi
+  fi
+  echo -e "${GREEN}CHECKS_PASSED count=$PASS dispatched=$TOTAL.${NC}"
+fi
 exit 0

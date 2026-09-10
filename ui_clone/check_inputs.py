@@ -338,6 +338,31 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     ),
     "live-parity-sweep": _ci(SRC + PUBLIC),
     "ref-screenshot-asset": _ci(SRC + PUBLIC, ("section-map.json",)),
+    # F3 (fable-20260910): section-compare.sh live-navigates the impl URL and
+    # (RECATCH_REF unset) the ref URL each run, sectioning against
+    # section-map.json ground truth. Was UNREGISTERED here, so
+    # compute_check_input_hash returned None -> check_iteration's
+    # inputHash-fingerprint was empty -> should_pause's repeated-failure guard
+    # (>=2 attempts at an unchanged fingerprint) could never trigger for this
+    # check. Register the same live-probe inputs as its sibling
+    # ref-screenshot-asset above.
+    #
+    # Deliberately EXCLUDES sections/matches.json (REF_SECTIONS): section-
+    # compare.sh writes that file itself each run (`python3 -m
+    # ui_clone.section_compare_sections pair ... matches.json`) from a live
+    # getBoundingClientRect() probe, then reads it back later in the SAME run
+    # — self-produced-and-consumed, not an external staleness input. Declaring
+    # it as a ref input would feed each run's own live-measurement jitter
+    # (sub-pixel rect drift, timing) straight into the next retry's
+    # fingerprint, defeating should_pause's repeated-failure guard exactly the
+    # way F3 was defeated (fable-20260910 follow-up review, LOW A). Matches
+    # the documented "rollup constituents ... excludes each rollup's own
+    # output" convention above. See _CHECK_ALLOW in
+    # tests/gates/test_check_inputs_lockstep.py for the matching test carve-out.
+    "section-compare": _ci(
+        SRC + PUBLIC + ENTRY,
+        ("section-map.json",) + REF_SPEC + REF_ASSET_SUB + ("required-media.json",),
+    ),
     "blank-viewport": _ci(SRC + PUBLIC + ENTRY),
     # Live browser probe of the served preview (ref side probes REF_URL, reads
     # no ref-dir artifacts): head assets from ENTRY, overflow from styles,
@@ -392,7 +417,7 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
          "sections/viewports/*/ref/*.png", "sections/viewports/*/impl/*.png",
          "transition-spec.json"),
     ),
-    "masked-region-static": _ci(SRC),
+    "masked-region-static": _ci(SRC, REF_ASSET_SUB),
     # ── ref-artifact-only (no impl input) ──
     "alignment-parity": _ci((), REF_SECTIONS + ("transition-spec.json",)),
     "runtime-spec-coverage": _ci((), REF_SPEC + ("generation-plan.json",)),

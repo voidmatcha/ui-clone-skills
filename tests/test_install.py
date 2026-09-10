@@ -114,7 +114,7 @@ def test_codex_install_projects_and_installs_native_agents() -> None:
     )
     assert 'CODEX_PUBLIC_SKILLS="ui-reverse-engineering ui-capture visual-debug"' in text
     assert (
-        'CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex bin hooks scripts'
+        'CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex/agents bin hooks scripts'
         in text
     )
     projection_match = re.search(
@@ -1262,6 +1262,64 @@ def test_uninstall_removes_recognized_legacy_projection_symlink(
     assert (old_source / ".claude-plugin" / "plugin.json").is_file()
 
 
+def test_uninstall_cleans_up_legacy_bare_codex_symlink_and_new_agents_parent(
+    tmp_path: Path,
+) -> None:
+    """fable-20260910 (Codex dev-hook parity review, finding 6).
+
+    CODEX_PLUGIN_PROJECTION_ITEMS was narrowed from the bare ".codex" to
+    ".codex/agents" so a maintainer-local ".codex/hooks.json" can never be
+    projected. Two uninstall gaps that narrowing introduced/exposed:
+    (a) a pre-existing install whose $CODEX_PLUGIN_DIR/.codex is ITSELF a
+        whole-directory symlink (the old projection shape) is invisible to
+        the new per-item removal loop and was never cleaned up;
+    (b) even a freshly-narrowed, cleanly-owned install left the now-empty
+        real $CODEX_PLUGIN_DIR/.codex parent directory behind, which made
+        the final rmdir of $CODEX_PLUGIN_DIR fail and print a misleading
+        "preserving user-owned path" warning on an otherwise fully-owned tree.
+    """
+    home = tmp_path / "home"
+    plugin_dir = home / "plugins" / "ui-clone-skills"
+    plugin_dir.mkdir(parents=True)
+    # Legacy state (a): .codex itself is a whole-directory symlink, as it
+    # would be from an install predating the CODEX_PLUGIN_PROJECTION_ITEMS
+    # narrowing.
+    (plugin_dir / ".codex").symlink_to(REPO_ROOT / ".codex", target_is_directory=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
+            "AGENTS_SKILLS_DIR": str(home / ".agents" / "skills"),
+            "UI_CLONE_LOCAL_BIN_DIR": str(home / ".local" / "bin"),
+            "COMMAND_LOG": str(command_log),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "--uninstall"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (plugin_dir / ".codex").exists()
+    assert "removed legacy projection symlink" in result.stdout
+    assert not plugin_dir.exists(), (
+        "the now-empty plugin_dir must be fully removed, not left behind "
+        f"with a 'preserving user-owned path' warning: {result.stdout}"
+    )
+    assert f"preserving user-owned path: {plugin_dir}" not in result.stdout
+
+
 def test_claude_legacy_settings_fallback_and_conflict_preservation(
     tmp_path: Path,
 ) -> None:
@@ -1612,6 +1670,38 @@ def test_claude_marketplace_source_is_self_contained_real_files(tmp_path: Path) 
         )
 
 
+def test_claude_install_removes_only_owned_legacy_skill_shadows(tmp_path: Path) -> None:
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_claude(fake_bin / "claude", populate=True)
+    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+
+    legacy = home / ".claude" / "skills"
+    legacy.mkdir(parents=True)
+    (legacy / "ui-capture").symlink_to(checkout / "skills" / "ui-capture")
+    user_owned = legacy / "visual-debug"
+    user_owned.mkdir()
+    (user_owned / "SKILL.md").write_text("user owned\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path,
+        env=_claude_probe_env(tmp_path, home, fake_bin, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (legacy / "ui-capture").exists()
+    assert user_owned.is_dir()
+    assert (user_owned / "SKILL.md").read_text(encoding="utf-8") == "user owned\n"
+
+
 def test_reinstall_refreshes_an_already_installed_claude_plugin(tmp_path: Path) -> None:
     """An install over an existing install must refresh the host's copy.
 
@@ -1803,6 +1893,90 @@ def test_install_runs_an_installed_hook_from_the_host_cache(tmp_path: Path) -> N
     assert str(cache) in invocations, (
         f"probe must run the hook from the host cache, not the checkout; got:\n{invocations}"
     )
+
+
+@pytest.mark.parametrize(
+    ("cache_relative", "reject"),
+    [
+        ("skills/ui-capture/SKILL.md", True),
+        ("ui_clone/removed_module.py", True),
+        ("skills/removed-skill/SKILL.md", True),
+        (".venv/lib/python/site-packages/runtime.py", False),
+        ("ui_clone/__pycache__/runtime.cpython-313.pyc", False),
+        (".host-install-metadata.json", False),
+    ],
+)
+def test_install_rejects_stale_same_version_claude_cache(
+    tmp_path: Path, cache_relative: str, reject: bool
+) -> None:
+    """A successful host update must not hide immutable same-version bytes."""
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_claude(fake_bin / "claude", populate=True)
+    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+
+    version = json.loads(
+        (checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    cache_file = (
+        home
+        / ".claude"
+        / "plugins"
+        / "cache"
+        / "voidmatcha"
+        / "ui-clone-skills"
+        / version
+        / cache_relative
+    )
+
+    first = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path,
+        env=_claude_probe_env(tmp_path, home, fake_bin, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text("stale same-version bytes\n", encoding="utf-8")
+    _write_executable(
+        fake_bin / "claude",
+        '#!/usr/bin/env bash\n'
+        'printf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n'
+        'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
+        '  printf "  ui-clone-skills@voidmatcha\\n"\n'
+        'fi\n',
+    )
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path,
+        env=_claude_probe_env(tmp_path, home, fake_bin, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    combined = result.stdout + result.stderr
+    if reject:
+        assert result.returncode != 0, combined
+        assert "stale bytes" in combined
+        assert cache_relative in combined
+        assert "Bump all six version files" in combined
+    else:
+        assert result.returncode == 0, combined
+
+
+def test_claude_launch_notice_does_not_double_load_plugin_dir() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    notice = text[text.index("loop_setup_notice()") : text.index("register_marketplace()")]
+    assert 'claude --plugin-dir "$CODEX_PLUGIN_DIR"' not in notice
+    assert "--plugin-dir, which would load a second development copy" in notice
 
 
 def test_install_refuses_a_claude_source_that_resolves_inside_the_checkout(

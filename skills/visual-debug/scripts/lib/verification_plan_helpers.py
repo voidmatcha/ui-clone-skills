@@ -452,6 +452,20 @@ def amend_plan(base_path: str, fresh_path: str, out_path: str, plan_derived_raw:
 
     base["requiredChecks"] = base_req
     base["deferredChecks"] = base_def
+    # fable-20260910 follow-up review round 3 (unconfirmed item, now
+    # verified and fixed): amend keeps every other top-level field from the
+    # OLD base plan untouched, so a base plan minted before
+    # ui_clone.verification_scope existed (no "verificationScope" key at
+    # all) would stay scope-less FOREVER across every future --amend — the
+    # fresh build's verificationScope/viewports (computed above, unconditionally,
+    # on every run) never gets a chance to reach the merged output. Backfill
+    # ONLY when the base plan has no verificationScope of its own yet — this
+    # is purely additive and never overwrites a decision an existing plan
+    # (or a user editing it) already made.
+    if "verificationScope" not in base and "verificationScope" in fresh:
+        base["verificationScope"] = fresh["verificationScope"]
+        if "viewports" in fresh:
+            base["viewports"] = fresh["viewports"]
     base["amendedAt"] = datetime.datetime.now(datetime.UTC).isoformat()
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(base, fh, indent=2)

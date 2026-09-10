@@ -967,6 +967,8 @@ _NODE_STRUCTURAL_KEYS = {
     "hover_styles",
     "textSeq",
     "inlineProps",
+    "authoredMediaStyles",
+    "authoredMediaPriorities",
 }
 # U1 — capture-time lazy artifacts; real URLs are promoted onto
 # src/srcset/poster, so these must never be emitted.
@@ -1777,10 +1779,42 @@ def _unbake_capture_height():
         return 900
 
 
+def _width_range_applies(term, capture_w):
+    """Evaluate CSS width range syntax without crediting unknown media axes."""
+    dimension = r"(?:\d+(?:\.\d*)?|\.\d+)(?:px|r?em)"
+    operand = rf"(?:width|{dimension})"
+    match = re.fullmatch(
+        rf"\(\s*({operand})\s*(<=|>=|<|>|=)\s*({operand})"
+        rf"(?:\s*(<=|>=|<|>)\s*({operand}))?\s*\)", term
+    )
+    if not match:
+        return None
+    left, operator, right, next_operator, end = match.groups()
+    if next_operator:
+        # CSS chained ranges place width in the middle, with both comparisons
+        # facing the same direction. Other combinations are invalid syntax.
+        if right != "width" or left == "width" or end == "width" or operator[0] != next_operator[0]:
+            return None
+    elif (left == "width") == (right == "width"):
+        return None
+
+    def value(raw):
+        if raw == "width":
+            return float(capture_w)
+        number = re.fullmatch(r"([\d.]+)(px|r?em)", raw)
+        return float(number.group(1)) * (1 if number.group(2) == "px" else 16)
+
+    def compare(a, op, b):
+        return {"<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b, "=": a == b}[op]
+
+    result = compare(value(left), operator, value(right))
+    return result and compare(value(right), next_operator, value(end)) if next_operator else result
+
+
 def _media_applies(header, capture_w):
     """Does this @media condition text APPLY at capture_w? (v2)
 
-    Only min/max-width terms (px, em, rem) are evaluated; every other axis is
+    Only min/max-width and width-range terms (px, em, rem) are evaluated; every other axis is
     treated as unknown and keeps the bake (conservative — see the v2 table in
     the un-bake block).
 
@@ -1820,7 +1854,10 @@ def _media_applies(header, capture_w):
                 break
             m = re.fullmatch(r"\(\s*(min|max)-width\s*:\s*([0-9.]+)(px|r?em)\s*\)", term)
             if not m:
-                branch_ok = False  # unknown axis → this branch cannot apply
+                range_result = _width_range_applies(term, capture_w)
+                if range_result is True:
+                    continue
+                branch_ok = False  # unknown or inactive axis cannot grant credit
                 break
             # Media-query em/rem are relative to the INITIAL font size (16px),
             # NOT the page font-size, so *16 is exact regardless of the ref's
@@ -4688,7 +4725,11 @@ def render(
             # cap at the container so images/videos scale down on narrow screens;
             # auto height preserves aspect ratio while scaling.
             styles.setdefault("max-width", "100%")
-            if isinstance(styles.get("height"), str) and styles["height"].endswith("px"):
+            if (
+                isinstance(styles.get("height"), str)
+                and styles["height"].endswith("px")
+                and "height" not in set(node.get("inlineProps") or [])
+            ):
                 styles["height"] = "auto"
         elif isinstance(_w, str) and _w.endswith("px"):
             try:
@@ -4855,8 +4896,26 @@ def render(
     if text and not text.strip() and not children:
         styles = dict(styles or {})
         styles["white-space"] = "pre"
+    # Restore authored media box declarations after capture-size synthesis.
+    # A percentage height plus contain is not equivalent to intrinsic auto
+    # height, even when both look similar at one captured viewport.
+    authored_media = node.get("authoredMediaStyles")
+    media_priority_setters = []
+    media_priorities = node.get("authoredMediaPriorities") or {}
+    if tag in ("img", "video") and isinstance(authored_media, dict):
+        for prop in ("width", "height", "object-fit", "object-position"):
+            value = authored_media.get(prop)
+            if isinstance(value, str) and value.strip():
+                styles[prop] = value
+                if isinstance(media_priorities, dict) and media_priorities.get(prop) == "important":
+                    media_priority_setters.append(
+                        f"element.style.setProperty({json.dumps(prop)}, {json.dumps(value)}, \"important\");"
+                    )
     if styles:
         style_attr = f" style={style_to_jsx(styles)}"
+
+    if media_priority_setters:
+        style_attr += " ref={(element) => { if (element) { " + " ".join(media_priority_setters) + " } }}"
 
     # Asset/link attributes captured by extract-dom (Fix 16c). Emit each as a
     # JSX attribute with the HTML→JSX rename where needed. Skip empty values.
@@ -6773,6 +6832,10 @@ def _walk_demote_nonmap(node):
 
 
 def _demote_nested_nonmap_sections(root):
+    # Mirrored reference CSS can qualify selectors by tag, including sections
+    # absent from the coarse section map. Keep those authored tags intact.
+    if _forensic_classname_only():
+        return
     # Duplicate suppression is valid only when the claimed root itself is a
     # section. A mapped div may be a coarse page region on some sites, and
     # its nested sections can be both semantic landmarks and subjects of
@@ -6804,9 +6867,8 @@ for i, sec in enumerate(sections):
         _claimed_doc = DOC_ORDER.get(id(subtree), -1)
         if _claimed_doc > _last_claimed_doc:
             _last_claimed_doc = _claimed_doc
-    # Demote nested non-section-map <section> descendants to <div> so they don't
-    # register as extra section-compare landmarks (impl count must equal the
-    # section-map). The root keeps its <section>; claimed nested sections are kept.
+    # Legacy rebuilds demote nested non-map sections. Forensic CSS mode keeps
+    # source tags; consumed-node pruning separately prevents duplicate emission.
     _demote_nested_nonmap_sections(subtree)
     # Section anchors — captures made before extract-dom recorded HTML ids have
     # no `id` on the subtree root, but section-map.json carries the section's id
@@ -7097,6 +7159,8 @@ def _restore_positioning_context(node):
     if found is None:
         return node
     anc, anc_pos = found
+    if id(anc) in WRAPPER_EMITTED_IDS:
+        return node
     return {
         "tag": "div",
         "class": anc.get("class") or "",
@@ -7143,15 +7207,14 @@ def _collect_uncovered(node):
 
 
 def _demote_uncovered_sections(node):
-    """Recursively demote <section> -> <div> within an uncovered fragment.
+    """Demote uncovered sections only under the legacy rebuild contract.
 
-    Uncovered nodes are not in section-map.json, so they must never render as
-    <section> landmarks (section-compare enumerates impl sections by tag=section;
-    an uncovered <section> inflates the impl count vs the ref). Preserves
-    nested sections when they belong to a coarse landmark such as <footer>:
-    those sections carry real document semantics rather than representing
-    independent section-map entries. Scoped to the uncovered path.
+    Forensic CSS mode preserves source tag selectors and semantic sections even
+    when the coarse section map omits them. Legacy mode retains its existing
+    coarse-landmark exceptions, including nested footer sections.
     """
+    if _forensic_classname_only():
+        return
     if not isinstance(node, dict):
         return
     tag = (node.get("tag") or "").lower()
@@ -7161,6 +7224,43 @@ def _demote_uncovered_sections(node):
         node["tag"] = "div"
     for c in node.get("children") or []:
         _demote_uncovered_sections(c)
+
+
+UNCOVERED_GROUPS: dict = {}
+
+
+def _write_uncovered_component(cname, nodes):
+    _placed = [_restore_positioning_context(_n) for _n in nodes]
+    parts = [r for r in (render(node, indent=3) for node in _placed) if r]
+    # fable-20260910 follow-up review round 3 (LOW, latent): `cname` is
+    # unconditionally registered into `exports`/`group_comp` by the caller
+    # BEFORE this function runs (every uncovered group gets a component name
+    # reserved up front). Returning here without writing the file used to be
+    # safe only because every node group render()'d to something — if a
+    # FUTURE render() path ever yields "" for every node in a group (all
+    # non-dict / SKIP_TAGS today, per render()/`_collect_uncovered`'s own
+    # filtering, so unreachable now), the emitted App.tsx would still `import
+    # ... from "./components/{cname}"` for a file that was never written,
+    # breaking the Vite build with no diagnostic. Always write a real
+    # (possibly empty) component so the import can never dangle.
+    body = "\n".join(parts) if parts else ""
+    file_body = (
+        "// Auto-generated by scaffold-to-jsx.sh — section-uncovered ref nodes,\n"
+        "// preserved at their document position so no visible content is dropped\n"
+        "// or misplaced (specific regression section-compare regression fix).\n"
+        "// Wrapper is a <div>, NOT a <section>: uncovered fragments are absent\n"
+        "// from section-map.json and must not register as section-compare\n"
+        "// landmarks (else impl section count inflates vs the ref).\n"
+        f"export default function {cname}() {{\n"
+        "  return (\n"
+        '    <div data-uncovered="text">\n'
+        f"{body}\n"
+        "    </div>\n"
+        "  );\n"
+        "}\n"
+    )
+    (out_dir / f"{cname}.tsx").write_text(file_body, encoding="utf-8")
+    written.append(f"{cname}.tsx")
 
 
 _collect_uncovered(structure)
@@ -7214,29 +7314,8 @@ if _uncovered:
             _demote_uncovered_sections(_n)
         # Document position is already fixed above (DOC_ORDER keys the original
         # nodes), so restoring the containing block here cannot disturb it.
-        _placed = [_restore_positioning_context(_n) for _n in groups[gi]]
-        parts = [r for r in (render(node, indent=3) for node in _placed) if r]
-        if not parts:
-            continue
         cname = "_UncoveredHead" if gi < 0 else f"_UncoveredAfter{gi}"
-        body = "\n".join(parts)
-        file_body = (
-            "// Auto-generated by scaffold-to-jsx.sh — section-uncovered ref nodes,\n"
-            "// preserved at their document position so no visible content is dropped\n"
-            "// or misplaced (specific regression section-compare regression fix).\n"
-            "// Wrapper is a <div>, NOT a <section>: uncovered fragments are absent\n"
-            "// from section-map.json and must not register as section-compare\n"
-            "// landmarks (else impl section count inflates vs the ref).\n"
-            f"export default function {cname}() {{\n"
-            "  return (\n"
-            '    <div data-uncovered="text">\n'
-            f"{body}\n"
-            "    </div>\n"
-            "  );\n"
-            "}\n"
-        )
-        (out_dir / f"{cname}.tsx").write_text(file_body, encoding="utf-8")
-        written.append(f"{cname}.tsx")
+        UNCOVERED_GROUPS[cname] = groups[gi]
         group_comp[gi] = cname
 
     # Rebuild the App body order: head group, then each section followed by the
@@ -7271,9 +7350,9 @@ if _uncovered:
 # The content sections in the run provide the flow height; the absolute backdrop
 # (which carries its own height) then fills the region the content defines.
 #
-# Fail-safe: a wrapper is only emitted when its section-map descendants form a
-# FULLY CONTIGUOUS run in the final export order (no foreign section interleaved)
-# AND the run has >=2 section components. If the run cannot be safely determined,
+# Fail-safe: a wrapper is only emitted when its mapped and residue descendants form a
+# FULLY CONTIGUOUS run in the final export order (no foreign export interleaved)
+# AND the run has at least two exports. If the run cannot be safely determined,
 # no wrapper is emitted and the current flat behaviour is preserved.
 
 
@@ -7288,20 +7367,36 @@ def _ancestor_chain(node):
 
 
 def _has_absolute_backdrop_child(anc):
-    """True when `anc` directly contains a position:absolute child with no
-    top/left/right/bottom offsets (a full-bleed backdrop that relies on `anc`
-    as its containing block to paint). This is the signal that `anc` MUST be
-    re-emitted: without it the backdrop attaches to the static App root."""
+    """Recognize absolute backdrop children that need their containing block.
+
+    Authored offsets still resolve against that block. For the offset case,
+    require an empty painted layer spanning both axes, so an absolute icon or
+    control does not create a section grouping merely because it is positioned.
+    """
     for c in anc.get("children") or []:
         if not isinstance(c, dict):
             continue
         st = c.get("styles") or {}
         if (st.get("position") or "").strip().lower() != "absolute":
             continue
-        # A backdrop has no positional offsets (defaults to the containing
-        # block's top-left) — a positioned overlay with explicit offsets does
-        # not need re-parenting to look right and is left alone.
-        if not any((st.get(k) or "").strip() for k in ("top", "left", "right", "bottom", "inset")):
+        offsets = {k: str(st.get(k) or "").strip().lower()
+                   for k in ("top", "left", "right", "bottom", "inset")}
+        # Preserve the established no-offset backdrop contract.
+        if not any(offsets.values()):
+            return True
+        if ((c.get("tag") or "div").lower() not in ("div", "span")
+                or c.get("children") or str(c.get("text") or "").strip()
+                or c.get("role") or c.get("tabindex") is not None
+                or not _paints_something(c)):
+            continue
+        inset = offsets["inset"]
+        if inset and "auto" not in inset.split():
+            return True
+        horizontal = (all(offsets[k] not in ("", "auto") for k in ("left", "right"))
+                      or str(st.get("width") or "").strip() == "100%")
+        vertical = (all(offsets[k] not in ("", "auto") for k in ("top", "bottom"))
+                    or str(st.get("height") or "").strip() == "100%")
+        if horizontal and vertical:
             return True
     return False
 
@@ -7419,24 +7514,28 @@ def _wrapper_ancestor_meta(anc):
 
 def _compute_wrapper_groups():
     """Detect positioned/backdrop wrapper ancestors that span a contiguous run of
-    >=2 section components and return them as nesting directives.
+    at least two owned exports and return them as nesting directives.
 
     Returns a list of (start_idx, end_idx, tag, class, style_dict) over the final
     `exports` list (end_idx inclusive). Inner-most wrappers come first so the
     caller can nest them correctly. Empty when nothing qualifies (fail-safe)."""
     # Map each section component name -> index in the final export order.
     export_pos = {nm: i for i, nm in enumerate(exports)}
-    # Section components in document order (those with a resolved subtree). The
-    # _Uncovered* fragments are not section-map entries; they carry no subtree.
-    sec_names = [nm for nm in exports if section_subtrees.get(nm) is not None]
+    # Include residue using its original nodes, before positioning restoration.
+    # All nodes in a residue export must share the proposed ancestor.
+    sec_names = [nm for nm in exports if section_subtrees.get(nm) is not None or nm in UNCOVERED_GROUPS]
     # ancestor id() -> {"node": anc, "names": [section names in doc order]}
     anc_groups = {}
     anc_order = []
     for nm in sec_names:
         sub = section_subtrees.get(nm)
-        if sub is None:
-            continue
-        for anc in _ancestor_chain(sub):
+        nodes = [sub] if sub is not None else UNCOVERED_GROUPS[nm]
+        chains = [_ancestor_chain(node) for node in nodes]
+        # A mixed-owner residue fragment cannot be swallowed by one region.
+        common = set.intersection(*(set(map(id, chain)) for chain in chains)) if chains else set()
+        for anc in chains[0] if chains else []:
+            if id(anc) not in common:
+                continue
             # The structure root is already re-emitted as the App root div —
             # never re-wrap it as a nested grouping wrapper.
             if anc is structure:
@@ -7461,15 +7560,11 @@ def _compute_wrapper_groups():
         if len(positions) < 2:
             continue
         start, end = positions[0], positions[-1]
-        # Fail-safe contiguity check: every section component (subtree-bearing
-        # export) within [start, end] MUST belong to this wrapper. If a foreign
-        # section is interleaved, the wrapper does not cleanly span a contiguous
-        # run and we abstain (re-emitting it would either swallow the foreign
-        # section or split the run — both worse than flat). _Uncovered* fragments
-        # inside the span are fine: they are this region's own residue content.
+        # Every export in the span must belong to this ancestor. Mixed-owner
+        # residue and foreign sections must never be swallowed by the wrapper.
         member_pos = set(positions)
         foreign = any(
-            section_subtrees.get(exports[i]) is not None and i not in member_pos
+            i not in member_pos
             for i in range(start, end + 1)
         )
         if foreign:
@@ -7508,6 +7603,10 @@ def _compute_wrapper_groups():
 WRAPPER_EMITTED_IDS: set = set()
 
 WRAPPER_GROUPS = _compute_wrapper_groups()
+
+# Render residue only after grouping accepts/rejects its containing block.
+for _uncovered_name, _uncovered_nodes in UNCOVERED_GROUPS.items():
+    _write_uncovered_component(_uncovered_name, _uncovered_nodes)
 
 # Fix 88 band divs whose owner IS re-emitted are now redundant: the owner paints
 # the region through the mirrored ref CSS. Undo them, restoring the wrapper's

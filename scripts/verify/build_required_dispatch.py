@@ -249,33 +249,6 @@ for row in dispatch_rows:
         normal_rows.append(row)
 
 
-def _ensure_section_compare_precedes_alignment_checks(rows: list[tuple[str, str, str, str, str, str, str]]) -> list[tuple[str, str, str, str, str, str, str]]:
-    """Keep section-compare before consumers whose checks rely on section matches.
-
-    `alignment-parity` and `alignment-sweep` consume `sections/matches.json`
-    artifacts generated (or refreshed) by section-compare. If their rows are
-    emitted earlier, the B1 staleness hash can short-circuit them and reuse a
-    stale verdict. Keep these checks after section-compare within the same
-    dispatch pass.
-    """
-    section_idx = None
-    alignment_consumer_idxs = []
-    for i, row in enumerate(rows):
-        cid = row[1]
-        if cid == "section-compare":
-            section_idx = i
-        if cid in {"alignment-parity", "alignment-sweep"}:
-            alignment_consumer_idxs.append(i)
-
-    if section_idx is None or not alignment_consumer_idxs:
-        return rows
-
-    earliest_consumer = min(alignment_consumer_idxs)
-    if earliest_consumer < section_idx:
-        row = rows.pop(section_idx)
-        rows.insert(earliest_consumer, row)
-    return rows
-
 
 # post-implement also requires canonical section evidence
 # (sections/result.txt), but verification-plan.json historically lists only
@@ -295,13 +268,13 @@ if not has_section_row and has_ref_screenshots and section_script.is_file():
     # refuses a single-viewport result.txt for them. Computed once; both the frozen
     # wrapper and the fast single-pass path carry it.
     vps = []
-    if (Path(ref_dir) / "detected-breakpoints.json").is_file():
+    if plan.get("verificationScope") or (Path(ref_dir) / "detected-breakpoints.json").is_file():
         for vp in plan.get("viewports") or []:
             try:
                 vps.append(f"{int(vp['w'])}x{int(vp['h'])}")
             except (KeyError, TypeError, ValueError):
                 continue
-    viewport_env = [f"VIEWPORTS={','.join(vps)}"] if len(vps) > 1 else []
+    viewport_env = [f"VIEWPORTS={','.join(vps)}"] if vps else []
     if tier == "comprehensive" and frozen_script.is_file():
         # Capture-variance determinism (specific regression): the comprehensive tier runs the
         # 3-pass frozen-ref + impl-path-calib wrapper so the impl is captured at the
@@ -345,7 +318,103 @@ if not has_section_row and has_ref_screenshots and section_script.is_file():
         )
     )
 
-normal_rows = _ensure_section_compare_precedes_alignment_checks(normal_rows)
-
+# Serialize the render prerequisites before targeted selection so iteration
+# dependency closure and the full dispatcher enforce the same phase barrier.
+# Only add present checks: legacy plans do not gain fictitious pass evidence.
+render_prerequisites = {"preview-runtime-health", "impl-url-guard", "runtime-env"}
+content_prerequisites = {"runtime-text-sequence", "required-media-coverage", "asset-transfer"}
+foundations = render_prerequisites | content_prerequisites
+# alignment-parity / alignment-sweep consume sections/matches.json, which
+# section-compare (re)writes. This used to be enforced only by reordering rows
+# textually (_ensure_section_compare_precedes_alignment_checks, now removed) —
+# but that reorder was applied BEFORE this loop adds section-compare's own
+# `foundations | {geometry-sanity}` dependency, and on any real plan the
+# content-prerequisite rows (runtime-text-sequence/asset-transfer/required-
+# media-coverage) are emitted textually AFTER alignment-parity/alignment-sweep.
+# The stable topological sort below then dispatches the alignment rows FIRST
+# (they have no unmet deps yet) while section-compare waits on its own
+# prerequisites — alignment consumers ran against STALE matches.json and the
+# post-implement gate then flagged them as stale-artifact failures on every
+# canonical run (fable-20260910 follow-up review round 3, MAJOR). Making the
+# data edge explicit as a real dependency lets the topo sort enforce it
+# correctly instead of relying on emission order.
+alignment_consumers = {"alignment-parity", "alignment-sweep"}
+# fable-20260910 follow-up review round 3 (MINOR): "batch-compare" and
+# "scroll-anim-temporal-diff" are not real check ids (verification-plan.sh's
+# only add_check id for that script is "scroll-anim-temporal"; batch-compare
+# has no add_check row at all) — harmless via the `& present_ids` filter
+# below, but misleading. Removed.
+motion_consumers = {
+    "transition-fires", "spec-implementation-coverage", "transition-trajectory",
+    "scroll-state-machine", "video-motion-compare",
+    "hover-state-compare", "click-state-compare", "transition-compare",
+    "scroll-anim-temporal",
+}
+matched_state_consumers = {
+    "video-motion-compare", "hover-state-compare",
+    "click-state-compare", "transition-compare", "scroll-anim-temporal",
+}
+present_ids = {row[1] for row in normal_rows + rollup_rows}
+ordered_rows = []
 for row in normal_rows + rollup_rows:
+    required = set()
+    if row[1] in content_prerequisites:
+        required = render_prerequisites
+    elif row[1] == "geometry-sanity":
+        required = foundations
+    elif row[1] == "section-compare":
+        # Static section evidence must precede full motion probes: a missing
+        # section is a foundation failure, not a trajectory failure.
+        required = foundations | {"geometry-sanity"}
+    elif row[1] in alignment_consumers:
+        required = {"section-compare"}
+    elif row[1] in motion_consumers:
+        required = foundations | {"geometry-sanity", "section-compare"}
+        if row[1] in matched_state_consumers:
+            required |= {"transition-trajectory", "scroll-state-machine"}
+    if required:
+        required_deps = sorted(set(row[6].split()) | (required & present_ids))
+        row = (*row[:6], " ".join(required_deps))
+    ordered_rows.append(row)
+
+# Stable topological dispatch: newly declared prerequisites must run before
+# consumers even when an older/manual plan lists expensive rows first.
+pending_rows = list(ordered_rows)
+ordered_rows = []
+emitted_ids: set[str] = set()
+while pending_rows:
+    ready = next((index for index, item in enumerate(pending_rows)
+                  if set(item[6].split()) & present_ids <= emitted_ids), None)
+    if ready is None:
+        raise ValueError("Required-check dependencies contain a cycle")
+    row = pending_rows.pop(ready)
+    ordered_rows.append(row)
+    emitted_ids.add(row[1])
+
+for row in ordered_rows:
+    # MANUAL rows (e.g. scroll-anim-temporal-diff.sh) carry the literal
+    # string "MANUAL" as args, not a real dispatch template — run-required-
+    # checks.sh matches that literal exactly to skip them as agent-invoked
+    # advisories (`[ "$args" = "MANUAL" ]`). Prepending the desktop-scope
+    # ENV: prefix here used to turn "MANUAL" into "ENV:VIEWPORTS=... --
+    # MANUAL", which no longer matches that check — the row was dispatched
+    # for real with "MANUAL" as its only positional arg and always failed
+    # (e.g. "Missing ref-url"), blocking auto-verify closeout under the
+    # default desktop scope (fable-20260910 follow-up review).
+    if (
+        row[0] == "DISPATCH"
+        and row[3] != "MANUAL"
+        and plan.get("verificationScope", {}).get("mode") == "desktop"
+    ):
+        # Cheap boundary checks read scope directly; all generic VIEWPORTS
+        # consumers receive only the detailed representative viewport.
+        viewport = plan["verificationScope"]["representative"]
+        assignment = (f"VIEWPORTS={int(viewport['w'])}x{int(viewport['h'])} "
+                      f"VIEW_W={int(viewport['w'])} VIEW_H={int(viewport['h'])}")
+        args = row[3]
+        if args.startswith("ENV:"):
+            args = f"ENV:{assignment} " + args[4:]
+        else:
+            args = f"ENV:{assignment} -- {args}"
+        row = (*row[:3], args, *row[4:])
     print("\t".join(row), flush=True)
