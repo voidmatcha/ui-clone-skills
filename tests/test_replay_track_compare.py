@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import ModuleType
 
 from ui_clone.replay_track import build_recording_manifest, track_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "visual-debug" / "scripts" / "replay-track-compare.py"
+
+
+def _load_compare_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("replay_track_compare", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _valid_track() -> dict[str, object]:
@@ -263,6 +274,46 @@ def test_replay_track_compare_captures_declared_track_and_writes_aggregate() -> 
         assert json.loads(log_path.read_text(encoding="utf-8"))[0] == "http://127.0.0.1:3000"
         assert (ref / "transitions" / "replay-tracks" / "impl" / "hero-replay-track.json").is_file()
         assert (ref / "transitions" / "replay-tracks" / "impl" / "hero-replay-track.manifest.json").is_file()
+
+
+def test_candidate_paths_disambiguate_equal_basenames(tmp_path: Path) -> None:
+    module = _load_compare_module()
+    ref = tmp_path / "ref"
+    first = ref / "clip" / "ref" / "hero-replay-track.json"
+    second = ref / "alternate" / "hero-replay-track.json"
+    tracks = [
+        ("hero", first, first.with_name("hero-replay-track.manifest.json")),
+        ("alternate", second, second.with_name("hero-replay-track.manifest.json")),
+    ]
+
+    paths = module._candidate_paths(ref, tracks)
+
+    assert len(paths) == 2
+    assert paths[0] != paths[1]
+    assert all(path.parent == ref / "transitions" / "replay-tracks" / "impl" for path in paths)
+    assert all(path.name.startswith("hero-replay-track-") for path in paths)
+
+
+def test_candidate_paths_reserve_legacy_names_before_disambiguation(tmp_path: Path) -> None:
+    module = _load_compare_module()
+    digest = hashlib.sha256(b"first\0a/track.json").hexdigest()[:10]
+    names = [("first", "a/track.json"), ("second", "b/track.json"),
+             ("third", f"c/track-{digest}.json"),
+             ("fourth", f"d/track-{digest}-2.json")]
+    tracks = [(name, tmp_path / path, (tmp_path / path).with_suffix(".manifest.json"))
+              for name, path in names]
+    paths = module._candidate_paths(tmp_path, tracks)
+    assert len(set(paths)) == len(tracks)
+    assert paths[2].name == f"track-{digest}.json"
+    assert paths[3].name == f"track-{digest}-2.json"
+    assert module._candidate_paths(tmp_path, list(reversed(tracks))) == list(reversed(paths))
+
+
+def test_candidate_paths_keep_duplicate_declarations_distinct(tmp_path: Path) -> None:
+    module = _load_compare_module()
+    track = ("same", tmp_path / "track.json", tmp_path / "track.manifest.json")
+    paths = module._candidate_paths(tmp_path, [track, track])
+    assert len(set(paths)) == 2
 
 
 def test_replay_track_compare_does_not_reuse_stale_candidate() -> None:

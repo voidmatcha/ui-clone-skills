@@ -136,4 +136,5 @@ def test_inline_scripts_shell_validates_origin() -> None:
     """A lost page target must not publish an empty inline-script inventory."""
     shell = (ROOT / "scripts" / "extract" / "inline-scripts.sh").read_text(encoding="utf-8")
     assert "validate-agent-browser-origin.py" in shell
+    assert 'python3 "$ORIGIN_VALIDATOR" "$EXPECTED_URL"' in shell
     assert "--session" in shell

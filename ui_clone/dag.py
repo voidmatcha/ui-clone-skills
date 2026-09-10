@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+# Runtime verification reports (for example font-parity.json) are outputs,
+# not plan inputs. Font sources and substitution decisions remain inputs.
 GENERATION_PLAN_SOURCES = (
     "section-map.json",
     "styles.json",
@@ -34,7 +36,6 @@ GENERATION_PLAN_SOURCES = (
     "layout-decisions.json",
     "component-map.json",
     "asset-substitution.json",
-    "font-parity.json",
     "bundle-extraction.json",
     "sticky-elements.json",
     "hidden-elements.json",

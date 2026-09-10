@@ -661,3 +661,52 @@ global.document = {
     first_capture = (tree.get("children") or [])[0]
     assert first_capture.get("text") == "Version:"
     assert first_capture.get("wsAfter") is True, first_capture
+
+
+def test_capture_preserves_authored_media_units_and_fit(tmp_path: Path) -> None:
+    if not shutil.which('node'):
+        pytest.skip('node required')
+    iife = _extract_iife(SCRIPT.read_text())
+    stub = DOM_STUB + r'''
+const findImage = (n) => n.tagName === 'IMG' ? n : n.children.map(findImage).find(Boolean);
+const image = findImage(root);
+const authored = {'width':'100%','height':'100%','object-fit':'contain','object-position':'20% 50%'};
+image.style = {length:4, getPropertyValue:(p)=>authored[p] || '', getPropertyPriority:(p)=>p === 'object-fit' ? 'important' : ''};
+global.getComputedStyle = (_el) => ({display:'block', position:'static',
+    getPropertyValue:(p)=> p === 'width' ? '65.3281px' : p === 'height' ? '135.75px' : authored[p] || ''});
+'''
+    proc = subprocess.run(['node', '-e', stub + '\nconsole.log(' + iife + ');'],
+                          capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    image = _find(json.loads(proc.stdout), 'img')
+    assert image is not None
+    assert image['authoredMediaStyles'] == {'width':'100%', 'height':'100%', 'object-fit':'contain', 'object-position':'20% 50%'}
+    assert image['styles']['object-fit'] == 'contain'
+    assert image['authoredMediaPriorities'] == {'object-fit': 'important'}
+
+    # Exercise the actual capture -> reconciled structure -> forensic generator
+    # path, rather than only supplying the new metadata directly to a renderer.
+    ref = tmp_path / 'ref'
+    ref.mkdir()
+    tree = {'tag': 'body', 'children': [{'tag': 'section', 'class': 'hero', 'children': [json.loads(proc.stdout)]}]}
+    (ref / 'structure.json').write_text(json.dumps(tree))
+    (ref / 'revealed.json').write_text('[]')
+    (ref / 'section-map.json').write_text(json.dumps({'sections': [{'index': 0, 'tag': 'section', 'cls': 'hero'}]}))
+    (ref / 'generation-plan.json').write_text(json.dumps({'forensicPreservation': {'strategy': 'ref-derived-jsx-with-local-css'}}))
+    (ref / 'css').mkdir()
+    (ref / 'css' / 'main.css').write_text('img{object-fit:cover}')
+    merge = subprocess.run(['python3', str(REPO / 'scripts/extract/_reconcile_spec_targets.py'),
+                            'merge', str(ref), str(ref / 'revealed.json')],
+                           capture_output=True, text=True, timeout=15)
+    assert merge.returncode == 0, merge.stderr
+    merged_image = _find(json.loads((ref / 'structure.merged.json').read_text()), 'img')
+    assert merged_image is not None
+    assert merged_image['authoredMediaStyles'] == image['authoredMediaStyles']
+    impl = tmp_path / 'impl'
+    generated = subprocess.run(['bash', str(REPO / 'skills/visual-debug/scripts/scaffold-to-jsx.sh'), str(ref), str(impl)],
+                               capture_output=True, text=True, timeout=30)
+    assert generated.returncode == 0, generated.stderr
+    output = ''.join(p.read_text() for p in (impl / 'src').rglob('*.tsx'))
+    assert 'width: "100%"' in output and 'height: "100%"' in output
+    assert 'objectFit: "contain"' in output
+    assert 'element.style.setProperty("object-fit", "contain", "important")' in output

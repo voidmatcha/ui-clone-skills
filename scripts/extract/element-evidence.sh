@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "Usage: element-evidence.sh <agent-browser-session> <css-selector> <output-json>" >&2
+if [[ $# -lt 4 || $# -gt 5 ]]; then
+  echo "Usage: element-evidence.sh <agent-browser-session> <expected-url> <css-selector> <output-json> [navigation-receipt]" >&2
   exit 2
 fi
 
 SESSION="$1"
-SELECTOR="$2"
-OUT="$3"
+EXPECTED_URL="$2"
+SELECTOR="$3"
+OUT="$4"
+NAVIGATION_RECEIPT="${5:-$(dirname "$OUT")/capture-navigation.json}"
 
 SELECTOR_JSON="$(python3 - "$SELECTOR" <<'PY'
 import json
@@ -165,7 +167,8 @@ if ! agent-browser --session "$SESSION" eval --json "$EVAL_JS" >"$RAW_FILE"; the
   echo "element-evidence: agent-browser eval failed (session=$SESSION)" >&2
   exit 3
 fi
-if ! python3 "$ORIGIN_VALIDATOR" < "$RAW_FILE"; then
+if ! python3 "$ORIGIN_VALIDATOR" "$EXPECTED_URL" --session "$SESSION" \
+  --navigation "$NAVIGATION_RECEIPT" < "$RAW_FILE"; then
   echo "element-evidence: agent-browser eval returned a non-page origin (session=$SESSION)" >&2
   exit 3
 fi

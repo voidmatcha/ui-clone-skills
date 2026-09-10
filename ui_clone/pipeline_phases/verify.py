@@ -125,6 +125,25 @@ def _unmeasurable_motion_blocker(ref_dir: Path) -> str | None:
     )
 
 
+def _scope_evidence(ref_dir: Path) -> dict | None:
+    path = ref_dir / "verification-plan.json"
+    if not path.exists():
+        return None
+    plan = json.loads(path.read_text())
+    if not isinstance(plan, dict):
+        raise ValueError("Invalid verification scope plan")
+    scope = plan.get("verificationScope")
+    if scope is None:
+        return None
+    if not isinstance(scope, dict):
+        raise ValueError("Invalid verification scope")
+    return {"verificationScope": scope, "viewports": plan.get("viewports", [])}
+
+
+def _scope_hash(scope: dict) -> str:
+    return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
+
+
 def build_verify_stamp(ref_dir: Path, impl_dir: Path, gates: list[str]) -> dict:
     """Canonical verify-stamp payload, hash-pinned to closeout evidence.
 
@@ -155,11 +174,22 @@ def build_verify_stamp(ref_dir: Path, impl_dir: Path, gates: list[str]) -> dict:
         artifact = ref_dir / artifact_name
         if artifact.is_file():
             stamp[stamp_key] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    scope = _scope_evidence(ref_dir)
+    if scope is not None:
+        stamp["verificationScope"] = scope["verificationScope"]
+        stamp["verificationScopeSha256"] = _scope_hash(scope)
     return stamp
 
 
 def verify_stamp_evidence_problem(ref_dir: Path, stamp: dict) -> str | None:
     """Return a problem when motion evidence no longer matches its stamp pins."""
+    try:
+        scope = _scope_evidence(Path(ref_dir))
+    except (OSError, ValueError) as exc:
+        return f"Verification scope could not be read: {exc}"
+    expected = _scope_hash(scope) if scope is not None else None
+    if stamp.get("verificationScopeSha256") != expected:
+        return "Verification scope changed or is not pinned by the completion stamp"
     for artifact_name, stamp_key in _MOTION_EVIDENCE_PINS:
         artifact = Path(ref_dir) / artifact_name
         stamped_sha = stamp.get(stamp_key)

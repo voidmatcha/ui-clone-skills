@@ -21,7 +21,7 @@ Sub-docs must match `skills/ui-reverse-engineering/SKILL.md` pipeline numbering:
 
 Each gate checks artifacts produced BEFORE that gate fires. Dispatch keys live in `ui_clone/gate.py` `VALID_GATES`:
 
-- `reference` (after Phase 1 / `/ui-capture`): `static/ref/` ≥5 PNGs, `transitions/ref/` ≥1 file, `regions.json`
+- `reference` (after Phase 1 / `/ui-capture`, or after a later Phase 2 repairs deferred provisional/failed evidence): `static/ref/` ≥5 PNGs, `regions.json`, and either ≥1 WebM in `transitions/ref/` or transition artifacts with matching live-capture/inventory provenance. Backed artifacts must include a WebM/MP4 `video` or distinct PNG state paths (`idle`/`active`, `before`/`after`, or `state-N`). Deferral requires Phase 2 later in the same invocation; it must repair the evidence and pass this gate. A Phase-2-only resume rechecks current reference evidence when the five-screenshot baseline exists or reference completion was previously recorded; a recorded completion with a missing baseline fails. Phase 1 status separately requires the full-scroll video; transition PNG pairs do not replace it.
 - `extraction` (after Step 3): `structure.json`, `head.json`, `styles.json`, `fonts.json`, `visible-images.json`, `inline-svgs.json`, `body-state.json`, `design-bundles.json`, `css/variables.txt`, `em-conversion.json` (if `scalingSystem ≠ px-fixed`)
 - `bundle` (after 5c-a): `bundles/` (≥1 JS chunk; warns <3), `interactions-detected.json`, `scroll-engine.json`
 - `paid-features` (after 5c-c): `paid-features.json` — every paid font CDN hit must have `decision` ∈ {`use`, `substitute`, `skip`}. Empty findings pass. GSAP plugins are not checked (GSAP is now 100% free). See `skills/visual-debug/scripts/paid-features-detect.sh`.
@@ -29,6 +29,13 @@ Each gate checks artifacts produced BEFORE that gate fires. Dispatch keys live i
 - `pre-generate` (before Step 7): `extracted.json`, `transition-coverage.json`, `section-map.json`, hover timing resolved, `dom-state-diff.json` (if hasPreloader), `webflow-*` (if Webflow), audit artifacts (element-roles, element-groups, layout-decisions, component-map)
 - `state-coverage` (between `pre-generate` and `post-implement`): multi-snapshot capture artifacts vs impl source. Reads `state-structure-spec.json` as the compact rollup plus `states/splash/trajectory.json`, `states/scroll/summary.json`, `states/hover/manifest.json`, and optional `states/click/manifest.json`, then verifies impl/src/** has matching hooks (class strings from splash transitions, scroll-state primitives like IntersectionObserver/ScrollTrigger/useScroll, hover handlers like `:hover`/`hover:`/`onMouseEnter`/`whileHover`, click state handlers when captured). Skips silently when `states/` directory is absent (legacy ref dirs predate the multi-snapshot capture pipeline). Partial captures check only the present phases. Produced by `scripts/extract/capture-states.sh` (Phase A splash), `scripts/extract/capture-scroll.sh` (Phase B scroll), `scripts/extract/capture-hover.sh` (Phase C hover), `scripts/extract/capture-click.sh` (click state), and `scripts/extract/state-structure-spec.py` (compact rollup).
 - `post-implement` (after each transition impl): `extracted.json`, `transition-spec.json`, `static/ref` ≥5, plus every block-severity `verification-plan.json` artifact for the active tier. The per-tier sub-checks are enumerated in the table below; their full anti-cheat hardening rationale (Rounds 3–7, pixel-truth visible-identity, splash distribution calibration) lives in [`gate-hardening-history.md`](gate-hardening-history.md).
+
+The `spec` selector census also reads recorded splash DOM snapshots under
+`states/splash/`, backed by a checked summary and matching trajectory timestamps.
+An initial loading element need not remain in the settled `structure.json`.
+Spec declarations and reconciliation reports alone do not prove its presence;
+class/id tokens must occur in one captured DOM snapshot, not across different
+moments or inside script strings or inert templates.
 
 ### post-implement sub-checks
 
@@ -66,9 +73,15 @@ The verification-path hardening narratives (frozen same-frame section-compare, v
 
 **Phase 0A note:** `canvas-webgl-detection.json` is produced by the pipeline via `skills/visual-debug/scripts/canvas-webgl-detect.sh` but is *advisory*, not gated — it routes the agent to `canvas-webgl-extraction.md` when needed. No `gate_canvas_*` exists.
 
-## Rejected design notes
+## Cache and completion scope
 
-**Rejected: fingerprint-cached check reuse.** A proposal to skip re-running a check when its input fingerprint (impl source-tree hash + relevant ref-artifact hashes + check-script hash) exactly matches the fingerprint recorded in the last GREEN artifact was reviewed and **declined** (design review 2026-06-12). The intended saving is only 1–3 min/loop, against an unbounded anti-cheat risk: (1) no per-check input-set contract exists — `verification-plan.json` rows carry no file-input lists and the dispatcher maps args, not inputs, so mapping drift would cause silent stale-GREEN reuse; (2) the "deterministic" candidates are not pure file-IO (junk-token has a live-DOM mode; alignment depends on `UI_CLONE_ALIGN_*` / `UI_CLONE_GENERATED_EVIDENCE_DIRS` env state); (3) consumer-side fingerprint recomputation is intractable today (the canonical verify stamp only hash-pins `sections/`+`result.txt`), and cached old-mtime artifacts break the dispatcher/gate/Stop-hook freshness checks in both directions. The tier system already addresses cost where it matters, and `section-compare` has its own scoped content-hash fast path. No caching is implemented; checks always re-run.
+Reference-only caching reuses validated baseline/calibration captures with matching
+reference content, source code, URL, viewport/settings, and bounded TTL. It never
+reuses implementation measurements. Missing or unknown check inputs remain
+conservative; partial iteration receipts cannot satisfy either closeout path.
+Canonical completion binds the selected scope and representative viewports.
+Desktop completion covers the representative viewport plus mandatory live boundary
+probes, and must be reported as desktop-only. Scope expansion requires verification.
 
 ## Ref-vs-ref self-pass invariant (batch-11)
 

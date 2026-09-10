@@ -82,7 +82,7 @@ EVAL_TYPOGRAPHY='(() => {
 probe() {
   local session="$1" url="$2"
   agent-browser --session "$session" open "$url" >/dev/null 2>&1
-  agent-browser --session "$session" set viewport 1280 800 >/dev/null 2>&1
+  agent-browser --session "$session" set viewport "${VIEW_W:-1280}" "${VIEW_H:-800}" >/dev/null 2>&1
   agent-browser --session "$session" wait 2500 >/dev/null 2>&1
   agent-browser --session "$session" eval "$EVAL_TYPOGRAPHY" 2>/dev/null | tail -1
 }

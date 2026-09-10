@@ -74,6 +74,29 @@ node bin/ui-clone <url> <component-or-run-dir> <session> status --json
 
 ## Next action
 
+### Browser identity for manual retries
+
+The pipeline exports a browser namespace and color scheme to its child
+processes. Those exports do not propagate back to the calling shell. Before
+running a manual helper against a session created by the driver, restore the
+same values in that shell:
+
+```bash
+SESSION='<same-project-name-used-by-the-driver>'
+: "${AGENT_BROWSER_NAMESPACE:=ui-clone-$(printf '%s' "$SESSION" | cksum | awk '{print $1}')}"
+: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
+export AGENT_BROWSER_NAMESPACE AGENT_BROWSER_COLOR_SCHEME
+```
+
+If the original run used explicit overrides, export those exact values instead.
+Changing launch settings can restart the browser; a matching session name alone
+does not preserve its page. Redirect receipts also bind to the namespace and
+session, so keep `capture-navigation.json` in the reference directory when
+retrying `inline-scripts.sh` or `element-evidence.sh`. If element evidence is
+written outside that directory, pass the receipt path as its fifth argument.
+
+### Resume the pipeline
+
 ```bash
 node bin/ui-clone pipeline <url> <component-or-run-dir> <session> next --json
 ```
@@ -129,10 +152,24 @@ Prints the goal card (target, progress, hard-cap state) for a run.
 
 ## Bounded logs for agent hosts
 
+When `pipeline run` includes Phase 1, provisional or failed reference evidence
+returns nonzero unless Phase 2 is scheduled later in that invocation. Phase 2
+must repair the evidence and pass the reference gate; a missing screenshot
+baseline or an older completed reference gate cannot waive that requirement.
+Resuming Phase 2 on its own also rechecks current reference evidence whenever
+the five-screenshot baseline exists or a prior reference completion is recorded.
+A prior completion with fewer than five baseline screenshots fails the resume;
+restore the baseline before continuing.
+Phase 1 status still requires the full-scroll video separately from transition
+evidence, which may use verified PNG pairs or an inventory-backed MP4.
+
 Pipeline `run` and `verify` keep full subprocess output under
 `tmp/ref/<component>/logs/` and print concise status lines by default. This keeps
 Codex/Claude transcripts small enough to resume safely after long browser,
 capture, or gate runs.
+Each invocation also preserves an immutable log under the scope's `attempts/`
+directory; the stable log filename continues to show the latest attempt.
+Earlier failures therefore remain available after a retry.
 
 - `UI_CLONE_LOG_TAIL_LINES=120` controls failure-tail echo length.
 - `UI_CLONE_LOG_TAIL_LINES=0` prints log paths only.
@@ -204,3 +241,56 @@ past a gate voids the measurement signal the gate exists to produce.
 If a gate is blocking legitimate clone work, the fix is to re-run the canonical
 check (the deny message names it), not to set these. For genuinely non-clone
 work, a human decides — ask the user before setting either flag.
+
+## Desktop scope and repair iterations
+
+Implementation preserves source responsive CSS and structural variants from the start.
+`generation-plan.json.responsiveImplementation` is independent of verification scope;
+its policy is not proof that unmeasured layouts pass.
+
+`verification-plan.sh <ref-dir> --scope=desktop` is the default: one detailed
+representative viewport plus cheap live probes inside the inferred desktop band.
+Use `--scope=all` for an explicitly requested responsive sweep. Completion reports
+and stamps retain the scope; desktop completion prompts for additional layouts.
+
+For repair runs, set `UI_CLONE_ITERATION_CHECKS=id,id` or
+`UI_CLONE_CHANGED_FILES=/path/to/newline-separated-impl-relative-paths` when invoking
+`run-required-checks.sh`. Dependency checks remain selected. Unknown inputs are
+conservative. Unset both for final dispatch; `iteration-receipt.json` is a dispatch
+receipt, never completion evidence. Partial, dry, failed, or unfinished dispatch receipts block canonical closeout.
+Only a successful full dispatch records `status: completed`; canonical gates still
+validate all artifacts before stamping completion.
+
+Known failures enter a targeted repair loop before another full `auto-verify.sh`
+run: inspect failing rows, fix the cause, and rerun the failed check with its
+dependencies. A build pass is not runtime evidence. The umbrella exits failed
+after a failed required-check dispatch instead of starting further visual capture.
+Content and runtime checks precede geometry and section comparison. Exhaustive
+transition firing, trajectory/state sweeps, and frame comparisons depend on that
+section evidence. These prerequisites also apply to targeted dispatch selection.
+Failed prerequisites
+block dependent captures while independent diagnostics may continue. Final
+full-scope verification remains mandatory after repair.
+
+Trajectory sampling uses captured changing intervals in addition to global page
+fractions. Missing target ranges produce `transitions/trajectory-sampling.json`
+with an error and the selectors requiring capture; recover that evidence rather
+than reducing the target set. Additional local samples compare settled geometry,
+while optional full-frame diagnostics remain at the global sample positions.
+
+Per-check `iteration-retries/` receipts classify failures and stop two identical
+failures with unchanged inputs from causing another expensive blind retry.
+After diagnosing an external condition, remove the named per-check retry receipt
+to retry; do not remove failing evidence or weaken required checks.
+
+## Worker routing and bounded recovery
+
+Specialized role installation does not prove host runtime availability. If a role
+is absent or rejected, use a generic native worker with the same shared contract
+and explicit artifact ownership; remember the rejection for this session. Only
+use the bounded inline fallback when delegation itself is unavailable or the work
+cannot run independently. Keep all gate requirements unchanged.
+
+Use `pipeline ... next --json` and `pipeline ... report --for-llm` before reopening
+large source artifacts. A schemaVersion 1 base generation plan still needs enrichment;
+inspect the exact pre-generate failures and complete that work before implementation.

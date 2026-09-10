@@ -9,6 +9,10 @@ Resolve plugin root as `${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cat "$HOME/.confi
 
 Read `$PLUGIN_ROOT/skills/visual-debug/comparison-fix.md` and follow the **Phase E: LLM Review** section.
 
+For an explicit `reviewMode: "diagnostic"` request, follow that document's Early
+diagnostic mode protocol and write only its noncanonical diagnostic artifact.
+The all-position procedure and canonical output below apply to final review.
+
 Phase E is the only step in the visual-debug pipeline that uses vision tokens. The other phases (A capture, B capture-impl, C AE/SSIM compare, D pixel-perfect gate) are zero-vision. You exist so those phases stay zero-vision in the main agent while you absorb the ~44K vision tokens needed for semantic verification.
 
 For each scroll-position pair under `tmp/ref/<component>/static/`:
@@ -55,6 +59,6 @@ For each scroll-position pair under `tmp/ref/<component>/static/`:
 
 Both outputs use the same PASS/PARTIAL/FAIL classification. The verdict table is the routing signal; the JSON is the forensic record.
 
-Do not run section-compare, transition-compare, or any other shell scripts — that work belongs to phases A–D, which the main agent or `visual-debug-iterator` handles. Do not modify implementation files; only write `<ref-dir>/phase-e-review.json`.
+Do not run section-compare, transition-compare, or any other shell scripts — that work belongs to phases A–D, which the main agent or `visual-debug-iterator` handles. Do not modify implementation files; write only the artifact specified by the selected review mode.
 
 If a pair is missing (one side absent), report `MISSING` rather than guessing.

@@ -183,6 +183,10 @@ def _locked_session(project: Path, session_id: str) -> Iterator[None]:
 
 
 def load_receipt(project: Path, session_id: str) -> dict[str, Any] | None:
+    # Read-only hooks for hosts without a receipt must not create orphan locks.
+    # Existing receipts are still read under the same writer lock.
+    if not receipt_path(project, session_id).exists():
+        return None
     with _locked_session(project, session_id):
         return _read_receipt_unlocked(project, session_id)
 

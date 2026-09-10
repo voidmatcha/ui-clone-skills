@@ -24,8 +24,8 @@ set -uo pipefail
 
 SESSION="${1:-}"
 URL="${2:-}"
-VIEW_W="${3:-1280}"
-VIEW_H="${4:-800}"
+VIEW_W="${3:-${VIEW_W:-1280}}"
+VIEW_H="${4:-${VIEW_H:-800}}"
 WAIT_MS="${WAIT_MS:-1500}"
 
 if [ -z "$SESSION" ] || [ -z "$URL" ]; then

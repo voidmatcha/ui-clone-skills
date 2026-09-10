@@ -2,6 +2,20 @@
 
 These rules cover post-mortem failure modes that have surfaced in prior cloning sessions. They are environment-level (shell, CLI, paths) rather than pipeline-level. Read once at session start; the SKILL.md core rules cover token / I/O hygiene, this file covers the environment surface around them.
 
+## Fresh-run evidence boundary
+
+For a fresh run, discover project files only inside the selected workspace and
+read tool contracts only from the resolved plugin root. Do not search sibling
+clone directories for AGENTS.md, implementation code, or reference artifacts.
+Do not open earlier runs' bundle-extraction, generation plans, CSS, DOM, or capture
+files to fill gaps in the new run. Prior operational notes may guide commands,
+but all site-specific implementation evidence must come from this run's capture.
+A missing artifact requires its producer or an explicit unresolved result.
+Only an explicit resume/reuse request authorizes reading another run's evidence.
+
+Read this file once per session. Later recover the active gate and use heading-
+bounded contract reads instead of reopening all environment or generation docs.
+
 ## Viewport ordering rule
 
 Always run `agent-browser --session <s> open <url>` **before** `set viewport <w> <h>`, and add `wait` after. Calling `set viewport` *before* the page is open is silently dropped — the browser opens at the default 1280 wide and your width is lost. Correct order:

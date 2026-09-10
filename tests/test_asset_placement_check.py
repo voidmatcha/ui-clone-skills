@@ -1094,3 +1094,81 @@ def test_asset_placement_rejects_comment_only_reference(tmp_path: Path) -> None:
     assert artifact["status"] == "fail"
     assert artifact["checked"] == 1
     assert artifact["missingPlacements"], artifact
+
+
+def test_asset_placement_follows_only_rendered_local_children(tmp_path: Path) -> None:
+    ref = tmp_path / 'ref'
+    impl = tmp_path / 'impl'
+    ref.mkdir()
+    impl.mkdir()
+    (ref / 'visible-images.json').write_text(json.dumps([
+        {'src': 'https://cdn.example.com/assets/pyramid.png', 'top': 20}
+    ]))
+    (ref / 'section-map.json').write_text(json.dumps({'sections': [
+        {'index': 0, 'id': 'cards', 'y': 0, 'height': 100}
+    ]}))
+    (ref / 'component-map.json').write_text(json.dumps({'sections': [
+        {'index': 0, 'file': 'Cards.tsx'}
+    ]}))
+    (impl / 'Child.tsx').write_text(
+        'import Cards from "./Cards";\n'
+        'export default function Child(){return <><Cards/><img src="/assets/pyramid.png"/></>}\n'
+    )
+    for rendered, expected in [(True, 0), (False, 1)]:
+        (impl / 'Cards.tsx').write_text(
+            'import Child from "./Child";\n'
+            'export default function Cards(){return ' + ('<Child/>' if rendered else '<div/>') + '}\n'
+        )
+        proc = subprocess.run(['bash', str(ASSET_PLACEMENT_SCRIPT), str(ref), str(impl)],
+                              capture_output=True, text=True, timeout=10)
+        assert proc.returncode == expected, proc.stdout + proc.stderr
+
+
+def test_asset_placement_child_import_root_boundary_and_missing_asset(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    impl.mkdir()
+    (ref / "visible-images.json").write_text(json.dumps([
+        {"src": "https://cdn.example.com/assets/pyramid.png", "top": 20}
+    ]))
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "id": "cards", "y": 0, "height": 100}
+    ]}))
+    (ref / "component-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "file": "Cards.tsx"}
+    ]}))
+    (tmp_path / "Outside.tsx").write_text('export default function Outside(){return <img src="/assets/pyramid.png"/>}')
+    (impl / "Link.tsx").symlink_to(tmp_path / "Outside.tsx")
+    (impl / "Child.tsx").write_text('export function Child(){return <img src="/assets/other.png"/>}')
+    for source in (
+        'import Outside from "../Outside"; export default ()=> <Outside/>;',
+        'import Link from "./Link"; export default ()=> <Link/>;',
+        'import {Child as Card} from "./Child"; export default ()=> <Card/>;',
+    ):
+        (impl / "Cards.tsx").write_text(source)
+        proc = subprocess.run(["bash", str(ASSET_PLACEMENT_SCRIPT), str(ref), str(impl)],
+                              capture_output=True, text=True, timeout=10)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+    (impl / "Child.tsx").write_text('export function Child(){return <img src="/assets/pyramid.png"/>}')
+    proc = subprocess.run(["bash", str(ASSET_PLACEMENT_SCRIPT), str(ref), str(impl)],
+                          capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_asset_placement_rejects_unrendered_sibling_exports_and_fake_jsx(tmp_path: Path) -> None:
+    ref, impl = tmp_path / 'ref', tmp_path / 'impl'
+    ref.mkdir()
+    impl.mkdir()
+    (ref / 'visible-images.json').write_text(json.dumps([{'src': 'https://cdn.example.com/pyramid.png', 'top': 20}]))
+    (ref / 'section-map.json').write_text(json.dumps({'sections': [{'index': 0, 'id': 'cards', 'y': 0, 'height': 100}]}))
+    (ref / 'component-map.json').write_text(json.dumps({'sections': [{'index': 0, 'file': 'Cards.tsx'}]}))
+    (impl / 'Child.tsx').write_text('export function Used(){return <div/>} export function Unused(){return <img src="/pyramid.png"/>}')
+    for source in (
+        'import {Used} from "./Child"; export default ()=> <Used/>;',
+        'import {Unused} from "./Child"; const fake="<Unused/>"; export default ()=> <div>{fake}</div>;',
+        'import {Unused} from "./Child"; /* <Unused/> */ export default ()=> <div/>;',
+    ):
+        (impl / 'Cards.tsx').write_text(source)
+        proc = subprocess.run(['bash', str(ASSET_PLACEMENT_SCRIPT), str(ref), str(impl)], capture_output=True, text=True, timeout=10)
+        assert proc.returncode == 1, proc.stdout + proc.stderr

@@ -37,7 +37,6 @@ PINNED = [
 # the ref corpus permanently.
 PINNED_EXTRACT = [
     "capture.sh",
-    "capture-hover.sh",
     "responsive-sweep.sh",
     "canvas-replay-capture.sh",
 ]
@@ -80,3 +79,10 @@ def test_no_mktemp_templates_with_suffix_after_xs() -> None:
                 if re.search(r"mktemp[^)\n]*XXXXXX\.[A-Za-z]", line):
                     bad.append(f"{sh.relative_to(root)}:{i}")
     assert bad == [], f"mktemp templates with a suffix after the Xs: {bad}"
+
+
+@pytest.mark.parametrize("name", ["capture-hover.sh"])
+def test_capture_pins_media_with_caller_overridable_default(name: str) -> None:
+    src = (EXTRACT_SCRIPTS / name).read_text(encoding="utf-8")
+    assert 'CAPTURE_COLOR_SCHEME="${AGENT_BROWSER_COLOR_SCHEME:-light}"' in src
+    assert 'set media "$CAPTURE_COLOR_SCHEME"' in src

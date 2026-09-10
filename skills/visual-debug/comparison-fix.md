@@ -303,6 +303,20 @@ Max 3 full iterations before escalating to user with score breakdown.
 
 ### Phase E: LLM Structural Review (MANDATORY, ALL positions)
 
+#### Early diagnostic mode
+
+Before a full sweep, the main agent may delegate Phase E with
+`reviewMode: "diagnostic"` to inspect existing matched pairs for a reported
+semantic mismatch or a representative first-draft section/splash. Name the
+specific pairs and their viewport/scroll or motion-phase alignment; do not recapture
+the whole page for this diagnosis. Report observable mismatches, alignment
+uncertainty, and source questions. Keep the reviewer read-only on implementation.
+Write `<ref-dir>/diagnostics/phase-e-diagnostic.json` with `canonical: false` and
+`reviewMode: "diagnostic"`, and return a compact verdict table. Do not write
+`phase-e-review.json` or any completion stamp in this mode. The main agent uses
+the findings for a scoped source-backed repair. This optional diagnosis does not
+require Phase D to pass and does not replace the all-position final review below.
+
 After AE + DSSIM complete, the LLM reads **every position's** ref+impl pair. This is NOT a sanity check — it is a **mandatory verification axis** that catches what AE and DSSIM cannot.
 
 **Why this changed from "1 pair only":** We discovered that AE can report PASS on completely wrong content (scientific notation parsing bug: `1.27e+06` → `1`), and DSSIM can report PASS when content is missing on a same-color background (`empty yellow bg` vs `yellow bg + card` → DSSIM=0.19). Neither automated metric reliably answers "is this the same page?"

@@ -1693,16 +1693,19 @@ def main() -> None:
             and has_clone_writes(project_root, session_id_from_payload)
         ):
             reason = (
-                "⛔ UI-RE off-pipeline Stop gate: this session browsed an external "
-                "site via agent-browser but owns no pipeline ref dir — clone-shaped "
-                "work without a single verification gate is the documented "
-                "ship-short failure mode (omx postmortem: 1593px missing, "
-                "completion declared on build/smoke checks).\n\n"
-                "Either bootstrap the pipeline so gates can run:\n"
+                "⛔ UI-RE off-pipeline Stop gate: this session has BOTH an external "
+                "agent-browser browse record AND attempted markup/style writes, "
+                "but owns no pipeline ref dir. The write record can come from an "
+                "earlier or denied write in this session; Markdown alone does not "
+                "create it. This heuristic does not establish clone intent: "
+                "research followed by an HTML report can also match.\n\n"
+                "For clone work, bootstrap the pipeline so gates can run:\n"
                 "  python -m ui_clone.pipeline <url> <component> <session> run --phases 0A,1,2\n"
-                "or, if this genuinely is not clone work, the off-pipeline "
+                "For non-clone work, use existing explicit user authorization "
+                "where applicable. The off-pipeline "
                 "escape hatch is documented for HUMANS in docs/agent-cli.md "
-                "— ask the user."
+                "and must be applied through human/CI host settings; do not "
+                "bootstrap a clone pipeline solely to dismiss this warning."
             )
             _emit_block(reason)
             sys.exit(0)

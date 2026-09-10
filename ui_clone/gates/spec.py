@@ -787,6 +787,78 @@ def _token_present(token: str, captured: set[str]) -> bool:
     return any(c == token or c.startswith(token + "__") for c in captured)
 
 
+def _captured_splash_dom_tokens(ref_dir: Path) -> list[tuple[set[str], set[str]]]:
+    """Read recorded splash DOM snapshots, never spec-authored subtree claims.
+
+    Each snapshot stays separate: tokens from different moments must not jointly
+    invent a target. Paths are fixed capture outputs and confined to this ref.
+    """
+    from html.parser import HTMLParser
+
+    from ui_clone.evidence_validation import load_strict_json_file
+
+    root = ref_dir.resolve()
+    splash = ref_dir / "states" / "splash"
+
+    def load(path: Path) -> Any:
+        try:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root) or not resolved.is_file():
+                return None
+            return load_strict_json_file(resolved)
+        except (OSError, ValueError, RuntimeError):
+            return None
+
+    summary = load(splash / "summary.json")
+    trajectory = load(splash / "trajectory.json")
+    if not isinstance(summary, dict) or summary.get("checked") is not True:
+        return []
+    if not isinstance(trajectory, list):
+        return []
+    times = {
+        row["ts_ms"] for row in trajectory
+        if isinstance(row, dict) and type(row.get("ts_ms")) is int and row["ts_ms"] >= 0
+    }
+    if not times:
+        return []
+
+    class Tokens(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.classes: set[str] = set()
+            self.ids: set[str] = set()
+            self.template_depth = 0
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag == "template":
+                self.template_depth += 1
+            if self.template_depth:
+                return
+            for name, value in attrs:
+                if name == "class" and value:
+                    self.classes.update(value.split())
+                elif name == "id" and value:
+                    self.ids.add(value)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "template" and self.template_depth:
+                self.template_depth -= 1
+
+    snapshots: list[tuple[set[str], set[str]]] = []
+    for name in [*(f"{ts}ms.json" for ts in sorted(times)), "settled.json"]:
+        data = load(splash / name)
+        if not isinstance(data, dict) or type(data.get("ts_ms")) is not int:
+            continue
+        expected_ts = max(times) if name == "settled.json" else int(name.removesuffix("ms.json"))
+        if data["ts_ms"] != expected_ts or not isinstance(data.get("outerHTML"), str):
+            continue
+        parser = Tokens()
+        parser.feed(data["outerHTML"])
+        parser.close()
+        snapshots.append((parser.classes, parser.ids))
+    return snapshots
+
+
 def _check_spec_selectors_present_in_dom(
     self: Gate, spec: dict[str, Any] | None
 ) -> list[CheckResult]:
@@ -794,8 +866,9 @@ def _check_spec_selectors_present_in_dom(
     absent from the captured homepage DOM is almost always a bundle-derived
     selector that targets a SUBPAGE (mined from minified JS), not this capture.
     Such a target survives the syntax check, then fails far downstream at
-    transition-fires ("element not found") after a full generate. structure.json
-    is already on disk at spec time, so we surface it here for ~0 cost.
+    transition-fires ("element not found") after a full generate. Validate the
+    settled structure plus recorded splash DOM snapshots, because real intro
+    targets can unmount before structure.json is captured.
 
     Conservative by construction: only class/id identifiers are checked (they are
     reliably captured); tag-only and attribute-only targets are skipped; and
@@ -848,7 +921,7 @@ def _check_spec_selectors_present_in_dom(
         _re.IGNORECASE,
     )
 
-    def _selector_present(cleaned: str) -> bool:
+    def _selector_present(cleaned: str, classes: set[str], ids: set[str]) -> bool:
         """A CSS selector list matches when ANY comma-group matches; a group
         matches when ALL its class/id tokens are present (so a compound or
         descendant selector whose target leaf is absent is correctly flagged,
@@ -873,6 +946,7 @@ def _check_spec_selectors_present_in_dom(
     transitions = spec.get("transitions")
     transitions = transitions if isinstance(transitions, list) else []
     absent: list[tuple[str, str]] = []
+    splash_snapshots = _captured_splash_dom_tokens(self.ref_dir)
     for i, t in enumerate(transitions):
         if not isinstance(t, dict) or _is_stub_entry(t):
             continue
@@ -884,7 +958,10 @@ def _check_spec_selectors_present_in_dom(
         cleaned = noise_re.sub(" ", target)
         if not class_re.search(cleaned) and not id_re.search(cleaned):
             continue  # tag-only / attr-only — not reliably checkable
-        if not _selector_present(cleaned):
+        if not _selector_present(cleaned, classes, ids) and not any(
+            _selector_present(cleaned, state_classes, state_ids)
+            for state_classes, state_ids in splash_snapshots
+        ):
             absent.append((str(t.get("id", f"#{i}")), target))
 
     if not absent:
@@ -896,7 +973,7 @@ def _check_spec_selectors_present_in_dom(
             "spec-selectors-present-in-dom",
             "fail",
             f"{len(absent)} transition-spec target(s) reference class/id selectors absent "
-            f"from the captured homepage DOM (structure.json): {sample}{extra}. Each will "
+            f"from the captured homepage DOM (structure.json and recorded splash snapshots): {sample}{extra}. Each will "
             "fail downstream at transition-fires ('element not found') after a full generate, "
             "so it must be resolved now, at spec time. For each: (1) if the target is a "
             "same-page node that mounts only after an interaction (hover/tab/scroll), re-capture "

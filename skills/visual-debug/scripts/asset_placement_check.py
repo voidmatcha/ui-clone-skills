@@ -333,7 +333,11 @@ def resolve_import_path(from_path: Path, specifier: str) -> Path | None:
         candidates.append(base / f"index{suffix}")
     for candidate in candidates:
         if candidate.is_file():
-            return candidate
+            try:
+                candidate.resolve().relative_to(impl_root.resolve())
+            except ValueError:
+                continue
+            return candidate.resolve()
     return None
 
 
@@ -374,6 +378,70 @@ def imported_named_export_text(component_path_value: Path, component_text: str) 
             continue
         parts.append(extract_named_exports(module_text, names))
     return "\n".join(part for part in parts if part)
+
+
+def rendered_child_text(path: Path, source: str, visited: set[Path] | None = None) -> str:
+    """Follow rendered relative JSX imports, bounded to the implementation root."""
+    visited = set() if visited is None else visited
+    path = path.resolve()
+    if path in visited or len(visited) >= 100:
+        return ""
+    visited.add(path)
+    parts: list[str] = []
+    source = strip_comments(source)
+    source_kinds = lex_kinds(source)
+    imports = re.finditer(
+        r"import\s+(?P<bindings>[^;\n]+?)\s+from\s*['\"](?P<path>[^'\"]+)['\"]",
+        source,
+    )
+    for match in imports:
+        if source_kinds[match.start()] != _K_CODE:
+            continue
+        target = resolve_import_path(path, match.group("path"))
+        if target is None or target in visited:
+            continue
+        try:
+            target.resolve().relative_to(impl_root.resolve())
+        except ValueError:
+            continue
+        bindings = match.group("bindings")
+        locals_ = []
+        default = re.match(r"([A-Z]\w*)", bindings)
+        if default:
+            locals_.append(default.group(1))
+        named = re.search(r"\{([^}]+)\}", bindings)
+        if named:
+            locals_.extend(item.strip().split(" as ")[-1].strip()
+                           for item in named.group(1).split(","))
+        rendered = any(
+            source_kinds[jsx.start()] == _K_CODE
+            for name in locals_ if re.fullmatch(r"[A-Z]\w*", name)
+            for jsx in re.finditer(r"<" + re.escape(name) + r"(?=[\s/>])", source)
+        )
+        if not rendered:
+            continue
+        try:
+            child = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        child_kinds = lex_kinds(child)
+        exports = [
+            item for item in re.finditer(
+                r"\bexport\s+(?:default\s+)?(?:async\s+)?"
+                r"(?:function|class|const|let|var)\s+[A-Z]\w*", child
+            ) if child_kinds[item.start()] == _K_CODE
+        ]
+        # Whole-module evidence is safe only for a single component export.
+        # Barrel and multi-component modules need symbol-level analysis; do not
+        # credit their unrelated exports merely because one child is rendered.
+        if len(exports) > 1 or any(
+            child_kinds[item.start()] == _K_CODE
+            for item in re.finditer(r"\bexport\s*\{", child)
+        ):
+            continue
+        parts.extend((child, imported_named_export_text(target, child),
+                      rendered_child_text(target, child, visited)))
+    return "\n".join(parts)
 
 
 # A module counts as an asset-bearing runtime controller only if it assigns an
@@ -698,6 +766,8 @@ for entry in visible:
             text
             + "\n"
             + imported_named_export_text(path.resolve(), text)
+            + "\n"
+            + rendered_child_text(path.resolve(), text)
             + "\n"
             + controller_text
         )

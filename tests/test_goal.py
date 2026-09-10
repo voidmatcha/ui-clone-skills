@@ -960,6 +960,28 @@ def test_goal_check_done_exits_zero_when_done_and_clean(tmp_path: Path) -> None:
     assert result.stdout == ""
 
 
+def test_desktop_check_done_is_a_quiet_success_predicate(tmp_path: Path) -> None:
+    from ui_clone.pipeline_phases.verify import build_verify_stamp
+    from ui_clone.state import POST_IMPL_VERIFY_GATES
+
+    ref_dir = tmp_path / "ref"
+    _write_state(ref_dir, "done")
+    (ref_dir / "sections").mkdir()
+    (ref_dir / "sections/result.txt").write_text("| hero | PASS | ok |\n")
+    (ref_dir / "verification-plan.json").write_text(json.dumps({
+        "verificationScope": {"mode": "desktop", "completionLabel": "desktop-only"},
+        "viewports": [{"w": 1280, "h": 800}],
+    }))
+    stamp = build_verify_stamp(ref_dir, ref_dir / "impl", list(POST_IMPL_VERIFY_GATES))
+    (ref_dir / "verify-stamp.json").write_text(json.dumps(stamp))
+    result = subprocess.run(
+        [sys.executable, "-m", "ui_clone.goal", str(ref_dir), "--check-done"],
+        capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1], timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
 def test_goal_check_done_exits_one_when_done_but_section_compare_failing(tmp_path: Path) -> None:
     ref_dir = tmp_path / "tmp" / "ref" / "hero"
     _write_state(ref_dir, "done")

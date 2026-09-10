@@ -548,7 +548,7 @@ def test_timer_probe_requeries_remounted_target_and_canvas_samples_grid() -> Non
         "skills/visual-debug/scripts/transition-fires-check.sh"
     ).read_text()
     assert "current = resolveEntry(e, current)" in src
-    assert "const live = resolveEntry(e, null)" in src
+    assert "resolveScrollEntry(e) : resolveEntry(e, null)" in src
     assert "for (const [x, y, size] of sampleTiles(c.width, c.height))" in src
     assert "getImageData(x, y, size, size)" in src
 

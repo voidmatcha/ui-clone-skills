@@ -21,6 +21,7 @@ def _run_check(
     detected: object,
     impl_detected: object,
     explicit_breakpoints: str | None = None,
+    scope: dict | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[int], list[object]]:
     ref_dir = tmp_path / "ref"
     ref_dir.mkdir()
@@ -32,6 +33,9 @@ def _run_check(
         json.dumps(impl_detected),
         encoding="utf-8",
     )
+
+    if scope is not None:
+        (ref_dir / "verification-plan.json").write_text(json.dumps({"verificationScope": scope}))
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -133,3 +137,12 @@ def test_explicit_breakpoints_replace_detected_default_sweep(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert widths == [767, 768, 769, 1919, 1920, 1921]
     assert artifact == []
+
+
+def test_desktop_scope_never_probes_mobile_or_outside_band(tmp_path: Path) -> None:
+    proc, widths, _ = _run_check(tmp_path, detected={"breakpoints": [768, 1024, 1600]},
+        impl_detected={}, scope={"mode": "desktop", "range": {"minWidth": 1025, "maxWidth": 1599}})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert widths
+    assert min(widths) >= 1025
+    assert max(widths) <= 1599

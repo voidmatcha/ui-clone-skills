@@ -41,6 +41,7 @@ fi
 URL="$1"
 SESSION="$2"
 REF_DIR="$3"
+CAPTURE_COLOR_SCHEME="${AGENT_BROWSER_COLOR_SCHEME:-light}"
 REUSE_SESSION="false"
 if [ "${4:-}" = "--reuse-session" ]; then
   REUSE_SESSION="true"
@@ -54,7 +55,7 @@ fi
 # A shared agent-browser daemon can be restarted by an unrelated concurrent
 # capture and silently reopen this session at about:blank. Keep every capture
 # run in a deterministic namespace while preserving an explicit caller choice.
-if [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
+if [ "$REUSE_SESSION" = "false" ] && [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
   CAPTURE_NAMESPACE_ID="$(printf '%s' "$SESSION" | cksum | awk '{print $1}')"
   AGENT_BROWSER_NAMESPACE="ui-clone-${CAPTURE_NAMESPACE_ID}"
   export AGENT_BROWSER_NAMESPACE
@@ -65,6 +66,12 @@ mkdir -p "$(dirname "$OUTDIR")"
 RESPONSE_TMP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
+NAVIGATION_RECEIPT="$REF_DIR/capture-scroll-navigation.json"
+if [ "$REUSE_SESSION" = "true" ]; then
+  NAVIGATION_RECEIPT="$REF_DIR/capture-navigation.json"
+else
+  unset AGENT_BROWSER_COLOR_SCHEME
+fi
 EVAL_JS_FILE="$SCRIPT_DIR/capture-scroll-eval.js"
 INIT_JS_FILE="$SCRIPT_DIR/capture-scroll-init.js"
 [ -f "$EVAL_JS_FILE" ] || {
@@ -87,8 +94,10 @@ fi
 # agent-browser treats launch-affecting environment changes between commands
 # as a reason to restart its daemon. Export before `open`; setting this only on
 # `eval` discards the live page and replays the script against about:blank.
-AGENT_BROWSER_DEFAULT_TIMEOUT="$EVAL_TIMEOUT_MS"
-export AGENT_BROWSER_DEFAULT_TIMEOUT
+if [ "$REUSE_SESSION" = "false" ]; then
+  AGENT_BROWSER_DEFAULT_TIMEOUT="$EVAL_TIMEOUT_MS"
+  export AGENT_BROWSER_DEFAULT_TIMEOUT
+fi
 
 derived_ready_wait_ms() {
   local splash_summary="${REF_DIR}/${STATES_PREFIX:-states}/splash/summary.json"
@@ -138,6 +147,33 @@ wait_for_derived_readiness() {
   fi
 }
 
+open_derived_page() {
+  local open_output
+  agent-browser --session "$SCROLL_SESSION" close >/dev/null 2>&1 || true
+  # Materialize the persistent page before applying emulation settings. The
+  # first cold command can otherwise target a transient launch page.
+  if ! agent-browser --session "$SCROLL_SESSION" get url >/dev/null 2>&1; then
+    echo "capture-scroll: agent-browser page initialization failed (session=$SCROLL_SESSION)" >&2
+    return 1
+  fi
+  if ! agent-browser --session "$SCROLL_SESSION" set viewport 1440 900 >/dev/null 2>&1; then
+    echo "capture-scroll: agent-browser viewport failed (session=$SCROLL_SESSION)" >&2
+    return 1
+  fi
+  if ! agent-browser --session "$SCROLL_SESSION" set media "$CAPTURE_COLOR_SCHEME" >/dev/null 2>&1; then
+    echo "capture-scroll: agent-browser color scheme failed (session=$SCROLL_SESSION)" >&2
+    return 1
+  fi
+  if ! open_output="$(agent-browser --session "$SCROLL_SESSION" --init-script "$INIT_JS_FILE" open "$URL" --json)"; then
+    echo "capture-scroll: agent-browser open failed for $URL (session=$SCROLL_SESSION)" >&2
+    printf '%s\n' "$open_output" >&2
+    return 1
+  fi
+  if ! printf '%s' "$open_output" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$SCROLL_SESSION" --navigation "$NAVIGATION_RECEIPT" --record; then
+    return 1
+  fi
+}
+
 cleanup() {
   rm -f "${RESPONSE_TMP:-}"
   if [ "$REUSE_SESSION" = "false" ]; then
@@ -149,12 +185,15 @@ trap cleanup EXIT
 
 # Open page in the derived session unless reusing the caller's session.
 if [ "$REUSE_SESSION" = "false" ]; then
-  if ! OPEN_OUTPUT="$(agent-browser --session "$SCROLL_SESSION" --init-script "$INIT_JS_FILE" open "$URL" 2>&1)"; then
-    echo "capture-scroll: agent-browser open failed for $URL (session=$SCROLL_SESSION)" >&2
-    printf '%s\n' "$OPEN_OUTPUT" >&2
+  if ! open_derived_page; then
     exit 2
   fi
   wait_for_derived_readiness
+else
+  if ! agent-browser --session "$SCROLL_SESSION" set media "$CAPTURE_COLOR_SCHEME" >/dev/null 2>&1; then
+    echo "capture-scroll: agent-browser color scheme failed (session=$SCROLL_SESSION)" >&2
+    exit 2
+  fi
 fi
 
 # Keep the browser program in a real JavaScript file. Besides making it
@@ -165,7 +204,7 @@ RESPONSE_RAW=""
 EVAL_OK="false"
 for attempt in $(seq 1 "$EVAL_ATTEMPTS"); do
   if RESPONSE_RAW="$(agent-browser --session "$SCROLL_SESSION" eval --json --stdin < "$EVAL_JS_FILE" 2>&1)"; then
-    if printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR"; then
+    if printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$SCROLL_SESSION" --navigation "$NAVIGATION_RECEIPT"; then
       EVAL_OK="true"
       break
     fi
@@ -180,7 +219,7 @@ for attempt in $(seq 1 "$EVAL_ATTEMPTS"); do
     # the next attempt a fresh page target without weakening capture
     # requirements or accepting partial scroll data.
     if [ "$REUSE_SESSION" = "false" ]; then
-      agent-browser --session "$SCROLL_SESSION" --init-script "$INIT_JS_FILE" open "$URL" >/dev/null 2>&1 || true
+      open_derived_page >/dev/null 2>&1 || true
     fi
     wait_for_derived_readiness
   fi

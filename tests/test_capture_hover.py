@@ -44,8 +44,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "extract" / "capture-hover.sh"
@@ -63,6 +66,37 @@ def test_browser_eval_frame_wait_has_background_tab_fallback() -> None:
     assert "setTimeout(finish, delayMs + 50)" in source
     assert "await boundedFrameWait(SETTLE_MS)" in source
     assert "new Promise(r => requestAnimationFrame" not in source
+
+
+def test_browser_eval_has_bounded_wall_clock_timeout() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'HOVER_EVAL_TIMEOUT_MS="${CAPTURE_HOVER_TIMEOUT_MS:-90000}"' in source
+    assert 'AGENT_BROWSER_DEFAULT_TIMEOUT="$HOVER_EVAL_TIMEOUT_MS"' in source
+    assert "export AGENT_BROWSER_DEFAULT_TIMEOUT" in source
+    assert '| AGENT_BROWSER_DEFAULT_TIMEOUT="$HOVER_EVAL_TIMEOUT_MS" agent-browser' not in source
+
+
+def test_browser_eval_candidate_cap_is_bounded_and_configurable() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'HOVER_CANDIDATE_CAP="${CAPTURE_HOVER_CANDIDATE_CAP:-50}"' in source
+    assert '[ "$HOVER_CANDIDATE_CAP" -gt 50 ]' in source
+    assert "const CAP = ${HOVER_CANDIDATE_CAP};" in source
+
+
+def test_runtime_candidates_require_hover_evidence_and_use_unique_selectors() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "if (!semantic && !pointer && !hasTransition) continue;" in source
+    assert "document.querySelectorAll(candidate).length === 1" in source
+    assert ":nth-of-type(${sameTag.indexOf(el) + 1})" in source
+
+
+def test_css_hover_parser_preserves_functional_selector_lists() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "const splitSelectorList" in source
+    assert "parenDepth === 0 && bracketDepth === 0" in source
+    assert "const expandHoverBranches" in source
+    assert "stripTopLevelHovers(trimmed)" in source
+    assert "split(/,(?![^()]*\\))/)" not in source
 
 
 def _make_fake_agent_browser(
@@ -97,11 +131,27 @@ def _make_fake_agent_browser(
         # 35/200 (exit 141 = 128 + SIGPIPE). Draining won 200/200 in both.
         # End to end, the same box ran this file 25x at -n 4 under load:
         # 0/25 failures with the drain, 24/25 without.
-        '  cat >/dev/null 2>/dev/null || true\n'
-        f"  echo '{eval_payload}'\n"
+        f"  cat >'{tmp_path / 'eval.js'}' 2>/dev/null || true\n"
+        f"  python3 '{tmp_path / 'async-response.py'}'\n"
         f"  exit {eval_returncode}\n"
         "fi\n"
         "exit 0\n"
+    )
+    (tmp_path / "async-response.py").write_text(
+        "import json\n"
+        f"raw = {eval_payload!r}\n"
+        "try:\n"
+        "    payload = json.loads(raw)\n"
+        "except ValueError:\n"
+        "    print(raw)\n"
+        "else:\n"
+        "    if isinstance(payload, dict) and 'success' in payload:\n"
+        "        data = payload.get('data')\n"
+        "        if isinstance(data, dict):\n"
+        "            data['result'] = {'state': 'done', 'value': data.get('result')}\n"
+        "    else:\n"
+        "        payload = {'success': True, 'data': {'origin': 'https://example.test', 'result': {'state': 'done', 'value': payload}}}\n"
+        "    print(json.dumps(payload))\n"
     )
     fake.chmod(0o755)
     return bin_dir
@@ -138,10 +188,12 @@ def test_derived_session_wait_uses_splash_summary_duration(tmp_path: Path) -> No
     assert proc.returncode == 0, proc.stderr
     calls = (tmp_path / "calls.log").read_text().splitlines()
     assert "--session sess1-hover wait" in calls
+    close_index = calls.index("--session sess1-hover close")
     open_index = calls.index("--session sess1-hover open")
+    viewport_index = calls.index("--session sess1-hover set")
     wait_index = calls.index("--session sess1-hover wait")
     eval_index = calls.index("--session sess1-hover eval")
-    assert open_index < wait_index < eval_index
+    assert close_index < viewport_index < open_index < wait_index < eval_index
 
 
 def test_about_blank_eval_envelope_fails_closed(tmp_path: Path) -> None:
@@ -388,9 +440,7 @@ def test_cssom_stylesheet_href_maps_to_downloaded_css_source(tmp_path: Path) -> 
 
     assert proc.returncode == 0, proc.stderr
     hover_css = json.loads((ref_dir / "hover-css-rules.json").read_text())
-    assert hover_css["rules"][0]["sourceHrefs"] == [
-        "https://cdn.example.test/assets/site.css?v=42"
-    ]
+    assert hover_css["rules"][0]["sourceHrefs"] == ["https://cdn.example.test/assets/site.css?v=42"]
     assert hover_css["rules"][0]["sourceFile"] == "css/site.css"
 
 
@@ -614,6 +664,12 @@ def test_derived_session_used_by_default(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text()
     assert "sess1-hover" in calls
     assert "--session sess1-hover close" in calls
+    lines = calls.splitlines()
+    close_index = lines.index("--session sess1-hover close")
+    viewport_index = lines.index("--session sess1-hover set")
+    open_index = lines.index("--session sess1-hover open")
+    assert close_index < viewport_index < open_index
+    assert not any("open about:blank" in line for line in lines)
     bare_lines = [
         line
         for line in calls.splitlines()
@@ -652,3 +708,131 @@ def test_summary_carries_cap_metadata(tmp_path: Path) -> None:
     assert summary["candidatesFound"] == 150
     assert summary["candidatesProcessed"] == 50
     assert summary["candidatesCappedAt"] == 50
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_generic_transition_targets_survive_default_capture_budget(tmp_path: Path) -> None:
+    """Run production candidate selection against thirty nonsemantic JS targets."""
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload([]))
+    proc = _run_capture_hover(tmp_path / "ref", bin_dir)
+    assert proc.returncode == 0, proc.stderr
+    script = (tmp_path / "eval.js").read_text()
+    cap = script.split("const CAP = ", 1)[1].split(";", 1)[0]
+    selection = script.split("  const selectorSegment =", 1)[1].split("  // Fixed property set", 1)[
+        0
+    ]
+    program = (
+        """
+const targets = Array.from({length:30}, (_, i) => ({
+  id: `target-${i}`, localName: 'div', matches: () => false,
+  getBoundingClientRect: () => ({width:100, height:100})
+}));
+const document = {
+  querySelectorAll: () => targets,
+  querySelector: selector => targets.find(el => '#' + el.id === selector)
+};
+const CSS = {escape: value => value};
+const getComputedStyle = () => ({display:'block', visibility:'visible',
+  cursor:'auto', transitionDuration:'0s, 0.2s'});
+const candidates = new Map();
+const unsupportedHoverSelectors = 0;
+"""
+        + f"const CAP = {cap};\nconst selectorSegment ="
+        + selection
+        + """
+console.log(JSON.stringify(orderedCandidates.map(row => row.activation)));
+"""
+    )
+    result = subprocess.run(
+        ["node", "-e", program], capture_output=True, text=True, check=True, timeout=10
+    )
+    assert json.loads(result.stdout) == [f"#target-{i}" for i in range(30)]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("selector, expected", [
+    (".link:hover", [(".link", ".link")]),
+    (".nav .link:hover .icon", [(".nav .link", ".nav .link .icon")]),
+    (".nav :is(.link:hover)", [(".nav :is(.link)", ".nav :is(.link)")]),
+    (".nav :where(.link:hover) .icon", [(".nav :where(.link)", ".nav :where(.link) .icon")]),
+    (".nav .link:is(:hover)", [(".nav .link:is(*)", ".nav .link:is(*)")]),
+    (".nav :is(.idle, .link:hover)", [(".nav :is(.link)", ".nav :is(.link)")]),
+    (".nav :is(.a:hover, .b:hover)", [
+        (".nav :is(.a)", ".nav :is(.a)"), (".nav :is(.b)", ".nav :is(.b)")]),
+    (".nav :is(:where(.link:hover))", [
+        (".nav :is(:where(.link))", ".nav :is(:where(.link))")]),
+    (".nav :is(.a, .b):hover .icon", [
+        (".nav :is(.a, .b)", ".nav :is(.a, .b) .icon")]),
+    (".nav :is(.link:hover).enabled .icon", [
+        (".nav :is(.link).enabled", ".nav :is(.link).enabled .icon")]),
+    ('.nav :is([data-label="a,b"]:hover)', [
+        ('.nav :is([data-label="a,b"])', '.nav :is([data-label="a,b"])')]),
+    *[
+        (f".nav :is(.link:hover):{pseudo}", [
+            (".nav :is(.link)", f".nav :is(.link):{pseudo}")])
+        for pseudo in (
+            "before", "BEFORE", "after", "AFTER",
+            "first-letter", "FIRST-LETTER", "first-line", "FIRST-LINE",
+        )
+    ],
+    (".nav :is(.link:hover)::before", [
+        (".nav :is(.link)", ".nav :is(.link)::before")]),
+    (".nav :is(.link:hover .label)", []),
+    (".nav :is(.link:hover).active .icon:hover", []),
+    (".nav :is(.link:hover, .other).active .icon:hover", []),
+    (".nav :is(.link:hover) > .icon:hover", []),
+    (".nav :where(.link:hover) + .icon:hover", []),
+    (".nav :is(.link:hover) ~ .icon:is(:hover)", []),
+    (".nav :is(.link:hover):hover", [
+        (".nav :is(.link)", ".nav :is(.link)")]),
+    (".nav:hover :is(.link:hover)", []),
+    (".nav:hover > :where(.link:hover)", []),
+    (".link:hover:is(:hover)", [(".link:is(*)", ".link:is(*)")]),
+    (".nav :is(.link:hover):hover.enabled", [
+        (".nav :is(.link).enabled", ".nav :is(.link).enabled")]),
+    (".nav :is(.link:hover).enabled:hover", [
+        (".nav :is(.link).enabled", ".nav :is(.link).enabled")]),
+    (".link:hover:is(.enabled:hover)", [
+        (".link:is(.enabled)", ".link:is(.enabled)")]),
+    (".link:is(.enabled:hover):hover", [
+        (".link:is(.enabled)", ".link:is(.enabled)")]),
+    (".link:hover.enabled", [(".link.enabled", ".link.enabled")]),
+    (".link:hover:where(:is(.enabled:hover)):focus .icon", [
+        (".link:where(:is(.enabled)):focus", ".link:where(:is(.enabled)):focus .icon")]),
+    ('.link:hover:is([data-label=":hover"].enabled:hover)', [
+        ('.link:is([data-label=":hover"].enabled)', '.link:is([data-label=":hover"].enabled)')]),
+    ('.link:hover:is([data-label=":hover"]):focus', [
+        ('.link:is([data-label=":hover"]):focus', '.link:is([data-label=":hover"]):focus')]),
+    ('.link[data-label=":hover"]:hover.enabled', [
+        ('.link[data-label=":hover"].enabled', '.link[data-label=":hover"].enabled')]),
+    ('.link[data-label=":hover"]', []),
+    (".link:hover:not(:hover)", []),
+    (".link:hover:is(.enabled:not(:hover))", []),
+    (".link:hover .icon:hover", []),
+    (".link:hover:is(.enabled:hover .icon)", []),
+    (".link:hover:is(.enabled:hover)::before", [
+        (".link:is(.enabled)", ".link:is(.enabled)::before")]),
+    (".nav :not(.link:hover)", []),
+    (".nav :has(.link:hover)", []),
+    (".nav :is(.a:hover), .other:hover", [
+        (".nav :is(.a)", ".nav :is(.a)"), (".other", ".other")]),
+])
+def test_functional_hover_parser_preserves_activation_scope(
+    selector: str, expected: list[tuple[str, str]],
+) -> None:
+    """Execute production CSSOM parsing; outside matches must not enter its activation selector."""
+    script = SCRIPT.read_text()
+    parser = script.split("  const normalizeSelector =", 1)[1].split(
+        "  // 2. Deduplicate", 1
+    )[0]
+    program = (
+        "const document = {styleSheets: [{cssRules: [{selectorText: "
+        + json.dumps(selector)
+        + ', style: {length: 1, 0: "color", getPropertyValue: () => "red"}}]}]};\n'
+        + "const normalizeSelector =" + parser
+        + "console.log(JSON.stringify(cssHoverRules.map(r => [r.activation, r.affected])));"
+    )
+    result = subprocess.run(
+        ["node", "-e", program], capture_output=True, text=True, check=True, timeout=10,
+    )
+    assert json.loads(result.stdout) == [list(pair) for pair in expected]

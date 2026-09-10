@@ -114,7 +114,7 @@ EVAL_PRIMARY_FAMILY='(() => {
 extract_family() {
   local session="$1" url="$2"
   agent-browser --session "$session" open "$url" >/dev/null 2>&1
-  agent-browser --session "$session" set viewport 1280 800 >/dev/null 2>&1
+  agent-browser --session "$session" set viewport "${VIEW_W:-1280}" "${VIEW_H:-800}" >/dev/null 2>&1
   agent-browser --session "$session" wait 2500 >/dev/null 2>&1
   # Return the raw stdout as-is. agent-browser prints the JSON-stringified
   # eval result on its own line; downstream node call double-parses to recover

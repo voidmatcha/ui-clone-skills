@@ -1498,6 +1498,15 @@ def evaluate(spec: dict, observations: dict, asset_sub: dict,
     }
 
 
+def mobile_retry_allowed(ref_dir: Path) -> bool:
+    """A desktop contract cannot silently expand into a mobile measurement."""
+    path = ref_dir / "verification-plan.json"
+    if not path.exists():
+        return True
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    return bool(plan.get("verificationScope", {}).get("mode") != "desktop")
+
+
 def merge_viewport_artifacts(base: dict, overrides: list[dict]) -> dict:
     """Replace same-id verdicts measured at a viewport where the target renders.
 
@@ -1505,6 +1514,10 @@ def merge_viewport_artifacts(base: dict, overrides: list[dict]) -> dict:
     desktop viewport. Their scoped retry is authoritative for only those ids;
     desktop verdicts for every other transition remain untouched.
     """
+    # Missing/hidden targets remain blockers until reference-backed
+    # applicability is established. A mobile pass cannot erase this failure.
+    if (base or {}).get("verificationScope", {}).get("mode") == "desktop":
+        return dict(base)
     merged = dict(base or {})
     entries = [dict(row) for row in (base or {}).get("entries", []) if isinstance(row, dict)]
     positions = {
@@ -1583,6 +1596,11 @@ def _load(path: str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--mobile-retry-allowed":
+        try:
+            return 0 if mobile_retry_allowed(Path(argv[1])) else 1
+        except (OSError, ValueError, TypeError, AttributeError, IndexError):
+            return 2
     if argv and argv[0] == "--merge-artifacts":
         if len(argv) != 4:
             sys.stderr.write(
@@ -1622,6 +1640,17 @@ def main(argv: list[str] | None = None) -> int:
         spec, observations, asset_sub, impl_url=impl_url,
         ref_structure=ref_structure,
     )
+    try:
+        if not mobile_retry_allowed(Path(spec_path).parent):
+            artifact["verificationScope"] = {"mode": "desktop"}
+            artifact["scopeApplicabilityNote"] = (
+                "Mobile retries are outside desktop scope. Hidden or missing targets "
+                "remain failures; reference-backed applicability evidence is required "
+                "before excluding any target."
+            )
+    except (OSError, ValueError, TypeError, AttributeError):
+        sys.stderr.write("Invalid verification scope; refusing transition verdict.\n")
+        return 2
     Path(out_path).write_text(json.dumps(artifact, indent=2), encoding="utf-8")
 
     print(summary_line(artifact))

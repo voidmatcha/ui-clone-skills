@@ -35,6 +35,12 @@ Automate with `scripts/extract/extract-assets.sh`.
 
 ## Step 2: Include original CSS in the project
 
+Preserve the full local stylesheet cascade, including inactive media/container rules
+and fluid expressions. Desktop verification does not authorize pruning mobile rules
+or replacing authored responsive values with computed capture-time pixels. Maintain
+source order and query ancestors; inspect responsive variants before adding overrides.
+
+
 ```css
 /* src/app/globals.css */
 @import 'tailwindcss';
@@ -229,10 +235,9 @@ Rules:
 - Portal escape (portal-candidates.json has entries):
     createPortal(el, document.body). Common: nav bars, floating buttons,
     overlay menus, cookie banners. Without portal, they scroll with content.
-- Sticky container heights: use EXACT extracted values, never estimate.
-    Verify lastContentBottom - sectionBottom < 100px after implementation.
-- Sticky lock points: wrapper height so diff(stickyCenter, lastContentCenter) ≈ 0
-    at unstick. Sweep scroll positions to verify.
+- Sticky container sizing: preserve authored responsive rules and recovered pin
+    distance. Check pin entry/release at matched viewport and scroll states;
+    measured heights diagnose drift but do not prescribe fixed pixel floors.
 - Body-level state (body-state.json bodyClassRules):
     document.body.classList.toggle() in scroll handler. Cascade all visual
     changes (nav color, logo filter, bg-color) via CSS, not per-component state.
@@ -240,8 +245,10 @@ Rules:
     for text-over-image color inversion.
 - Gradient text: backgroundClip: 'text' + webkitTextFillColor: 'transparent'.
     Use CSS class (not inline) so it can be toggled light/dark.
-- Section spacing (MANDATORY post-gen): measure lastContentBottom - sectionBottom
-    per section. If >100px, reduce section height to lastContentBottom + 65px.
+- Section spacing: investigate missing content, font/media metrics, containing
+    blocks, overflow, and pin lifecycle when bounds differ. Preserve source
+    spacing rules; do not derive CSS height from absolute document coordinates
+    or add an arbitrary trailing-space allowance.
 - Make interactions FUNCTIONAL — no stubbed handlers
 - Mouse-follow (interactions-detected.json type: "mouse-follow"):
     Parent: onMouseMove → element-relative cursor coords

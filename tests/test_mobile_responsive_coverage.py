@@ -145,6 +145,7 @@ def test_dense_static_signals_are_diagnostic_not_blocking(tmp_path: Path) -> Non
             str(ROOT / "skills" / "visual-debug" / "scripts" / "verification-plan.sh"),
             str(ref),
             "--tier=standard",
+            "--scope=all",
         ],
         capture_output=True,
         text=True,

@@ -1,6 +1,6 @@
 # Visual-debug iteration discipline
 
-**Audience**: anyone (host-agnostic) iterating Phase 7 fix cycles on a failed section-compare or tree-diff.
+**Audience**: anyone (host-agnostic) repairing generated content, structure, visuals, or behavior during Phase 7.
 
 - **Claude Code path**: invoked via `visual-debug-iterator` sub-agent (`.claude-plugin/agents/visual-debug-iterator.md`). The sub-agent reads this file as its operational contract. The sub-agent's `disallowedTools` field enforces the vision-free rule by blocking `Read(*.png)` etc.
 - **Codex native path**: invoked via the `visual-debug-iterator` native subagent (`.codex/agents/visual-debug-iterator.toml`) when Codex/OMX subagent routing is available. The vision-free rule is policy in the TOML instructions: do not read PNG/JPG/WebP/GIF files.
@@ -8,7 +8,7 @@
 
 ## Pre-condition
 
-`section-compare.sh` or `tree-diff.sh` reported FAIL (`FAIL_COUNT > 0`, `INCOMPLETE`, or `🌑 saturated`). An impl is running and the gate output is in `tmp/ref/<component>/sections/result.txt` or `tree-diff-status.json`.
+A generated implementation has a failed content, structure, runtime, or visual check. Read that check's artifact before editing. Pixel-specific rules below apply when `section-compare.sh` or `tree-diff.sh` reports FAIL; they do not require pixel capture to validate a text or runtime repair.
 
 ## Inputs
 
@@ -20,7 +20,43 @@
 - `tmp/ref/<component>/source-forensics.json` — optional source-backed guidance returned by the `source-forensics` worker after raw HTML/CSS/JS fallback
 - `impl/src/` — the implementation source (read freely; edit only what the failing row points at)
 
+## First generated draft
+
+Before exhaustive motion checks, compare preserved text/media and section ownership
+against the captured scaffold and inventories. Use the existing text-fidelity,
+runtime-text-sequence, asset, and structure checks from the verification plan.
+For a missing text row, trace live reference -> captured node -> generated node ->
+rendered state. Recover extraction loss, restore generation loss, or fix visibility
+at its captured trigger; do not duplicate hidden variants just to increase counts.
+
+Check representative sections at the same viewport and scroll state after these
+foundations pass. Early geometry is a diagnostic for missing/collapsed structure;
+page height is a final aggregate cross-check, never the sizing objective. Fix the
+source layout rule, containing block, font/media metrics, or pin lifecycle instead
+of inserting numeric height floors or blank space. Run affected load-bearing motion
+early when needed to reproduce a section's layout. Do not wait for every unrelated
+hover/click entry to pass before diagnosing that section.
+
+When representative pairs show a semantic mismatch that the numeric/text
+diagnostics do not explain, ask the main agent to delegate Phase E with
+`reviewMode: "diagnostic"` as defined in `../visual-debug/comparison-fix.md`.
+Reuse the existing matched pairs for the affected section or splash. The iterator
+stays vision-free; this early diagnosis cannot satisfy final visual review.
+
 ## Verification cost discipline (inner iterations)
+
+For any known content, structure, runtime, or geometry failure, first read its failing rows and compare
+the reference and implementation under the same viewport, initial state, scroll
+target, and settling conditions. Fix the implementation or recover invalid
+measurement evidence; never weaken a check to clear it. Rerun the failing check
+and its dependency closure using `UI_CLONE_ITERATION_CHECKS=<check-id>` with
+`run-required-checks.sh`. Repeat expensive section/motion capture only after these
+failures clear, or when a specific diagnostic question requires that measurement.
+Route exhaustive transition sweeps through the dispatcher so its prerequisite
+barriers apply. Direct motion probes are for a named diagnostic question or the
+affected IDs, not a way around failed content/section checks.
+Report the remaining failed checks even when other sections pass. Process liveness,
+a successful build, and matching total height do not prove visual convergence.
 
 Re-running the full comprehensive sweep after every edit is the dominant
 wall-clock sink (~5min+/cycle). Closeout safety is enforced elsewhere
@@ -31,11 +67,15 @@ full suite), so inner iterations are SAFE to scope:
    checks, no 60fps video). Comprehensive ONLY for the closeout verify.
 2. **Sections:** `UI_CLONE_VERIFY_SECTIONS=<failing,csv>` re-compares only the
    sections you just fixed (read the failing list from `sections/result.json`).
-3. **Transitions:** `UI_CLONE_FIRES_IDS=<id1,id2>` re-probes only the spec
-   entries you just wired — writes `transition-fires.scoped.json` so the
-   canonical artifact is never clobbered by a partial measurement.
-4. **Batch:** fix EVERY failing section/transition in the current list, then
-   run ONE scoped sweep — never edit→sweep→edit per item.
+3. **Transitions:** `UI_CLONE_FIRES_IDS=<id1,id2>` re-probes the affected spec
+   entries — writes `transition-fires.scoped.json` so the canonical artifact is
+   never clobbered by a partial measurement. Firing alone does not prove the
+   correct target, amplitude, or timing; use matched-state trajectory evidence.
+4. **Affected set:** after a scoped fix, test the failed entries and any siblings
+   driven by the same changed controller. Broaden only when that dependency
+   requires it, and state why. Do not insist on the full entry set merely because
+   partial evidence cannot certify completion; repair and closeout are different
+   stages. Independent failures need not all be fixed before testing one fix.
 5. **Closeout:** the final `pipeline ... verify` must run full comprehensive —
    scoped/standard artifacts cannot satisfy the Stop hook by design.
 6. **Dynamic-reference pinning:** sites with carousels / auto-rotating banners /
@@ -58,7 +98,7 @@ full suite), so inner iterations are SAFE to scope:
 2. **No raw-source loading.** Do not read raw `bundles/*.js`, large `css/*.css`, captured HTML dumps, or full DOM/style JSON. If compact artifacts and text gates cannot explain the next fix, return `bailout-source-forensics` with the failing section, selectors, and exact source questions. The main agent will dispatch the `source-forensics` worker and then re-enter this loop with `source-forensics.json`.
 3. **One fix per iteration.** Pick the highest-severity row (🌑 saturated > critical > major > layout-major > minor). Identify the specific impl file + DOM node from the text signals above. Apply a SCOPED edit (single component or single style rule). Re-run the gate.
 4. **Substitution-aware.** STRUCTURAL_ONLY (substituted) rows are not failures — skip them. Focus on PASS-blocking rows only.
-5. **Gate re-run.** After every edit, re-run `section-compare.sh` (or `tree-diff.sh` for non-pixel fails) — never assume the fix works without verification. The summary line MUST include the gate's exit code, not just `PASS`.
+5. **Check the changed behavior.** For a visual fix, rerun the affected section comparison; for content, structure, or runtime repairs, rerun the corresponding failed check and affected dependencies. Record its exit code and remaining failures. A scoped result is repair evidence, not closeout.
 6. **Max 5 iterations.** If 5 consecutive iterations don't reduce FAIL_COUNT, return with a "blocked" verdict naming the section + suspected root cause. The main agent decides whether to escalate.
 7. **Contract preservation.** Edits must not violate `generation-plan.json` — do not swap libraries, restructure components, or change architecture layers. Stay within "scoped style/JSX/data fix." If a fix would require contract change, return with `blocked-contract-conflict`.
 
@@ -72,16 +112,22 @@ full suite), so inner iterations are SAFE to scope:
 - **Public-domain TLD short-circuit:** `.gov` / `wikimedia.org` / `wikipedia.org` / `commons.wikimedia.org` images are by-default downloadable. If `asset-download.sh` reports 0 succeeded for these, the network or capture is broken — investigate before declaring substitution. Agent self-assessed "looks USDA-licensed" is NOT evidence; `.gov` IS public domain.
 - **Commercial fonts in research mode:** Die Grotesk, PP Neue Montreal, etc. — fetch + use the self-hosted .woff2 directly via `asset-download.sh`. This is permissible for local research / benchmark fidelity (no publication). Substitution to free font is opt-in for users who plan to publish.
 
-## Convergence requirement (AE-first principle)
+## Convergence follows the failure class
 
-The terminal goal is NOT gate-pass — it is **AE convergence to ref**. Every fix iteration must demonstrate measurable AE reduction on at least one previously-failing section. Agent reasoning, substitution declarations, library installs, and component rewrites are all means to this end. If they don't lower AE, they don't count.
+Measure the signal the fix is intended to change: missing-text rows for content,
+parent/asset/layout differences for structure, affected trigger/trajectory results
+for behavior, and per-section AE for pixel mismatches. Do not require an unrelated
+full visual sweep to prove a content or runtime repair. A build or total-height
+match alone does not establish progress.
 
-- **Record per-iteration AE delta**: after each fix, compare current `sections/result.txt` AE/Mpx values against the previous iteration's. Write `iter N: section=<name> ae_prev=<X> ae_now=<Y> delta=<-Z%>` to the verdict summary.
-- **No-progress detection**: if 2 consecutive iterations show ≤5% AE reduction on the target section (or worse — AE increased), classify as `blocked-no-convergence` and return. Don't keep editing — the fix strategy is wrong.
-- **Gate-pass without AE reduction is INVALID**: agents that game STRUCTURAL_ONLY / wildcard substitution / impl-rename to bypass measurement violate this principle. Return with `blocked-gate-game` if the gate passes but section-compare AE delta is 0 across all sections.
-- **Final verdict requires AE evidence**: `verdict: PASS` must include `total_ae_reduction: <%>` and `sections_with_ae_drop: <N>/<total>`. Without these numbers, the verdict is not honored by the main agent.
-
-This applies recursively to any sub-agent reasoning chain. Substitution declarations, library swaps, refactor decisions — each must trace back to a measurable AE outcome. Reasoning that "looks right" but doesn't move AE is wasted iteration.
+- Record the before/after failing row or metric and the affected component.
+- During visual iterations, record per-section AE deltas. Two iterations without
+  meaningful improvement require a new source-backed hypothesis or the delegated
+  source-forensics path; do not repeat the same correction or broaden blindly.
+- Never obtain convergence by weakening thresholds, hiding content, inventing
+  spacers, or excluding failures without reference-backed applicability evidence.
+- Final closeout still requires comprehensive, unscoped checks and canonical stamps.
+  Partial improvements must be reported alongside unresolved failures.
 
 ## Bailout cases (return immediately)
 
@@ -89,7 +135,7 @@ This applies recursively to any sub-agent reasoning chain. Substitution declarat
 - **Hydration error**: console reports React hydration mismatch → return with `fixType: "ssr-mismatch"`
 - **Library missing**: gate output references "lenis is not defined" or similar → return with `fixType: "missing-install"`, the main agent installs the package
 - **Contract conflict**: fix requires a `generation-plan.json` change (library swap, component delete) → return with `fixType: "contract-conflict"`
-- **Source forensics required**: compact artifacts cannot explain the next scoped fix or two iterations show no AE reduction → return with `fixType: "source-forensics"`, failing section, selectors, and source questions; do not read raw HTML/CSS/JS yourself.
+- **Source forensics required**: compact artifacts cannot explain the next scoped fix or two visual iterations show no AE reduction → return with `fixType: "source-forensics"`, failing section, selectors, and source questions; do not read raw HTML/CSS/JS yourself.
 
 These are out-of-scope for visual iteration; they need pipeline-level intervention.
 

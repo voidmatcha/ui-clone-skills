@@ -201,6 +201,21 @@ def test_print_cmp_selectors_matches_the_tuple() -> None:
     assert result.stdout.strip() == ", ".join(CMP_OVERLAY_SELECTORS)
 
 
+def test_section_compare_does_not_remove_generic_role_named_content() -> None:
+    """Symmetric deletion can hide the same real content on both sides."""
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "section-compare.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "--print-cmp-selectors" in script
+    for role in ("popup", "modal", "cookie", "banner", "overlay", "signup"):
+        assert f"[class*={role}]" not in script
+
+
 def test_pause_js_removal_runs_against_a_stub_dom(tmp_path: Path) -> None:
     """Execute the emitted JS so a malformed selector list is caught here."""
     if shutil.which("node") is None:  # pragma: no cover - environment dependent

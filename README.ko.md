@@ -17,7 +17,7 @@
   <a href="README.md">🇺🇸 English</a> | <strong>🇰🇷 한국어</strong> | <a href="README.ja.md">🇯🇵 日本語</a> | <a href="README.zh-cn.md">🇨🇳 简体中文</a>
 </p>
 
-<!-- README-CANONICAL-REVISION: sha256=94c5893d3844012801dbd4251fea7ac2b0d4018a4484dfbd6b2b975e75c08243; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
+<!-- README-CANONICAL-REVISION: sha256=abb78b7ead0f943d143a6eda35664c7b68c73332814aab6fd83e0726e63a8818; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
 
 `ui-clone-skills`는 실제 웹사이트를 근거 기반의 React + Tailwind 구현으로 바꿉니다. 렌더링된 페이지를 캡처하고, 실제 CSS와 에셋을 내려받으며, 반응형 스타일과 계산된 스타일을 읽고, JavaScript 번들에서 애니메이션 매개변수를 복원한 뒤 여러 뷰포트와 상호작용 상태에서 결과를 검증합니다.
 
@@ -96,6 +96,8 @@ JavaScript 번들에 숨은 애니메이션 매개변수가 중요하거나, 기
 
 일상적인 비교에는 모델이 모든 스크린샷을 판단하게 하는 대신 결정론적 스크립트를 사용합니다. 비전은 최종 결과의 의미적 일치 여부를 검토하거나, 메트릭만으로 불일치 원인을 설명할 수 없어 범위를 좁혀 진단할 때만 사용합니다.
 
+참조 전환 증거에는 동영상이나 출처 기록이 일치하는 서로 다른 캡처 상태 이미지를 사용할 수 있습니다. 이미지 쌍이 별도로 필요한 전체 스크롤 녹화를 대신하지는 않습니다. 허용되는 산출물은 [게이트 명세](./docs/gates.md)에 정의돼 있습니다.
+
 <a id="skills"></a>
 
 ## Skills
@@ -132,6 +134,8 @@ tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatc
 
 호스트 하나만 대상으로 삼으려면 `--claude-only` 또는 `--codex-only`를 사용하세요. Claude Code에는 플러그인과 라이프사이클 훅을 설치합니다. Codex에는 공개 스킬 세 가지를 설치하고, 워크스페이스에서 `ui-reverse-engineering`을 처음 실행할 때 프로젝트 로컬 훅을 활성화합니다.
 
+설치하거나 업데이트한 뒤에는 Claude Code를 재시작하고 일반 `claude` 세션을 여세요. `--plugin-dir`를 추가하면 개발용 복사본이 중복으로 로드됩니다. 설치 프로그램은 배포 원본과 설치된 캐시의 내용을 비교하며, 같은 버전의 오래된 파일이 남아 있으면 업데이트 성공으로 처리하지 않고 이를 알립니다.
+
 체크아웃 설치, 수동 의존성 설정, 호스트별 플래그, 스킬만 설치하는 방법은 [설치 가이드](./README_detail/install.md)를 참고하세요.
 
 ## 요구 사항
@@ -156,6 +160,10 @@ tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatc
 6. **측정된 불일치를 반복해서 수정하고**, 요청한 완료 계약을 충족하거나 실제 장애 요인을 보고할 때만 멈춥니다.
 
 체크아웃에서는 `python -m ui_clone.pipeline live_url component_name session_name status --json` 또는 `node bin/ui-clone pipeline live_url component_name session_name status --json`으로 상태를 확인하세요. npm 배포는 중단된 상태이므로 `ui-clone-cli`가 이 저장소에 npm 링크되어 있지 않다면 체크아웃 내부 명령을 사용하세요.
+
+Phase 1에서 임시 참조 증거를 생성한 경우, 같은 실행에서 Phase 2가 뒤이어 실행될 때만 참조 게이트 판정을 미룰 수 있습니다. Phase 2는 증거를 보완하고 게이트를 통과해야 합니다. Phase 2를 재개할 때 기본 스크린샷 5장이 있거나 이전 참조 완료 기록이 있으면 현재 참조 증거를 다시 검사합니다. 이전 완료 기록이 있는데 기본 스크린샷이 5장 미만이면 재개에 실패합니다. 재개 동작과 수동 재시도 시 브라우저 세션 설정은 [CLI 계약](./docs/agent-cli.md)을 참고하세요.
+
+파이프라인 밖의 작업을 검사하는 Stop 훅은 해당 세션이 소유한 파이프라인 참조가 없을 때, 같은 세션의 외부 사이트 탐색과 HTML·CSS·컴포넌트 쓰기 시도 기록을 함께 확인합니다. 브라우징만 하거나 Markdown을 작성하는 것만으로는 이 검사가 활성화되지 않습니다. 조사 후 HTML 보고서를 작성해도 조건에 해당할 수 있으므로, 이 방식만으로 클론 작업이라고 확정할 수는 없습니다. 클론 작업이 아니라면 무관한 클론 파이프라인을 시작하는 대신 [사람이 직접 적용하는 예외 절차](./docs/agent-cli.md#escape-hatches-humans-only)를 따르세요.
 
 ## 문서
 

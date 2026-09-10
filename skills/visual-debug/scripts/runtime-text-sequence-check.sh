@@ -260,7 +260,7 @@ ANALYSIS_JS='(() => {
     phaseSampleStartIndex: null,
   };
   window.__uiCloneRuntimeTextState = state;
-  const isRenderedText = (node) => {
+  const isRenderedText = (node, allowCollapsedSeparator = false) => {
     const parent = node.parentElement;
     if (
       !parent ||
@@ -277,7 +277,12 @@ ANALYSIS_JS='(() => {
         (rect) => rect.width > 0 && rect.height > 0,
       );
       range.detach();
-      if (!rects.length) return false;
+      // Only the collector may retain collapsed separators, between visible
+      // text nodes in the same block. A whitespace span can itself have zero
+      // width, so substituting the parent rectangle is insufficient.
+      if (!rects.length) {
+        return allowCollapsedSeparator && /^\s+$/.test(node.nodeValue || "");
+      }
       const margin = 16;
       const horizontallyOffCanvas = rects.every(
         (rect) => rect.right <= -margin || rect.left >= innerWidth + margin,
@@ -362,12 +367,21 @@ ANALYSIS_JS='(() => {
     activeAnchor = null;
     activeParts = [];
     runOrdinals = new Map();
+    let pendingSeparator = "";
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
       const node = walker.currentNode;
-      if (!isRenderedText(node)) continue;
+      if (!isRenderedText(node)) {
+        if (activeBlock && blockFor(node.parentElement) === activeBlock &&
+            isRenderedText(node, true)) {
+          pendingSeparator += node.nodeValue || "";
+        }
+        continue;
+      }
       const block = blockFor(node.parentElement);
       if (activeBlock !== null && block !== activeBlock) flush();
+      if (activeBlock === block && pendingSeparator) activeParts.push(pendingSeparator);
+      pendingSeparator = "";
       activeBlock = block;
       if (activeAnchor === null) activeAnchor = node;
       activeParts.push(node.nodeValue || "");

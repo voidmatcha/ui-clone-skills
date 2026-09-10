@@ -4,14 +4,15 @@
 # Usage: bash scripts/verify/auto-verify.sh <session> <orig-url> <impl-url> <ref-dir>
 #
 # Runs in order:
+#   Prerequisites: state-coverage + required-check dispatch
 #   D0: layout-health-check (structural comparison)
 #   C:  batch-scroll + AE comparison (pixel comparison)
 #   Gate: post-implement validation
 #
 # Exit: 0 = all pass, 1 = failures found
 #
-# DO NOT run individual checks selectively. This script exists to prevent
-# cherry-picking passing checks while ignoring failures.
+# Canonical closeout runs the full suite. During repair, use targeted checks
+# and retain unresolved failures; partial results cannot certify completion.
 
 set -euo pipefail
 
@@ -19,6 +20,9 @@ SESSION="${1:?Usage: auto-verify.sh <session> <orig-url> <impl-url> <ref-dir>}"
 ORIG_URL="${2:?}"
 IMPL_URL="${3:?}"
 REF_DIR="${4:?}"
+
+# Invalidate a prior successful invocation before setup or checks can fail.
+rm -f "$REF_DIR/visual-debug-stamp.json"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -183,8 +187,6 @@ echo "Session: $SESSION"
 echo "Original: $ORIG_URL"
 echo "Implementation: $IMPL_URL"
 echo "Ref dir: $REF_DIR"
-STRUCTURAL_ONLY_MODE="$(structural_only_mode)"
-SECTION_RESULT_PASS_MODE="$(section_result_pass_mode)"
 
 # Guard local impl URLs before any agent-browser screenshot/eval work. This
 # catches orphan dev servers serving the requested port from a previous loop.
@@ -206,6 +208,26 @@ for url in "$ORIG_URL" "$IMPL_URL"; do
     exit 1
   fi
 done
+
+# Complete the prerequisite before spending time on browser verification.
+run_check "Gate: state-coverage" \
+  uv run --project "$REPO_ROOT" python -m ui_clone.gate "$REF_DIR" state-coverage
+if [ "$TOTAL_FAIL" -gt 0 ]; then
+  write_visual_debug_stamp "false" 1 "$TOTAL_CHECKS" "$TOTAL_FAIL" "false"
+  exit 1
+fi
+
+# The umbrella owns artifact production; callers must not have to discover
+# and invoke dozens of required checks after a premature completion failure.
+run_check "Required verification checks" \
+  bash "$REPO_ROOT/scripts/verify/run-required-checks.sh" "$SESSION" "$ORIG_URL" "$IMPL_URL" "$REF_DIR"
+if [ "$TOTAL_FAIL" -gt 0 ]; then
+  echo "BLOCKED: Repair failed required checks with targeted verification before another full sweep."
+  write_visual_debug_stamp "false" 1 "$TOTAL_CHECKS" "$TOTAL_FAIL" "false"
+  exit 1
+fi
+STRUCTURAL_ONLY_MODE="$(structural_only_mode)"
+SECTION_RESULT_PASS_MODE="$(section_result_pass_mode)"
 
 # ── D0: Layout health check ──
 if [ "$STRUCTURAL_ONLY_MODE" = "true" ]; then
@@ -300,9 +322,13 @@ PHASE_E_PRESENT="false"
 UI_RE_AUTOVERIFY_INFLIGHT="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 export UI_RE_AUTOVERIFY_INFLIGHT
 rm -f "$REF_DIR/visual-debug-stamp.json"
-write_visual_debug_stamp "true" 0 "$TOTAL_CHECKS" "$TOTAL_FAIL" "$PHASE_E_PRESENT" "true" "$UI_RE_AUTOVERIFY_INFLIGHT"
-run_check "Gate: post-implement" \
-  uv run --project "$REPO_ROOT" python -m ui_clone.gate "$REF_DIR" post-implement
+if [ "$TOTAL_FAIL" -eq 0 ]; then
+  write_visual_debug_stamp "true" 0 "$TOTAL_CHECKS" "$TOTAL_FAIL" "$PHASE_E_PRESENT" "true" "$UI_RE_AUTOVERIFY_INFLIGHT"
+  run_check "Gate: post-implement" \
+    uv run --project "$REPO_ROOT" python -m ui_clone.gate "$REF_DIR" post-implement
+else
+  echo "BLOCKED: Resolve failed checks before the post-implement gate."
+fi
 
 # ── Visual-debug stamp ──
 # Emit visual-debug-stamp.json so downstream gates can prove this canonical

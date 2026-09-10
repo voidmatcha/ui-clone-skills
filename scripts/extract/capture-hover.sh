@@ -46,8 +46,18 @@ set -euo pipefail
 # dark-evening Phase-0 capture bakes dark styles into the ref corpus
 # PERMANENTLY, and every light-pinned verify then honestly-fails against
 # poisoned ground truth. Caller override intact (default only when unset).
-: "${AGENT_BROWSER_COLOR_SCHEME:=light}"
-export AGENT_BROWSER_COLOR_SCHEME
+CAPTURE_COLOR_SCHEME="${AGENT_BROWSER_COLOR_SCHEME:-light}"
+HOVER_EVAL_TIMEOUT_MS="${CAPTURE_HOVER_TIMEOUT_MS:-90000}"
+if ! [[ "$HOVER_EVAL_TIMEOUT_MS" =~ ^[0-9]+$ ]] || [ "$HOVER_EVAL_TIMEOUT_MS" -lt 10000 ]; then
+  HOVER_EVAL_TIMEOUT_MS=90000
+fi
+HOVER_CANDIDATE_CAP="${CAPTURE_HOVER_CANDIDATE_CAP:-50}"
+if ! [[ "$HOVER_CANDIDATE_CAP" =~ ^[0-9]+$ ]] || [ "$HOVER_CANDIDATE_CAP" -lt 1 ] || [ "$HOVER_CANDIDATE_CAP" -gt 50 ]; then
+  HOVER_CANDIDATE_CAP=50
+fi
+# Configure the timeout before the first fresh-session command. Reused sessions
+# must keep their caller's launch environment so the daemon retains the page.
+
 
 if [ "$#" -lt 3 ]; then
   echo "Usage: $0 <url> <session> <ref_dir> [--reuse-session]" >&2
@@ -66,7 +76,7 @@ HOVER_SESSION="${SESSION}-hover"
 if [ "$REUSE_SESSION" = "true" ]; then
   HOVER_SESSION="$SESSION"
 fi
-if [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
+if [ "$REUSE_SESSION" = "false" ] && [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
   CAPTURE_NAMESPACE_ID="$(printf '%s' "$SESSION" | cksum | awk '{print $1}')"
   AGENT_BROWSER_NAMESPACE="ui-clone-${CAPTURE_NAMESPACE_ID}"
   export AGENT_BROWSER_NAMESPACE
@@ -77,6 +87,14 @@ mkdir -p "$OUTDIR"
 RESPONSE_TMP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
+NAVIGATION_RECEIPT="$REF_DIR/capture-hover-navigation.json"
+if [ "$REUSE_SESSION" = "true" ]; then
+  NAVIGATION_RECEIPT="$REF_DIR/capture-navigation.json"
+else
+  unset AGENT_BROWSER_COLOR_SCHEME
+  AGENT_BROWSER_DEFAULT_TIMEOUT="$HOVER_EVAL_TIMEOUT_MS"
+  export AGENT_BROWSER_DEFAULT_TIMEOUT
+fi
 
 derived_ready_wait_ms() {
   local splash_summary="${REF_DIR}/${STATES_PREFIX:-states}/splash/summary.json"
@@ -126,7 +144,18 @@ wait_for_derived_readiness() {
 cleanup() {
   rm -f "${RESPONSE_TMP:-}"
   if [ "$REUSE_SESSION" = "false" ]; then
-    agent-browser --session "$HOVER_SESSION" close >/dev/null 2>&1 || true
+    python3 - "$HOVER_SESSION" <<'PY_CLOSE' >/dev/null 2>&1 || true
+import subprocess
+import sys
+
+try:
+    subprocess.run(
+        ["agent-browser", "--session", sys.argv[1], "close"],
+        timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    pass
+PY_CLOSE
   fi
 }
 
@@ -134,23 +163,52 @@ trap cleanup EXIT
 
 # Open page in the derived session unless reusing the caller's session.
 if [ "$REUSE_SESSION" = "false" ]; then
-  if ! agent-browser --session "$HOVER_SESSION" open "$URL" >/dev/null 2>&1; then
+  agent-browser --session "$HOVER_SESSION" close >/dev/null 2>&1 || true
+  # Materialize the persistent page before applying emulation settings. The
+  # first cold command can otherwise target a transient launch page.
+  if ! agent-browser --session "$HOVER_SESSION" get url >/dev/null; then
+    echo "capture-hover: agent-browser page initialization failed (session=$HOVER_SESSION)" >&2
+    exit 2
+  fi
+  if ! agent-browser --session "$HOVER_SESSION" set viewport 1440 900 >/dev/null; then
+    echo "capture-hover: agent-browser viewport failed (session=$HOVER_SESSION)" >&2
+    exit 2
+  fi
+  if ! agent-browser --session "$HOVER_SESSION" set media "$CAPTURE_COLOR_SCHEME" >/dev/null; then
+    echo "capture-hover: agent-browser color scheme failed (session=$HOVER_SESSION)" >&2
+    exit 2
+  fi
+  if ! OPEN_OUTPUT="$(agent-browser --session "$HOVER_SESSION" open "$URL" --json)"; then
     echo "capture-hover: agent-browser open failed for $URL (session=$HOVER_SESSION)" >&2
     exit 2
   fi
+  if ! printf '%s' "$OPEN_OUTPUT" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$HOVER_SESSION" --navigation "$NAVIGATION_RECEIPT" --record; then
+    exit 2
+  fi
   wait_for_derived_readiness
+else
+  if ! agent-browser --session "$HOVER_SESSION" set media "$CAPTURE_COLOR_SCHEME" >/dev/null; then
+    echo "capture-hover: agent-browser color scheme failed (session=$HOVER_SESSION)" >&2
+    exit 2
+  fi
 fi
 
-# Single in-page eval — CSS rule extraction + JS-handler probing in one
-# Promise loop. Each candidate gets a passive control interval before events,
-# so timer/autoplay changes are not mislabeled as hover. Total wall time
-# ~50 × (200ms control + 200ms settle + 50ms restore) ≈ 22.5s worst-case.
+# One in-page probe — CSS rule extraction + JS-handler probing in one
+# Promise loop, started once and harvested through short eval polls. Each candidate gets a passive control interval before events,
+# so timer/autoplay changes are not mislabeled as hover.
+# The default top-50 budget bounds CSS and JavaScript hover candidates.
+# CAPTURE_HOVER_CANDIDATE_CAP can lower the budget for diagnostic runs.
 EVAL_JS='(async () => {
   const CAP = 50;
+  const PROBE_TIMEOUT_MS = 90000;
   const SETTLE_MS = 200;
   const RESTORE_MS = 50;
   const startedAt = performance.now();
-  const boundedFrameWait = (delayMs) => new Promise(resolve => {
+  const boundedFrameWait = (delayMs) => new Promise((resolve, reject) => {
+    if (performance.now() - startedAt >= PROBE_TIMEOUT_MS) {
+      reject(new Error("hover capture exceeded total deadline"));
+      return;
+    }
     let finished = false;
     const finish = () => {
       if (finished) return;
@@ -165,9 +223,152 @@ EVAL_JS='(async () => {
   const normalizeSelector = (selector) => selector.trim()
     .replace(/\s+/g, " ")
     .replace(/\s*([>+~])\s*/g, "$1");
+  const splitSelectorList = (selector) => {
+    const parts = [];
+    let start = 0, parenDepth = 0, bracketDepth = 0, quote = "";
+    for (let i = 0; i < selector.length; i++) {
+      const ch = selector[i];
+      if (quote) {
+        if (ch === quote && selector[i - 1] !== "\\") quote = "";
+        continue;
+      }
+      if (ch === "\"" || ch.charCodeAt(0) === 39) { quote = ch; continue; }
+      if (ch === "(") parenDepth++;
+      else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
+      else if (ch === "[") bracketDepth++;
+      else if (ch === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+      else if (ch === "," && parenDepth === 0 && bracketDepth === 0) {
+        parts.push(selector.slice(start, i));
+        start = i + 1;
+      }
+    }
+    parts.push(selector.slice(start));
+    return parts;
+  };
+
+  // Track real pseudo-classes separately from quoted/attribute text. Only
+  // top-level predicates belong to the compound currently being normalized.
+  const hoverShape = (selector) => {
+    const hovers = [], boundaries = [];
+    let quote = "", bracket = 0, depth = 0, hasHover = false;
+    for (let i = 0; i < selector.length; i++) {
+      const ch = selector[i];
+      if (ch === "\\") { i++; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "\"" || ch.charCodeAt(0) === 39) { quote = ch; continue; }
+      if (ch === "[") { bracket++; continue; }
+      if (ch === "]") { bracket--; continue; }
+      if (bracket) continue;
+      if (/^:hover(?![\w-])/i.test(selector.slice(i))) {
+        hasHover = true;
+        if (!depth) hovers.push(i);
+      }
+      if (!depth && (/[\s>+~]/.test(ch)
+        || /^::|^:(?:before|after|first-letter|first-line)(?![\w-])/i.test(selector.slice(i)))) {
+        boundaries.push(i);
+      }
+      if (ch === "(") depth++;
+      if (ch === ")") depth--;
+    }
+    return {hovers, boundaries, hasHover};
+  };
+  const stripTopLevelHovers = (selector) => {
+    let result = selector;
+    for (const index of hoverShape(selector).hovers.reverse()) {
+      result = result.slice(0, index) + result.slice(index + 6);
+    }
+    return result;
+  };
+  const normalizeHoverSubject = (selector) => {
+    const {hovers, boundaries} = hoverShape(selector);
+    if (!hovers.length) return [];
+    const end = boundaries.find(index => index > hovers[0]) ?? selector.length;
+    // More than one hovered subject needs multiple pointer activations.
+    if (hovers.some(index => index >= end)) return [];
+    return [stripTopLevelHovers(selector.slice(0, end)) + ":hover" + selector.slice(end)];
+  };
+
+  // Recover only positive selector-list functions. Moving a hover predicate
+  // outside :is/:where is valid when it belongs to the branch subject. A
+  // descendant after that predicate, or :not/:has, requires different semantics
+  // and stays unsupported rather than selecting an unrelated element.
+  const expandHoverBranches = (selector, level = 0) => {
+    if (level > 16) return [];
+    let quote = "", bracketDepth = 0;
+    for (let i = 0; i < selector.length; i++) {
+      const ch = selector[i];
+      if (ch === "\\") { i++; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "\"" || ch.charCodeAt(0) === 39) { quote = ch; continue; }
+      if (ch === "[") { bracketDepth++; continue; }
+      if (ch === "]") { bracketDepth--; continue; }
+      if (bracketDepth) continue;
+      const call = selector.slice(i).match(/^:([a-z-]+)\(/i);
+      if (!call) continue;
+      const open = i + call[0].length - 1;
+      let end = open + 1, depth = 1, innerQuote = "", innerBracket = 0;
+      for (; end < selector.length; end++) {
+        const c = selector[end];
+        if (c === "\\") { end++; continue; }
+        if (innerQuote) { if (c === innerQuote) innerQuote = ""; continue; }
+        if (c === "\"" || c.charCodeAt(0) === 39) { innerQuote = c; continue; }
+        if (c === "[") { innerBracket++; continue; }
+        if (c === "]") { innerBracket--; continue; }
+        if (innerBracket) continue;
+        if (c === "(") depth++;
+        if (c === ")" && --depth === 0) break;
+      }
+      if (depth !== 0) return [];
+      const body = selector.slice(open + 1, end);
+      if (!hoverShape(body).hasHover) { i = end; continue; }
+      if (!["is", "where"].includes(call[1].toLowerCase())) return [];
+      // An earlier hovered subject cannot stand in for this branch subject.
+      const prefix = selector.slice(0, i);
+      const prefixShape = hoverShape(prefix);
+      if (prefixShape.hovers.some(index => prefixShape.boundaries.some(end => end > index))) return [];
+      const expanded = [];
+      for (const branch of splitSelectorList(body)) {
+        if (!hoverShape(branch).hasHover) continue;
+        for (const recovered of expandHoverBranches(branch.trim(), level + 1)) {
+          const hover = hoverShape(recovered).hovers[0];
+          // A combinator after hover changes the branch subject. Do not move
+          // that hover onto the final subject; report unsupported syntax.
+          if (hoverShape(recovered).boundaries.some(index => index > hover)) continue;
+          const subject = stripTopLevelHovers(recovered).trim() || "*";
+          // Keep suffixes on the same compound (.enabled, attribute tests,
+          // or non-hover pseudo-classes) in the activation selector too.
+          const suffix = selector.slice(end + 1);
+          let stop = 0, suffixDepth = 0, suffixBracket = 0, suffixQuote = "";
+          for (; stop < suffix.length; stop++) {
+            const c = suffix[stop];
+            if (c === "\\") { stop++; continue; }
+            if (suffixQuote) { if (c === suffixQuote) suffixQuote = ""; continue; }
+            if (c === "\"" || c.charCodeAt(0) === 39) { suffixQuote = c; continue; }
+            if (c === "[") { suffixBracket++; continue; }
+            if (c === "]") { suffixBracket--; continue; }
+            if (suffixBracket) continue;
+            if (!suffixDepth && /^::|^:(?:before|after|first-letter|first-line)(?![\w-])/i.test(suffix.slice(stop))) break;
+            if (c === "(") suffixDepth++;
+            if (c === ")") suffixDepth--;
+            if (!suffixDepth && /[\s>+~]/.test(c)) break;
+          }
+          // A later subject needs its own hover activation. The capture driver
+          // targets one element, so do not erase that additional requirement.
+          if (hoverShape(suffix.slice(stop)).hasHover) continue;
+          const replacement = selector.slice(0, open + 1) + subject + ")"
+            + suffix.slice(0, stop) + ":hover" + suffix.slice(stop);
+          expanded.push(...expandHoverBranches(replacement, level + 1));
+          if (expanded.length > 50) return [];
+        }
+      }
+      return expanded;
+    }
+    return normalizeHoverSubject(selector);
+  };
 
   // 1. Parse CSSOM for :hover rules. Skip CORS-blocked sheets silently.
   const cssHoverRules = [];
+  let unsupportedHoverSelectors = 0;
   for (const sheet of document.styleSheets) {
     const sourceHref = typeof sheet.href === "string" ? sheet.href : "";
     let rules;
@@ -176,30 +377,31 @@ EVAL_JS='(async () => {
     for (const rule of rules) {
       if (!rule.selectorText || !rule.style) continue;
       const sel = rule.selectorText;
-      if (!sel.includes(":hover")) continue;
-      // Split on top-level commas — avoid splitting inside :is() / :where() / :not().
-      const parts = sel.split(/,(?![^()]*\))/);
+      if (!hoverShape(sel).hasHover) continue;
+      // Split only top-level commas. Regex lookaheads mis-split nested
+      // :is()/:where() lists and attribute values containing commas.
+      const parts = splitSelectorList(sel);
       for (const part of parts) {
-        const trimmed = part.trim();
-        if (!trimmed.includes(":hover")) continue;
-        // Activation is everything BEFORE :hover; affected is the
-        // full selector with :hover removed. `.card:hover .title` →
-        // activation=".card", affected=".card .title".
-        const idx = trimmed.indexOf(":hover");
-        const activation = normalizeSelector(trimmed.slice(0, idx));
-        const affected = normalizeSelector(trimmed.replace(":hover", ""));
-        if (!activation) continue;
-        const props = {};
-        for (let i = 0; i < rule.style.length; i++) {
-          const p = rule.style[i];
-          props[p] = rule.style.getPropertyValue(p);
+        if (!hoverShape(part).hasHover) continue;
+        const recoveredSelectors = expandHoverBranches(part.trim());
+        if (!recoveredSelectors.length) unsupportedHoverSelectors++;
+        for (const trimmed of recoveredSelectors) {
+          const idx = hoverShape(trimmed).hovers[0];
+          const activation = normalizeSelector(trimmed.slice(0, idx));
+          const affected = normalizeSelector(stripTopLevelHovers(trimmed));
+          if (!activation) continue;
+          const props = {};
+          for (let i = 0; i < rule.style.length; i++) {
+            const p = rule.style[i];
+            props[p] = rule.style.getPropertyValue(p);
+          }
+          cssHoverRules.push({
+            activation,
+            affected,
+            cssProperties: props,
+            sourceHrefs: sourceHref ? [sourceHref] : [],
+          });
         }
-        cssHoverRules.push({
-          activation,
-          affected,
-          cssProperties: props,
-          sourceHrefs: sourceHref ? [sourceHref] : [],
-        });
       }
     }
   }
@@ -225,15 +427,41 @@ EVAL_JS='(async () => {
   // bounded candidate pool from interactive semantics, pointer cursors, and
   // declared transitions; the runtime diff below keeps only elements whose
   // synthetic pointer/mouse events actually change style or DOM state.
-  const runtimeSelector = (el) => {
+  const selectorSegment = (el) => {
     const tag = el.localName || "element";
     if (el.id) return `#${CSS.escape(el.id)}`;
+    const classes = Array.from(el.classList || []).filter(Boolean).slice(0, 3);
+    let segment = classes.length
+      ? `${tag}.${classes.map((name) => CSS.escape(name)).join(".")}`
+      : tag;
+    const parent = el.parentElement;
+    if (parent) {
+      const sameTag = Array.from(parent.children).filter((child) => child.localName === tag);
+      if (sameTag.length > 1) segment += `:nth-of-type(${sameTag.indexOf(el) + 1})`;
+    }
+    return segment;
+  };
+  const runtimeSelector = (el) => {
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const tag = el.localName || "element";
     for (const attr of ["data-testid", "data-test", "data-cy", "aria-label", "name"]) {
       const value = el.getAttribute(attr);
-      if (value) return `${tag}[${attr}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"]`;
+      if (value) {
+        const candidate = `${tag}[${attr}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"]`;
+        try { if (document.querySelectorAll(candidate).length === 1) return candidate; }
+        catch (e) {}
+      }
     }
-    const classes = Array.from(el.classList || []).filter(Boolean).slice(0, 3);
-    return classes.length ? `${tag}.${classes.map((name) => CSS.escape(name)).join(".")}` : tag;
+    const path = [];
+    let node = el;
+    while (node && node.nodeType === Node.ELEMENT_NODE && path.length < 6) {
+      path.unshift(selectorSegment(node));
+      const candidate = path.join(">");
+      try { if (document.querySelectorAll(candidate).length === 1) return candidate; }
+      catch (e) {}
+      node = node.parentElement;
+    }
+    return path.join(">");
   };
   for (const el of document.querySelectorAll("*")) {
     let cs, rect;
@@ -262,7 +490,7 @@ EVAL_JS='(async () => {
   // syntax: pseudo-elements and other stateful suffixes may not match until
   // the real pointer state is active.
   let selectorsAbsentFromPage = 0;
-  let selectorsInvalid = 0;
+  let selectorsInvalid = unsupportedHoverSelectors;
   const presentCandidates = [];
   for (const cand of candidates.values()) {
     let activationEl;
@@ -515,12 +743,17 @@ EVAL_JS='(async () => {
   };
 })();'
 
-RESPONSE_RAW="$(printf '%s' "$EVAL_JS" | agent-browser --session "$HOVER_SESSION" eval --json --stdin 2>&1)" || {
+# Keep the browser program static and shell-safe while allowing bounded
+# diagnostic/capacity runs. Values are validated integers in [1, 50].
+EVAL_JS="${EVAL_JS/const CAP = 50;/const CAP = ${HOVER_CANDIDATE_CAP};}"
+EVAL_JS="${EVAL_JS/const PROBE_TIMEOUT_MS = 90000;/const PROBE_TIMEOUT_MS = ${HOVER_EVAL_TIMEOUT_MS};}"
+
+RESPONSE_RAW="$(printf '%s' "$EVAL_JS" | python3 "$SCRIPT_DIR/browser-async-eval.py" --session "$HOVER_SESSION" --timeout-ms "$HOVER_EVAL_TIMEOUT_MS" 2>&1)" || {
   echo "capture-hover: agent-browser eval failed (session=$HOVER_SESSION)" >&2
   echo "$RESPONSE_RAW" >&2
   exit 3
 }
-if ! printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR"; then
+if ! printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$HOVER_SESSION" --navigation "$NAVIGATION_RECEIPT"; then
   echo "capture-hover: agent-browser eval returned a non-page origin (session=$HOVER_SESSION)" >&2
   exit 3
 fi

@@ -149,10 +149,25 @@ probe_width() {
   echo "$RAW" | sed 's/^"//;s/"$//' | sed 's/\\"/"/g' >> "$SAMPLES"
 }
 
+SCOPE_RANGE="$(python3 - "${REF_DIR:-}" <<'PY_SCOPE'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1]) / 'verification-plan.json'
+if p.exists():
+    scope = json.loads(p.read_text()).get('verificationScope', {})
+    if scope.get('mode') == 'desktop':
+        print(scope['range']['minWidth'], scope['range']['maxWidth'])
+PY_SCOPE
+)" || exit 2
+if [ -n "$SCOPE_RANGE" ]; then
+  read -r SCOPE_MIN SCOPE_MAX <<< "$SCOPE_RANGE"
+  BPS="$SCOPE_MIN $SCOPE_MAX"
+fi
 for BP in $BPS; do
   for OFF in -1 0 1; do
     W=$((BP + OFF))
     [ "$W" -lt 200 ] && continue
+    if [ -n "$SCOPE_RANGE" ] && { [ "$W" -lt "$SCOPE_MIN" ] || [ "$W" -gt "$SCOPE_MAX" ]; }; then continue; fi
     probe_width "$W" "$BP"
   done
 done

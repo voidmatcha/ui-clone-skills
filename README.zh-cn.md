@@ -17,7 +17,7 @@
   <a href="README.md">🇺🇸 English</a> | <a href="README.ko.md">🇰🇷 한국어</a> | <a href="README.ja.md">🇯🇵 日本語</a> | <strong>🇨🇳 简体中文</strong>
 </p>
 
-<!-- README-CANONICAL-REVISION: sha256=94c5893d3844012801dbd4251fea7ac2b0d4018a4484dfbd6b2b975e75c08243; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
+<!-- README-CANONICAL-REVISION: sha256=abb78b7ead0f943d143a6eda35664c7b68c73332814aab6fd83e0726e63a8818; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
 
 `ui-clone-skills` 将一个真实网站转化为有证据支撑的 React + Tailwind 实现。它会捕获浏览器实际渲染的页面，下载真实的 CSS 和资源，读取响应式样式与计算样式，从 JavaScript bundle 中还原动画参数，并在不同视口和交互状态下验证结果。
 
@@ -96,6 +96,8 @@ Preserve the responsive layout, scroll reveals, and hover motion. Output to ./ou
 
 常规对比使用确定性脚本，而不是让模型判断每一张截图。视觉能力仅用于最终语义审查，以及仅凭指标无法解释差异时的限定范围诊断。
 
+参考过渡证据可以使用视频，或来源记录匹配的不同状态截图。图片对不能替代单独要求的完整滚动录像。[门禁规范](./docs/gates.md)定义了可接受的产物。
+
 <a id="skills"></a>
 
 ## 技能
@@ -132,6 +134,8 @@ tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatc
 
 使用 `--claude-only` 或 `--codex-only` 仅安装到一个宿主。Claude Code 会获得插件和生命周期钩子。Codex 会获得三个公开技能，并在 `ui-reverse-engineering` 首次于某个工作区运行时启用项目本地钩子。
 
+安装或更新后，请重启 Claude Code，再启动普通的 `claude` 会话。添加 `--plugin-dir` 会重复加载开发副本。安装程序会将已安装缓存与分发源文件进行比较；如果同一版本仍残留旧文件，会报告问题，而不是宣称更新成功。
+
 请参阅[安装指南](./README_detail/install.md)，了解从 checkout 安装、手动配置依赖项、宿主专用选项以及仅安装技能的方式。
 
 ## 要求
@@ -156,6 +160,10 @@ tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatc
 6. **根据实测差异迭代**，只有满足用户要求的完成契约，或报告真实阻碍时才停止。
 
 在 checkout 中，可使用 `python -m ui_clone.pipeline live_url component_name session_name status --json` 或 `node bin/ui-clone pipeline live_url component_name session_name status --json` 查看状态。npm 发布目前暂停，因此除非 `ui-clone-cli` 已通过 npm link 指向此仓库，否则请优先使用 checkout 中的命令。
+
+当 Phase 1 生成临时参考证据时，只有同一次执行中后续还会运行 Phase 2，才能推迟参考门禁判定。Phase 2 必须修复证据并通过门禁。恢复 Phase 2 时，如果已有5张基准截图或先前的参考完成记录，就会重新检查当前参考证据。如果有完成记录但基准截图不足5张，恢复将失败。恢复行为和手动重试所需的浏览器会话设置见 [CLI 契约](./docs/agent-cli.md)。
+
+在没有属于当前会话的流水线参考目录时，流水线外的 Stop 检查会结合该会话的外部浏览记录与 HTML、CSS 或组件写入尝试来判定。仅浏览网页或编写 Markdown 不会触发这项检查。调查后生成 HTML 报告也可能符合条件，因此这种启发式判定不能证明任务意图是克隆。对于非克隆工作，请遵循[由人工操作的例外流程](./docs/agent-cli.md#escape-hatches-humans-only)，不要为了消除警告而启动无关的克隆流水线。
 
 ## 文档
 

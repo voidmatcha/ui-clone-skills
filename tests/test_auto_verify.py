@@ -65,6 +65,10 @@ esac
     )
     _write_executable(fake_bin / "agent-browser", "#!/usr/bin/env bash\nexit 0\n")
     _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(fake_bin / "bash", """#!/bin/bash
+case "$1" in */run-required-checks.sh) exit 0 ;; esac
+exec /bin/bash "$@"
+""")
 
     env = os.environ.copy()
     env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
@@ -97,3 +101,62 @@ esac
     assert "WARN" in proc.stdout
     stamp = json.loads((ref / "visual-debug-stamp.json").read_text())
     assert stamp["stampedBy"] == "scripts/verify/auto-verify.sh"
+
+
+def test_auto_verify_runs_prerequisites_before_completion(tmp_path: Path) -> None:
+    import shutil
+
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts" / "verify"
+    scripts.mkdir(parents=True)
+    shutil.copy(_project_root() / "scripts/verify/auto-verify.sh", scripts)
+    _write_executable(scripts / "run-required-checks.sh", '''#!/usr/bin/env bash
+printf 'required\n' >> "$CALLS"
+exit "${REQUIRED_EXIT:-0}"
+''')
+    visual = tmp_path / "visual"
+    visual.mkdir()
+    (visual / "ae-compare.sh").touch()
+    _write_executable(visual / "layout-health-check.sh", '''#!/usr/bin/env bash
+printf 'layout\n' >> "$CALLS"
+exit 0
+''')
+    ref = tmp_path / "ref"
+    (ref / "sections").mkdir(parents=True)
+    (ref / "sections/result.txt").write_text("**Result: 1 PASS, 0 FAIL**\n")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "curl", "#!/usr/bin/env bash\nprintf 200\n")
+    _write_executable(fake_bin / "agent-browser", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(fake_bin / "sleep", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(fake_bin / "uv", '''#!/usr/bin/env bash
+printf '%s\n' "${@: -1}" >> "$CALLS"
+if [ "${@: -1}" = state-coverage ]; then
+  [ ! -f "${@: -2:1}/visual-debug-stamp.json" ] || exit 99
+  exit "${STATE_EXIT:-0}"
+fi
+exit 0
+''')
+    calls = tmp_path / "calls"
+    env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+               CALLS=str(calls), VISUAL_DEBUG_SCRIPTS_DIR=str(visual))
+    for state_exit, required_exit, expected in [
+        (0, 0, ["state-coverage", "required", "post-implement"]),
+        (1, 0, ["state-coverage"]),
+        (0, 1, ["state-coverage", "required"]),
+    ]:
+        calls.write_text("")
+        if required_exit:
+            (ref / "sections/result.txt").unlink()
+        (ref / "visual-debug-stamp.json").write_text(json.dumps({"passed": True}))
+        proc = subprocess.run(
+            ["bash", str(scripts / "auto-verify.sh"), "test", "https://ref.test/",
+             "https://impl.test/", str(ref)],
+            env=dict(env, STATE_EXIT=str(state_exit), REQUIRED_EXIT=str(required_exit)),
+            capture_output=True, text=True, timeout=15,
+        )
+        assert calls.read_text().splitlines() == expected, proc.stdout + proc.stderr
+        assert proc.returncode == (1 if state_exit or required_exit else 0)
+        stamp = json.loads((ref / "visual-debug-stamp.json").read_text())
+        assert stamp["passed"] is (not (state_exit or required_exit))
+        assert not stamp.get("provisional")

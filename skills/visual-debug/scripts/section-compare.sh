@@ -775,7 +775,7 @@ try:
         for k in ('fonts','images','videos')
     )
     auto = 0
-    if has_subs and not pats:
+    if has_subs and 'structuralOnlySections' not in d:
         pats = ['*']
         auto = 1
     print(' '.join(p for p in pats if isinstance(p, str)))
@@ -805,6 +805,9 @@ fi
 # real asset. This blocks the "declare wholesale substitution to skip
 if [ "$SUBSTITUTION_ALL" = "1" ]; then
   PAID_FEATURES_FILE="$DIR/paid-features.json"
+  if [ ! -f "$PAID_FEATURES_FILE" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/paid-features.json" ]; then
+    PAID_FEATURES_FILE="${REF_ROOT_DIR}/paid-features.json"
+  fi
   has_paid=$(python3 -c "
 import json, sys
 try:
@@ -962,30 +965,10 @@ if [ -z "$_CMP_SELECTORS" ]; then
   exit 2
 fi
 DISMISS_OVERLAYS='(() => {
-  // First sweep: vendor-specific consent/cookie SDKs that always render fixed UIs
+  // Vendor-specific consent/cookie SDKs that always render fixed UIs.
+  // Generic role-word selectors are forbidden here: symmetric removal can
+  // erase real site content from both sides and make a bad clone compare equal.
   try { document.querySelectorAll("'"$_CMP_SELECTORS"'").forEach(el => el.remove()); } catch (e) {}
-  // Second sweep: heuristic match by class keywords for big popups.
-  //
-  // Fixed only. The keywords are role words, not vendor names, so they match
-  // the sites own markup constantly -- and an absolutely positioned element that
-  // large is normally page content, not an overlay: a hero gradient, a banner
-  // section, a marquee fade. Measured on three production pages, `absolute`
-  // caught only real content (navercorp .banner__img with two images and
-  // .banner__info with 97 characters of copy; webflow .marquee-overlay) and
-  // `fixed` caught nothing at all, so this loses no measured coverage. Removal
-  // runs on the reference AND the implementation, so deleting content here is
-  // invisible: both sides lose it and the section compares equal.
-  //
-  // A real popup or consent modal is fixed. A per-site absolute overlay that
-  // genuinely needs removing belongs in SECTION_FIXED_OVERLAY_SELECTORS.
-  document.querySelectorAll("[class*=popup], [class*=modal], [class*=cookie], [class*=banner], [class*=overlay], [class*=signup]").forEach(el => {
-    const s = getComputedStyle(el);
-    if (s.position === "fixed") {
-      if (el.offsetWidth > window.innerWidth * 0.3 && el.offsetHeight > window.innerHeight * 0.2) {
-        el.remove();
-      }
-    }
-  });
   document.body.style.overflow = "";
   document.documentElement.style.overflow = "";
   return "overlays dismissed";

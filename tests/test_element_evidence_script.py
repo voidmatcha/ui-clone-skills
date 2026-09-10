@@ -26,6 +26,7 @@ def test_element_evidence_script_is_extensionless_agent_browser_probe() -> None:
     assert "transitionDuration" in script
     assert "outerHTML" not in script
     assert "chrome." not in script
+    assert 'python3 "$ORIGIN_VALIDATOR" "$EXPECTED_URL"' in script
 
 
 def test_element_evidence_embedded_eval_is_valid_javascript(tmp_path: Path) -> None:
@@ -87,7 +88,7 @@ def test_element_evidence_rejects_non_page_origin(tmp_path: Path) -> None:
     env["LANG"] = "C"
     script = Path(__file__).resolve().parents[1] / "scripts" / "extract" / "element-evidence.sh"
     proc = subprocess.run(
-        [str(script), "sess1", ".hero", str(out)],
+        [str(script), "sess1", "https://example.test", ".hero", str(out)],
         capture_output=True,
         text=True,
         env=env,
@@ -115,7 +116,7 @@ def test_element_evidence_rejects_failure_envelope(tmp_path: Path) -> None:
     env["LANG"] = "C"
     script = Path(__file__).resolve().parents[1] / "scripts" / "extract" / "element-evidence.sh"
     proc = subprocess.run(
-        [str(script), "sess1", ".hero", str(out)],
+        [str(script), "sess1", "https://example.test", ".hero", str(out)],
         capture_output=True,
         text=True,
         env=env,
@@ -125,3 +126,38 @@ def test_element_evidence_rejects_failure_envelope(tmp_path: Path) -> None:
     assert proc.returncode == 3, f"{proc.stdout}\n{proc.stderr}"
     assert "reported failure" in proc.stderr
     assert not out.exists()
+
+
+@pytest.mark.parametrize("consumer", ["inline", "element-default", "element-explicit"])
+@pytest.mark.parametrize("receipt_mode", ["valid", "missing", "wrong-session", "wrong-origin"])
+def test_extractors_require_bound_navigation_receipt_for_redirects(
+    tmp_path: Path, consumer: str, receipt_mode: str,
+) -> None:
+    requested = "http://example.test/"
+    final_url = "https://www.example.test/"
+    actual = "https://unrelated.test" if receipt_mode == "wrong-origin" else "https://www.example.test"
+    payload = json.dumps({"success": True, "data": {
+        "origin": actual,
+        "result": {"url": final_url, "scripts": [], "skipped": [], "selector": ".hero"},
+    }})
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "AGENT_BROWSER_NAMESPACE": "receipt-test"}
+    receipt = tmp_path / ("custom-navigation.json" if consumer == "element-explicit" else "capture-navigation.json")
+    if receipt_mode != "missing":
+        receipt.write_text(json.dumps({
+            "requestedUrl": requested, "finalUrl": final_url,
+            "session": "other" if receipt_mode == "wrong-session" else "sess1",
+            "namespace": "receipt-test",
+        }))
+    scripts = Path(__file__).resolve().parents[1] / "scripts/extract"
+    if consumer == "inline":
+        command = [str(scripts / "inline-scripts.sh"), "sess1", requested, str(tmp_path)]
+        output = tmp_path / "inline-scripts.json"
+    else:
+        output = tmp_path / "evidence.json"
+        command = [str(scripts / "element-evidence.sh"), "sess1", requested, ".hero", str(output)]
+        if consumer == "element-explicit":
+            command.append(str(receipt))
+    proc = subprocess.run(command, capture_output=True, text=True, env=env, timeout=30)
+    assert (proc.returncode == 0) is (receipt_mode == "valid"), proc.stderr
+    assert output.exists() is (receipt_mode == "valid")

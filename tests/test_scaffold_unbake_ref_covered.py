@@ -2218,3 +2218,19 @@ def test_descendant_credit_requires_the_ancestor_on_this_nodes_chain(
         ".other_module h2 { font-size: var(--h-text-size); }",
     )
     assert '"96px"' in blob, blob
+
+
+def test_modern_width_ranges_release_captured_font_bake(tmp_path: Path) -> None:
+    for index, condition in enumerate(('width >= 1024px', '1024px <= width', '64rem <= width < 100rem')):
+        case = tmp_path / str(index)
+        case.mkdir()
+        blob, _ = _emit(case, dict(_HEADLINE), f'@media ({condition}) {{ .headline {{ font-size: clamp(32px, 8vw, 164px); }} }}')
+        assert 'fontSize: "164px"' not in blob, blob
+
+
+def test_inactive_modern_width_ranges_keep_captured_font_bake(tmp_path: Path) -> None:
+    for index, condition in enumerate(('width > 1440px', 'width < 1440px', '1440px < width < 1920px', 'width >= 1600px')):
+        case = tmp_path / str(index)
+        case.mkdir()
+        blob, _ = _emit(case, dict(_HEADLINE), f'@media ({condition}) {{ .headline {{ font-size: clamp(32px, 8vw, 164px); }} }}')
+        assert 'fontSize: "164px"' in blob, blob

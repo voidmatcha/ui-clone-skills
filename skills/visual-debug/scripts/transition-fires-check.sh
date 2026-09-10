@@ -571,17 +571,19 @@ PHASE2_TEMPLATE="(async () => {
   const probes = Array.prototype.slice.call(
     document.querySelectorAll('[data-tf-idxs]')
   );
-  // A timer may remount its target while earlier chunks are running, taking
-  // the phase-1 marker with the detached node. Recover the live target for the
-  // active chunk before iterating probes; other kinds keep marker-only routing.
+  // Timers and scroll state machines may replace targets between chunks.
+  // Scroll recovery uses only the declared selector, never a broader match.
+  const resolveScrollEntry = (e) => {
+    try { return document.querySelector(e.target); } catch (_) { return null; }
+  };
   for (const i of CHUNK) {
     const e = ENTRIES[i];
-    if (!e || e.kind !== 'timer') continue;
+    if (!e || (e.kind !== 'timer' && e.kind !== 'scrub')) continue;
     const marked = probes.some((node) => (
       (node.getAttribute('data-tf-idxs') || '').split(',').includes(String(i))
     ));
     if (marked) continue;
-    const live = resolveEntry(e, null);
+    const live = e.kind === 'scrub' ? resolveScrollEntry(e) : resolveEntry(e, null);
     if (!live) continue;
     const prior = live.getAttribute('data-tf-idxs');
     live.setAttribute('data-tf-idxs', prior ? prior + ',' + i : String(i));
@@ -665,12 +667,14 @@ PHASE2_TEMPLATE="(async () => {
         // reshuffles evolve z-order per card); legacy two-field sigs stay
         // parseable.
         const takeSample = () => {
-          const cs = getComputedStyle(el); const rr = el.getBoundingClientRect();
-          var chs = el.querySelectorAll('span,div,em,b,i,p,a,img,video,svg,g,path');
+          const current = el.isConnected ? el : resolveScrollEntry(e);
+          if (!current) throw new Error('scroll target missing after remount');
+          const cs = getComputedStyle(current); const rr = current.getBoundingClientRect();
+          var chs = current.querySelectorAll('span,div,em,b,i,p,a,img,video,svg,g,path');
           var sig = ''; var csig = ''; var lim = Math.min(chs.length, 48);
           for (var sci = 0; sci < lim; sci++){ var scc = getComputedStyle(chs[sci]); sig += scc.transform + '|' + scc.opacity + '|' + scc.zIndex + ';'; csig += scc.color + ';'; }
           var animRunning = (cs.animationName && cs.animationName !== 'none' && cs.animationPlayState !== 'paused' && cs.animationDuration && cs.animationDuration !== '0s');
-          samples.push({ transform: cs.transform, opacity: parseFloat(cs.opacity), filter: cs.filter, top: rr.top, width: rr.width, height: rr.height, childSig: sig, childColorSig: csig, cls: (el.getAttribute('class') || ''), scrollY: window.scrollY, docH: docH, smoothEngine: smoothEngine, animRunning: animRunning });
+          samples.push({ transform: cs.transform, opacity: parseFloat(cs.opacity), filter: cs.filter, top: rr.top, width: rr.width, height: rr.height, childSig: sig, childColorSig: csig, cls: (current.getAttribute('class') || ''), scrollY: window.scrollY, docH: docH, smoothEngine: smoothEngine, animRunning: animRunning });
         };
         // Scroll-linked label/state swaps can complete well before the normal
         // settle window. Sample inside that window when the spec declares the
@@ -1539,7 +1543,17 @@ RC=$?
 # but do render at the canonical mobile viewport, then replace only those rows
 # in the canonical artifact. The scoped child disables this block to prevent
 # recursion; all other desktop verdicts remain authoritative.
-if [ "$UI_CLONE_FIRES_RESPONSIVE_RETRY" != "0" ] && [ -z "$FIRES_IDS" ]; then
+# Implementation visibility alone cannot prove reference mobile applicability.
+run_py -m ui_clone.gates.transition_fires --mobile-retry-allowed "$REF_DIR"
+_SCOPE_RETRY_RC=$?
+if [ "$_SCOPE_RETRY_RC" -gt 1 ]; then
+  echo "ERROR: invalid verification scope; refusing responsive retry" >&2
+  exit 2
+fi
+if [ "$_SCOPE_RETRY_RC" -eq 1 ]; then
+  echo "Desktop scope: mobile retry disabled; unresolved transition targets remain blockers."
+fi
+if [ "$_SCOPE_RETRY_RC" -eq 0 ] && [ "$UI_CLONE_FIRES_RESPONSIVE_RETRY" != "0" ] && [ -z "$FIRES_IDS" ]; then
   RESPONSIVE_CANDIDATES_B64=$(run_py - "$SPEC" "$OUT" <<'PY'
 import base64, json, sys
 

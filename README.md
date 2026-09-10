@@ -94,6 +94,8 @@ Fast iteration can use `quick` or `standard` verification tiers. The default `co
 
 Routine comparison uses deterministic scripts instead of asking a model to judge every screenshot. Vision is reserved for the final semantic review and scoped diagnosis when metrics alone cannot explain a mismatch.
 
+Reference transition evidence can use video or distinct captured image states with matching provenance. Image pairs do not replace the separate full-scroll recording requirement. The [gate reference](./docs/gates.md) defines the accepted artifacts.
+
 <a id="skills"></a>
 
 ## Skills
@@ -130,6 +132,8 @@ tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatc
 
 Use `--claude-only` or `--codex-only` to target one host. Claude Code receives the plugin and lifecycle hooks. Codex receives the three public skills and enables project-local hooks when `ui-reverse-engineering` first runs in a workspace.
 
+Restart Claude Code after installation or an update, then start a normal `claude` session. Adding `--plugin-dir` would load a second development copy. The installer checks delivered cache contents against the shipped source and reports stale same-version files instead of claiming the update succeeded.
+
 See the [installation guide](./README_detail/install.md) for checkout installs, manual dependency setup, host-specific flags, and the skill-only path.
 
 ## Requirements
@@ -154,6 +158,10 @@ See the [installation guide](./README_detail/install.md) for checkout installs, 
 6. **Iterate on measured mismatches** and stop only when the requested completion contract is satisfied or a real blocker is reported.
 
 From a checkout, inspect state with `python -m ui_clone.pipeline live_url component_name session_name status --json` or `node bin/ui-clone pipeline live_url component_name session_name status --json`. npm publishing is paused, so prefer the in-checkout commands unless `ui-clone-cli` is npm-linked to this repository.
+
+When Phase 1 produces provisional reference evidence, it can defer the reference gate only if Phase 2 runs later in the same invocation. Phase 2 must repair the evidence and pass the gate. Resuming Phase 2 rechecks current reference evidence when a five-screenshot baseline exists or reference completion was previously recorded. A prior completion with fewer than five baseline screenshots fails the resume. See the [CLI contract](./docs/agent-cli.md) for resume behavior and browser session settings for manual retries.
+
+The off-pipeline Stop guard combines external browsing with HTML, CSS, or component write attempts in the same session when no owned pipeline reference exists. Browsing alone or writing Markdown does not activate this guard. Research followed by an HTML report can also match; this heuristic does not prove clone intent. For non-clone work, follow the [human-operated exception procedure](./docs/agent-cli.md#escape-hatches-humans-only), rather than starting an unrelated clone pipeline.
 
 ## Documentation
 

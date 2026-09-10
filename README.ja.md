@@ -17,7 +17,7 @@
   <a href="README.md">🇺🇸 English</a> | <a href="README.ko.md">🇰🇷 한국어</a> | <strong>🇯🇵 日本語</strong> | <a href="README.zh-cn.md">🇨🇳 简体中文</a>
 </p>
 
-<!-- README-CANONICAL-REVISION: sha256=94c5893d3844012801dbd4251fea7ac2b0d4018a4484dfbd6b2b975e75c08243; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
+<!-- README-CANONICAL-REVISION: sha256=abb78b7ead0f943d143a6eda35664c7b68c73332814aab6fd83e0726e63a8818; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
 
 `ui-clone-skills` は、公開中のWebサイトを根拠に基づく React + Tailwind 実装へ変換します。レンダリングされたページをキャプチャし、実際の CSS とアセットをダウンロードし、レスポンシブスタイルと計算済みスタイルを読み取り、JavaScript バンドルからアニメーションのパラメータを復元したうえで、複数のビューポートとインタラクション状態にわたって結果を検証します。
 
@@ -96,6 +96,8 @@ JavaScript バンドル内に隠れたアニメーションパラメータが重
 
 通常の比較では、すべてのスクリーンショットをモデルに判定させるのではなく、決定論的なスクリプトを使用します。Vision は最終的なセマンティックレビューと、メトリクスだけでは差異を説明できない場合の範囲を限定した診断にのみ使用します。
 
+参照のトランジション証拠には、動画、または出所の記録が一致する異なる状態のキャプチャ画像を使用できます。画像ペアは、別途必要な全体スクロールの録画を代替しません。受け入れ可能な成果物は[ゲート仕様](./docs/gates.md)で定義されています。
+
 <a id="skills"></a>
 
 ## Skills
@@ -132,6 +134,8 @@ tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatc
 
 ホストを一つに限定するには `--claude-only` または `--codex-only` を使います。Claude Code にはプラグインとライフサイクルフックが導入されます。Codex には三つの公開スキルが導入され、ワークスペースで `ui-reverse-engineering` を初めて実行したときにプロジェクトローカルのフックが有効になります。
 
+インストールまたは更新後は Claude Code を再起動し、通常の `claude` セッションを開始してください。`--plugin-dir` を追加すると、開発用コピーが重複して読み込まれます。インストーラーは配布元の内容とインストール済みキャッシュを比較し、同じバージョンの古いファイルが残っていれば、更新成功とせずに報告します。
+
 チェックアウトからのインストール、依存関係の手動セットアップ、ホスト固有のフラグ、スキルのみを導入する方法については、[インストールガイド](./README_detail/install.md)を参照してください。
 
 ## 要件
@@ -156,6 +160,10 @@ tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatc
 6. **計測された差異に基づいて反復**し、要求された完了条件を満たすか、実際のブロッカーが報告されるまで停止しません。
 
 チェックアウトでは、`python -m ui_clone.pipeline live_url component_name session_name status --json` または `node bin/ui-clone pipeline live_url component_name session_name status --json` で状態を確認できます。npm への公開は一時停止しているため、`ui-clone-cli` がこのリポジトリに npm link されている場合を除き、チェックアウト内のコマンドを使用してください。
+
+Phase 1 が暫定的な参照証拠を生成した場合、同じ実行内で Phase 2 が後に続く場合に限り、参照ゲートの判定を延期できます。Phase 2 は証拠を補修し、ゲートを通過する必要があります。Phase 2 の再開時は、基本スクリーンショットが5枚ある場合、または参照の完了記録がある場合に、現在の参照証拠を再検査します。完了記録があるのに基本スクリーンショットが5枚未満の場合、再開は失敗します。再開時の動作と手動リトライ時のブラウザーセッション設定は [CLI 契約](./docs/agent-cli.md)を参照してください。
+
+パイプライン外の作業を検査する Stop ガードは、セッションが所有するパイプライン参照がない場合に、同じセッションでの外部サイト閲覧と HTML・CSS・コンポーネントへの書き込み試行を組み合わせて判定します。閲覧だけ、または Markdown の作成だけでは、このガードは有効になりません。調査後の HTML レポート作成も条件に一致するため、この判定だけではクローン作業の意図は確定できません。クローン作業でなければ、無関係なクローンパイプラインを開始せず、[人が適用する例外手順](./docs/agent-cli.md#escape-hatches-humans-only)に従ってください。
 
 ## ドキュメント
 

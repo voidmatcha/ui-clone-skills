@@ -112,13 +112,13 @@ PY
 REF_RAW=""
 if [ -n "$REF_URL" ]; then
   agent-browser --session "$REF_SESSION" open "$REF_URL" >/dev/null 2>&1
-  agent-browser --session "$REF_SESSION" set viewport 1280 800 >/dev/null 2>&1
+  agent-browser --session "$REF_SESSION" set viewport "${VIEW_W:-1280}" "${VIEW_H:-800}" >/dev/null 2>&1
   agent-browser --session "$REF_SESSION" wait 2500 >/dev/null 2>&1
   REF_RAW=$(agent-browser --session "$REF_SESSION" eval "$COUNT_JS" 2>/dev/null | tail -1)
 fi
 
 agent-browser --session "$SESSION" open "$IMPL_URL" >/dev/null 2>&1
-agent-browser --session "$SESSION" set viewport 1280 800 >/dev/null 2>&1
+agent-browser --session "$SESSION" set viewport "${VIEW_W:-1280}" "${VIEW_H:-800}" >/dev/null 2>&1
 agent-browser --session "$SESSION" wait 2500 >/dev/null 2>&1
 RAW=$(agent-browser --session "$SESSION" eval "$COUNT_JS" 2>/dev/null | tail -1)
 if [ -z "$RAW" ]; then

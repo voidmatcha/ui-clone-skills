@@ -5,6 +5,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "visual-debug" / "scripts" / "scaffold-to-jsx.sh"
 
@@ -4885,3 +4887,112 @@ def test_uncovered_in_flow_painted_node_is_not_wrapped(tmp_path: Path) -> None:
     assert "erf-wrapper" not in blob, (
         f"an in-flow node renders at its flow position already; got:\n{blob[:1200]}"
     )
+
+
+@pytest.mark.parametrize("backdrop, expected_group", [
+    ({}, True),
+    ({"styles": {"inset": "0"}}, True),
+    ({"styles": {"top": "0", "bottom": "0", "left": "0", "right": "0"}}, True),
+    ({"styles": {"inset": "12px 8px"}}, True),
+    ({"styles": {"top": "0", "left": "0", "width": "100%", "height": "100%"}}, True),
+    ({"tag": "button", "text": "Close", "styles": {"inset": "0"}}, False),
+    ({"styles": {"top": "4px", "right": "4px", "width": "24px", "height": "24px"}}, False),
+    ({"styles": {"inset": "0", "background-color": "transparent"}}, False),
+], ids=["legacy", "inset", "four-edges", "nonzero-inset", "full-size", "control", "icon", "transparent"])
+def test_backdrop_wrapper_includes_one_section_and_owned_residue(
+    tmp_path: Path, backdrop: dict, expected_group: bool,
+) -> None:
+    ref, impl = tmp_path / 'ref', tmp_path / 'impl'
+    ref.mkdir()
+    (impl / 'src').mkdir(parents=True)
+    tree: dict = {'tag': 'body', 'class': 'site-root', 'children': [
+        {'tag': 'div', 'class': 'erf_wrapper', 'styles': {'position': 'relative', 'height': '4580px'}, 'children': [
+            {'tag': 'div', 'class': 'card_bg', 'styles': {'position': 'absolute', 'height': '4580px', 'background-color': 'rgb(253, 251, 238)'}},
+            {'tag': 'section', 'class': 'pyramid', 'id': 'pyramid', 'children': [{'tag': 'h2', 'text': 'Pyramid'}]},
+            {'tag': 'div', 'class': 'sections_wrapper', 'children': [{'tag': 'p', 'text': 'Food categories'}]},
+        ]},
+        {'tag': 'section', 'class': 'outside', 'id': 'outside', 'children': [{'tag': 'h2', 'text': 'Outside'}]},
+    ]}
+    layer = tree['children'][0]['children'][0]
+    layer['styles'].update(backdrop.get('styles', {}))
+    layer.update({key: value for key, value in backdrop.items() if key != 'styles'})
+    (ref / 'structure.json').write_text(json.dumps(tree))
+    (ref / 'section-map.json').write_text(json.dumps({'sections': [
+        {'index': 0, 'tag': 'section', 'cls': 'pyramid', 'id': 'pyramid'},
+        {'index': 1, 'tag': 'section', 'cls': 'outside', 'id': 'outside'}]}))
+    proc = subprocess.run(['bash', str(SCRIPT), str(ref), str(impl)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    app = _app_tsx(impl)
+    if not expected_group:
+        assert '<div className="erf_wrapper"' not in app
+        assert '<Pyramid' in app and '<Outside' in app
+        return
+    start = app.index('<div className="erf_wrapper"')
+    end = app.index('</div>', start)
+    region = app[start:end]
+    assert '<Pyramid' in region and '<_UncoveredHead' in region and '<_UncoveredAfter0' in region
+    assert '<Outside' not in region
+    assert '4580' not in region
+    fragments = ''.join(p.read_text() for p in (impl / 'src/components').glob('_Uncovered*.tsx'))
+    assert 'className="erf_wrapper"' not in fragments
+    assert 'className="card_bg"' in fragments
+    assert 'Food categories' in fragments
+
+
+@pytest.mark.parametrize("forensic, rollback", [(False, False), (True, False), (True, True)])
+def test_forensic_preserves_nested_and_uncovered_section_tags(
+    tmp_path: Path, forensic: bool, rollback: bool,
+) -> None:
+    """Reference CSS addresses real tags even outside coarse section-map entries."""
+    import os
+
+    ref, impl = tmp_path / "ref", tmp_path / "impl"
+    (ref / "css").mkdir(parents=True)
+    (impl / "src").mkdir(parents=True)
+    tree: dict = {"tag": "body", "class": "site-root", "children": [
+        {"tag": "section", "class": "hero", "children": [
+            {"tag": "h1", "text": "Hero title"},
+            {"tag": "section", "class": "category", "children": [
+                {"tag": "p", "text": "Category content"},
+            ]},
+        ]},
+        {"tag": "section", "class": "detail", "children": [
+            {"tag": "p", "text": "Mapped detail"},
+        ]},
+        {"tag": "div", "class": "residues", "children": [
+            {"tag": "section", "class": f"residue-{index}", "children": [
+                {"tag": "p", "text": f"Uncovered content {index}"},
+            ]} for index in range(3)
+        ]},
+    ]}
+    (ref / "structure.json").write_text(json.dumps(tree))
+    (ref / "section-map.json").write_text(json.dumps({"sections": [
+        {"index": 0, "tag": "section", "cls": "hero"},
+        {"index": 1, "tag": "section", "cls": "detail"},
+    ]}))
+    (ref / "css/main.css").write_text(
+        'section.category{padding:32px}section[class^="residue-"]{display:grid}'
+    )
+    if forensic:
+        (ref / "generation-plan.json").write_text(json.dumps({
+            "forensicPreservation": {
+                "required": True, "strategy": "ref-derived-jsx-with-local-css",
+            },
+        }))
+    env = os.environ.copy()
+    env.pop("UI_CLONE_FORENSIC_CLASSNAME_ONLY", None)
+    if rollback:
+        env["UI_CLONE_FORENSIC_CLASSNAME_ONLY"] = "0"
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    blob = _src_blob(impl)
+    preserve = forensic and not rollback
+    for cls in ("category", "residue-0", "residue-1", "residue-2"):
+        tag = "section" if preserve else "div"
+        assert blob.count(f'<{tag} className="{cls}"') == 1, blob
+    assert len(re.findall(r'^\s*<section\b', blob, re.MULTILINE)) == (6 if preserve else 2), blob
+    for text in ("Hero title", "Category content", "Mapped detail", "Uncovered content 0", "Uncovered content 1", "Uncovered content 2"):
+        assert blob.count(text) == 1, blob

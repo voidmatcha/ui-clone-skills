@@ -149,6 +149,8 @@ def _verification_plan_summary(ref_dir: Path) -> JsonObject | None:
     required = cast(list[Any], raw_required) if isinstance(raw_required, list) else []
     return {
         "tier": plan.get("tier", ""),
+        "verificationScope": plan.get("verificationScope"),
+        "viewports": plan.get("viewports", []),
         "signals": plan.get("signals", {}),
         "requiredCheckCount": len(required),
         "requiredChecks": [
@@ -274,6 +276,9 @@ def render_verify_report_html(report: JsonObject) -> str:
     section = report.get("sectionCompare") if isinstance(report.get("sectionCompare"), dict) else None
     plan = report.get("verificationPlan") if isinstance(report.get("verificationPlan"), dict) else None
 
+    scope = plan.get("verificationScope") if isinstance(plan, dict) else None
+    scope_label = scope.get("completionLabel", "unspecified") if isinstance(scope, dict) else "legacy scope"
+
     gate_rows = []
     for gate in gates:
         if not isinstance(gate, dict):
@@ -345,6 +350,7 @@ def render_verify_report_html(report: JsonObject) -> str:
 </head>
 <body>
   <h1>ui-clone verify report</h1>
+  <p>Verification scope: {html.escape(str(scope_label))}</p>
   <p><span class="badge {cls}">{html.escape(verdict.upper())}</span></p>
   <p class="muted">Generated: {html.escape(str(report.get('generatedAt', '')))}</p>
   <p><strong>Component:</strong> {html.escape(str(report.get('component', '')))}<br>

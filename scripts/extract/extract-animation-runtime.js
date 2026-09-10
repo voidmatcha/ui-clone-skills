@@ -377,7 +377,9 @@
       }
       rows.push({ sourceId: k, selector: sel, filter: varies, varies, byScroll, latched });
     }
-    return rows.slice(0, 30);
+    // Every observed motion row is input evidence for generation and local
+    // trajectory sampling; truncation silently removes later DOM targets.
+    return rows;
   })();
   const scrollLinkedEverPresent = scrollLinkedStyles.length > 0;
   let captureStatus = "ok";

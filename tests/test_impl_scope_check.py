@@ -46,3 +46,32 @@ def test_reference_capture_summary_not_flagged_outside_scope(tmp_path: Path) -> 
         f"reference-capture summary must be exempt, got violations: {offenders}"
     )
     assert art["status"] != "fail"
+
+
+def test_many_reference_files_do_not_overflow_process_environment(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "impl").mkdir(parents=True)
+    ref = repo / "tmp" / "ref" / "sample"
+    ref.mkdir(parents=True)
+    (repo / "impl" / "index.html").write_text("baseline")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t.t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "commit.gpgsign", "false")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "baseline")
+    command = ["bash", str(SCRIPT), str(ref), str(repo / "impl")]
+    subprocess.run(command, check=True, capture_output=True, timeout=120)
+    frames = ref / "frames"
+    frames.mkdir()
+    for i in range(12000):
+        (frames / (str(i) + "-" + "x" * 180 + ".png")).touch()
+    # An unknown lock is still outside the iteration scope.
+    (repo / ".ui-re-continuation").mkdir()
+    lock = ".ui-re-continuation/unknown.lock"
+    (repo / lock).touch()
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    assert "Argument list too long" not in result.stderr
+    assert result.returncode == 1, result.stderr
+    artifact = json.loads((ref / "impl-scope.json").read_text())
+    assert [v["path"] for v in artifact["violations"]] == [lock]

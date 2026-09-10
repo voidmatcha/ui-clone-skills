@@ -81,8 +81,8 @@ trap cleanup EXIT
 # Open both pages once. Set viewport AFTER open (otherwise it's silently dropped).
 agent-browser --session "$SESSION_REF" navigate "$REF_URL" >/dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" navigate "$IMPL_URL" >/dev/null 2>&1
-agent-browser --session "$SESSION_REF" set viewport 1280 900 >/dev/null 2>&1
-agent-browser --session "$SESSION_IMPL" set viewport 1280 900 >/dev/null 2>&1
+agent-browser --session "$SESSION_REF" set viewport "${VIEW_W:-1280}" "${VIEW_H:-900}" >/dev/null 2>&1
+agent-browser --session "$SESSION_IMPL" set viewport "${VIEW_W:-1280}" "${VIEW_H:-900}" >/dev/null 2>&1
 sleep 2
 
 sample_one() {

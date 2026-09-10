@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import socket
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -37,22 +40,22 @@ def test_frozen_wrapper_retries_pass1_with_fresh_session(tmp_path: Path) -> None
         'out="$4"\n'
         'mkdir -p "$out/sections"\n'
         'case "$session" in\n'
-        '  *-base-a2)\n'
+        '  *-b2)\n'
         '    mkdir -p "$out/sections/ref"\n'
         '    printf "[]" > "$out/sections/ref-sections.json"\n'
         '    printf "png" > "$out/sections/ref/hero.png"\n'
         '    exit 1\n'
         '    ;;\n'
-        '  *-base-a1)\n'
+        '  *-b1)\n'
         '    echo "simulated poisoned browser session"\n'
         '    exit 1\n'
         '    ;;\n'
-        '  *-cal)\n'
+        '  *-c)\n'
         '    mkdir -p "$out/sections/impl"\n'
         '    printf "png" > "$out/sections/impl/hero.png"\n'
         '    exit 0\n'
         '    ;;\n'
-        '  *-run)\n'
+        '  *-r)\n'
         '    printf "final verdict\\n" > "$out/sections/result.txt"\n'
         '    exit 0\n'
         '    ;;\n'
@@ -86,15 +89,15 @@ def test_frozen_wrapper_retries_pass1_with_fresh_session(tmp_path: Path) -> None
     assert (out / "sections" / "ref-calib" / "hero.png").is_file()
     session_calls = calls.read_text().splitlines()
     assert [
-        next(suffix for suffix in ("base-a1", "base-a2", "cal", "run") if name.endswith(suffix))
+        next(suffix for suffix in ("b1", "b2", "c", "r") if name.endswith(suffix))
         for name in session_calls
     ] == [
-        "base-a1",
-        "base-a2",
-        "cal",
-        "run",
+        "b1",
+        "b2",
+        "c",
+        "r",
     ]
-    assert all(name.startswith("scf-frozen-tes-") for name in session_calls)
+    assert all(re.fullmatch(r"s[0-9a-f]{12}-(?:b[12]|c|r)", name) for name in session_calls)
     assert len(set(session_calls)) == 4
     assert "pass 1 attempt 1 did not materialize" in proc.stderr
     assert "_close_section_sessions" not in wrapper.read_text(encoding="utf-8")
@@ -126,20 +129,20 @@ def test_frozen_wrapper_promotes_ref_self_compare_impl_path_baseline(
         'out="$4"\n'
         'mkdir -p "$out/sections"\n'
         'case "$session" in\n'
-        '  *-base-a1)\n'
+        '  *-b1)\n'
         '    mkdir -p "$out/sections/ref" "$out/sections/impl"\n'
         '    printf "[{\\"className\\":\\"direct-ref\\"}]" > "$out/sections/ref-sections.json"\n'
         '    printf "[{\\"className\\":\\"impl-path-ref\\"}]" > "$out/sections/impl-sections.json"\n'
         '    printf "direct-ref-pixels" > "$out/sections/ref/hero.png"\n'
         '    printf "impl-path-ref-pixels" > "$out/sections/impl/hero.png"\n'
         '    ;;\n'
-        '  *-cal)\n'
+        '  *-c)\n'
         f'    cp "$out/sections/ref/hero.png" "{observed_pixels}"\n'
         f'    cp "$out/sections/ref-sections.json" "{observed_sections}"\n'
         '    mkdir -p "$out/sections/impl"\n'
         '    printf "calibration" > "$out/sections/impl/hero.png"\n'
         '    ;;\n'
-        '  *-run) printf "final verdict\\n" > "$out/sections/result.txt" ;;\n'
+        '  *-r) printf "final verdict\\n" > "$out/sections/result.txt" ;;\n'
         'esac\n',
         encoding="utf-8",
     )
@@ -193,17 +196,17 @@ def test_frozen_wrapper_bounds_long_canonical_sessions_and_cleans_exact_prefixes
         'out="$4"\n'
         'mkdir -p "$out/sections"\n'
         'case "$session" in\n'
-        '  *-base-a1) exit 1 ;;\n'
-        '  *-base-a2)\n'
+        '  *-b1) exit 1 ;;\n'
+        '  *-b2)\n'
         '    mkdir -p "$out/sections/ref"\n'
         '    printf "[]" > "$out/sections/ref-sections.json"\n'
         '    printf "png" > "$out/sections/ref/hero.png"\n'
         '    ;;\n'
-        '  *-cal)\n'
+        '  *-c)\n'
         '    mkdir -p "$out/sections/impl"\n'
         '    printf "png" > "$out/sections/impl/hero.png"\n'
         '    ;;\n'
-        '  *-run) printf "final verdict\\n" > "$out/sections/result.txt" ;;\n'
+        '  *-r) printf "final verdict\\n" > "$out/sections/result.txt" ;;\n'
         '  *) exit 2 ;;\n'
         'esac\n',
         encoding="utf-8",
@@ -255,8 +258,18 @@ def test_frozen_wrapper_bounds_long_canonical_sessions_and_cleans_exact_prefixes
 
     flattened = [name for run_calls in all_calls for name in run_calls]
     assert len(set(flattened)) == 8
-    assert all(name.startswith("scf-dogfood-do-") for name in flattened)
-    assert all(len(f"{name}-1920x1080-sc-impl") < 64 for name in flattened)
+    assert all(re.fullmatch(r"s[0-9a-f]{12}-(?:b[12]|c|r)", name) for name in flattened)
+    # The observed macOS agent-browser socket directory adds 68 bytes,
+    # including slash and .sock. A session-only 64-char limit misses this.
+    # Reproduce that directory budget and actually bind each derived name.
+    with tempfile.TemporaryDirectory(prefix="scf-test-", dir="/tmp") as socket_root:
+        socket_dir = Path(socket_root) / ("x" * (62 - len(socket_root) - 1))
+        socket_dir.mkdir()
+        for name in flattened:
+            socket_path = socket_dir / f"{name}-1920x1080-sc-impl.sock"
+            assert len(os.fsencode(socket_path)) <= 103
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unix_socket:
+                unix_socket.bind(str(socket_path))
     assert set(all_calls[0]).isdisjoint(all_calls[1])
 
     cleaned = cleanup_calls.read_text().splitlines()
@@ -354,16 +367,16 @@ def _run_frozen_with_measurement_cleanup_failure(
         'out="$4"\n'
         'mkdir -p "$out/sections"\n'
         'case "$session" in\n'
-        '  *-base-a1)\n'
+        '  *-b1)\n'
         '    mkdir -p "$out/sections/ref"\n'
         '    printf "[]" > "$out/sections/ref-sections.json"\n'
         '    printf "png" > "$out/sections/ref/hero.png"\n'
         "    ;;\n"
-        '  *-cal)\n'
+        '  *-c)\n'
         '    mkdir -p "$out/sections/impl"\n'
         '    printf "png" > "$out/sections/impl/hero.png"\n'
         "    ;;\n"
-        f"  *-run) exit {measurement_exit} ;;\n"
+        f"  *-r) exit {measurement_exit} ;;\n"
         "esac\n",
         encoding="utf-8",
     )
@@ -374,7 +387,7 @@ def _run_frozen_with_measurement_cleanup_failure(
     cleanup.write_text(
         "#!/usr/bin/env bash\n"
         'case "$1" in\n'
-        '  *-run)\n'
+        '  *-r)\n'
         '    echo "simulated measurement cleanup failure for $1" >&2\n'
         "    exit 8\n"
         "    ;;\n"

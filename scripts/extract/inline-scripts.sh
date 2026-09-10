@@ -11,7 +11,7 @@
 # picks them up with no other change, and _find_file_for_offset attributes
 # matches to a real filename.
 #
-# Usage: inline-scripts.sh <session> <ref-dir>
+# Usage: inline-scripts.sh <session> <expected-url> <ref-dir>
 #
 # Output:
 #   <ref-dir>/bundles/inline-<n>.js   — one file per executable inline script
@@ -21,9 +21,10 @@
 set -euo pipefail
 
 SESSION="${1:-}"
-REF_DIR="${2:-}"
-if [ -z "$SESSION" ] || [ -z "$REF_DIR" ]; then
-  echo "Usage: inline-scripts.sh <session> <ref-dir>" >&2
+EXPECTED_URL="${2:-}"
+REF_DIR="${3:-}"
+if [ -z "$SESSION" ] || [ -z "$EXPECTED_URL" ] || [ -z "$REF_DIR" ]; then
+  echo "Usage: inline-scripts.sh <session> <expected-url> <ref-dir>" >&2
   exit 2
 fi
 [ -d "$REF_DIR" ] || { echo "inline-scripts: ref-dir not found: $REF_DIR" >&2; exit 2; }
@@ -41,7 +42,8 @@ if ! agent-browser --session "$SESSION" eval --json --stdin < "$EVAL_JS_FILE" > 
   head -c 400 "$RESPONSE_TMP" >&2
   exit 3
 fi
-if ! python3 "$ORIGIN_VALIDATOR" < "$RESPONSE_TMP"; then
+if ! python3 "$ORIGIN_VALIDATOR" "$EXPECTED_URL" --session "$SESSION" \
+  --navigation "$REF_DIR/capture-navigation.json" < "$RESPONSE_TMP"; then
   echo "inline-scripts: agent-browser eval returned a non-page origin (session=$SESSION)" >&2
   exit 3
 fi

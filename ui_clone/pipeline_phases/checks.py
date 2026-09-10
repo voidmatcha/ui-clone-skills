@@ -125,11 +125,12 @@ def check_phase_1(pipeline: Pipeline) -> PhaseResult:
             _has_files(pipeline.ref_dir / "scroll-video" / "ref", "*.webm", 1),
         )
     )
+    from ui_clone.gate import Gate
+    from ui_clone.gates.reference import _transition_evidence_result
+
+    transition_evidence = _transition_evidence_result(Gate(pipeline.ref_dir))
     result.checks.append(
-        pipeline._check(
-            "transitions/ref/ videos",
-            _has_files(pipeline.ref_dir / "transitions" / "ref", "*.webm", 1),
-        )
+        pipeline._check(transition_evidence.label, transition_evidence.status == "pass")
     )
     result.checks.append(
         pipeline._check("regions.json", (pipeline.ref_dir / "regions.json").is_file())

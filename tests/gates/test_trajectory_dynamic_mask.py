@@ -124,3 +124,14 @@ def test_declared_scroll_state_targets_use_target_motion_verdict_before_full_fra
     assert "target-motion diagnostic: full-frame AE" in code
     assert "TARGET_TRAJECTORY_MODE" in code
     assert ': > "$TARGET_DIR/full-frame-diagnostic.tsv"' in code
+
+
+def test_pure_scroll_scrub_enters_local_target_sampling(tmp_path: Path) -> None:
+    code = SCRIPT.read_text(encoding="utf-8")
+    match = re.search(r"PROTECTED_TRAJ_TARGETS=\$\(python3 - .*?<<'PY'.*?\n(.*?)\nPY\n", code, re.S)
+    assert match
+    spec = tmp_path / "transition-spec.json"
+    spec.write_text(json.dumps({"transitions": [{"id": "image-zoom", "target": "#zoom", "animation": {"type": "scroll-scrub"}}]}))
+    result = subprocess.run([sys.executable, "-c", match.group(1), str(spec)], capture_output=True, text=True, check=True, timeout=10)
+    assert result.stdout.strip() == "#zoom"
+    assert 'python3 -m ui_clone.trajectory_samples' in code

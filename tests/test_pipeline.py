@@ -1031,6 +1031,40 @@ class TestPipelinePhases:
         result = p.check_phase_1()
         assert all(c.passed for c in result.checks)
 
+    @pytest.mark.parametrize("valid_inventory", [True, False])
+    @pytest.mark.parametrize("has_scroll_video", [True, False])
+    def test_check_phase_1_accepts_verified_png_pairs_without_transition_video(
+        self, tmp_path: Path, valid_inventory: bool, has_scroll_video: bool,
+    ) -> None:
+        ref_dir = tmp_path / "ref"
+        static = ref_dir / "static/ref"
+        static.mkdir(parents=True)
+        for index in range(5):
+            (static / f"scroll_{index}.png").write_bytes(b"png")
+        if has_scroll_video:
+            scroll = ref_dir / "scroll-video/ref"
+            scroll.mkdir(parents=True)
+            (scroll / "full-scroll.webm").write_bytes(b"webm")
+        transitions = ref_dir / "transitions/ref"
+        transitions.mkdir(parents=True)
+        artifacts = {"idle": "transitions/ref/idle.png", "active": "transitions/ref/active.png"}
+        for relative in artifacts.values():
+            (ref_dir / relative).write_bytes(b"png")
+        (ref_dir / "regions.json").write_text(json.dumps({"hover": [{
+            "name": "button", "triggerType": "hover", "selector": "button",
+            "artifacts": artifacts,
+        }]}))
+        if valid_inventory:
+            (ref_dir / "capture-artifact-inventory.json").write_text(json.dumps({
+                "status": "pass", "regionsChecked": 1, "missingArtifacts": [],
+                "checkedArtifacts": [{
+                    "region": "button", "triggerType": "hover", "path": relative, "bytes": 3,
+                } for relative in artifacts.values()],
+            }))
+        p = self._make_pipeline(tmp_path, ref_dir)
+        result = p.check_phase_1()
+        assert all(check.passed for check in result.checks) is (valid_inventory and has_scroll_video)
+
     def test_check_phase_2_skipped_without_ref(self, tmp_path: Path) -> None:
         """Phase 2: skipped when has_ref=False."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
@@ -1042,7 +1076,7 @@ class TestPipelinePhases:
     def test_check_phase_1_regions_only_does_not_set_has_ref(self, tmp_path: Path) -> None:
         """Regression: regions.json existing alone must not satisfy has_ref.
 
-        The supplementary phase-1 checks (scroll-video, transitions, regions.json)
+        The supplementary phase-1 checks (transitions and regions.json)
         can pass independently. Only static/ref/ screenshots is the canonical
         "reference exists" signal — the run_status() codepath at pipeline.py uses
         phase_1.checks[0].passed to decide whether Phase 2 may proceed.
@@ -1053,7 +1087,7 @@ class TestPipelinePhases:
         p = self._make_pipeline(tmp_path, ref_dir)
         result = p.check_phase_1()
         assert result.checks[0].passed is False, "static/ref/ screenshots must fail"
-        assert result.checks[3].passed is True, "regions.json must pass"
+        assert next(check for check in result.checks if check.label == "regions.json").passed
         # The fix: has_ref derives from the canonical first check, not any().
         assert result.checks[0].passed is False
 
@@ -1203,10 +1237,13 @@ class TestPipelineRunDriver:
         artifact = json.loads((ref_dir / "canvas-webgl-detection.json").read_text())
         assert artifact["primaryRenderType"] == "DOM"
 
-    def test_execute_phase_1_marks_reference_gate(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("provisional", [True, False])
+    @pytest.mark.parametrize("with_phase_2", [True, False])
+    def test_execute_phase_1_defers_only_with_later_phase_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        provisional: bool, with_phase_2: bool,
     ) -> None:
-        """Phase 1 must stamp the reference gate after producing artifacts."""
+        """A placeholder capture must continue to Phase 2 instead of deadlocking."""
         ref_dir = tmp_path / "tmp" / "ref" / "comp"
         ref_dir.mkdir(parents=True)
         root = self._fake_plugin_root(tmp_path)
@@ -1227,19 +1264,33 @@ class TestPipelineRunDriver:
         monkeypatch.setenv("PLUGIN_ROOT", str(root))
 
         p = self._make_pipeline(tmp_path, ref_dir)
-        result = p.execute_phases(("1",))
+        if not provisional:
+            capture.write_text(
+                capture.read_text()
+                .replace('"placeholder":true', '"placeholder":false')
+                .replace('"detectionRan":false', '"detectionRan":true')
+                + 'rm "$3/transitions/ref/hover.webm"\n'
+            )
+        extract_dom = root / "skills" / "visual-debug" / "scripts" / "extract-dom.sh"
+        extract_dom.write_text('touch "$1/phase-2-attempted"\nexit 7\n')
+        result = p.execute_phases(("1", "2") if with_phase_2 else ("1",))
 
-        assert result == 0
+        assert result == 1
+        assert (ref_dir / "phase-2-attempted").exists() is with_phase_2
         state = _load_json_safe(ref_dir / "pipeline-state.json")
         assert state is not None
-        assert "reference" in state["completed_steps"]
-        assert state["current_gate"] == "extraction"
+        assert "reference" not in state["completed_steps"]
+        assert state["current_gate"] == "reference"
 
+    @pytest.mark.parametrize("color", [None, "", "dark"])
+    @pytest.mark.parametrize("namespace", [None, "", "caller-owned"])
     def test_execute_phase_2_marks_extraction_and_bundle_gates(
         self,
         tmp_path: Path,
         ref_dir_with_artifacts: Path,
         monkeypatch: pytest.MonkeyPatch,
+        namespace: str | None,
+        color: str | None,
     ) -> None:
         """Phase 2 must not leave a valid artifact tree with an unstamped state cursor."""
         ref_dir = ref_dir_with_artifacts
@@ -1258,14 +1309,176 @@ class TestPipelineRunDriver:
         root = self._fake_plugin_root(tmp_path)
         monkeypatch.setenv("PLUGIN_ROOT", str(root))
 
+        if namespace is None:
+            monkeypatch.delenv("AGENT_BROWSER_NAMESPACE", raising=False)
+        else:
+            monkeypatch.setenv("AGENT_BROWSER_NAMESPACE", namespace)
+        if color is None:
+            monkeypatch.delenv("AGENT_BROWSER_COLOR_SCHEME", raising=False)
+        else:
+            monkeypatch.setenv("AGENT_BROWSER_COLOR_SCHEME", color)
+        seen_colors: list[str | None] = []
+        seen_namespaces: list[str | None] = []
+        original_run = subprocess.run
+
+        def record_run(cmd: list[str], **kwargs: Any) -> Any:
+            if cmd[0] != "cksum":
+                seen_namespaces.append(kwargs.get("env", {}).get("AGENT_BROWSER_NAMESPACE"))
+                seen_colors.append(kwargs.get("env", {}).get("AGENT_BROWSER_COLOR_SCHEME"))
+            return original_run(cmd, **kwargs)
+
+        monkeypatch.setattr("ui_clone.pipeline_phases.execute.subprocess.run", record_run)
         p = self._make_pipeline(tmp_path, ref_dir)
         result = p.execute_phases(("2",))
 
         assert result == 0
+        expected = namespace or "ui-clone-" + original_run(
+            ["cksum"], input=p.session.encode(), capture_output=True, check=True
+        ).stdout.decode().split()[0]
+        assert seen_namespaces and set(seen_namespaces) == {expected}
+        assert os.environ.get("AGENT_BROWSER_NAMESPACE") == namespace
+        assert set(seen_colors) == {color or "light"}
+        assert os.environ.get("AGENT_BROWSER_COLOR_SCHEME") == color
         state = _load_json_safe(ref_dir / "pipeline-state.json")
         assert state is not None
         assert state["completed_steps"][:3] == ["reference", "extraction", "bundle"]
         assert state["current_gate"] == "paid-features"
+
+    @pytest.mark.parametrize("evidence", ["valid", "provisional", "missing"])
+    def test_phase_2_rechecks_current_reference_despite_completed_stamp(
+        self, tmp_path: Path, ref_dir_with_artifacts: Path,
+        monkeypatch: pytest.MonkeyPatch, evidence: str,
+    ) -> None:
+        ref_dir = ref_dir_with_artifacts
+        static = ref_dir / "static/ref"
+        static.mkdir(parents=True, exist_ok=True)
+        for index in range(5):
+            (static / f"section-{index}.png").write_bytes(b"png")
+        (ref_dir / "detected-breakpoints.json").write_text(json.dumps({"breakpoints": [768, 1024, 1440]}))
+        (ref_dir / "pipeline-state.json").write_text(json.dumps({
+            "component": ref_dir.name, "completed_steps": ["reference"],
+            "current_gate": "extraction",
+        }))
+        original_regions = (ref_dir / "regions.json").read_text()
+        if evidence == "provisional":
+            (ref_dir / "regions.json").write_text(json.dumps({"placeholder": True, "regions": []}))
+        elif evidence == "missing":
+            (ref_dir / "regions.json").unlink()
+        root = self._fake_plugin_root(tmp_path)
+        (root / "scripts/extract/capture-region-artifacts.py").write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "ref = Path(sys.argv[3])\n"
+            "(ref / 'bridge-called').touch()\n"
+            f"(ref / 'regions.json').write_text({original_regions!r})\n"
+        )
+        monkeypatch.setenv("PLUGIN_ROOT", str(root))
+        pipeline = self._make_pipeline(tmp_path, ref_dir)
+        assert pipeline.execute_phases(("2",)) == 0
+        assert (ref_dir / "bridge-called").exists() is (evidence != "valid")
+
+    @pytest.mark.parametrize("baseline_count", range(5))
+    @pytest.mark.parametrize("prior_reference", [False, True])
+    @pytest.mark.parametrize("png_directory", [False, True])
+    def test_phase_2_resume_rejects_lost_previously_completed_baseline(
+        self, tmp_path: Path, ref_dir_with_artifacts: Path,
+        monkeypatch: pytest.MonkeyPatch, baseline_count: int, prior_reference: bool,
+        capsys: pytest.CaptureFixture[str], png_directory: bool,
+    ) -> None:
+        ref_dir = ref_dir_with_artifacts
+        screenshots = sorted((ref_dir / "static/ref").glob("*.png"))
+        for screenshot in screenshots[baseline_count:]:
+            screenshot.unlink()
+        if png_directory:
+            (ref_dir / "static/ref/directory.png").mkdir()
+        (ref_dir / "pipeline-state.json").write_text(json.dumps({
+            "component": ref_dir.name,
+            "completed_steps": ["reference"] if prior_reference else [],
+            "current_gate": "extraction" if prior_reference else "reference",
+        }))
+        root = self._fake_plugin_root(tmp_path)
+        monkeypatch.setenv("PLUGIN_ROOT", str(root))
+        pipeline = self._make_pipeline(tmp_path, ref_dir)
+
+        assert pipeline.execute_phases(("2",)) == 1
+        output = capsys.readouterr().out
+        state = _load_json_safe(ref_dir / "pipeline-state.json")
+        assert state is not None
+        if prior_reference:
+            assert not (ref_dir / "asset-metadata-called").exists()
+            assert "extraction" not in state["completed_steps"]
+            assert "bundle" not in state["completed_steps"]
+            assert "five baseline screenshots" in output
+        else:
+            # Standalone extraction may run, but its gate still requires the
+            # reference prerequisite. Do not impose a new baseline preflight.
+            assert "== execute: gate extraction" in output
+            assert "five baseline screenshots" not in output
+
+    @pytest.mark.parametrize("recapture,missing_baseline", [(False, False), (True, False), (True, True)])
+    def test_execute_phase_2_reassembles_after_live_region_capture(
+        self,
+        tmp_path: Path,
+        ref_dir_with_artifacts: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        recapture: bool,
+        missing_baseline: bool,
+    ) -> None:
+        ref_dir = ref_dir_with_artifacts
+        (ref_dir / "detected-breakpoints.json").write_text(
+            json.dumps({"breakpoints": [768, 1024, 1440]})
+        )
+        static_ref = ref_dir / "static" / "ref"
+        static_ref.mkdir(parents=True, exist_ok=True)
+        for index in range(5):
+            (static_ref / f"section-{index}.png").write_bytes(b"png")
+        if missing_baseline:
+            for screenshot in static_ref.glob("*.png"):
+                screenshot.unlink()
+        (ref_dir / "pipeline-state.json").write_text(
+            json.dumps(
+                {
+                    "component": ref_dir.name,
+                    "completed_steps": ["reference"] if recapture else [],
+                    "current_gate": "reference",
+                }
+            )
+        )
+        root = self._fake_plugin_root(tmp_path)
+        capture_regions = root / "scripts" / "extract" / "capture-region-artifacts.py"
+        original_regions = (ref_dir / "regions.json").read_text()
+        if not recapture:
+            (ref_dir / "regions.json").write_text(json.dumps({"placeholder": True, "regions": []}))
+        capture_regions.write_text(
+            "import os, sys\nfrom pathlib import Path\n"
+            "namespace_file = Path(sys.argv[3]) / 'capture-namespace'\n"
+            "if namespace_file.exists():\n"
+            "    assert namespace_file.read_text() == os.environ['AGENT_BROWSER_NAMESPACE']\n"
+            f"(Path(sys.argv[3]) / 'regions.json').write_text({original_regions!r})\n",
+            encoding="utf-8",
+        )
+        if recapture:
+            (root / "scripts/extract/capture.sh").write_text(
+                "printf '%s' '{\"placeholder\":true,\"regions\":[]}' > \"$3/regions.json\"\n"
+                'printf %s "$AGENT_BROWSER_NAMESPACE" > "$3/capture-namespace"\n'
+            )
+        monkeypatch.setenv("PLUGIN_ROOT", str(root))
+
+        finalize_calls: list[Path] = []
+
+        def _record_finalize(path: Path) -> dict[str, str]:
+            finalize_calls.append(path)
+            return {}
+
+        monkeypatch.setattr(
+            "ui_clone.extraction_artifacts.finalize_full_extraction_artifacts",
+            _record_finalize,
+        )
+
+        p = self._make_pipeline(tmp_path, ref_dir)
+        result = p.execute_phases(("1", "2") if recapture else ("2",))
+
+        assert result == (1 if missing_baseline else 0)
+        assert finalize_calls == ([] if missing_baseline else [ref_dir, ref_dir])
 
     def test_execute_phase_2_runs_bundle_extraction_producer(
         self,

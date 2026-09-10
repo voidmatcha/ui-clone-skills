@@ -13,6 +13,8 @@ a static style defect under a mask can no longer hide.
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+from typing import Any
 
 import ui_clone.gates.masked_region_static as masked_region_static
 from ui_clone.gates.masked_region_static import (
@@ -759,3 +761,42 @@ def test_ref_visibility_does_not_excuse_real_respbypass_defect() -> None:
         and (r.get("reason") or "").startswith("impl element absent")
         for r in result["rows"]
     ), result
+
+
+def test_declared_font_pair_is_honored_without_waiving_other_styles() -> None:
+    ref: list[dict[str, Any]] = [{"selector": ".heading", "index": 0, "styles": {"font-family": "Die Grotesk D", "color": "red"}}]
+    impl: list[dict[str, Any]] = [{"selector": ".heading", "index": 0, "styles": {"font-family": "Inter Variable", "color": "red"}}]
+    declaration = [{"original": "Die Grotesk D", "replacement": "Inter Variable", "reason": "Declared replacement"}]
+    result = evaluate(ref, impl, font_substitutions=declaration)
+    assert result["status"] == "pass"
+    assert any(r.get("reason") == "declared-font-substitution" for r in result["rows"])
+    for changed in ("Arial", "Inter"):
+        impl[0]["styles"]["font-family"] = changed
+        assert evaluate(ref, impl, font_substitutions=declaration)["status"] == "fail"
+    impl[0]["styles"]["font-family"] = "Inter Variable"
+    impl[0]["styles"]["color"] = "blue"
+    assert evaluate(ref, impl, font_substitutions=declaration)["status"] == "fail"
+    impl[0]["styles"]["color"] = "red"
+    for invalid in ([{"original": "*", "replacement": "Inter Variable", "reason": "Any"}], [{"original": "Die Grotesk D", "replacement": "Inter Variable"}], [], ["anything"]):
+        assert evaluate(ref, impl, font_substitutions=invalid)["status"] == "fail"
+
+
+def test_font_substitution_cli_producer_writes_consistent_exit_and_receipt(tmp_path: Path) -> None:
+    import json
+
+    (tmp_path / "transition-spec.json").write_text(json.dumps({"transitions": [{"id": "heading", "target": ".heading", "dynamic": True}]}))
+    (tmp_path / "dom-scaffold.json").write_text(json.dumps({"tree": {"tag": "body", "children": [{"tag": "h2", "class": "heading", "styles": {"ff": "Die Grotesk D"}}]}}))
+    impl = tmp_path / "impl.json"
+    entries: list[dict[str, Any]] = [{"selector": ".heading", "index": 0, "styles": {"font-family": "Inter Variable"}}]
+    impl.write_text(json.dumps(entries))
+    args = ["verdict", str(tmp_path), str(impl)]
+    assert masked_region_static.main(args) == 1
+    (tmp_path / "asset-substitution.json").write_text(json.dumps({"fonts": [{"original": "Die Grotesk D", "replacement": "Inter Variable", "reason": "Declared replacement"}]}))
+    assert masked_region_static.main(args) == 0
+    receipt = json.loads((tmp_path / "masked-region-static.json").read_text())
+    assert receipt["status"] == "pass"
+    assert receipt["rows"][0]["refValue"] == "Die Grotesk D"
+    assert receipt["rows"][0]["implValue"] == "Inter Variable"
+    entries[0]["styles"]["font-family"] = "Arial"
+    impl.write_text(json.dumps(entries))
+    assert masked_region_static.main(args) == 1

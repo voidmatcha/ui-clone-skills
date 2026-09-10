@@ -347,6 +347,7 @@ def _compare_bucket(
     ),
     ref_rendered_count: int | None = None,
     ref_rendered_style: dict[str, Any] | None = None,
+    font_substitutions: set[tuple[str, str]] | None = None,
 ) -> None:
     """Resolve the rendered-visible impl match(es) for one (selector, viewport)
     bucket and compare each against the ref entries (settled style), appending
@@ -460,7 +461,10 @@ def _compare_bucket(
                     }
                 )
                 continue
-            ok = normalize_value(prop, rv) == normalize_value(prop, iv)
+            substituted = prop == "font-family" and (
+                normalize_value(prop, rv), normalize_value(prop, iv)
+            ) in (font_substitutions or set())
+            ok = normalize_value(prop, rv) == normalize_value(prop, iv) or substituted
             rows.append(
                 {
                     "selector": selector,
@@ -470,6 +474,7 @@ def _compare_bucket(
                     "refValue": rv,
                     "implValue": iv,
                     "status": "ok" if ok else "fail",
+                    **({"reason": "declared-font-substitution"} if substituted else {}),
                 }
             )
         if compared == 0:
@@ -497,8 +502,23 @@ def evaluate(
     ref_hidden_viewports: Mapping[str, Iterable[int]] | None = None,
     ref_measured_viewports: Iterable[int] | None = None,
     ref_rendered: Mapping[str, Mapping[str, Any]] | None = None,
+    font_substitutions: list[Any] | None = None,
 ) -> dict[str, Any]:
     props = props if props is not None else style_props()
+    # Scope each declaration to its exact family pair; never waive other styles
+    # or accept wildcard/unreasoned font declarations.
+    font_pairs: set[tuple[str, str]] = set()
+    for item in font_substitutions or []:
+        if not isinstance(item, dict):
+            continue
+        values = [item.get(key) for key in ("original", "replacement", "reason")]
+        if not all(isinstance(value, str) and value.strip() for value in values):
+            continue
+        original, replacement = (
+            normalize_value("font-family", item[key]) for key in ("original", "replacement")
+        )
+        if original and replacement and not any(c in original + replacement for c in "*?[]"):
+            font_pairs.add((original, replacement))
     rows: list[dict[str, Any]] = []
     unmeasured: list[dict[str, Any]] = []
     for sel in unresolvable_selectors or []:
@@ -612,6 +632,7 @@ def evaluate(
                 reason,
                 ref_rendered_count=rr_count,
                 ref_rendered_style=rr_style,
+                font_substitutions=font_pairs,
             )
 
     if requested_selectors is not None:
@@ -849,6 +870,8 @@ def main(argv: list[str] | None = None) -> int:
             rbv = ref_vp_vis.get("renderedByViewport")
             if isinstance(rbv, dict):
                 ref_rendered = rbv
+        declarations = _load_json(ref_dir / "asset-substitution.json")
+        fonts = declarations.get("fonts") if isinstance(declarations, dict) else None
         payload = evaluate(
             plan["refEntries"],
             impl_entries,
@@ -858,6 +881,7 @@ def main(argv: list[str] | None = None) -> int:
             ref_hidden_viewports=ref_hidden,
             ref_measured_viewports=ref_measured,
             ref_rendered=ref_rendered,
+            font_substitutions=fonts if isinstance(fonts, list) else None,
         )
         if not plan["selectors"] and not plan.get("unresolvableSelectors"):
             payload["status"] = "skip"

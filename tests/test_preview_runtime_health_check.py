@@ -324,7 +324,8 @@ def test_probe_keeps_motionless_fixed_header_mutates_false(tmp_path: Path) -> No
     assert result["mutates"] is False
 
 
-def test_preview_runtime_probe_heredoc_survives_shell_boundary(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scope_viewport", [False, True])
+def test_preview_runtime_probe_heredoc_survives_shell_boundary(tmp_path: Path, scope_viewport: bool) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     capture_path = tmp_path / "probe.js"
@@ -339,6 +340,9 @@ from pathlib import Path
 
 capture_path = Path({str(capture_path)!r})
 args = sys.argv[1:]
+if "set" in args:
+    with capture_path.with_suffix(".viewports").open("a") as fh:
+        fh.write(args[-2] + "x" + args[-1] + "\\n")
 if "eval" in args:
     capture_path.write_text(sys.stdin.read(), encoding="utf-8")
     print(json.dumps({{
@@ -375,6 +379,9 @@ sys.exit(0)
         "PREVIEW_RUNTIME_HEALTH_WAIT_MS": "0",
         "PREVIEW_RUNTIME_HEALTH_AGENT_BROWSER_TIMEOUT_SEC": "5",
     }
+    if scope_viewport:
+        env.pop("PREVIEW_RUNTIME_HEALTH_VIEWPORTS")
+        env["VIEWPORTS"] = "1440x900"
     proc = subprocess.run(
         ["bash", str(SCRIPT), "shell-boundary", "http://ref.test/", "http://impl.test/", str(tmp_path / "ref")],
         cwd=ROOT,
@@ -389,3 +396,5 @@ sys.exit(0)
     probe = capture_path.read_text(encoding="utf-8")
     assert "scrollTransition" in probe
     assert "top: cs.top" in probe
+    widths = capture_path.with_suffix(".viewports").read_text().splitlines()
+    assert widths == (["1440x900"] if scope_viewport else ["390x844"]) * 2

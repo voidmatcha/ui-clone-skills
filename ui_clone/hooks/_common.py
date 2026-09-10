@@ -1044,6 +1044,18 @@ def quick_tier_blocker(ref_dir: Path) -> str | None:
     tier=quick gaming vector). Missing/unreadable plans are left to the
     normal spec gate.
     """
+    receipt_path = Path(ref_dir) / "iteration-receipt.json"
+    if receipt_path.exists():
+        try:
+            receipt = json.loads(receipt_path.read_text())
+        except (OSError, ValueError):
+            return "Invalid iteration receipt; run the full required-check dispatcher"
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("mode") != "final"
+            or receipt.get("status") != "completed"
+        ):
+            return "Partial iteration cannot close out; run the full required-check dispatcher"
     plan_path = Path(ref_dir) / "verification-plan.json"
     if not plan_path.is_file():
         return None

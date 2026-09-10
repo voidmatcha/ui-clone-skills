@@ -40,24 +40,27 @@ EXCLUDE_DYNAMIC="${EXCLUDE_DYNAMIC:-1}"
 rm -rf "$OUT_DIR/sections/viewports" 2>/dev/null || true
 mkdir -p "$OUT_DIR/sections"
 RUN_NONCE="${SECTION_FROZEN_RUN_NONCE:-$$}"
-SESSION_READABLE="$(
-  printf '%s' "$SESSION" \
-    | LC_ALL=C tr -c '[:alnum:]_-' '-' \
-    | cut -c1-10
-)"
-[ -n "$SESSION_READABLE" ] || SESSION_READABLE="session"
-
 _internal_session() {  # <phase>
   local phase="$1"
+  local phase_tag
+  case "$phase" in
+    base-a1) phase_tag="b1" ;;
+    base-a2) phase_tag="b2" ;;
+    cal) phase_tag="c" ;;
+    run) phase_tag="r" ;;
+    *) echo "Unknown frozen comparison phase: $phase" >&2; return 2 ;;
+  esac
   local digest
   digest="$(
     printf '%s\n%s\n%s\n' "$SESSION" "$RUN_NONCE" "$phase" \
       | shasum -a 256 \
       | awk '{ print substr($1, 1, 12) }'
   )"
-  # Keep the full agent-browser name below 64 chars even after the longest
-  # viewport + "-sc-impl" suffix added by section-compare.sh.
-  printf 'scf-%s-%s-%s\n' "$SESSION_READABLE" "$digest" "$phase"
+  # macOS limits the entire UNIX socket path to 103 bytes, not the session
+  # alone. A 16-byte prefix + "-1920x1080-sc-impl" + the observed default
+  # socket-directory/.sock overhead (68 bytes) totals 102 bytes. Keep the
+  # 48-bit digest of the full caller identity, nonce, and phase for isolation.
+  printf 's%s-%s\n' "$digest" "$phase_tag"
 }
 
 _cleanup_owned_sessions() {  # <prefix> <phase>
@@ -83,6 +86,22 @@ _cleanup_owned_sessions() {  # <prefix> <phase>
   return 1
 }
 
+# A reference-only cache skips both self-comparisons across clone edits. The
+# helper validates source/settings hashes, per-file integrity and capture age.
+_CACHE_HELPER="$SCRIPT_DIR/section-reference-cache.py"
+_cache_key=""
+_cache_hit=0
+if [ "${SECTION_REFERENCE_CACHE:-1}" = "1" ] && [ -f "$_CACHE_HELPER" ]; then
+  _cache_key="$(EXCLUDE_DYNAMIC="$EXCLUDE_DYNAMIC" python3 "$_CACHE_HELPER" key "$OUT_DIR" "$REF_URL")" || _cache_key=""
+  if [ -n "$_cache_key" ] && python3 "$_CACHE_HELPER" restore "$OUT_DIR" "$_cache_key"; then
+    _cache_hit=1
+    echo "section-compare-frozen: validated reference/calibration cache hit; capturing implementation fresh"
+  fi
+fi
+if [ "$_cache_hit" != "1" ]; then
+# Remove stale crops so a failed capture cannot appear materialized.
+rm -rf "$OUT_DIR/sections/ref" "$OUT_DIR/sections/ref-calib" "$OUT_DIR/sections/impl"
+rm -f "$OUT_DIR/sections/ref-sections.json" "$OUT_DIR/sections/impl-sections.json"
 # ── PASS 1: materialize the FROZEN ref baseline (ref-path capture, urls=ref/ref).
 # Viewport-aware materialization check: a single-viewport run freezes the ref at
 # top-level sections/ref/; a multi-viewport run fans out into
@@ -183,6 +202,13 @@ fi
 # through the IMPL path at the frozen forced positions; snapshot those crops as
 # ref-calib = the ref's OWN same-frame scrub noise floor. SECTION_SKIP_IMPL_RESIZE
 # keeps native box dims so the layout-box self-variance is real.
+# A failed calibration must not mistake pass-1 implementation crops for its
+# own measurements. The reference baseline has already been promoted above.
+rm -f "$OUT_DIR/sections/impl/"*.png
+for _vp in "$OUT_DIR/sections/viewports/"*/; do
+  [ -d "$_vp" ] || continue
+  rm -f "${_vp}sections/impl/"*.png
+done
 _calib_session="$(_internal_session cal)"
 set +e
 EXCLUDE_DYNAMIC="$EXCLUDE_DYNAMIC" RECATCH_REF=0 SECTION_SKIP_IMPL_RESIZE=1 \
@@ -224,13 +250,20 @@ if [ "$_calib_copied" != "1" ]; then
   exit 2
 fi
 
+# Only successful captures may seed a persistent cache. Nonzero comparisons
+# may still be measured for diagnosis but must never become reusable evidence.
+if [ -n "$_cache_key" ] && [ "$_pass1_rc" -eq 0 ] && [ "$_calib_rc" -eq 0 ]; then
+  python3 "$_CACHE_HELPER" save "$OUT_DIR" "$_cache_key" || true
+fi
+fi
+
 # ── PASS 2B: measurement (urls=ref/REAL-IMPL). Reuse the frozen ref + ref-calib;
 # capture the REAL clone at the SAME forced scroll frame. THIS result.txt is the
 # verdict. section-compare classifies scroll-scrub sections dynamic and applies
 # the same-frame AE ceiling + dssim floor; static sections keep strict AE.
 _measurement_session="$(_internal_session run)"
 set +e
-EXCLUDE_DYNAMIC="$EXCLUDE_DYNAMIC" RECATCH_REF=0 \
+EXCLUDE_DYNAMIC="$EXCLUDE_DYNAMIC" RECATCH_REF=0 ONLY_IF_CHANGED=0 \
   bash "$SECTION_COMPARE" "$REF_URL" "$IMPL_URL" "$_measurement_session" "$OUT_DIR"
 _measurement_rc=$?
 set -e

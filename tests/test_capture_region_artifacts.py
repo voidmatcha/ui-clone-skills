@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 from ui_clone.gate import Gate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -34,11 +36,17 @@ calls = Path(os.environ["FAKE_CALLS"])
 with calls.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(sys.argv[1:]) + "\\n")
 
+with calls.with_suffix(".env.jsonl").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps({key: os.environ.get(key) for key in (
+        "AGENT_BROWSER_NAMESPACE", "AGENT_BROWSER_COLOR_SCHEME"
+    )}) + "\\n")
 args = sys.argv[1:]
 session = args[args.index("--session") + 1]
 command_index = args.index("--session") + 2
 command = args[command_index]
 rest = args[command_index + 1:]
+if " ".join([command, *rest]) == os.environ.get("FAKE_SETUP_FAIL"):
+    sys.exit(1)
 state_path = Path(os.environ["FAKE_STATE"])
 try:
     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -66,7 +74,12 @@ def png(width, height, fill, box, box_fill):
 
 if command == "open" and os.environ.get("FAKE_OPEN_FAIL") == "1":
     sys.exit(2)
+elif command == "open":
+    print(json.dumps({"success": True, "data": {"url": os.environ.get("FAKE_FINAL_URL", "https://example.test")}}))
 elif command == "eval":
+    origin = os.environ.get("FAKE_EVAL_ORIGIN", os.environ.get("FAKE_FINAL_URL", "https://example.test"))
+    if state.get("screenshot_taken") and os.environ.get("FAKE_SCREENSHOT_DRIFT"):
+        origin = "https://wrong.test"
     script = rest[-1]
     scroll_key = session + ":scroll"
     drift_key = session + ":delayed-scroll-drift"
@@ -83,7 +96,7 @@ elif command == "eval":
         state_path.write_text(json.dumps(state), encoding="utf-8")
     scrolled = float(state.get(scroll_key, 0))
     if "scrollHeight" in script:
-        print(json.dumps({"success": True, "data": {"result": {"found": True, "maxScroll": 1000}}}))
+        print(json.dumps({"success": True, "data": {"origin": origin, "result": {"found": True, "maxScroll": 1000}}}))
         sys.exit(0)
     found = ".missing" not in script
     result = {
@@ -130,7 +143,7 @@ elif command == "eval":
                 "transitionDuration": "0.2s",
                 "transitionTimingFunction": "ease-out",
             })
-    print(json.dumps({"success": True, "data": {"result": result}}))
+    print(json.dumps({"success": True, "data": {"origin": origin, "result": result}}))
 elif command == "hover":
     state[session] = bool(rest and rest[0] != "body")
     state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -142,6 +155,8 @@ elif (
     state[session + ":delayed-scroll-drift"] = True
     state_path.write_text(json.dumps(state), encoding="utf-8")
 elif command == "screenshot":
+    state["screenshot_taken"] = True
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     output = Path(rest[-1])
     output.parent.mkdir(parents=True, exist_ok=True)
     active = (
@@ -192,6 +207,8 @@ def _run(
     identical: bool = False,
     reuse_session: bool = False,
     open_fail: bool = False,
+    setup_fail: str | None = None,
+    browser_env: dict[str, str] | None = None,
     transition_spec: dict | None = None,
     interactions: dict | list | None = None,
     verification_signals: dict | None = None,
@@ -254,6 +271,11 @@ def _run(
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["FAKE_CALLS"] = str(calls_path)
     env["FAKE_STATE"] = str(tmp_path / "state.json")
+    env.pop("AGENT_BROWSER_NAMESPACE", None)
+    env.pop("AGENT_BROWSER_COLOR_SCHEME", None)
+    env.update(browser_env or {})
+    if setup_fail:
+        env["FAKE_SETUP_FAIL"] = setup_fail
     if identical:
         env["FAKE_IDENTICAL"] = "1"
     if open_fail:
@@ -304,6 +326,8 @@ def _run_existing_ref(
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["FAKE_CALLS"] = str(calls_path)
     env["FAKE_STATE"] = str(tmp_path / "state.json")
+    env.pop("AGENT_BROWSER_NAMESPACE", None)
+    env.pop("AGENT_BROWSER_COLOR_SCHEME", None)
     proc = subprocess.run(
         [
             sys.executable,
@@ -419,7 +443,7 @@ def test_dedupes_hover_regions_and_writes_explicit_artifacts(tmp_path: Path) -> 
 
     commands = [call[2] for call in calls]
     assert commands.count("open") == 1
-    assert commands.count("close") == 1
+    assert commands.count("close") == 2
     assert all(call[1] == "capture-region-artifacts" for call in calls)
     marker_selector = '[data-uiclone-region="region-0"]'
     assert any(call[2] == "hover" and call[3] == marker_selector for call in calls)
@@ -567,7 +591,7 @@ def test_failed_open_still_closes_only_the_derived_session(tmp_path: Path) -> No
         open_fail=True,
     )
     assert proc.returncode != 0
-    assert [call[2] for call in calls] == ["open", "close"]
+    assert [call[2] for call in calls] == ["close", "get", "set", "set", "open", "close"]
     assert all(call[1] == "capture-region-artifacts" for call in calls)
 
 
@@ -614,7 +638,7 @@ def test_real_spec_dispatch_only_region_remains_an_unsupported_obligation(
     )
     assert proc.returncode != 0
     assert [call[2] for call in calls].count("open") == 1
-    assert [call[2] for call in calls].count("close") == 1
+    assert [call[2] for call in calls].count("close") == 2
     payload = json.loads((ref_dir / "regions.json").read_text())
     assert payload["regions"] == [hover, scroll]
     summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
@@ -825,6 +849,13 @@ def test_generated_hover_transition_preserves_distinct_affected_target(
             "placeholder": True,
             "transitions": [],
         },
+        interactions={
+            "source": "ui_clone.extraction_artifacts",
+            "interactions": [
+                {"id": "card", "trigger": "hover", "target": ".card"},
+                {"id": "same", "trigger": "hover", "target": ".same"},
+            ],
+        },
         hover_css_rules={
             "source": "scripts/extract/capture-hover.sh",
             "rules": [
@@ -847,6 +878,9 @@ def test_generated_hover_transition_preserves_distinct_affected_target(
     by_target = {transition["target"]: transition for transition in spec["transitions"]}
     assert by_target[".card"]["affectedTarget"] == ".card .title"
     assert "affectedTarget" not in by_target[".same"]
+    assert (ref_dir / "hover-css-rules.json").stat().st_mtime_ns >= (
+        ref_dir / "interactions-detected.json"
+    ).stat().st_mtime_ns
 
 
 def test_generated_hover_transition_observes_affected_descendant_styles(
@@ -904,6 +938,30 @@ def test_generated_hover_transition_observes_affected_descendant_styles(
         "data-uiclone-observation" in script and "getComputedStyle(observed)" in script
         for script in evals
     )
+
+
+def test_hover_pseudo_element_target_uses_queryable_owner(tmp_path: Path) -> None:
+    module = _load_capture_module()
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    (ref_dir / "hover-css-rules.json").write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "selector": ".doc-link:hover .icon::before",
+                        "activation": ".doc-link",
+                        "affected": ":is(.doc-link, .doc-link.active) .icon::before",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert module._hover_rule_affected_targets(ref_dir) == {
+        ".doc-link": ":is(.doc-link, .doc-link.active) .icon"
+    }
 
 
 def test_preserved_live_hover_transitions_are_repaired_without_recapture(
@@ -1369,3 +1427,230 @@ def test_capture_does_not_launder_an_authored_spec_into_bridge_ownership(
     assert spec["source"] == "agent-authored"
     summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
     assert {entry["region"] for entry in summary["unsupported"]} == {"authored-scroll"}
+
+
+@pytest.mark.parametrize(
+    "browser_env", [{}, {"AGENT_BROWSER_NAMESPACE": "custom", "AGENT_BROWSER_COLOR_SCHEME": "dark"}]
+)
+def test_fresh_bridge_configures_capture_environment(
+    tmp_path: Path, browser_env: dict[str, str]
+) -> None:
+    proc, _, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        browser_env=browser_env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    scheme = browser_env.get("AGENT_BROWSER_COLOR_SCHEME", "light")
+    assert [call[2:] for call in calls[:6]] == [
+        ["close"],
+        ["get", "url"],
+        ["set", "viewport", "1440", "900"],
+        ["set", "media", scheme],
+        ["open", "https://example.test", "--json"],
+        ["wait", "3500"],
+    ]
+    checksum = subprocess.run(
+        ["cksum"], input="capture", text=True, capture_output=True, check=True, timeout=5
+    ).stdout.split()[0]
+    expected = {
+        "AGENT_BROWSER_NAMESPACE": browser_env.get(
+            "AGENT_BROWSER_NAMESPACE", f"ui-clone-{checksum}"
+        ),
+        "AGENT_BROWSER_COLOR_SCHEME": browser_env.get("AGENT_BROWSER_COLOR_SCHEME"),
+    }
+    environments = [
+        json.loads(line) for line in (tmp_path / "calls.env.jsonl").read_text().splitlines()
+    ]
+    assert environments and all(env == expected for env in environments)
+    assert calls[-1][2:] == ["close"]
+
+
+@pytest.mark.parametrize(
+    "step", ["close", "get url", "set viewport 1440 900", "set media light", "wait 3500"]
+)
+def test_bridge_setup_failure_does_not_capture(tmp_path: Path, step: str) -> None:
+    proc, ref_dir, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        setup_fail=step,
+    )
+    assert proc.returncode != 0
+    assert not any(call[2] in {"eval", "screenshot", "hover"} for call in calls)
+    assert calls[-1][2:] == ["close"]
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["status"] == "fail"
+    assert summary["captured"] == []
+
+
+@pytest.mark.parametrize(
+    "browser_env", [{}, {"AGENT_BROWSER_NAMESPACE": "caller", "AGENT_BROWSER_COLOR_SCHEME": "dark"}]
+)
+def test_reused_bridge_preserves_browser_environment(
+    tmp_path: Path, browser_env: dict[str, str]
+) -> None:
+    proc, _, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        reuse_session=True,
+        browser_env=browser_env,
+    )
+    assert proc.returncode == 0
+    assert all(call[1] == "capture" and call[2] not in {"open", "close", "set"} for call in calls)
+    environments = [
+        json.loads(line) for line in (tmp_path / "calls.env.jsonl").read_text().splitlines()
+    ]
+    expected = {
+        key: browser_env.get(key)
+        for key in ("AGENT_BROWSER_NAMESPACE", "AGENT_BROWSER_COLOR_SCHEME")
+    }
+    assert environments and all(env == expected for env in environments)
+
+
+def test_bridge_restores_scoped_environment_after_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    module = _load_capture_module()
+    ref_dir = tmp_path / "ref"
+    _write_regions(ref_dir, [{"name": "button", "triggerType": "hover", "selector": ".button"}])
+    monkeypatch.delenv("AGENT_BROWSER_NAMESPACE", raising=False)
+    original_env = os.environ.copy()
+
+    def fail_capture(*args: object) -> int:
+        assert module._BROWSER_ENV.get()["AGENT_BROWSER_NAMESPACE"].startswith("ui-clone-")
+        assert os.environ == original_env
+        raise RuntimeError("capture interrupted")
+
+    monkeypatch.setattr(module, "_capture_main", fail_capture)
+    with pytest.raises(RuntimeError, match="capture interrupted"):
+        module.main(["https://example.test", "capture", str(ref_dir)])
+    assert module._BROWSER_ENV.get() is None
+    assert os.environ == original_env
+
+
+@pytest.mark.parametrize(
+    "suffix", ["::before", "::after", ":before", ":after", ":first-letter", ":first-line"]
+)
+def test_legacy_pseudo_element_owner(suffix: str) -> None:
+    module = _load_capture_module()
+    assert module._observable_hover_target(f".icon{suffix}") == ".icon"
+    assert module._observable_hover_target(".icon:first-child") == ".icon:first-child"
+
+
+@pytest.mark.parametrize("drift", ["eval", "screenshot"])
+def test_bridge_rejects_wrong_origin_before_publishing(tmp_path: Path, drift: str) -> None:
+    browser_env = (
+        {"FAKE_EVAL_ORIGIN": "https://wrong.test"}
+        if drift == "eval"
+        else {"FAKE_SCREENSHOT_DRIFT": "1"}
+    )
+    proc, ref_dir, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        browser_env=browser_env,
+    )
+    assert proc.returncode != 0
+    assert calls[-1][2:] == ["close"]
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["status"] == "fail"
+    assert not (ref_dir / "transition-spec.json").exists()
+
+
+def test_bridge_accepts_its_recorded_redirect(tmp_path: Path) -> None:
+    proc, ref_dir, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        browser_env={"FAKE_FINAL_URL": "https://www.example.test/final"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert ["open", "https://example.test", "--json"] in [call[2:] for call in calls]
+    receipt = json.loads((ref_dir / "capture-region-artifacts-navigation.json").read_text())
+    assert receipt["finalUrl"] == "https://www.example.test/final"
+    assert receipt["session"] == "capture-region-artifacts"
+
+
+@pytest.mark.parametrize("mismatch", [None, "session", "namespace", "requestedUrl"])
+def test_reused_bridge_requires_matching_redirect_receipt(
+    tmp_path: Path, mismatch: str | None
+) -> None:
+    receipt = {
+        "requestedUrl": "https://example.test",
+        "finalUrl": "https://www.example.test/final",
+        "session": "capture",
+        "namespace": "caller-space",
+    }
+    if mismatch:
+        receipt[mismatch] = "wrong"
+    proc, _, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        reuse_session=True,
+        browser_env={
+            "AGENT_BROWSER_NAMESPACE": "caller-space",
+            "FAKE_FINAL_URL": receipt["finalUrl"],
+        },
+        source_files={"capture-navigation.json": json.dumps(receipt)},
+    )
+    assert proc.returncode == (2 if mismatch else 0), proc.stderr
+    assert all(call[2] not in {"open", "close"} for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("selector", "owner"),
+    [
+        ('[data-label="::before"]::after', '[data-label="::before"]'),
+        ('[data-label="icon:before"]:after', '[data-label="icon:before"]'),
+        ('[data-label="a  b"]::before', '[data-label="a  b"]'),
+        (r'[data-label="a\"::before"]::after', r'[data-label="a\"::before"]'),
+        (r'.icon\:\:before::after', r'.icon\:\:before'),
+        (':is(.icon, [data-label="::before"]):first-child::after',
+         ':is(.icon, [data-label="::before"]):first-child'),
+        ('[data-label="::before"]:not(.disabled)', '[data-label="::before"]:not(.disabled)'),
+        ('slot::slotted(:is(.a, .b))', 'slot'),
+    ],
+)
+def test_hover_owner_preserves_selector_literals(selector: str, owner: str) -> None:
+    assert _load_capture_module()._observable_hover_target(selector) == owner
+
+
+@pytest.mark.parametrize(
+    ("summary", "overrides", "expected"),
+    [
+        ({"checked": True, "durationMs": 8000}, {}, 8500),
+        ({"checked": False, "durationMs": 8000}, {}, 3500),
+        ({"checked": True, "durationMs": 100}, {}, 3500),
+        ({"checked": True, "durationMs": "bad"}, {}, 3500),
+        ([], {}, 3500),
+        ({"checked": True, "durationMs": 8000},
+         {"CAPTURE_DERIVED_READY_WAIT_MS": "9000", "CAPTURE_DERIVED_READY_BUFFER_MS": "100"},
+         9000),
+        ({"checked": True, "durationMs": 8000},
+         {"CAPTURE_DERIVED_READY_WAIT_MS": "bad", "CAPTURE_DERIVED_READY_BUFFER_MS": "-1"},
+         8500),
+    ],
+)
+def test_bridge_waits_for_checked_splash_before_probing(
+    tmp_path: Path, summary: object, overrides: dict[str, str], expected: int,
+) -> None:
+    proc, _, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        browser_env={"STATES_PREFIX": "alternate-states", **overrides},
+        source_files={"alternate-states/splash/summary.json": json.dumps(summary)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls[5][2:] == ["wait", str(expected)]
+    assert calls[6][2] == "mouse"
+
+
+def test_reused_bridge_does_not_repeat_splash_wait(tmp_path: Path) -> None:
+    proc, _, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        reuse_session=True,
+        source_files={"states/splash/summary.json": '{"checked":true,"durationMs":8000}'},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls[0][2] == "mouse"
+    assert not any(call[2:] == ["wait", "8500"] for call in calls)

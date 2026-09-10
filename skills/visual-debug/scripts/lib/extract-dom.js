@@ -27,7 +27,7 @@
     // Fix 93 (B3) — aspect-ratio round-trips losslessly: getComputedStyle returns
     // it as an author ratio (e.g. "16 / 9"), NOT px-resolved, so capturing it
     // preserves intrinsic sizing without any relativity inference.
-    'aspect-ratio',
+    'aspect-ratio','object-fit','object-position',
     // box-sizing must be captured: getComputedStyle().height on a border-box
     // element is a border-box px value (padding INSIDE). Re-emitting that height
     // without box-sizing:border-box (content-box default) adds the padding on
@@ -535,6 +535,22 @@
         if (el.style.getPropertyValue(p)) ip.push(p);
       }
       if (ip.length) out.inlineProps = ip;
+      // Computed media dimensions lose authored percentages and object-fit.
+      // Keep only media box declarations; animation/controller state remains
+      // governed by the runtime extraction rather than replaying all inline CSS.
+      if (['IMG', 'VIDEO'].includes(el.tagName.toUpperCase())) {
+        const authored = {};
+        const priorities = {};
+        for (const p of ['width', 'height', 'object-fit', 'object-position']) {
+          const value = el.style.getPropertyValue(p);
+          if (value) {
+            authored[p] = value;
+            if (el.style.getPropertyPriority && el.style.getPropertyPriority(p) === "important") priorities[p] = "important";
+          }
+        }
+        if (Object.keys(authored).length) out.authoredMediaStyles = authored;
+        if (Object.keys(priorities).length) out.authoredMediaPriorities = priorities;
+      }
     }
     // B-family: generic data-* hooks (animation state machines key on them,
     // e.g. word-reveal data-word-id) — capture them all; the transpiler

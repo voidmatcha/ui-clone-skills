@@ -31,6 +31,10 @@ Automated post-implementation visual comparison — original vs implementation. 
 - **Routed invocation:** `ui-reverse-engineering` may route here after a failed visual diff, failed post-implementation gate, or completed-state mismatch request.
 - **Missing evidence:** If baseline/reference capture is missing, return to `ui-capture` first; if implementation or regeneration is needed, return to `ui-reverse-engineering` or the active caller pipeline.
 - **Return contract:** Send the caller concrete findings: failing artifact, mismatched selector/region, likely root cause, recommended fix, and verification command. `visual-debug` diagnoses and guides; the caller owns implementation, build, regeneration, and full clone orchestration.
+- **Worker capability:** A named diagnostic/reviewer role may be unavailable even when generic native workers work. Follow `ui-reverse-engineering/SKILL.md` host-neutral dispatch: use the same contract with a generic worker, and do not repeat a rejected role name. Preserve Phase E's delegated-context requirement.
+- **Read budget:** Read this entrypoint once, then locate the current diagnostic section by heading. Query failing rows/IDs from artifacts rather than dumping entire reports or rereading the whole skill after each check.
+- **Repair order:** Resolve known content/structure/runtime/geometry failures with targeted checks before another expensive section/motion sweep. A successful build does not clear a failed runtime check. Follow `../ui-reverse-engineering/iteration-discipline.md`; full canonical verification remains required after repair.
+- **Visible output:** Matching DOM text, section heights, or fired events does not prove appearance or trajectory parity. Check section background and visible foreground together, preserve media fit, and compare intermediate states inside the target's active scroll range before accepting a motion match.
 - **Evidence-pack first:** If `brief/WORKER_BRIEF.md` or `evidence-pack.json` exists under the ref dir, read the brief before raw diff/DOM/style artifacts. Use the pack as a compact selector/bbox/style/trigger index and open only the named drill-down paths needed for the failing hotspot.
 
 ## When to use
@@ -324,6 +328,10 @@ These are diagnostic, not gate-blocking. Use them when `section-compare` / `tran
 A position is PASS only when **all three agree** (or LLM explicitly approves a known difference).
 
 ### Phase E: LLM Review (MANDATORY)
+
+For early semantic diagnosis, delegate the bounded `reviewMode: "diagnostic"`
+route in `comparison-fix.md` using existing representative pairs. Its separate
+noncanonical artifact cannot replace the final all-position review below.
 
 NOTE: Quick comparison (Phases A-D) uses zero vision tokens via AE/SSIM diff. Phase E (LLM verification) is mandatory for full verification workflow and DOES use vision tokens for the final review.
 

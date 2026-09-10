@@ -527,7 +527,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         ref_dir = Path(args[1])
         vps = _plan_viewports(ref_dir)
-        for width in sweep_widths([w for w, _ in vps], _breakpoints(ref_dir)):
+        from ui_clone.verification_scope import probe_widths
+
+        scoped = probe_widths(ref_dir)
+        widths = scoped if scoped is not None else sweep_widths([w for w, _ in vps], _breakpoints(ref_dir))
+        for width in widths:
             print(f"{width} {nearest_height(width, vps)}")
         return 0
 

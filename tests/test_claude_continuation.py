@@ -764,3 +764,11 @@ def test_cli_verbs_status_and_validation_errors(tmp_path: Path) -> None:
     assert invalid.returncode == 2
     assert invalid.stdout == ""
     assert "invalid session id" in invalid.stderr
+
+
+def test_missing_receipt_read_does_not_create_runtime_lock(tmp_path: Path) -> None:
+    assert cc.load_receipt(tmp_path, SESSION) is None
+    assert not (tmp_path / cc.RECEIPT_DIR).exists()
+    cc.activate(tmp_path, "other-session", cc.UI_RE_SKILL)
+    assert cc.load_receipt(tmp_path, SESSION) is None
+    assert not (tmp_path / cc.RECEIPT_DIR / f"{SESSION}.lock").exists()

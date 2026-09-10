@@ -1,14 +1,12 @@
 # Asset Substitution — Declaring Deliberate Differences
 
-> 🚨 **Most common mistake — `structuralOnlySections` MUST be included.**
-> Declaring `fonts` / `images` alone does NOT activate structural-only mode.
-> `section-compare.sh` reads `structuralOnlySections` patterns *separately*;
-> without it, every section still runs strict pixel AE diff and you get
-> 1M+ AE failures even though you declared the substitution. The simplest
-> safe value is `"structuralOnlySections": ["*"]` (wildcard, all sections).
-> The script's forgiving fallback auto-defaults to `["*"]` when fonts/images/videos
-> are declared but no patterns are given — but a warning prints every run.
-> Be explicit.
+> **Declare `structuralOnlySections` explicitly.** Use section patterns only for
+> sections affected by a deliberate substitution. An explicit empty array (`[]`)
+> keeps pixel comparison enabled, even when `fonts` / `images` / `videos` are listed.
+> For compatibility, a missing key with declared replacements defaults to `["*"]`
+> and prints a warning. Wildcard mode requires findings in `paid-features.json`;
+> without that evidence, the script rejects the wildcard and retains pixel checks.
+> Per-viewport runs fall back to the reference root for both artifacts.
 
 Some clones must substitute assets the original site uses:
 

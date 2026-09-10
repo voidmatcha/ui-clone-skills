@@ -43,7 +43,6 @@ scroll_engine = load("scroll-engine.json", {})
 bundle_extraction = load("bundle-extraction.json", {})
 paid_features = load("paid-features.json", {})
 asset_sub = load("asset-substitution.json", {})
-font_parity = load("font-parity.json", {})
 canvas_webgl = load("canvas-webgl-detection.json", {})
 splash_contract = load("states/splash/contract.json", {})
 
@@ -1778,6 +1777,10 @@ def _intro_from_splash_contract(contract):
     overlay_selector = contract.get("overlaySelector") or overlay.get("selector")
     plan = {
         "sourceArtifact": "states/splash/contract.json",
+        # Presence/exit samples do not describe the overlay's child choreography.
+        "evidenceScope": "lifecycle-only",
+        "durationSemantics": "observed-overlay-presence",
+        "requiresChoreographyExtraction": True,
         "requiresOverlay": bool(
             contract.get("detected")
             or contract.get("hasSplash")
@@ -2022,7 +2025,6 @@ provenance_sources = (
     "layout-decisions.json",
     "component-map.json",
     "asset-substitution.json",
-    "font-parity.json",
     "bundle-extraction.json",
     "animation-runtime-dump.json",
     "sticky-elements.json",
@@ -2084,6 +2086,11 @@ plan = {
     "stickyStrategy": sticky_plan,
     "hiddenElements": hidden_plan,
     "mobileSwap": mobile_swap_plan,
+    "responsiveImplementation": {
+        "mode": "preserve-source-responsive",
+        "verificationScopeIndependent": True,
+        "preserve": ["media-queries", "container-queries", "fluid-expressions", "layout-variants"],
+    },
     "architectureLayers": arch_layers,
     "smoothScroll": smooth_scroll_plan,
     "scrollListener": scroll_listener_plan,

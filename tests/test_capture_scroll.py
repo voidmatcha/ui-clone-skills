@@ -402,6 +402,8 @@ def test_eval_channel_failure_reopens_and_retries(tmp_path: Path) -> None:
     assert "attempt=1/3" in proc.stderr
     calls = (tmp_path / "calls.log").read_text().splitlines()
     assert sum(" open " in f" {line} " for line in calls) == 2
+    assert not any("open about:blank" in line for line in calls)
+    assert calls.count("--session sess1-scroll set viewport 1440 900") == 2
     assert sum(" eval " in f" {line} " for line in calls) == 2
     snap_0 = json.loads((ref_dir / "states" / "scroll" / "0pct.json").read_text())
     assert "ok" in snap_0["outerHTML"]
@@ -447,9 +449,11 @@ def test_derived_session_wait_uses_splash_summary_duration(tmp_path: Path) -> No
     assert proc.returncode == 0, proc.stderr
     calls = (tmp_path / "calls.log").read_text().splitlines()
     assert "--session sess1-scroll wait 3500" in calls
+    close_index = calls.index("--session sess1-scroll close")
+    viewport_index = calls.index("--session sess1-scroll set viewport 1440 900")
     open_index = next(
         i for i, line in enumerate(calls)
-        if line.endswith(" open https://example.test")
+        if line.endswith(" open https://example.test --json")
         and line.startswith("--session sess1-scroll ")
     )
     wait_index = calls.index("--session sess1-scroll wait 3500")
@@ -457,7 +461,7 @@ def test_derived_session_wait_uses_splash_summary_duration(tmp_path: Path) -> No
         i for i, line in enumerate(calls)
         if line.startswith("--session sess1-scroll eval ")
     )
-    assert open_index < wait_index < eval_index
+    assert close_index < viewport_index < open_index < wait_index < eval_index
 
 
 def test_reuse_session_flag_uses_callers_session(tmp_path: Path) -> None:

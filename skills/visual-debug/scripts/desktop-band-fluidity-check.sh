@@ -90,6 +90,9 @@ for row in rows_in:
     widths.append({
         "viewport": vp,
         "refDocH": ref_h,
+        "actualRefViewport": row.get("actualRefViewport"),
+        "actualImplViewport": row.get("actualImplViewport"),
+        "viewportValid": row.get("viewportValid"),
         "implDocH": impl_h,
         "dochDeltaPct": round(delta_pct, 3) if delta_pct is not None else None,
         "refOverflowX": ref_ox,
@@ -207,6 +210,20 @@ PY
   [ -z "$WIDTHS" ] && WIDTHS="$DEFAULT_WIDTHS"
 fi
 
+# The selected scope is authoritative over legacy desktop defaults.
+SCOPE_WIDTHS="$(python3 - "$REF_DIR" <<'PY_SCOPE'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1]) / 'verification-plan.json'
+if p.exists():
+    scope = json.loads(p.read_text()).get('verificationScope', {})
+    if scope.get('mode') == 'desktop':
+        widths = {scope['representative']['w'], *(v['w'] for v in scope['boundaryViewports'])}
+        print(','.join(f'{w}x900' for w in sorted(widths)))
+PY_SCOPE
+)" || exit 2
+[ -z "$SCOPE_WIDTHS" ] || WIDTHS="$SCOPE_WIDTHS"
+
 write_error() {
   # write_error <reason> — always emit an artifact so the dispatcher's
   # emit-or-fail invariant holds even on setup failure.
@@ -258,6 +275,8 @@ fi
 MEASURE_JS='(() => {
   const de = document.documentElement;
   return JSON.stringify({
+    actualWidth: window.innerWidth,
+    actualHeight: window.innerHeight,
     docH: de.scrollHeight,
     overflowX: de.scrollWidth > window.innerWidth + 1,
     bodyWidth: document.body.getBoundingClientRect().width
@@ -272,8 +291,11 @@ for WH in "${_WLIST[@]}"; do
   W="${WH%%x*}"
   H="${WH#*x}"
   [ "$H" = "$WH" ] && H=900
-  agent-browser --session "$REF_SESSION" set viewport "$W" "$H" >/dev/null 2>&1
-  agent-browser --session "$IMPL_SESSION" set viewport "$W" "$H" >/dev/null 2>&1
+  if ! agent-browser --session "$REF_SESSION" set viewport "$W" "$H" >/dev/null 2>&1 ||
+     ! agent-browser --session "$IMPL_SESSION" set viewport "$W" "$H" >/dev/null 2>&1; then
+    write_error "viewport setup failed: $WH"
+    exit 2
+  fi
   sleep 1.5
   agent-browser --session "$REF_SESSION" eval "$MEASURE_JS" > "$TMPD/ref.$i" 2>/dev/null || true
   agent-browser --session "$IMPL_SESSION" eval "$MEASURE_JS" > "$TMPD/impl.$i" 2>/dev/null || true
@@ -315,9 +337,16 @@ for idx in range(count):
     vp = (tmpd / f"vp.{idx}").read_text().strip() if (tmpd / f"vp.{idx}").is_file() else None
     ref = unwrap(tmpd / f"ref.{idx}") or {}
     impl = unwrap(tmpd / f"impl.{idx}") or {}
+    expected = tuple(int(part) for part in vp.split('x')) if vp else ()
+    actual_ref = (ref.get('actualWidth'), ref.get('actualHeight'))
+    actual_impl = (impl.get('actualWidth'), impl.get('actualHeight'))
+    viewport_valid = expected == actual_ref == actual_impl
     widths.append({
         "viewport": vp,
-        "refDocH": ref.get("docH"),
+        "actualRefViewport": list(actual_ref),
+        "actualImplViewport": list(actual_impl),
+        "viewportValid": viewport_valid,
+        "refDocH": ref.get("docH") if viewport_valid else None,
         "implDocH": impl.get("docH"),
         "refOverflowX": bool(ref.get("overflowX")),
         "implOverflowX": bool(impl.get("overflowX")),

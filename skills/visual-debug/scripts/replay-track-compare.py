@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -128,6 +129,36 @@ def _candidate_path(ref_dir: Path, region_name: str, track_path: Path) -> Path:
     return ref_dir / _IMPL_TRACK_DIR / f"{token}.json"
 
 
+def _candidate_paths(ref_dir: Path, tracks: list[tuple[str, Path, Path]]) -> list[Path]:
+    """Keep legacy names when unique and add stable suffixes on collisions."""
+    candidates = [_candidate_path(ref_dir, region_name, track_path) for region_name, track_path, _ in tracks]
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.name] = counts.get(candidate.name, 0) + 1
+
+    # Reserve unique legacy names first: a generated digest name may already
+    # be another track's basename. Allocate in source-key order so reordering
+    # distinct declarations does not change their output paths.
+    used = {candidate.name for candidate in candidates if counts[candidate.name] == 1}
+    resolved = list(candidates)
+    pending = [index for index, candidate in enumerate(candidates) if counts[candidate.name] > 1]
+    pending.sort(key=lambda index: (tracks[index][0], tracks[index][1].resolve().as_posix()))
+    for index in pending:
+        candidate = candidates[index]
+        region_name, track_path, _ = tracks[index]
+        relative_track = track_path.resolve().relative_to(ref_dir.resolve()).as_posix()
+        digest = hashlib.sha256(f"{region_name}\0{relative_track}".encode()).hexdigest()[:10]
+        stem = f"{candidate.stem}-{digest}"
+        name = f"{stem}.json"
+        sequence = 2
+        while name in used:
+            name = f"{stem}-{sequence}.json"
+            sequence += 1
+        used.add(name)
+        resolved[index] = candidate.with_name(name)
+    return resolved
+
+
 def _manifest_for_track(track_path: Path) -> Path:
     return track_path.with_name(f"{track_path.stem}.manifest.json")
 
@@ -191,6 +222,7 @@ def _compare_one(
     region_name: str,
     reference_path: Path,
     manifest_path: Path,
+    candidate_path: Path,
 ) -> dict[str, object]:
     try:
         manifest_errors = verify_recording_manifest(_REPO_ROOT, _read_json(manifest_path))
@@ -253,7 +285,7 @@ def _compare_one(
             "failures": [f"reference {error}" for error in reference_errors],
         }
 
-    out_path = _candidate_path(ref_dir, region_name, reference_path)
+    out_path = candidate_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Clear last run's candidate first: a wrapper that exits 0 without writing
     # would otherwise have its stale track and manifest read as this run's
@@ -373,7 +405,10 @@ def run(impl_url: str, ref_dir: Path, capture: Path) -> dict[str, object]:
     tracks, failures = _declared_tracks(ref_dir)
     track_results: list[dict[str, object]] = []
     if not failures:
-        for region_name, reference_path, manifest_path in tracks:
+        candidate_paths = _candidate_paths(ref_dir, tracks)
+        for (region_name, reference_path, manifest_path), candidate_path in zip(
+            tracks, candidate_paths, strict=True
+        ):
             track_results.append(
                 _compare_one(
                     impl_url=impl_url,
@@ -382,6 +417,7 @@ def run(impl_url: str, ref_dir: Path, capture: Path) -> dict[str, object]:
                     region_name=region_name,
                     reference_path=reference_path,
                     manifest_path=manifest_path,
+                    candidate_path=candidate_path,
                 )
             )
 

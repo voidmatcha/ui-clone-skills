@@ -525,3 +525,38 @@ def test_runtime_wrapper_writes_structured_error_artifact_for_failed_eval(
     else:
         assert artifact["scrollAudit"] is None
     assert artifact["generatedAt"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_runtime_capture_preserves_motion_rows_after_thirtieth_node() -> None:
+    asset = ROOT / "scripts/extract/extract-animation-runtime.js"
+    harness = f"""
+const source = require('fs').readFileSync({json.dumps(str(asset))}, 'utf8');
+const elements = Array.from({{length: 45}}, (_, index) => ({{
+  tagName: 'DIV', id: 'motion-' + index, className: 'food',
+  style: {{transform: 'translateY(0px)', opacity: '', width: '', height: '', borderRadius: '', filter: ''}},
+}}));
+global.setTimeout = (fn) => {{ fn(); return 0; }};
+global.document = {{documentElement: {{scrollHeight: 1500}}, querySelectorAll: () => elements}};
+global.window = {{innerWidth: 1440, innerHeight: 500, scrollY: 0,
+  scrollTo: (opts) => {{
+    const top = typeof opts === 'object' ? opts.top : opts;
+    window.scrollY = top;
+    for (const [index, element] of elements.entries()) {{
+      element.style.transform = 'translateY(' + (top * (index + 1) / 1000) + 'px)';
+    }}
+  }},
+}};
+(async () => console.log(await eval(source)))().catch(error => {{console.error(error); process.exit(1);}});
+"""
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    artifact = json.loads(result.stdout)
+    rows = artifact["scrollLinkedStyles"]
+    assert len(rows) == 45
+    assert {row["sourceId"] for row in rows} == {f"n{index}" for index in range(45)}
+    last = next(row for row in rows if row["sourceId"] == "n44")
+    assert last["selector"] == "div#motion-44.food"
+    assert last["byScroll"]["0"]["transform"] == "translateY(0px)"
+    assert last["byScroll"]["1"]["transform"] == "translateY(45px)"
+    assert artifact["captureStatus"] == "ok"

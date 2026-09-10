@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from ui_clone.dag import (
     StalenessIssue,
     _assert_no_cycles,
     check_staleness,
+    generation_plan_provenance_issues,
+    generation_plan_source_hashes,
     stale_set,
 )
 
@@ -306,3 +309,46 @@ def test_conftest_fixture_covers_all_deps_artifacts(ref_dir_with_artifacts: Path
     assert not missing, (
         f"conftest ref_dir_with_artifacts fixture is missing DEPS artifacts: {missing}"
     )
+
+
+def test_font_verification_output_does_not_invalidate_generation(tmp_path: Path) -> None:
+    provenance = {
+        "source": "generation-planner",
+        "generatedAt": "2026-09-08T00:00:00Z",
+        "hashAlgorithm": "sha256",
+        "sourceHashes": generation_plan_source_hashes(tmp_path),
+    }
+    (tmp_path / "generation-plan.json").write_text(json.dumps({"provenance": provenance}))
+    for stamp, parity in (("first", "match"), ("second", "mismatch")):
+        (tmp_path / "font-parity.json").write_text(json.dumps({
+            "capturedAt": stamp,
+            "ref": {"family": "Reference Font", "loaded": True},
+            "impl": {"family": "Fallback", "loaded": False},
+            "parity": parity,
+        }))
+        assert generation_plan_provenance_issues(tmp_path, provenance) == ([], [])
+        assert check_staleness(tmp_path) == []
+    assert "generation-plan.json" not in stale_set("font-parity.json")
+
+
+@pytest.mark.parametrize("source,before,after", [
+    ("styles.json", {"fontFamily": "Font A"}, {"fontFamily": "Font B"}),
+    ("asset-substitution.json", {"fonts": []}, {"fonts": [{"original": "A", "substitute": "B"}]}),
+    ("css/fonts.css", "@font-face {font-family: A; src: url(a.woff2)}", "@font-face {font-family: B; src: url(b.woff2)}"),
+])
+def test_real_font_inputs_still_invalidate_generation(
+    tmp_path: Path, source: str, before: object, after: object,
+) -> None:
+    path = tmp_path / source
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(before))
+    provenance = {
+        "source": "generation-planner",
+        "generatedAt": "2026-09-08T00:00:00Z",
+        "hashAlgorithm": "sha256",
+        "sourceHashes": generation_plan_source_hashes(tmp_path),
+    }
+    path.write_text(json.dumps(after))
+    invalid, stale = generation_plan_provenance_issues(tmp_path, provenance)
+    assert invalid == []
+    assert stale == (["css/*.css"] if source.endswith(".css") else [source])

@@ -266,6 +266,67 @@ def _has_real_detection_provenance(self: Gate, regions: dict[str, Any]) -> bool:
     )
 
 
+def _has_transition_artifact_shape(self: Gate, regions: dict[str, Any]) -> bool:
+    """Require a supported video or distinct paths for documented state pairs."""
+    for entry in _region_entries(regions):
+        artifacts = entry.get("artifacts")
+        if not isinstance(artifacts, dict):
+            continue
+        video = artifacts.get("video")
+        if isinstance(video, str) and video.lower().endswith((".webm", ".mp4")):
+            return True
+        pairs = [("idle", "active"), ("before", "after")]
+        cycle_keys = [
+            key for key in artifacts
+            if isinstance(key, str) and key.startswith("state-") and key[6:].isdigit()
+        ]
+        if len(cycle_keys) >= 2:
+            pairs.extend((cycle_keys[0], key) for key in cycle_keys[1:])
+        for first, second in pairs:
+            first_path, second_path = artifacts.get(first), artifacts.get(second)
+            if not isinstance(first_path, str) or not isinstance(second_path, str):
+                continue
+            if not first_path.lower().endswith(".png") or not second_path.lower().endswith(".png"):
+                continue
+            if (self.ref_dir / first_path).resolve() != (self.ref_dir / second_path).resolve():
+                return True
+    return False
+
+
+def _transition_evidence_result(self: Gate) -> CheckResult:
+    """Accept motion videos or browser-measured interactive state pairs.
+
+    Hover and click capture deliberately use idle/active PNG pairs rather than
+    video. Requiring a WebM for every site contradicts that public contract and
+    creates a false blocker after the live bridge or curated capture inventory
+    has already proved the transition with matching region provenance. Curated
+    inventories also support motion videos in formats other than WebM.
+    """
+    video_result = self.check_dir(
+        self.ref_dir / "transitions" / "ref",
+        "transitions/ref motion evidence",
+        min_files=1,
+        pattern="*.webm",
+        fix=(
+            "Capture a transition video, or run "
+            "scripts/extract/capture-region-artifacts.py for measured idle/active states"
+        ),
+    )
+    if video_result.status == "pass":
+        return video_result
+    regions = self._load_json("regions.json")
+    if isinstance(regions, dict) and (
+        _has_live_capture_provenance(self, regions)
+        or _has_inventory_capture_provenance(self, regions)
+    ) and _has_transition_artifact_shape(self, regions):
+        return CheckResult(
+            "interactive transition state evidence",
+            "pass",
+            "captured transition artifacts with matching live or inventory provenance",
+        )
+    return video_result
+
+
 def _has_inventory_capture_provenance(self: Gate, regions: dict[str, Any]) -> bool:
     """Validate the public ui-capture artifact-inventory handoff.
 
@@ -317,7 +378,9 @@ def _has_inventory_capture_provenance(self: Gate, regions: dict[str, Any]) -> bo
         artifacts = entry.get("artifacts")
         if not isinstance(artifacts, dict) or not artifacts:
             return False
-        paths = {value for value in artifacts.values() if isinstance(value, str)}
+        if any(not isinstance(value, str) or not value for value in artifacts.values()):
+            return False
+        paths = set(artifacts.values())
         region_rows = {
             path
             for row_name, row_trigger, path in checked_rows
@@ -434,22 +497,17 @@ def _check_regions_not_placeholder(self: Gate) -> CheckResult | None:
 
 def gate_reference(self: Gate) -> list[CheckResult]:
     results = []
+    screenshots = self.ref_dir / "static" / "ref"
+    screenshot_count = sum(path.is_file() for path in screenshots.glob("*.png"))
     results.append(
-        self.check_dir(
-            self.ref_dir / "static" / "ref",
+        CheckResult(
             "static/ref screenshots",
-            min_files=5,
+            "pass" if screenshot_count >= 5 else "fail",
+            f"static/ref contains {screenshot_count} direct PNG files (need ≥5)",
             fix="Run Phase 1: invoke /ui-capture <url> to capture reference screenshots",
         )
     )
-    results.append(
-        self.check_dir(
-            self.ref_dir / "transitions" / "ref",
-            "transitions/ref (transition videos)",
-            min_files=1,
-            fix="Run Phase 1: invoke /ui-capture <url> to capture transition videos",
-        )
-    )
+    results.append(_transition_evidence_result(self))
     results.append(
         self.check_file(
             self.ref_dir / "regions.json",

@@ -731,6 +731,21 @@ def test_about_blank_eval_envelope_fails_closed(tmp_path: Path) -> None:
     assert not (ref_dir / "states" / "splash" / "trajectory.json").exists()
 
 
+def test_different_http_origin_fails_closed(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    payload = json.dumps({
+        "success": True,
+        "data": {"origin": "https://wrong.example", "result": {}},
+    }).replace("'", "'\\''")
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+
+    proc = _run_capture_states(ref_dir, bin_dir)
+
+    assert proc.returncode == 3
+    assert "expected origin" in proc.stderr
+    assert not (ref_dir / "states" / "splash" / "summary.json").exists()
+
+
 def test_derived_session_used_by_default(tmp_path: Path) -> None:
     """Codex item (d): default behavior uses ${SESSION}-states derived
     session, not the caller's session directly."""
@@ -768,10 +783,15 @@ def test_derived_session_installs_init_script_before_open(tmp_path: Path) -> Non
     assert proc.returncode == 0, f"stderr: {proc.stderr}"
 
     calls = (tmp_path / "calls.log").read_text().splitlines()
-    open_calls = [line for line in calls if " open " in f" {line} "]
-    assert open_calls, f"expected an open call: {calls}"
-    assert "--init-script " in open_calls[0]
-    assert open_calls[0].index("--init-script ") < open_calls[0].index(" open ")
+    close_index = next(i for i, line in enumerate(calls) if line.endswith(" close"))
+    viewport_index = next(i for i, line in enumerate(calls) if line.endswith(" set viewport 1440 900"))
+    target_index = next(
+        i for i, line in enumerate(calls)
+        if line.endswith(" open https://example.test --json") and "--init-script " in line
+    )
+    assert close_index < viewport_index < target_index
+    assert not any("open about:blank" in line for line in calls)
+    assert calls[target_index].index("--init-script ") < calls[target_index].index(" open ")
     assert "sleep 2" not in SCRIPT.read_text()
 
 
@@ -833,3 +853,61 @@ def test_reuse_session_flag_uses_callers_session(tmp_path: Path) -> None:
         f"reuse-session must invoke caller's session: {calls}"
     )
     assert "sess1-states" not in calls
+
+
+def test_owned_session_preserves_launch_identity_and_emulation(tmp_path: Path) -> None:
+    """Model native launch hashing: changing init scripts resets page/emulation."""
+    import sys
+
+    fake = tmp_path / "agent-browser"
+    fake.write_text(
+        f"#!{sys.executable}\n" + r'''
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+args = args[2:]
+script = None
+if args[:1] == ['--init-script']:
+    script, args = args[1], args[2:]
+    assert Path(script).is_file(), 'init script removed before close'
+path = Path(os.environ['MODEL_STATE'])
+state = json.loads(path.read_text()) if path.exists() else {}
+# Native explicit launch options compare the full hash before each command.
+key = [script, os.environ.get('AGENT_BROWSER_ARGS')]
+if not state or ((script or key[1]) and state['key'] != key):
+    state = {'key': key, 'url': 'about:blank', 'viewport': [1280, 720], 'media': None}
+if args[0] == 'close':
+    path.unlink(missing_ok=True)
+    sys.exit(0)
+if args[:2] == ['set', 'viewport']:
+    state['viewport'] = [int(v) for v in args[2:4]]
+if args[:2] == ['set', 'media']:
+    state['media'] = args[2]
+if args[0] == 'open':
+    assert state['viewport'] == [1440, 900], state
+    assert state['media'] == 'dark', state
+    assert script and '__UI_CLONE_SPLASH_CAPTURE__' in Path(script).read_text()
+    state['url'] = args[1]
+    print(json.dumps({'success': True, 'data': {'url': state['url']}}))
+if args[0] == 'eval':
+    assert state['url'] == 'https://example.test', state
+    assert state['viewport'] == [1440, 900] and state['media'] == 'dark', state
+    print(json.dumps({'success': True, 'data': {'origin': state['url'], 'result': {
+        'states': [], 'durationMs': 0, 'polls': 0, 'timedOut': False, 'reason': 'no-change'
+    }}}))
+path.write_text(json.dumps(state))
+''', encoding="utf-8")
+    fake.chmod(0o755)
+    for launch_args in (None, "--disable-dev-shm-usage"):
+        env = os.environ.copy()
+        env.update(PATH=f"{tmp_path}:{env['PATH']}", MODEL_STATE=str(tmp_path / "model.json"),
+                   AGENT_BROWSER_COLOR_SCHEME="dark")
+        env.pop("AGENT_BROWSER_ARGS", None)
+        if launch_args:
+            env["AGENT_BROWSER_ARGS"] = launch_args
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), "https://example.test", "owned", str(tmp_path / "ref")],
+            capture_output=True, text=True, env=env, timeout=20,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert not (tmp_path / "model.json").exists(), 'owned browser must be closed'

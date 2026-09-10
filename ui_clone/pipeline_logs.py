@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -116,6 +117,11 @@ def write_process_log(
     body += output
     if body and not body.endswith("\n"):
         body += "\n"
+    attempts_dir = log_dir / "attempts"
+    attempts_dir.mkdir(exist_ok=True)
+    attempt_path = attempts_dir / f"{label_slug(label)}-{uuid.uuid4().hex}.log"
+    with attempt_path.open("x", encoding="utf-8") as attempt:
+        attempt.write(body)
     log_path.write_text(body, encoding="utf-8")
     return log_path
 

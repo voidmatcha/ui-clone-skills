@@ -268,3 +268,42 @@ exit 2
         }
     )
     assert widths == [1200, 1300]
+
+
+@pytest.mark.parametrize('failure', ['setup', 'wrong-size', 'none'])
+def test_boundary_probe_proves_actual_viewport(tmp_path: Path, failure: str) -> None:
+    ref = tmp_path / 'ref'
+    ref.mkdir()
+    (ref / 'verification-plan.json').write_text(json.dumps({'verificationScope': {
+        'mode': 'desktop', 'representative': {'w': 1440, 'h': 900},
+        'boundaryViewports': [{'w': 1280, 'h': 900}]}}))
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    browser = bin_dir / 'agent-browser'
+    browser.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args=sys.argv
+state=Path(os.environ['PROBE_STATE'])
+if args[3] == 'set':
+    if os.environ['PROBE_FAILURE'] == 'setup': sys.exit(1)
+    state.write_text(json.dumps([int(args[5]), int(args[6])]))
+if args[3] == 'eval':
+    w,h=json.loads(state.read_text())
+    if os.environ['PROBE_FAILURE'] == 'wrong-size': w=800
+    print(json.dumps({'actualWidth':w, 'actualHeight':h, 'docH':10000, 'overflowX':False, 'bodyWidth':w}))
+''')
+    browser.chmod(0o755)
+    sleep = bin_dir / 'sleep'
+    sleep.write_text('#!/bin/sh\nexit 0\n')
+    sleep.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", PROBE_FAILURE=failure,
+               PROBE_STATE=str(tmp_path / 'state'))
+    proc = subprocess.run(['bash', str(SCRIPT), 'proof', 'https://ref.example', 'http://impl.example', str(ref)],
+                          env=env, capture_output=True, text=True, timeout=15)
+    data = json.loads((ref / 'desktop-band-fluidity.json').read_text())
+    assert proc.returncode == {'setup': 2, 'wrong-size': 1, 'none': 0}[failure], proc.stderr
+    assert data['status'] == {'setup': 'error', 'wrong-size': 'fail', 'none': 'pass'}[failure]
+    if failure == 'none':
+        assert all(row['viewportValid'] for row in data['widths'])
+        assert {tuple(row['actualRefViewport']) for row in data['widths']} == {(1280, 900), (1440, 900)}

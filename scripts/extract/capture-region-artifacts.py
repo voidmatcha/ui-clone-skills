@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import os
 import re
 import struct
 import subprocess
 import sys
 import zlib
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,19 @@ MAX_REGIONS = 20
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 AUTO_SOURCE = "ui_clone.extraction_artifacts"
 BRIDGE_SOURCE = "scripts/extract/capture-region-artifacts.py"
+_BROWSER_ENV: ContextVar[dict[str, str] | None] = ContextVar("browser_env", default=None)
+_ORIGIN_CONTEXT: ContextVar[tuple[str, Path] | None] = ContextVar("origin_context", default=None)
+_ORIGIN_SPEC = importlib.util.spec_from_file_location(
+    "capture_origin_validator", Path(__file__).with_name("validate-agent-browser-origin.py")
+)
+if _ORIGIN_SPEC is None or _ORIGIN_SPEC.loader is None:
+    raise ImportError("capture origin validator is unavailable")
+_ORIGIN_VALIDATOR = importlib.util.module_from_spec(_ORIGIN_SPEC)
+_ORIGIN_SPEC.loader.exec_module(_ORIGIN_VALIDATOR)
+
+
+class OriginValidationError(RuntimeError):
+    """The browser no longer supplies evidence from its authorized page origin."""
 
 
 def _as_number(value: Any) -> float | None:
@@ -69,12 +85,21 @@ def _normalize_region_geometry(node: Any) -> None:
 
 
 def _run(session: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    result = subprocess.run(
         ["agent-browser", "--session", session, *args],
         capture_output=True,
         text=True,
         check=False,
+        env=_BROWSER_ENV.get(),
     )
+    if args and args[0] == "screenshot" and result.returncode == 0 and _ORIGIN_CONTEXT.get():
+        try:
+            if not _eval(session, "(() => { return {url: location.href}; })()"):
+                raise OriginValidationError("post-screenshot origin probe failed")
+        except OriginValidationError:
+            Path(args[-1]).unlink(missing_ok=True)
+            raise
+    return result
 
 
 def _eval(session: str, javascript: str) -> dict[str, Any]:
@@ -85,6 +110,12 @@ def _eval(session: str, javascript: str) -> dict[str, Any]:
         value: Any = json.loads(result.stdout)
     except (json.JSONDecodeError, ValueError):
         return {}
+    context = _ORIGIN_CONTEXT.get()
+    if context is not None:
+        expected_url, navigation = context
+        namespace = (_BROWSER_ENV.get() or {}).get("AGENT_BROWSER_NAMESPACE", "")
+        if _ORIGIN_VALIDATOR.validate_payload(value, expected_url, session, navigation, namespace):
+            raise OriginValidationError("agent-browser returned an unauthorized page origin")
     if (
         isinstance(value, dict)
         and isinstance(value.get("data"), dict)
@@ -1452,7 +1483,7 @@ def _hover_rule_affected_targets(ref_dir: Path) -> dict[str, str]:
         if not isinstance(rule, dict):
             continue
         activation = _hover_activation(rule.get("activation") or rule.get("selector"))
-        affected = " ".join(str(rule.get("affected") or "").split())
+        affected = _observable_hover_target(rule.get("affected"))
         if not activation or not affected or affected == activation:
             continue
         targets = affected_by_activation.setdefault(activation, [])
@@ -1461,6 +1492,63 @@ def _hover_rule_affected_targets(ref_dir: Path) -> dict[str, str]:
     return {
         activation: ", ".join(targets) for activation, targets in affected_by_activation.items()
     }
+
+
+def _observable_hover_target(value: Any) -> str:
+    """Remove pseudo-element tokens without rewriting selector literals."""
+    selector = str(value or "").strip()
+    result: list[str] = []
+    index = 0
+    quote = ""
+    bracket_depth = 0
+    while index < len(selector):
+        char = selector[index]
+        if char == "\\":
+            result.append(selector[index : index + 2])
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in {'"', "'"}:
+            quote = char
+        elif char == "[":
+            bracket_depth += 1
+        elif char == "]":
+            bracket_depth -= 1
+        elif char == ":" and not bracket_depth:
+            pseudo = re.match(
+                r"::[A-Za-z_-][\w-]*|:(?:before|after|first-letter|first-line)(?![\w-])",
+                selector[index:],
+                flags=re.IGNORECASE,
+            )
+            if pseudo:
+                index += len(pseudo.group())
+                # Functional pseudo-elements can have nested selector arguments.
+                # Consume the complete argument, respecting strings and escapes.
+                if index < len(selector) and selector[index] == "(":
+                    depth = 1
+                    index += 1
+                    argument_quote = ""
+                    while index < len(selector) and depth:
+                        char = selector[index]
+                        if char == "\\":
+                            index += 2
+                            continue
+                        if argument_quote:
+                            if char == argument_quote:
+                                argument_quote = ""
+                        elif char in {'"', "'"}:
+                            argument_quote = char
+                        elif char == "(":
+                            depth += 1
+                        elif char == ")":
+                            depth -= 1
+                        index += 1
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result).strip()
 
 
 def _reconcile_interactions(
@@ -1592,6 +1680,14 @@ def _reconcile_interactions(
     else:
         reconciled.pop("skipped", None)
     _write_json(path, reconciled)
+    hover_path = ref_dir / "hover-css-rules.json"
+    if hover_path.is_file():
+        # DAG contract: interactions-detected.json -> hover-css-rules.json.
+        # The live CSS inventory remains authoritative, but reconciliation
+        # enriches its downstream interaction rows. Refresh the preserved
+        # inventory after that write so the subsequent extracted.json assembly
+        # is not transitively stale on arrival.
+        hover_path.touch()
     return []
 
 
@@ -1876,17 +1972,105 @@ def main(argv: list[str] | None = None) -> int:
         for region in _walk_region_dicts(regions)
         if _is_capturable(region, dispatch_is_obligation=dispatch_is_obligation)
     )
-    opened = False
-    if capturable_count and not args.reuse_session:
-        opened = _run(session, "open", args.url).returncode == 0
-        if not opened:
-            _run(session, "close")
-            summary["skipped"].append({"region": "session", "reason": "agent-browser open failed"})
-            _write_json(summary_path, summary)
-            return 2
-        _run(session, "wait", "1000")
-
+    owns_session = bool(capturable_count and not args.reuse_session)
+    browser_env = os.environ.copy()
+    if owns_session and not browser_env.get("AGENT_BROWSER_NAMESPACE"):
+        checksum = (
+            subprocess.run(["cksum"], input=args.session.encode(), capture_output=True, check=True)
+            .stdout.split()[0]
+            .decode("ascii")
+        )
+        browser_env["AGENT_BROWSER_NAMESPACE"] = f"ui-clone-{checksum}"
+    env_token = _BROWSER_ENV.set(browser_env)
+    navigation = ref_dir / (
+        "capture-navigation.json"
+        if args.reuse_session
+        else "capture-region-artifacts-navigation.json"
+    )
+    origin_token = _ORIGIN_CONTEXT.set((args.url, navigation))
     try:
+        return _capture_main(
+            args,
+            regions,
+            summary,
+            summary_path,
+            ref_dir,
+            auto_spec,
+            session,
+            dispatch_is_obligation,
+            owns_session,
+        )
+    finally:
+        _ORIGIN_CONTEXT.reset(origin_token)
+        _BROWSER_ENV.reset(env_token)
+
+
+def _derived_ready_wait_ms(ref_dir: Path) -> int:
+    """Use the same settled-page budget as the derived hover/scroll captures."""
+
+    def nonnegative_int(value: Any, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return parsed if parsed >= 0 else default
+
+    wait_ms = nonnegative_int(os.environ.get("CAPTURE_DERIVED_READY_WAIT_MS"), 3500)
+    buffer_ms = nonnegative_int(os.environ.get("CAPTURE_DERIVED_READY_BUFFER_MS"), 500)
+    prefix = os.environ.get("STATES_PREFIX") or "states"
+    try:
+        summary = json.loads((ref_dir / prefix / "splash" / "summary.json").read_text())
+    except (OSError, ValueError):
+        summary = {}
+    if isinstance(summary, dict) and summary.get("checked") is True:
+        duration_ms = nonnegative_int(summary.get("durationMs"), 0)
+        wait_ms = max(wait_ms, duration_ms + buffer_ms)
+    return wait_ms
+
+
+def _capture_main(
+    args: argparse.Namespace,
+    regions: Any,
+    summary: dict[str, Any],
+    summary_path: Path,
+    ref_dir: Path,
+    auto_spec: bool,
+    session: str,
+    dispatch_is_obligation: bool,
+    owns_session: bool,
+) -> int:
+    try:
+        if owns_session:
+            # Keep launch-affecting environment identical for every command.
+            # Reset only our derived session before establishing capture defaults.
+            scheme = os.environ.get("AGENT_BROWSER_COLOR_SCHEME") or "light"
+            for command in (
+                ("close",),
+                # Materialize the persistent page before emulation settings.
+                ("get", "url"),
+                ("set", "viewport", "1440", "900"),
+                ("set", "media", scheme),
+                ("open", args.url, "--json"),
+                ("wait", str(_derived_ready_wait_ms(ref_dir))),
+            ):
+                result = _run(session, *command)
+                if result.returncode != 0:
+                    summary["skipped"].append(
+                        {
+                            "region": "session",
+                            "reason": f"agent-browser {command[0]} failed",
+                        }
+                    )
+                    _write_json(summary_path, summary)
+                    return 2
+                if command[0] == "open" and _ORIGIN_VALIDATOR.record_navigation(
+                    args.url,
+                    session,
+                    ref_dir / "capture-region-artifacts-navigation.json",
+                    result.stdout,
+                    (_BROWSER_ENV.get() or {}).get("AGENT_BROWSER_NAMESPACE", ""),
+                ):
+                    raise OriginValidationError("agent-browser navigation receipt is invalid")
         updated = _capture_regions(
             regions,
             session,
@@ -1970,8 +2154,13 @@ def main(argv: list[str] | None = None) -> int:
         # A run that attempted regions and captured none proved nothing; an exit
         # code of 0 here would hand the pipeline an empty evidence set as a pass.
         return 5 if summary["status"] == "fail" else 0
+    except OriginValidationError as exc:
+        summary["status"] = "fail"
+        summary["skipped"].append({"region": "session", "reason": str(exc)})
+        _write_json(summary_path, summary)
+        return 2
     finally:
-        if opened:
+        if owns_session:
             _run(session, "close")
 
 

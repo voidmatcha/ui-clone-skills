@@ -49,6 +49,7 @@ fi
 URL="$1"
 SESSION="$2"
 REF_DIR="$3"
+CAPTURE_COLOR_SCHEME="${AGENT_BROWSER_COLOR_SCHEME:-light}"
 REUSE_SESSION="false"
 if [ "${4:-}" = "--reuse-session" ]; then
   REUSE_SESSION="true"
@@ -58,7 +59,7 @@ STATES_SESSION="${SESSION}-states"
 if [ "$REUSE_SESSION" = "true" ]; then
   STATES_SESSION="$SESSION"
 fi
-if [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
+if [ "$REUSE_SESSION" = "false" ] && [ -z "${AGENT_BROWSER_NAMESPACE:-}" ]; then
   CAPTURE_NAMESPACE_ID="$(printf '%s' "$SESSION" | cksum | awk '{print $1}')"
   AGENT_BROWSER_NAMESPACE="ui-clone-${CAPTURE_NAMESPACE_ID}"
   export AGENT_BROWSER_NAMESPACE
@@ -74,12 +75,28 @@ INIT_SCRIPT=""
 RESPONSE_TMP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
+NAVIGATION_RECEIPT="$REF_DIR/capture-states-navigation.json"
+if [ "$REUSE_SESSION" = "true" ]; then
+  NAVIGATION_RECEIPT="$REF_DIR/capture-navigation.json"
+else
+  unset AGENT_BROWSER_COLOR_SCHEME
+fi
+
+# Native launch hashing includes init-script paths. Keep the owned session's
+# launch options identical from its first command until it is closed.
+state-agent-browser() {
+  if [ -n "$INIT_SCRIPT" ]; then
+    agent-browser --session "$STATES_SESSION" --init-script "$INIT_SCRIPT" "$@"
+  else
+    agent-browser --session "$STATES_SESSION" "$@"
+  fi
+}
 
 cleanup() {
-  rm -f "${INIT_SCRIPT:-}" "${RESPONSE_TMP:-}"
   if [ "$REUSE_SESSION" = "false" ]; then
-    agent-browser --session "$STATES_SESSION" close >/dev/null 2>&1 || true
+    state-agent-browser close >/dev/null 2>&1 || true
   fi
+  rm -f "${INIT_SCRIPT:-}" "${RESPONSE_TMP:-}"
 }
 
 trap cleanup EXIT
@@ -404,19 +421,49 @@ RUN_EVAL_JS="$EVAL_JS"
 if [ "$REUSE_SESSION" = "false" ]; then
   INIT_SCRIPT="$(mktemp -t capture-states-init.XXXX.js)"
   printf '%s\n' "window.__UI_CLONE_SPLASH_CAPTURE__ = $EVAL_JS" > "$INIT_SCRIPT"
-  if ! agent-browser --session "$STATES_SESSION" --init-script "$INIT_SCRIPT" open "$URL" >/dev/null 2>&1; then
+  # A killed prior run can leave this deterministic derived session alive on
+  # about:blank. Reset it before registering the first-navigation init script;
+  # otherwise the stale context consumes the script contract and the target
+  # eval remains attached to the blank page.
+  state-agent-browser close >/dev/null 2>&1 || true
+  # Materialize the persistent page before applying emulation settings. The
+  # first cold command can otherwise target a transient launch page.
+  if ! state-agent-browser get url >/dev/null; then
+    echo "capture-states: agent-browser page initialization failed (session=$STATES_SESSION)" >&2
+    exit 2
+  fi
+  # Apply emulation after materializing the page with its final launch options.
+  # Adding --init-script only at open would recreate the browser and discard
+  # viewport/media; dropping it at eval can recreate the page as about:blank.
+  if ! state-agent-browser set viewport 1440 900 >/dev/null; then
+    echo "capture-states: agent-browser viewport failed (session=$STATES_SESSION)" >&2
+    exit 2
+  fi
+  if ! state-agent-browser set media "$CAPTURE_COLOR_SCHEME" >/dev/null; then
+    echo "capture-states: agent-browser color scheme failed (session=$STATES_SESSION)" >&2
+    exit 2
+  fi
+  if ! OPEN_OUTPUT="$(state-agent-browser open "$URL" --json)"; then
     echo "capture-states: agent-browser open failed for $URL (session=$STATES_SESSION)" >&2
     exit 2
   fi
+  if ! printf '%s' "$OPEN_OUTPUT" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$STATES_SESSION" --navigation "$NAVIGATION_RECEIPT" --record; then
+    exit 2
+  fi
   RUN_EVAL_JS='(async () => await window.__UI_CLONE_SPLASH_CAPTURE__)()'
+else
+  if ! state-agent-browser set media "$CAPTURE_COLOR_SCHEME" >/dev/null; then
+    echo "capture-states: agent-browser color scheme failed (session=$STATES_SESSION)" >&2
+    exit 2
+  fi
 fi
 
-RESPONSE_RAW="$(agent-browser --session "$STATES_SESSION" eval --json "$RUN_EVAL_JS" 2>&1)" || {
+RESPONSE_RAW="$(state-agent-browser eval --json "$RUN_EVAL_JS" 2>&1)" || {
   echo "capture-states: agent-browser eval failed (session=$STATES_SESSION)" >&2
   echo "$RESPONSE_RAW" >&2
   exit 3
 }
-if ! printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR"; then
+if ! printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$STATES_SESSION" --navigation "$NAVIGATION_RECEIPT"; then
   echo "capture-states: agent-browser eval returned a non-page origin (session=$STATES_SESSION)" >&2
   exit 3
 fi

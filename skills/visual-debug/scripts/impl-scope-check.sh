@@ -228,11 +228,13 @@ ALL_CHANGES=$(printf '%s\n%s\n%s\n' "$COMMITTED" "$UNCOMMITTED" "$UNTRACKED" | g
 # (e.g. `git checkout <baseline> -- <violating-path>` in the nextAction
 # message) would otherwise be parsed by bash as command substitution and
 # blow up with "syntax error near unexpected token `newline'" the moment a
-# multi-token backtick pair appears in the docstring. Pass ALL_CHANGES via
-# env var so the Python block still sees the shell-computed list without
-# requiring variable interpolation inside the body.
-export ALL_CHANGES
-python3 - "$OUT" "$BASELINE" "$IMPL_REL" "$BASELINE_DIRTY_FILE" <<'PY'
+# multi-token backtick pair appears in the docstring. Pass paths in a temporary
+# file: video captures can exceed the OS exec environment/argument size limit.
+CHANGES_FILE=$(mktemp "${TMPDIR:-/tmp}/ui-re-scope-changes.XXXXXX") || exit 2
+trap 'rm -f "$CHANGES_FILE"' EXIT
+printf '%s\n' "$ALL_CHANGES" > "$CHANGES_FILE"
+unset ALL_CHANGES
+python3 - "$OUT" "$BASELINE" "$IMPL_REL" "$BASELINE_DIRTY_FILE" "$CHANGES_FILE" <<'PY'
 import hashlib
 import json
 import os
@@ -240,7 +242,7 @@ import sys
 from pathlib import Path
 
 out_path, baseline, impl_rel, baseline_dirty_path = sys.argv[1:5]
-all_changes = os.environ.get("ALL_CHANGES", "").strip().splitlines()
+all_changes = Path(sys.argv[5]).read_text(encoding="utf-8").splitlines()
 all_changes = [p for p in all_changes if p]
 
 allowed_prefixes = (impl_rel + "/", "tmp/")

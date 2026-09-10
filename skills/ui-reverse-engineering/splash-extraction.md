@@ -12,9 +12,17 @@ Splash animations (page-load intros, logo reveals, curtain opens) are the hardes
 
 `agent-browser eval` executes AFTER the page loads and JS hydrates. Any splash animation that fires on `DOMContentLoaded` or in the first `rAF` cycle has already played by then. Your 60fps capture records a **static post-animation state** and you conclude "no splash" — but it already finished.
 
-**Both Tier 2 methods (eval + Playwright `addInitScript`) can miss splash:** `addInitScript` runs before page load but AFTER React hydration — GSAP/CSS animations triggered on `DOMContentLoaded` have already set initial `from` values. The capture records the element moving from `from` to `to`, but `from` was applied before capture started, so it looks like "element was always at this position."
+An init script installed before navigation runs before page scripts, not after React hydration. Use the existing pre-navigation capture path; attaching an eval after `open` can miss the entrance. Early DOM samples alone still do not establish rendered choreography: correlate them with source CSS, animation construction sites, and matched-time frames.
 
-**Video frames are the ONLY reliable source for splash behavior.**
+## From lifecycle evidence to implementation
+
+`states/splash/contract.json` describes presence and exit. Its observed duration (and the plan's compatibility field `visibleDurationMs`) is not a source timer, stagger, or unmount deadline. `summary.json.durationMs` measures the capture window. Neither artifact specifies child positions, assets, easing, callbacks, or the page reveal behind the overlay.
+
+When `introAnimation.requiresChoreographyExtraction=true`, recover those details before generating the intro. Inspect its early DOM subtree and local CSS, then route unresolved animation parameters to `bundle-analyzer` or `source-forensics` with the overlay selector. Record source-backed asset paths, initial/target values, stagger, exit timeline, scroll lock, and page-reveal coupling in structured motion wires. Retain the lifecycle evidence separately; do not treat its presence as a complete animation specification.
+
+Preserve the observed child tree and CSS. Do not substitute a generic color transition, centered image row, fade, or a timer copied from the capture window. If source parameters remain unresolved, report the missing evidence instead of inventing motion.
+
+Verify one representative splash at matched entrance, overlap, and exit times before a full-page sweep. A lifecycle pass proves only mounting/exit behavior; actual child layout and motion require frame comparison. Keep an unresolved visual mismatch open even when lifecycle checks pass.
 
 ## Detection: when to use this protocol
 
@@ -303,58 +311,11 @@ if (n) {
 
 **Failure this prevents:** you implement an elaborate SVG logo assembly that never runs on the target — because it's in the `else` branch. Meanwhile the ACTUAL animation (GSAP FLIP from siteLoader to introHome) is in the `if` branch and you never implemented it.
 
-## Fixed overlay cleanup (MANDATORY before any capture)
+## Preserve overlays during capture
 
-Before capturing ANY reference screenshots or videos, remove fixed/sticky overlays NOT part of the site's actual UI (header/nav excluded). These corrupt every frame comparison and AE diff.
+Capture the first-load state before dismissing anything. A high z-index, fixed/sticky positioning, or a class containing `modal`, `banner`, or `widget` does not make an element disposable: it may be the intro, menu, or interaction under test. Do not remove or hide elements with generic DOM sweeps.
 
-```bash
-agent-browser --session <s> eval "(() => {
-  const removed = [];
-
-  // 1. Dismiss cookie/consent banners via click
-  const dismissSelectors = ['.iubenda-cs-reject-btn', '.iubenda-cs-accept-btn',
-    '[class*=cookie] button', 'button[class*=accept]', 'button[class*=reject]'];
-  for (const sel of dismissSelectors) {
-    const btn = document.querySelector(sel);
-    if (btn) { btn.click(); removed.push('clicked: ' + sel); }
-  }
-  for (const b of document.querySelectorAll('button')) {
-    if (/accept|accetta|rifiuta|reject|dismiss|got.it|agree/i.test(b.textContent)) {
-      b.click(); removed.push('clicked: ' + b.textContent.trim().slice(0, 20));
-    }
-  }
-
-  // 2. Force-remove remaining fixed/sticky overlays (NOT header/nav/intro/loader/hero)
-  for (const el of document.querySelectorAll('*')) {
-    const s = getComputedStyle(el);
-    if (s.position !== 'fixed' && s.position !== 'sticky') continue;
-    const r = el.getBoundingClientRect();
-    if (r.width < 100 || r.height < 50) continue;
-    const tag = el.tagName.toLowerCase();
-    const cls = (el.className?.toString?.() || '').toLowerCase();
-    if (tag === 'header' || tag === 'nav') continue;
-    if (cls.includes('header') || cls.includes('nav') || cls.includes('menu')) continue;
-    if (cls.includes('intro') || cls.includes('loader') || cls.includes('hero')) continue;
-    if (cls.includes('cookie') || cls.includes('consent') || cls.includes('modal')
-      || cls.includes('toast') || cls.includes('popup') || cls.includes('banner')
-      || cls.includes('chat') || cls.includes('widget') || cls.includes('promo')
-      || cls.includes('iubenda') || cls.includes('gdpr') || cls.includes('notice')) {
-      el.remove();
-      removed.push('removed: ' + cls.slice(0, 40));
-      continue;
-    }
-    const z = parseInt(s.zIndex) || 0;
-    if (z > 1000) {
-      el.style.display = 'none';
-      removed.push('hidden(z=' + z + '): ' + cls.slice(0, 30));
-    }
-  }
-
-  return JSON.stringify(removed);
-})()"
-```
-
-Run once after page load, BEFORE any recording. If overlays reappear after scroll/interaction, re-run before the next capture. If the banner can't be dismissed, use `agent-browser cookies clear` before opening.
+If an observed consent or third-party prompt prevents the target interaction, record its initial state, dismiss it through its specific visible control, and record that action. Use the same consent/session state for the matched implementation capture. Keep first-load splash evidence separate from the dismissed state; do not rerun blanket cleanup before each frame or clear cookies to manufacture a preferred reference.
 
 ## Splash vs. site content boundary
 

@@ -150,6 +150,8 @@ def test_stop_blocks_on_browse_plus_writes_without_ref(tmp_path: Path) -> None:
         f"browse+writes + no owned ref dir must block Stop: rc={r.returncode} out={out[:400]}"
     )
     assert "pipeline" in out, "block must name the pipeline bootstrap path"
+    assert "attempted markup/style writes" in out
+    assert "does not establish clone intent" in out
 
 
 def test_stop_free_for_browse_only_session(tmp_path: Path) -> None:
@@ -177,6 +179,25 @@ def test_stop_free_for_writes_only_session(tmp_path: Path) -> None:
     )
     out = r.stdout + r.stderr
     assert r.returncode == 0 and '"decision": "block"' not in out
+
+
+def test_research_markdown_write_does_not_activate_stop_guard(tmp_path: Path) -> None:
+    _write_crumb(tmp_path, "research-doc")
+    write = run_hook(
+        "ui_clone.hooks.pre_generate",
+        _write_payload(tmp_path / "topic-map.md", "research-doc"),
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+    assert write.returncode == 0
+    assert "deny" not in write.stdout
+    assert not (tmp_path / CRUMB_DIR / f"{_digest('research-doc')}-writes.json").exists()
+    stop = run_hook(
+        "ui_clone.hooks.section_gate",
+        _stop_payload("research-doc"),
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+    assert stop.returncode == 0
+    assert "block" not in stop.stdout
 
 
 def test_stop_allows_with_offpipeline_env(tmp_path: Path) -> None:

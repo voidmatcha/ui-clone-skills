@@ -244,7 +244,7 @@ Tells you exact frame numbers of transitions — zero image reading.
 
 **If Tier 1 shows AE spikes in the first 1–3 seconds, a splash exists.** Splash is what you most need 60fps values for, and it's exactly what plain `eval` misses (capture attaches after the splash already fired).
 
-> **→ Read `splash-extraction.md`** for the throttled splash capture protocol, video↔bundle cross-reference, GSAP timeline parsing, conditional branch detection, fixed overlay cleanup, and splash end-state verification.
+> **→ Read `splash-extraction.md`** for the throttled splash capture protocol, video↔bundle cross-reference, GSAP timeline parsing, conditional branch detection, overlay preservation, and splash end-state verification.
 
 **Standard Tier 2 (no splash, or post-splash):**
 

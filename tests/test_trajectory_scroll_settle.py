@@ -19,4 +19,4 @@ def test_trajectory_realigns_fraction_after_layout_settles() -> None:
     assert "for _pass in 1 2" in helper
     assert helper.count("scrollHeight - window.innerHeight") == 2
     assert helper.count("window.scrollTo") == 2
-    assert source.count('settle_scroll_fraction "$pct"') == 2
+    assert source.count('settle_scroll_fraction "$pct"') == 3

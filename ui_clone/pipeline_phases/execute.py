@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -158,6 +159,24 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
     scripts = Path(plugin_root) / "scripts" / "extract"
     visual_scripts = Path(plugin_root) / "skills" / "visual-debug" / "scripts"
 
+    # Browser identity must survive separate producer subprocesses and resumes.
+    # Match capture.sh's `printf %s "$SESSION" | cksum` fallback exactly.
+    child_env = _bash_env()
+    # Legacy extraction producers export the light default; pin it once so
+    # siblings that preserve the environment attach to the same daemon.
+    if not child_env.get("AGENT_BROWSER_COLOR_SCHEME"):
+        child_env["AGENT_BROWSER_COLOR_SCHEME"] = "light"
+    if not child_env.get("AGENT_BROWSER_NAMESPACE"):
+        try:
+            checksum = subprocess.run(
+                ["cksum"], input=pipeline.session.encode(), capture_output=True,
+                check=True, timeout=5,
+            ).stdout.decode().split()[0]
+        except (OSError, subprocess.SubprocessError, UnicodeError, IndexError) as exc:
+            print(f"{_RED}Cannot resolve browser namespace: {exc}{_NC}")
+            return 1
+        child_env["AGENT_BROWSER_NAMESPACE"] = f"ui-clone-{checksum}"
+
     # Ensure ref dir exists for downstream artifact targets.
     pipeline.ref_dir.mkdir(parents=True, exist_ok=True)
 
@@ -219,7 +238,7 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
                 capture_output=True,
                 text=True,
                 timeout=600,
-                env=_bash_env(),
+                env=child_env,
             )
         except FileNotFoundError as exc:
             print(f"  {_RED}✗{_NC} {label} failed: {exc}")
@@ -278,7 +297,8 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
         print(f"\n{_BOLD}== execute: gate {gate_name}{_NC}")
         return Gate(pipeline.ref_dir).run(gate_name) == 0
 
-    for phase in phases:
+    reference_needs_repair = False
+    for phase_index, phase in enumerate(phases):
         if phase == "0A":
             detect = visual_scripts / "canvas-webgl-detect.sh"
             if not detect.is_file():
@@ -316,14 +336,55 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
                     f"\n{_RED}Phase 1 failed: regions.json missing after capture.{_NC}"
                 )
                 return 1
-            if not _run_gate("reference"):
-                print(
-                    f"\n{_RED}Phase 1 failed: reference gate did not pass after capture.{_NC}"
+            regions_payload: object
+            try:
+                regions_payload = json.loads(
+                    (pipeline.ref_dir / "regions.json").read_text(encoding="utf-8")
                 )
-                return 1
+            except (OSError, json.JSONDecodeError):
+                regions_payload = None
+            provisional_regions = isinstance(regions_payload, dict) and (
+                regions_payload.get("placeholder") is True
+                or regions_payload.get("detectionRan") is False
+            )
+            can_defer_reference = "2" in phases[phase_index + 1:]
+            if provisional_regions:
+                reference_needs_repair = True
+                if not can_defer_reference:
+                    print(
+                        f"\n{_RED}Phase 1 incomplete: provisional regions require "
+                        f"a later Phase 2 to produce live transition evidence.{_NC}"
+                    )
+                    return 1
+                print(
+                    f"\n{_YELLOW}Phase 1 captured the baseline; deferring the reference "
+                    f"gate until Phase 2 replaces provisional regions with live "
+                    f"transition evidence.{_NC}"
+                )
+            elif not _run_gate("reference"):
+                reference_needs_repair = True
+                if not can_defer_reference:
+                    print(f"\n{_RED}Phase 1 failed: reference gate did not pass.{_NC}")
+                    return 1
+                print(
+                    f"\n{_YELLOW}Phase 1 reference evidence is incomplete; "
+                    f"Phase 2 may repair it before the gate is retried.{_NC}"
+                )
             continue
 
         if phase == "2":
+            # A resumed capture remains obligated to its reference baseline.
+            # Missing files must not make a previously completed reference
+            # look like standalone extraction with no reference prerequisite.
+            if "reference" in _PS.load(pipeline.ref_dir).completed_steps and sum(
+                path.is_file() for path in (pipeline.ref_dir / "static" / "ref").glob("*.png")
+            ) < 5:
+                _run_gate("reference")
+                print(
+                    f"\n{_RED}Phase 2 failed: reference repair requires at least "
+                    f"five baseline screenshots in static/ref/.{_NC}"
+                )
+                return 1
             # Phase 2 covers DOM extraction (extract-dom.sh + scaffold)
             # and asset/style extraction. dom-scaffold.sh consumes three
             # artifacts (structure.json + styles.json + section-map.json),
@@ -588,6 +649,75 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
                     print(f"  extraction finalizer: {len(actions)} artifact(s) updated")
             except Exception as exc:
                 print(f"  {_YELLOW}⚠{_NC} extraction finalizer skipped: {exc}")
+            # The reference gate requires trigger-classified regions backed by
+            # concrete motion evidence. Those regions cannot be produced in
+            # Phase 1 because their selectors come from the transition spec
+            # finalized above. Run the live bridge here, then close the
+            # reference gate before advancing to extraction/bundle gates.
+            has_phase_1_baseline = sum(
+                path.is_file() for path in (pipeline.ref_dir / "static" / "ref").glob("*.png")
+            ) >= 5
+            if has_phase_1_baseline:
+                from ui_clone.gate import Gate
+
+                # A historical completion stamp cannot vouch for today's
+                # artifacts, including when Phase 2 is resumed on its own.
+                reference_gate = Gate(pipeline.ref_dir)
+                current_regions = reference_gate._load_json("regions.json")
+                provisional_reference = isinstance(current_regions, dict) and (
+                    bool(current_regions.get("placeholder"))
+                    or current_regions.get("detectionRan") is False
+                )
+                reference_needs_repair = provisional_reference or any(
+                    check.status == "fail" for check in reference_gate.gate_reference()
+                )
+                if not reference_needs_repair and not _run_gate("reference"):
+                    return 1
+            if has_phase_1_baseline and reference_needs_repair:
+                capture_regions = scripts / "capture-region-artifacts.py"
+                if not capture_regions.is_file():
+                    print(
+                        f"\n{_RED}Phase 2 failed: live transition producer missing at "
+                        f"{capture_regions}.{_NC}"
+                    )
+                    return 1
+                if not _run(
+                    [
+                        sys.executable,
+                        str(capture_regions),
+                        pipeline.url,
+                        pipeline.session,
+                        str(pipeline.ref_dir),
+                    ],
+                    "Phase 2 — live transition region artifacts",
+                ):
+                    return 1
+                try:
+                    refreshed = finalize_full_extraction_artifacts(pipeline.ref_dir)
+                    if refreshed:
+                        print(
+                            "  extraction finalizer after live capture: "
+                            f"{len(refreshed)} artifact(s) updated"
+                        )
+                except Exception as exc:
+                    print(
+                        f"\n{_RED}Phase 2 failed: extraction could not be reassembled "
+                        f"after live transition capture: {exc}{_NC}"
+                    )
+                    return 1
+                if not _run_gate("reference"):
+                    print(
+                        f"\n{_RED}Phase 2 failed: reference gate did not pass after "
+                        f"live transition capture.{_NC}"
+                    )
+                    return 1
+                reference_needs_repair = False
+            if reference_needs_repair:
+                print(
+                    f"\n{_RED}Phase 2 failed: reference repair requires at least "
+                    f"five baseline screenshots in static/ref/.{_NC}"
+                )
+                return 1
             # Validate the artifact gate.
             has_ref = (pipeline.ref_dir / "regions.json").is_file()
             pipeline.next_phase = ""

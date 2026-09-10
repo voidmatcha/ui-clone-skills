@@ -2859,6 +2859,9 @@ def test_generation_plan_intro_animation_uses_splash_contract_without_init_style
     assert intro["sourceArtifact"] == "states/splash/contract.json"
     assert intro["overlaySelector"] == ".rf-splash"
     assert intro["visibleDurationMs"] == 1800
+    assert intro["evidenceScope"] == "lifecycle-only"
+    assert intro["durationSemantics"] == "observed-overlay-presence"
+    assert intro["requiresChoreographyExtraction"] is True
     assert intro["requiresOverlay"] is True
     assert plan["provenance"]["sourceHashes"]["states/splash/contract.json"]
 
@@ -3142,3 +3145,17 @@ def test_generation_plan_reuse_session_false_splash_contract_falls_through_to_pa
     assert intro["sourceId"] == "page-load-overlay-from-transition-spec"
     assert intro["overlaySelector"] == ".fable-splash"
     assert intro["visibleDurationMs"] == 1400
+
+
+def test_desktop_verification_does_not_narrow_responsive_implementation(tmp_path: Path) -> None:
+    (tmp_path / "verification-plan.json").write_text(json.dumps({
+        "verificationScope": {"mode": "desktop"}, "viewports": [{"w": 1440, "h": 900}]
+    }))
+    output = tmp_path / "generation-plan.json"
+    subprocess.run(["python3", str(_project_root() / "scripts/extract/generation_plan.py"),
+                    str(tmp_path), str(output)], check=True, capture_output=True, timeout=15)
+    plan = json.loads(output.read_text())
+    policy = plan["responsiveImplementation"]
+    assert policy["mode"] == "preserve-source-responsive"
+    assert policy["verificationScopeIndependent"] is True
+    assert policy["preserve"] == ["media-queries", "container-queries", "fluid-expressions", "layout-variants"]

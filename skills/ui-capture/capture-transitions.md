@@ -298,6 +298,65 @@ Promoted `source_chunk` values must resolve to real files under `css/`,
 transitions that were not recaptured, without changing their animation fields
 or reference frames.
 
+#### Never pair `hover <selector>` with `screenshot <selector>`
+
+`agent-browser screenshot <selector> <path>` is an element-clipped capture, and
+it scrolls the element into view before shooting. Two things follow, and both
+turn a real hover delta into a silently identical PNG pair:
+
+- The scroll-into-view moves the element out from under the pointer, so the
+  CSS `:hover` chain ends before the frame is taken.
+- Element-clipped captures come back uniformly blank for in-flow content that
+  sits outside the initially painted viewport.
+
+So a hand-rolled `hover <sel>` → `screenshot <sel> active.png` sequence reports
+`changed_px=0` for a button that visibly changes background on hover. A zero
+delta from that sequence is a capture defect, not evidence that the region is
+inert — do not discard the region on it.
+
+`capture-region-artifacts.py` is the default path precisely because it avoids
+this: it captures the **viewport** for both states and post-crops the measured
+CSS-pixel box afterwards, from the same box for both frames. Use the bridge.
+When capturing by hand — a region the bridge cannot address, or a one-off probe
+— reproduce its shape:
+
+```bash
+# 1. Center the element and read its viewport-relative box (do NOT use `hover`)
+agent-browser --session <s> eval "(() => { const e=document.querySelector('<sel>');
+  e.scrollIntoView({block:'center',behavior:'instant'}); return 'ok'; })()"
+agent-browser --session <s> wait 900
+BOX=$(agent-browser --session <s> eval "(() => { const r=document.querySelector('<sel>').getBoundingClientRect();
+  return Math.round(r.x)+' '+Math.round(r.y)+' '+Math.round(r.width)+' '+Math.round(r.height); })()" | tr -d '\"')
+read -r BX BY BW BH <<< "$BOX"
+
+# 2. Idle: park the pointer away from the element, capture the VIEWPORT
+agent-browser --session <s> mouse move 5 5
+agent-browser --session <s> wait 600
+agent-browser --session <s> screenshot /tmp/vp-idle.png
+
+# 3. Active: real pointer move to the element centre — no scroll happens now
+agent-browser --session <s> mouse move $((BX + BW/2)) $((BY + BH/2))
+agent-browser --session <s> wait 800   # >= transitionDuration
+agent-browser --session <s> screenshot /tmp/vp-active.png
+
+# 4. Crop both viewports to the SAME box → clip/ref/<name>-{idle,active}.png
+```
+
+Rules that keep the pair honest:
+
+- Read the box **after** the scroll settles and **before** hovering; a
+  transform-based hover (scale, translate) changes the rect, and cropping each
+  frame to its own box compares two different regions.
+- Crop both frames from the same box, then diff. A nonzero delta is the only
+  proof; `mouse move` alone is not.
+- A hover whose visual change renders outside the border box (`box-shadow`,
+  `outline`, blur, an absolutely positioned reveal) needs the crop box padded,
+  or the delta lands outside the crop and reads as zero.
+- If the delta is still zero, the effect usually belongs to an ancestor rather
+  than the probed element — re-probe the activation ancestor before writing the
+  region off. Record a genuinely inert region under `discarded` with its reason,
+  per `detection.md` Step 2A-3.
+
 ### Swiper carousel
 
 When `verification-plan.json` reports `signals.hasSwiper: true`, capture the

@@ -1556,3 +1556,64 @@ def test_gate_spec_covers_ix2_scroll_events_nested_in_dict(tmp_path: Path) -> No
     )
     assert "spec-bundle-site-coverage" in blob, blob
     assert "ix2:webflow.js:42" in blob, blob
+
+
+def _transient_capture_fixture(ref: Path) -> dict:
+    (ref / 'structure.json').write_text(json.dumps({'tag': 'body', 'class': 'page'}))
+    splash = ref / 'states' / 'splash'
+    splash.mkdir(parents=True)
+    (splash / 'summary.json').write_text(json.dumps({'checked': True}))
+    (splash / 'trajectory.json').write_text(json.dumps([{'ts_ms': 0}]))
+    (splash / '0ms.json').write_text(json.dumps({
+        'ts_ms': 0, 'outerHTML': '<html><body class="page"><div class="intro__abc"><span id="fruit"></span></div></body></html>'
+    }))
+    return {'transitions': [{'id': 'intro', 'target': '.intro #fruit'}]}
+
+
+def test_spec_selectors_accept_captured_transient_dom(tmp_path: Path) -> None:
+    from ui_clone.gates.spec import _check_spec_selectors_present_in_dom
+
+    spec = _transient_capture_fixture(tmp_path)
+    assert not _check_spec_selectors_present_in_dom(Gate(tmp_path), spec)
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'unchecked', 'unrecorded', 'escape', 'script', 'declaration', 'split', 'timestamp', 'settled-time', 'template', 'malformed'])
+def test_spec_selectors_reject_unsupported_transient_dom(tmp_path: Path, mutation: str) -> None:
+    from ui_clone.gates.spec import _check_spec_selectors_present_in_dom
+
+    spec = _transient_capture_fixture(tmp_path)
+    splash = tmp_path / 'states' / 'splash'
+    snapshot = splash / '0ms.json'
+    if mutation == 'missing':
+        spec['transitions'][0]['target'] = '.nonexistent'
+    elif mutation == 'unchecked':
+        (splash / 'summary.json').write_text('{"checked": false}')
+    elif mutation == 'unrecorded':
+        (splash / 'trajectory.json').write_text('[]')
+    elif mutation == 'escape':
+        outside = tmp_path.parent / (tmp_path.name + '-outside.json')
+        snapshot.rename(outside)
+        snapshot.symlink_to(outside)
+    elif mutation == 'script':
+        snapshot.write_text(json.dumps({'ts_ms': 0, 'outerHTML': '<html><body><script>const x = \'<div class="intro__abc" id="fruit">\';</script></body></html>'}))
+    elif mutation == 'declaration':
+        snapshot.unlink()
+        spec['transitions'][0]['subtreeHtml'] = '<div class="intro__abc" id="fruit"></div>'
+        (tmp_path / 'state-structure-spec.json').write_text(json.dumps({'missingSpecTargets': [spec['transitions'][0]]}))
+    elif mutation == 'timestamp':
+        (splash / 'trajectory.json').write_text('[{"ts_ms":0},{"ts_ms":1}]')
+        data = json.loads(snapshot.read_text())
+        data['ts_ms'] = 1
+        snapshot.write_text(json.dumps(data))
+    elif mutation == 'settled-time':
+        snapshot.rename(splash / 'settled.json')
+        (splash / 'trajectory.json').write_text('[{"ts_ms":0},{"ts_ms":1}]')
+    elif mutation == 'template':
+        snapshot.write_text(json.dumps({'ts_ms': 0, 'outerHTML': '<html><body><template><div class="intro__abc" id="fruit"></div></template></body></html>'}))
+    elif mutation == 'malformed':
+        snapshot.write_text('{')
+    elif mutation == 'split':
+        snapshot.write_text(json.dumps({'ts_ms': 0, 'outerHTML': '<html><body class="intro__abc"></body></html>'}))
+        (splash / 'trajectory.json').write_text('[{"ts_ms":0},{"ts_ms":1}]')
+        (splash / '1ms.json').write_text(json.dumps({'ts_ms': 1, 'outerHTML': '<html><body id="fruit"></body></html>'}))
+    assert any(r.status == 'fail' for r in _check_spec_selectors_present_in_dom(Gate(tmp_path), spec))

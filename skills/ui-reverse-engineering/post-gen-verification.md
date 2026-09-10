@@ -20,16 +20,17 @@ grep -n "<section\|</section\|<div\|</div" <file-path> | head -30
 
 ---
 
-### On AE FAIL — read the diff image first
+### On AE FAIL — diagnose the measured region
 
-High AE does not necessarily mean layout mismatch. Do not auto-judge `AE > 500 → FAIL`.
+Use section diff metadata and computed-style/tree differences to locate the
+mismatch. Reference images are inspected only through the delegated Phase E
+workflow in `visual-debug`; do not read them in the main fix loop.
 
-Read the diff image and determine whether pixel differences are in **image regions** or **layout regions**:
-
-- **Image region differences** = live thumbnails, streaming content, dynamic media. Unrelated to layout quality → **treat as PASS**
-- **Layout region differences** (header, navbar, section titles, margins) = actual layout mismatch → **fix required**
-
-**Live service note:** Streaming CDN URLs (live-broadcast thumbnail hosts, time-windowed signed asset URLs) change every minute. Hardcoded URLs will always differ from current ones. This is NOT a layout issue.
+Image-region differences remain failures until reference-backed dynamic-state
+or approved substitution evidence explains their treatment. Pin carousel/video
+states on both sides, recover stale signed assets when needed, and rerun the
+relevant comparison. Never convert an image-region mismatch to PASS merely
+because the region contains media.
 
 ---
 
@@ -250,7 +251,7 @@ agent-browser --session <s> record stop
 
 ---
 
-## Loop 1: Section height verification
+## Loop 1: Section bounds diagnosis
 
 For every section with fixed height (e.g., `style={{ height: N }}`):
 
@@ -274,7 +275,11 @@ agent-browser --session <s> eval "(() => {
 })()"
 ```
 
-**Gate:** every section `waste < 100`. If `waste > 100`, reduce section height to `lastContentBottom + 65`.
+This probe is diagnostic only: the last image is not necessarily the last content,
+and remaining space may be authored padding or scroll distance. Compare against
+the same reference section/state, inspect missing nodes and pin lifecycle, and
+restore the source sizing rule. There is no universal whitespace threshold and no
+fixed trailing-space correction.
 
 ## Loop 2: Sticky lock point verification
 

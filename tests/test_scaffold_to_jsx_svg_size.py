@@ -146,3 +146,38 @@ def test_transpiler_passes_svg_width_height_through() -> None:
     }
     assert "width" in values and "height" in values, (
         "svg width/height must stay in SVG_PASSTHROUGH_ATTRS for Fix 122")
+
+
+def test_authored_image_box_and_fit_survive_generation(tmp_path: Path) -> None:
+    node = {'tag': 'img', 'src': '/milk.webp', 'alt': 'Milk',
+            'styles': {'width': '65.3281px', 'height': '135.75px'},
+            'inlineProps': ['width', 'height'],
+            'authoredMediaStyles': {'width': '100%', 'height': '100%', 'object-fit': 'contain'}}
+    output = _run(tmp_path, _wrap(node))
+    assert 'width: "100%"' in output
+    assert 'height: "100%"' in output
+    assert 'objectFit: "contain"' in output
+    assert 'authoredMediaStyles=' not in output
+
+
+def test_legacy_authored_image_height_is_not_rewritten_to_auto(tmp_path: Path) -> None:
+    node = {'tag': 'img', 'src': '/milk.webp', 'alt': 'Milk',
+            'styles': {'width': '65.3281px', 'height': '135.75px', 'object-fit': 'contain'},
+            'inlineProps': ['width', 'height']}
+    output = _run(tmp_path, _wrap(node))
+    assert 'height: "135.75px"' in output
+    assert 'objectFit: "contain"' in output
+
+
+def test_media_important_priority_and_property_allowlist(tmp_path: Path) -> None:
+    node = {'tag': 'img', 'src': '/milk.webp',
+            'styles': {'width': '65px', 'height': '135px'},
+            'authoredMediaStyles': {'object-fit': 'contain', 'objectFit': 'cover', 'opacity': '0'},
+            'authoredMediaPriorities': {'object-fit': 'important'}}
+    output = _run(tmp_path, _wrap(node))
+    assert 'element.style.setProperty("object-fit", "contain", "important")' in output
+    assert 'objectFit: "contain"' in output
+    assert 'objectFit: "cover"' not in output
+    assert 'opacity: "0"' not in output
+    assert 'height: "auto"' in output
+    assert 'authoredMediaPriorities=' not in output

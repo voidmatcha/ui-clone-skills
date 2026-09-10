@@ -183,7 +183,7 @@ for t in d.get("transitions") or []:
         str(t.get("type") or ""),
         str(animation.get("type") or ""),
     ]
-    if any("scroll-state-machine" in label for label in labels):
+    if any(kind in label for label in labels for kind in ("scroll-state-machine", "scroll-scrub")):
         out.append(target)
 print(", ".join(dict.fromkeys(out)))
 PY
@@ -253,6 +253,18 @@ settle_scroll_fraction() {
 }
 
 REPORT="$DIR/transitions/trajectory-result.txt"
+
+_GLOBAL_TRAJECTORY_POINTS="$TRAJECTORY_POINTS"
+if [ -n "$PROTECTED_TRAJ_TARGETS" ]; then
+  # Global quarter-page probes miss early/local scrubs. Preserve those probes
+  # and add observed changing intervals' start/mid/end without inventing ranges.
+  _SAMPLE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  if ! _LOCAL_POINTS=$(PYTHONPATH="$_SAMPLE_ROOT" python3 -m ui_clone.trajectory_samples "$DIR" "$PROTECTED_TRAJ_TARGETS" $TRAJECTORY_POINTS); then
+    printf '%s\n' '❌ Local trajectory range evidence missing; inspect transitions/trajectory-sampling.json' > "$REPORT"
+    exit 2
+  fi
+  TRAJECTORY_POINTS="$_LOCAL_POINTS"
+fi
 
 STRUCTURAL_ONLY_MODE="${STRUCTURAL_TRAJECTORY_MODE:-$(structural_only_mode)}"
 if [ "$STRUCTURAL_ONLY_MODE" = "true" ]; then
@@ -413,14 +425,16 @@ if [ "$TARGET_TRAJECTORY_MODE" != "off" ] && [ -n "$PROTECTED_TRAJ_TARGETS" ]; t
   } > "$REPORT"
 
   for pct in $TRAJECTORY_POINTS; do
-    REF_Y=$(awk -v h="$REF_HEIGHT"  -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
-    IMPL_Y=$(awk -v h="$IMPL_HEIGHT" -v p="$pct" 'BEGIN { printf "%d", h * p / 100 }')
-    agent-browser --session "$SESSION_REF"  eval "(() => { window.scrollTo({top: $REF_Y,  behavior: 'instant'}); return window.scrollY; })()" >/dev/null
-    agent-browser --session "$SESSION_IMPL" eval "(() => { window.scrollTo({top: $IMPL_Y, behavior: 'instant'}); return window.scrollY; })()" >/dev/null
-    sleep "$(awk -v ms="$WAIT_SCROLL_SETTLE_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
+    settle_scroll_fraction "$pct"
     agent-browser --session "$SESSION_REF"  eval "$TARGET_SIGNATURE_JS" > "$TARGET_DIR/ref-$pct.json"
     agent-browser --session "$SESSION_IMPL" eval "$TARGET_SIGNATURE_JS" > "$TARGET_DIR/impl-$pct.json"
 
+    # Local points add authoritative geometry evidence, not another full-frame
+    # diagnostic sweep. Keep optional pixel diagnostics at the original points.
+    case " $_GLOBAL_TRAJECTORY_POINTS " in
+      *" $pct "*) ;;
+      *) continue ;;
+    esac
     REF_PNG="$OUT_DIR/diagnostic-full-frame/ref/${pct}.png"
     IMPL_PNG="$OUT_DIR/diagnostic-full-frame/impl/${pct}.png"
     DIFF_PNG="$OUT_DIR/diagnostic-full-frame/diff/${pct}.png"

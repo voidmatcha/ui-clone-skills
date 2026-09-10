@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from ui_clone.gate import Gate
 
 
@@ -18,6 +20,32 @@ def test_gate_reference_fail_no_screenshots(tmp_path: Path) -> None:
     results = gate.gate_reference()
     failures = [r for r in results if r.status == "fail"]
     assert len(failures) > 0
+
+
+@pytest.mark.parametrize("direct_png_count", [0, 4, 5])
+@pytest.mark.parametrize("extra_kind", ["non-png", "nested-png", "png-directory"])
+def test_reference_baseline_counts_only_direct_png_files(
+    tmp_path: Path, direct_png_count: int, extra_kind: str,
+) -> None:
+    ref = tmp_path / "ref"
+    screenshots = ref / "static/ref"
+    screenshots.mkdir(parents=True)
+    for index in range(direct_png_count):
+        (screenshots / f"capture-{index}.png").write_bytes(b"png")
+    for index in range(5):
+        if extra_kind == "non-png":
+            (screenshots / f"notes-{index}.txt").write_text("not a screenshot")
+        elif extra_kind == "nested-png":
+            nested = screenshots / "old-run"
+            nested.mkdir(exist_ok=True)
+            (nested / f"capture-{index}.png").write_bytes(b"png")
+        else:
+            (screenshots / f"directory-{index}.png").mkdir()
+
+    result = next(
+        row for row in Gate(ref).gate_reference() if row.label == "static/ref screenshots"
+    )
+    assert (result.status == "pass") is (direct_png_count == 5)
 
 
 def test_gate_reference_fail_no_transitions_ref(tmp_path: Path) -> None:
@@ -361,6 +389,9 @@ def test_gate_reference_passes_live_capture_regions_before_transition_spec_exist
         ),
         encoding="utf-8",
     )
+    # Interactive state pairs are the canonical evidence for hover/click; no
+    # fabricated transition video should be required as a second proof.
+    (ref / "transitions" / "ref" / "scroll.webm").unlink()
 
     failures = [r for r in Gate(ref).gate_reference() if r.status == "fail"]
 
@@ -438,6 +469,114 @@ def test_gate_reference_passes_categorized_ui_capture_inventory(tmp_path: Path) 
     assert [result.label for result in failures] == [
         "regions.json real-detection provenance"
     ]
+
+
+def _curated_transition_inventory(ref: Path, kind: str) -> None:
+    ref.mkdir()
+    _phase1(ref)
+    (ref / "transitions/ref/scroll.webm").unlink()
+    artifacts = (
+        {"idle": "transitions/ref/idle.png", "active": "transitions/ref/active.png"}
+        if kind == "png"
+        else {"video": "transitions/ref/scroll.mp4"}
+    )
+    for relative in artifacts.values():
+        (ref / relative).write_bytes(b"captured-transition")
+    (ref / "regions.json").write_text(json.dumps({"hover": [{
+        "name": "button", "triggerType": "hover", "selector": "button",
+        "artifacts": artifacts,
+    }]}))
+    (ref / "capture-artifact-inventory.json").write_text(json.dumps({
+        "status": "pass", "regionsChecked": 1, "missingArtifacts": [],
+        "checkedArtifacts": [{
+            "region": "button", "triggerType": "hover", "path": relative,
+            "bytes": (ref / relative).stat().st_size,
+        } for relative in artifacts.values()],
+    }))
+
+
+@pytest.mark.parametrize("kind", ["png", "mp4"])
+def test_gate_reference_accepts_curated_transition_inventory(tmp_path: Path, kind: str) -> None:
+    ref = tmp_path / "ref"
+    _curated_transition_inventory(ref, kind)
+    failures = [result for result in Gate(ref).gate_reference() if result.status == "fail"]
+    assert failures == []
+
+
+@pytest.mark.parametrize("tamper", [
+    "missing-inventory", "missing-file", "empty-file", "stale-size",
+    "mismatched-region", "mismatched-path", "escaping-path", "invalid-artifact",
+])
+def test_gate_reference_rejects_tampered_curated_transition_inventory(
+    tmp_path: Path, tamper: str,
+) -> None:
+    ref = tmp_path / "ref"
+    _curated_transition_inventory(ref, "png")
+    inventory_path = ref / "capture-artifact-inventory.json"
+    inventory = json.loads(inventory_path.read_text())
+    regions_path = ref / "regions.json"
+    regions = json.loads(regions_path.read_text())
+    active = ref / "transitions/ref/active.png"
+    if tamper == "missing-inventory":
+        inventory_path.unlink()
+    elif tamper == "missing-file":
+        active.unlink()
+    elif tamper == "empty-file":
+        active.write_bytes(b"")
+    elif tamper == "stale-size":
+        active.write_bytes(b"changed")
+    elif tamper == "mismatched-region":
+        inventory["checkedArtifacts"][1]["region"] = "other"
+    elif tamper == "mismatched-path":
+        inventory["checkedArtifacts"][1]["path"] = "transitions/ref/idle.png"
+    elif tamper == "escaping-path":
+        outside = tmp_path / "outside.png"
+        outside.write_bytes(active.read_bytes())
+        regions["hover"][0]["artifacts"]["active"] = "../outside.png"
+        inventory["checkedArtifacts"][1]["path"] = "../outside.png"
+    else:
+        regions["hover"][0]["artifacts"]["active"] = None
+    if inventory_path.exists():
+        inventory_path.write_text(json.dumps(inventory))
+    regions_path.write_text(json.dumps(regions))
+    failures = [result for result in Gate(ref).gate_reference() if result.status == "fail"]
+    assert any(result.label == "transitions/ref motion evidence" for result in failures)
+
+
+@pytest.mark.parametrize("shape, accepted", [
+    ("single-png", False), ("same-path", False), ("aliased-path", False),
+    ("unrelated-pngs", False), ("before-after", True), ("cycle", True),
+])
+def test_curated_transition_inventory_requires_transition_shape(
+    tmp_path: Path, shape: str, accepted: bool,
+) -> None:
+    ref = tmp_path / "ref"
+    _curated_transition_inventory(ref, "png")
+    regions_path = ref / "regions.json"
+    regions = json.loads(regions_path.read_text())
+    idle = "transitions/ref/idle.png"
+    active = "transitions/ref/active.png"
+    shapes = {
+        "single-png": {"idle": idle},
+        "same-path": {"idle": idle, "active": idle},
+        "aliased-path": {"idle": idle, "active": "transitions/ref/./idle.png"},
+        "unrelated-pngs": {"screenshot": idle, "thumbnail": active},
+        "before-after": {"before": idle, "after": active},
+        "cycle": {"state-0": idle, "state-1": active},
+    }
+    artifacts = shapes[shape]
+    regions["hover"][0]["artifacts"] = artifacts
+    regions_path.write_text(json.dumps(regions))
+    inventory_path = ref / "capture-artifact-inventory.json"
+    inventory = json.loads(inventory_path.read_text())
+    inventory["checkedArtifacts"] = [{
+        "region": "button", "triggerType": "hover", "path": path,
+        "bytes": (ref / path).stat().st_size,
+    } for path in artifacts.values()]
+    inventory_path.write_text(json.dumps(inventory))
+    from ui_clone.gates.reference import _transition_evidence_result
+
+    assert (_transition_evidence_result(Gate(ref)).status == "pass") is accepted
 
 
 def test_gate_reference_fails_live_capture_when_summary_failed_or_region_skipped(

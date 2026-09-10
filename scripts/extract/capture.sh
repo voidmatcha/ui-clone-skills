@@ -36,12 +36,11 @@
 
 set -euo pipefail
 
-# W-4 (loop-ebpb-0): pin the light color scheme at CAPTURE time too — a
-# dark-evening Phase-0 capture bakes dark styles into the ref corpus
-# PERMANENTLY, and every light-pinned verify then honestly-fails against
-# poisoned ground truth. Caller override intact (default only when unset).
+# Recording creates a fresh context; pin its launch color scheme too.
+# The pipeline driver supplies this same default to downstream producers.
 : "${AGENT_BROWSER_COLOR_SCHEME:=light}"
 export AGENT_BROWSER_COLOR_SCHEME
+CAPTURE_COLOR_SCHEME="$AGENT_BROWSER_COLOR_SCHEME"
 
 URL="${1:?usage: capture.sh <url> <session> <ref_dir> [--reuse-session]}"
 SESSION="${2:?usage: capture.sh <url> <session> <ref_dir> [--reuse-session]}"
@@ -133,7 +132,7 @@ run_capture_step() {
   shift 2
   CAPTURE_COMMAND="$(format_command "$@")"
   CAPTURE_MESSAGE=""
-  "$@"
+  "$@" || return "$?"
   CAPTURE_MESSAGE=""
 }
 
@@ -227,14 +226,34 @@ run_capture_step "hover-state-capture" "states/hover/summary.json" \
   bash "$CAPTURE_HOVER" "$URL" "$CAPTURE_SESSION" "$ABS_REF"
 require_capture_artifact "hover-state-capture:artifact-check" "states/hover/summary.json"
 
-# Open + canonical viewport. `set viewport` must follow `open` (the skill
-# notes the reverse order is silently dropped). Keep the same named session
-# alive for downstream Phase 2 extraction, but clear it first by default so
-# persisted site theme state cannot leak across captures.
+# Bootstrap a page before configuring the initial navigation's viewport/media.
+# Keep the same named session alive for downstream Phase 2 extraction, but clear
+# it first by default so persisted site theme state cannot leak across captures.
 if [ "$REUSE_SESSION" != "true" ]; then
   run_capture_step "pre-open-session-reset" "" agent-browser --session "$CAPTURE_SESSION" close
 fi
-run_capture_step "open" "" agent-browser --session "$CAPTURE_SESSION" open "$URL"
+run_capture_step "page-bootstrap" "" agent-browser --session "$CAPTURE_SESSION" get url >/dev/null
+run_capture_step "pre-open-viewport" "" agent-browser --session "$CAPTURE_SESSION" set viewport 1440 900
+run_capture_step "color-scheme" "" agent-browser --session "$CAPTURE_SESSION" set media "$CAPTURE_COLOR_SCHEME"
+NAVIGATION_RESPONSE="$(mktemp "${TMPDIR:-/tmp}/ui-clone-navigation.XXXXXX")"
+RECORD_ACTIVE=false
+RECORD_STATE_FILE=""
+cleanup_capture() {
+  local status="$?"
+  if [ "$RECORD_ACTIVE" = true ]; then
+    agent-browser --session "$CAPTURE_SESSION" record stop >/dev/null 2>&1 || true
+  fi
+  rm -f "$NAVIGATION_RESPONSE" || true
+  if [ -n "$RECORD_STATE_FILE" ]; then
+    rm -f "$RECORD_STATE_FILE" || true
+  fi
+  exit "$status"
+}
+trap cleanup_capture EXIT
+run_capture_step "open" "" agent-browser --session "$CAPTURE_SESSION" open "$URL" --json > "$NAVIGATION_RESPONSE"
+run_capture_step "navigation-receipt" "capture-navigation.json" \
+  python3 "$SCRIPT_DIR/validate-agent-browser-origin.py" "$URL" \
+  --session "$CAPTURE_SESSION" --navigation "$ABS_REF/capture-navigation.json" --record < "$NAVIGATION_RESPONSE"
 run_capture_step "viewport" "" agent-browser --session "$CAPTURE_SESSION" set viewport 1440 900
 SETTLED_WAIT_MS="$(settled_capture_wait_ms)"
 run_capture_step "initial-wait" "" agent-browser --session "$CAPTURE_SESSION" wait "$SETTLED_WAIT_MS"
@@ -266,13 +285,30 @@ run_capture_step "reset-wait" "" agent-browser --session "$CAPTURE_SESSION" wait
 # Scroll video — short smooth scroll-down recording so the `scroll-video/ref`
 # gate row passes. Real ui-capture does a longer paced scroll; this minimal
 # wrapper just exercises the recording path.
+RECORD_STATE_FILE="$(umask 077; mktemp "${TMPDIR:-/tmp}/ui-clone-record-state.XXXXXX")"
+run_capture_step "scroll-video:state-save" "" agent-browser --session "$CAPTURE_SESSION" state save "$RECORD_STATE_FILE" >/dev/null
 run_capture_step "scroll-video:record-start" "scroll-video/ref/full-scroll.webm" agent-browser --session "$CAPTURE_SESSION" record start \
   "${ABS_REF}/scroll-video/ref/full-scroll.webm"
+RECORD_ACTIVE=true
+# Recording reloads the current URL in a fresh context and resets emulation.
+# Restore media before measured scroll; navigating now would break recording.
+run_capture_step "scroll-video:viewport" "" agent-browser --session "$CAPTURE_SESSION" set viewport 1440 900
+run_capture_step "scroll-video:color-scheme" "" agent-browser --session "$CAPTURE_SESSION" set media "$CAPTURE_COLOR_SCHEME"
 run_capture_step "scroll-video:scroll" "" agent-browser --session "$CAPTURE_SESSION" eval \
   "(() => { window.scrollTo({top: document.documentElement.scrollHeight, behavior: 'smooth'}); return 1; })()" >/dev/null
 sleep 5
 run_record_stop "scroll-video:record-stop" "scroll-video/ref/full-scroll.webm"
+RECORD_ACTIVE=false
 require_capture_artifact "scroll-video:artifact-check" "scroll-video/ref/full-scroll.webm"
+# Reinitialize the reference after recording so downstream extraction sees its
+# first load under the pinned media. Restore origin state only after recording
+# stops: loading state while the recorder is active invalidates its stream.
+run_capture_step "post-record:state-load" "" agent-browser --session "$CAPTURE_SESSION" state load "$RECORD_STATE_FILE" >/dev/null
+run_capture_step "post-record:open" "" agent-browser --session "$CAPTURE_SESSION" open "$URL" --json > "$NAVIGATION_RESPONSE"
+run_capture_step "post-record:navigation-receipt" "capture-navigation.json" \
+  python3 "$SCRIPT_DIR/validate-agent-browser-origin.py" "$URL" \
+  --session "$CAPTURE_SESSION" --navigation "$ABS_REF/capture-navigation.json" --record < "$NAVIGATION_RESPONSE"
+run_capture_step "post-record:initial-wait" "" agent-browser --session "$CAPTURE_SESSION" wait "$SETTLED_WAIT_MS"
 
 # Single full-page region as the minimal regions.json — proper region
 # segmentation is the ui-capture skill's job; this only unblocks the gate.

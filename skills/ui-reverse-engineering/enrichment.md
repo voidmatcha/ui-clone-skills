@@ -4,11 +4,22 @@
 
 - **Claude Code path**: invoked via the `generation-planner` sub-agent (`.claude-plugin/agents/generation-planner.md`). The sub-agent reads this file as its operational contract.
 - **Codex native path**: invoked via the `generation-planner` native subagent (`.codex/agents/generation-planner.toml`) when Codex/OMX subagent routing is available. The native subagent reads this file as the same operational contract.
-- **Inline fallback**: if a host has no delegated-worker surface, perform the same work in the main context and state that fallback explicitly.
+- **Portable worker fallback**: if the named role is unavailable, use a generic native worker with this contract, explicit ref/output paths, and a bounded enrichment objective. A rejected role is not evidence that all delegation is unavailable. Follow the entrypoint dispatch rules; do not retry unavailable role names.
+- **Inline fallback**: only if delegation itself is unavailable or the work cannot run independently, perform the same bounded work in the main context and state that fallback explicitly.
 
 ## Pre-condition
 
 `scripts/extract/generation-plan.sh` has already produced `tmp/ref/<component>/generation-plan.json` at `schemaVersion: 1`. The plan covers component list, library deps, sticky strategy, hidden state, mobile-swap, architecture booleans, smooth-scroll wrapper, intro animation. Your job is to enrich it to `schemaVersion: 2`.
+
+## Read budget and handoff
+
+Start with the base plan's schemaVersion, source hashes, component IDs, and missing
+fields reported by the pre-generate gate. Read only the sections below needed to
+fill those gaps. Query source artifacts by the referenced selector/sourceId rather
+than printing complete token, animation, or transition inventories. Return the
+updated plan path, changed fields, unresolved evidence, and gate result; do not
+paste the enriched JSON back into the caller. This budget never permits fabricating
+missing evidence or skipping required enrichment.
 
 ## Inputs (already exist)
 
@@ -21,10 +32,17 @@
 - `tmp/ref/<component>/states/scroll/trajectory.json` — optional/supporting scroll-state trajectory evidence
 - `tmp/ref/<component>/transition-spec.json` — transitions
 - `tmp/ref/<component>/element-roles.json`, `element-groups.json`, `layout-decisions.json`, `component-map.json` — Step 6c audit
-- `tmp/ref/<component>/asset-substitution.json` + `font-parity.json` — substitution declarations
+- `tmp/ref/<component>/asset-substitution.json` — substitution declarations. `font-parity.json` is a post-implementation verification report, not a generation input; use captured styles/CSS for reference font requirements.
 - `tmp/ref/<component>/bundle-extraction.json` — deterministic bundle-parameter extraction (`scripts/extract/bundle-extraction.sh`, produced by the Phase-2 driver; `bundle-analyzer` only merges the `unresolved[]` gaps at Phase 5d); read this for sticky-mechanism decisions
 
 ## Work — fill these gaps in the plan
+
+Keep `responsiveImplementation` from the deterministic base unchanged. Verification
+scope controls which layouts receive detailed checks, not which source CSS, query
+ancestors, fluid expressions, or mobile-swap structures the implementation preserves.
+Carry observed breakpoint guards and responsive variants into component wiring;
+never narrow implementation architecture to the representative capture viewport.
+
 
 ### 1. Component grouping refinement
 
@@ -88,6 +106,17 @@ forensic artifacts such as `animation-runtime-dump.json`,
 `signature-effects-candidates.json`, or `states/scroll/trajectory.json`.
 Never cite `generation-plan.json`, `extracted.json`, or self-authored notes as
 motion evidence.
+
+For a detected intro with `requiresChoreographyExtraction=true`, read
+`splash-extraction.md` → "From lifecycle evidence to implementation" before
+writing its motion wires. Observed overlay presence is not an authored timeline.
+Recover the transient child layout, asset paths, stagger, exit, and page-reveal
+coupling from the captured CSS and animation sources. If compact artifacts omit
+those parameters, request bounded bundle/source forensics and return the missing
+evidence as `needsGuidance`; do not finish enrichment with invented intro motion.
+Promote recovered parameters through the existing transition/bundle artifacts,
+then regenerate the deterministic plan before enrichment so provenance stays
+current. A lifecycle check passing does not resolve this source-information gap.
 
 When the deterministic planner has collapsed identical repeated non-latched
 curves, carry `replay: "all-matches"` and the complete `sourceIds` list into

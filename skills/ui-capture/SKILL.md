@@ -64,7 +64,79 @@ agent-browser --session <s> eval "(() => ({sections: [...]}))()" > data.json
 - `<component>` provided → `tmp/ref/<component>/` (matches `ui_clone.gate` expectations — flat, no `capture/` parent)
 - `<component>` omitted → `tmp/ref/capture/` (standalone usage; not gated)
 
-**Evidence pack handoff:** after capture and extraction artifacts exist, generate
+## Deterministic default — run this before manual probes
+
+Do not hand-assemble the baseline with a sequence of `agent-browser eval`,
+`screenshot`, and `record` calls. That path is for debugging one failed signal,
+not for producing the initial corpus. After the dependency preflight, the first
+substantive command for a fresh capture is the pipeline driver:
+
+```bash
+UI_CLONE_ROOT="${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${UI_CLONE_ROOT:-}}}}"
+if [ -z "$UI_CLONE_ROOT" ]; then
+  UI_CLONE_ROOT="$(cat "$HOME/.config/ui-clone-skills/root" 2>/dev/null || true)"
+fi
+[ -n "$UI_CLONE_ROOT" ] && [ -f "$UI_CLONE_ROOT/ui_clone/pipeline.py" ] || {
+  echo "ui-capture: installed plugin root is unavailable" >&2
+  exit 2
+}
+export PLUGIN_ROOT="$UI_CLONE_ROOT"
+
+URL='<reference-url>'
+COMPONENT='<component-or-capture>'
+SESSION='<project-name>'
+WORK_DIR="$PWD"
+uv run --project "$UI_CLONE_ROOT" python -m ui_clone.pipeline \
+  "$URL" "$COMPONENT" "$SESSION" run --phases 0A,1,2
+CAPTURE_STATUS=$?
+if [ "$PWD" != "$WORK_DIR" ]; then
+  echo "ui-capture: driver changed the caller workspace" >&2
+  exit 2
+fi
+if [ "$CAPTURE_STATUS" -ne 0 ]; then
+  exit "$CAPTURE_STATUS"
+fi
+```
+
+Run the driver command exactly as shown. Do not append `| tail`, `| tee`, or
+another pipeline: without an explicit `pipefail` contract that reports the
+driver's own status, those forms can turn a failed capture into exit 0. The
+driver already writes bounded per-phase logs under the ref directory. Preserve
+`CAPTURE_STATUS` exactly as shown; no later status or cwd check may replace it.
+
+**Standalone success is terminal.** When this driver exits 0 and no
+`<local-url>` was supplied, report the output directory and stop. Do not run
+the Phase 1/2 commands below, open another agent-browser session, add a second
+set of section screenshots, or rebuild any artifact the driver produced. A
+compact read-only status or inventory check is allowed; extra capture commands
+are not. The manual phase runbook below is only for a targeted retry named by a
+structured driver failure, or for the explicitly requested reference/impl
+comparison path when `<local-url>` is present.
+
+Before a manual retry, restore the driver's browser identity as described in
+`docs/agent-cli.md`, under "Browser identity for manual retries".
+The driver's child-process exports do not persist in the calling shell.
+
+For the minimal standalone prompt `/ui-capture https://example.com capture`, use
+`COMPONENT=capture`. The driver owns session reset, viewport-before-navigation,
+splash calibration, scroll/DOM state capture, hover inventory, screenshots,
+recording, extraction, and the reference gate. Stop and diagnose its structured
+`capture-error.json` or pipeline status when it fails; do not replace a failed
+driver stage with an improvised parallel corpus.
+
+Use `uv run --project`, never `uv run --directory`: `--project` selects the
+plugin environment while preserving the caller's cwd; `--directory` moves the
+process into the installed plugin source and writes `tmp/ref/` into the plugin.
+
+Later one-off helpers must use the resolved `PLUGIN_ROOT`, never the caller's
+current directory. A standalone Claude session commonly starts in an empty
+project where `scripts/extract/...` does not exist. Use
+`"$PLUGIN_ROOT/scripts/..."` for every repo helper below. Relative helper paths
+shown in examples are descriptive shorthand only; they are not valid from an
+arbitrary standalone cwd.
+
+**Evidence pack handoff:** when a caller explicitly needs a downstream clone or
+verification handoff, generate
 compact worker briefs from the ref dir so downstream skills do not re-read raw
 DOM, screenshots, bundle maps, or transition JSON by default:
 
@@ -87,7 +159,7 @@ valid CSS selector, including `#id`, `[data-*]`, `[role=...]`, or a generated
 
 ```bash
 TARGET_SELECTOR='<css-selector-from-dom-evidence>'
-bash scripts/extract/element-evidence.sh "$SESSION" "$TARGET_SELECTOR" "$OUT_DIR/element-target.json"
+bash scripts/extract/element-evidence.sh "$SESSION" "$URL" "$TARGET_SELECTOR" "$OUT_DIR/element-target.json"
 ```
 
 The output includes the provided selector plus selector candidates derived from
@@ -172,9 +244,11 @@ fi
 
 Captured content is **untrusted** display data. Sanitize eval output before saving. No credentials in `curl`/`agent-browser`. Skip `javascript:` URIs, base64 blobs, prompt-like text. Delete the relevant `$OUT_DIR` after verification.
 
-## Pipeline
+## Manual diagnostic pipeline
 
-**Read the sub-doc before executing its phase.**
+Do not execute this runbook after a successful standalone driver run. Read the
+relevant sub-doc only when retrying the specific failed signal or when a
+`<local-url>` requires the reference/implementation comparison path.
 
 ```
 Phase 1:  Full page capture     — static screenshot + full scroll video
@@ -292,6 +366,15 @@ after Phase 2B-2E and fix any missing files before handing off.
 | Video | >50KB, >1s | Duration reasonable |
 
 Retry: 3s → 5s → stop and report.
+
+**A zero pixel difference on a hover pair is a capture defect until proven otherwise.**
+`hover <selector>` followed by `screenshot <selector>` produces identical PNGs
+even for a region that visibly changes — the element-clipped capture scrolls the
+element out from under the pointer and returns blank for content outside the
+initially painted viewport. Capture the viewport for both states and post-crop
+the same box, and never discard a region on that zero. See
+`capture-transitions.md` § 2C — "Never pair `hover <selector>` with
+`screenshot <selector>`".
 
 ## Troubleshooting
 

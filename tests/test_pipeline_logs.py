@@ -9,6 +9,17 @@ from ui_clone.pipeline_logs import label_slug, log_tail_lines, tail_text, write_
 from ui_clone.pipeline_phases.verify import execute_verify
 
 
+def test_retries_preserve_each_attempt(tmp_path: Path) -> None:
+    first = write_process_log(tmp_path, "run", "capture", "first failure", exit_code=3)
+    second = write_process_log(tmp_path, "run", "capture", "retry passed", exit_code=0)
+    assert first == second
+    assert "retry passed" in second.read_text()
+    attempts = list((second.parent / "attempts").glob("capture-*.log"))
+    assert len(attempts) == 2
+    assert any("first failure" in p.read_text() for p in attempts)
+    assert any("retry passed" in p.read_text() for p in attempts)
+
+
 def test_log_tail_lines_env_parsing() -> None:
     assert log_tail_lines({}) == 120
     assert log_tail_lines({"UI_CLONE_LOG_TAIL_LINES": "0"}) == 0

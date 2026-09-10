@@ -413,7 +413,7 @@ counts = {"critical": 0, "major": 0, "layout-major": 0, "advisory": 0, "minor": 
 for r in rows: counts[r["sev"]] += 1
 
 SEV_ICON = {"critical": "🔴", "major": "🟠", "layout-major": "🟣",
-            "minor": "🟡", "layout-minor": "🟦", "unpaired": "⚪"}
+            "advisory": "🔶", "minor": "🟡", "layout-minor": "🟦", "unpaired": "⚪"}
 
 def fmt_layout(lds):
     return "; ".join(f"`{ax}`: {iv}→{rv} Δ{d:.1f}" for ax, iv, rv, d in lds[:3])
