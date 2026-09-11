@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-09-11
+
+### Fixed
+
+- Enforce a version bump on a release push (main/master) when this machine
+  already has that version installed, since both Claude Code's and Codex's
+  plugin caches are version-keyed and silently go stale on an unbumped push;
+  primary check compares against the target branch's own current version on
+  origin (machine-independent), with the local install state as a secondary
+  nudge.
+- Fix `git push --all`/`--mirror` resolving the release-discipline checks'
+  comparison base to a nonexistent ref, silently skipping them.
+- Fix every release-discipline check comparing against the checked-out
+  branch (HEAD) instead of the local ref actually named by the push — a
+  `git push origin main` run from a different checked-out branch used to
+  check the wrong branch's content entirely. The 6 version files are now
+  read from the commit actually being pushed, never the working tree.
+- Check every local branch with a remote-tracking ref (not just the first
+  match) under `--all`/`--mirror`, and resolve the actual remote name from
+  the push command instead of assuming "origin".
+
 ## [0.8.9] - 2026-09-11
 
 ### Fixed
