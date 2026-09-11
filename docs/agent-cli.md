@@ -270,7 +270,13 @@ transition firing, trajectory/state sweeps, and frame comparisons depend on that
 section evidence. These prerequisites also apply to targeted dispatch selection.
 Failed prerequisites
 block dependent captures while independent diagnostics may continue. Final
-full-scope verification remains mandatory after repair.
+full-scope verification remains mandatory after repair. For section-compare
+specifically, "failed" here means it did not MATERIALIZE evidence at all
+(missing or unparseable `sections/result.txt`) — a genuine section pixel FAIL
+with real evidence still lets motion checks dispatch; the clone's canonical
+pass/fail verdict is unaffected and still comes from the post-implement gate.
+
+
 
 Trajectory sampling uses captured changing intervals in addition to global page
 fractions. Missing target ranges produce `transitions/trajectory-sampling.json`

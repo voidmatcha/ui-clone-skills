@@ -361,6 +361,24 @@ else
   err "Non-English (Hangul) text found: $KOREAN_HITS"
 fi
 
+# ── 11. .codex/ tracked-content invariant ──
+section ".codex/ tracked content"
+
+# fable-20260911 follow-up review (MINOR): install.sh's
+# CODEX_PLUGIN_PROJECTION_ITEMS narrows the ".codex" projection to
+# ".codex/agents" specifically so a maintainer-local, gitignored
+# ".codex/hooks.json" (the Codex analogue of .claude/settings.json) can never
+# reach the distributed plugin projection/cache. That narrowing is only
+# correct as long as ".codex/agents" stays the ONLY thing actually tracked in
+# git under ".codex/" — this turns that assumption from an install.sh comment
+# into an enforced invariant.
+CODEX_TRACKED=$(git ls-files .codex 2>/dev/null | grep -v '^\.codex/agents/' || true)
+if [ -z "$CODEX_TRACKED" ]; then
+  ok ".codex/ tracks only agents/ (install.sh's projection narrowing is sound)"
+else
+  err ".codex/ tracks files outside agents/ — install.sh's CODEX_PLUGIN_PROJECTION_ITEMS=\".codex/agents\" no longer covers everything shipped, or a maintainer-local file was accidentally committed: $CODEX_TRACKED"
+fi
+
 # ── Summary ──
 echo ""
 echo "════════════════════════════════════════"

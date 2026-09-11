@@ -3184,7 +3184,21 @@ def test_content_foundation_failure_blocks_geometry_section_and_motion(tmp_path:
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_section_failure_blocks_all_transition_probes_and_video(tmp_path: Path, missing: bool) -> None:
+def test_section_compare_missing_or_generic_status_fail_blocks_motion(
+    tmp_path: Path, missing: bool
+) -> None:
+    # fable-20260911 follow-up review (MINOR): renamed for clarity. This
+    # exercises the GENERIC prerequisite path (a bare `{"status": "fail"}`
+    # JSON artifact, or a missing one) shared by every foundation cid in
+    # `_run_foundation_barrier_plan` — NOT the section-compare-specific
+    # `sections/result.txt` materialization check (see
+    # test_canonical_section_verdict_controls_motion_dispatch below, which
+    # covers the REAL artifact shape section-compare.sh actually produces).
+    # A real plan's section-compare row never produces "section-compare.json"
+    # with a bare status field, so this test's "fail" case is a synthetic
+    # shape kept only to prove the shared generic-status fallback still
+    # blocks correctly for any cid that DID use it; the "missing" case (no
+    # artifact at all) is realistic and still blocks under both paths.
     result, ref = _run_foundation_barrier_plan(tmp_path, failure="section-compare", missing=missing)
     assert result.returncode == 1, result.stdout + result.stderr
     executed = (ref / "executed").read_text().splitlines()

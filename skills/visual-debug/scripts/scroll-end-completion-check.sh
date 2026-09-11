@@ -368,7 +368,10 @@ for VP in "${VPS[@]}"; do
   # "infrastructure" instead of "implementation" (fable-20260910 follow-up
   # review round 3, LOW). Only a target that vanished mid-probe — where no
   # residual could be measured at all — leaves the run truly inconclusive.
-  TEMPORAL_COUNT=$(node -e "
+  # fable-20260911 follow-up review: renamed from TEMPORAL_COUNT — this now
+  # counts ONLY unmeasurableTargets (a target that vanished mid-probe), not
+  # temporal/continuous motion in general (see the comment above).
+  UNMEASURABLE_COUNT=$(node -e "
     const d = JSON.parse(process.argv[1]);
     process.stdout.write(String((d.unmeasurableTargets || []).length));
   " "$DATA")
@@ -379,10 +382,10 @@ for VP in "${VPS[@]}"; do
   if [ "$CONFIRMED_TIME_ONLY_COUNT" -gt 0 ]; then
     echo "   ℹ️  ${CONFIRMED_TIME_ONLY_COUNT} target(s) have confirmed time-only motion (not scroll-attributable) — excluded from the settle check"
   fi
-  if [ "$TEMPORAL_COUNT" -gt 0 ]; then
+  if [ "$UNMEASURABLE_COUNT" -gt 0 ]; then
     GLOBAL_STATUS=1
     PROBE_ERROR=1
-    echo "   ❌ ${TEMPORAL_COUNT} target(s) have unresolved time-dependent motion or missing samples — scroll completion is inconclusive"
+    echo "   ❌ ${UNMEASURABLE_COUNT} target(s) vanished mid-probe — scroll completion is inconclusive"
   elif [ -n "$STUCK_COUNT" ] && [ "$STUCK_COUNT" -gt 0 ]; then
     GLOBAL_STATUS=1
     echo "   ❌ ${STUCK_COUNT} stuck element(s) at ${W}x${H}"

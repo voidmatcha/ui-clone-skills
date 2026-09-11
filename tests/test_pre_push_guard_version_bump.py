@@ -110,12 +110,34 @@ def _installed(tmp_path: Path, version: str) -> Path:
     return path
 
 
-def test_blocks_unbumped_version_already_installed_locally(tmp_path: Path) -> None:
+def test_blocks_unbumped_version_still_live_on_origin(tmp_path: Path) -> None:
+    # fable-20260911 follow-up review (MAJOR): this is now the PRIMARY,
+    # machine-independent check — origin/main's own current version is the
+    # deterministic ground truth for "is this push actually a new release",
+    # unlike the local installed_plugins.json state (which can go stale
+    # forever, see test_blocks_unbumped_version_already_installed_locally_only
+    # below and the "no local record at all" case here).
     work = _make_repo_pushed_at(tmp_path, "1.0.0")
-    # Real content change, version left at 1.0.0.
     (work / "README.md").write_text("changed\n")
     _git(work, "add", "-A")
     _git(work, "commit", "-q", "-m", "change without bump")
+
+    proc = _run_guard(work, None)  # no local install record at all
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
+    assert "already the version live on origin/main" in proc.stderr
+
+
+def test_blocks_unbumped_version_already_installed_locally_only(tmp_path: Path) -> None:
+    # Isolate the SECONDARY (local-only) check: origin already reflects a
+    # different (older) version than current, so the primary origin-based
+    # check does not fire, but this machine's installed_plugins.json still
+    # matches the current version (e.g. a stale local cache from an earlier
+    # identical attempt).
+    work = _make_repo_pushed_at(tmp_path, "0.9.0")
+    _write_versions(work, "1.0.0")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "bump relative to origin, real content change")
     installed = _installed(tmp_path, "1.0.0")
 
     proc = _run_guard(work, installed)
@@ -135,11 +157,13 @@ def test_allows_push_when_version_was_bumped(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-def test_allows_push_when_nothing_installed_locally(tmp_path: Path) -> None:
+def test_allows_push_when_nothing_installed_locally_but_version_was_bumped(
+    tmp_path: Path,
+) -> None:
     work = _make_repo_pushed_at(tmp_path, "1.0.0")
-    (work / "README.md").write_text("changed\n")
+    _write_versions(work, "1.0.1")
     _git(work, "add", "-A")
-    _git(work, "commit", "-q", "-m", "change, no local install record")
+    _git(work, "commit", "-q", "-m", "bump, no local install record")
 
     proc = _run_guard(work, None)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -189,6 +213,217 @@ def test_refspec_push_to_main_from_a_feature_branch_still_enforces_bump(
     (work / "README.md").write_text("changed\n")
     _git(work, "add", "-A")
     _git(work, "commit", "-q", "-m", "feature work, no bump")
+    installed = _installed(tmp_path, "1.0.0")
+
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
+    stdin = json.dumps({"tool_input": {"command": push_command}}, separators=(",", ":"))
+    proc = subprocess.run(
+        ["bash", str(GUARD)], cwd=work, input=stdin, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
+
+
+def test_all_push_enforces_bump_on_master_when_only_main_is_synced(
+    tmp_path: Path,
+) -> None:
+    # fable-20260911 round 6 follow-up review (MINOR): --all used to check
+    # only the FIRST of main/master with both a local branch and a remote-
+    # tracking ref, returning immediately -- an unbumped, real change on the
+    # SECOND one (master, here) went unchecked as long as main itself
+    # happened to be in sync with origin/main.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    _git(work, "branch", "master")
+    _git(work, "push", "-q", "-u", "origin", "master")
+    _git(work, "checkout", "-q", "master")
+    (work / "README.md").write_text("changed on master\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change on master without bump")
+    _git(work, "checkout", "-q", "main")  # main stays exactly synced with origin/main
+    installed = _installed(tmp_path, "1.0.0")
+
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
+    stdin = json.dumps({"tool_input": {"command": "git push --all"}}, separators=(",", ":"))
+    proc = subprocess.run(
+        ["bash", str(GUARD)], cwd=work, input=stdin, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
+
+
+def test_non_origin_remote_name_is_used_for_base_resolution(tmp_path: Path) -> None:
+    # fable-20260911 round 6 follow-up review ("also re-check the
+    # non-generic parts"): the release-check base used to hardcode "origin"
+    # regardless of which remote was actually named on the command line.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    _git(work, "remote", "rename", "origin", "upstream")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump")
+    installed = _installed(tmp_path, "1.0.0")
+
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
+    stdin = json.dumps({"tool_input": {"command": "git push upstream main"}}, separators=(",", ":"))
+    proc = subprocess.run(
+        ["bash", str(GUARD)], cwd=work, input=stdin, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
+
+
+def test_missing_version_files_at_source_skips_gracefully(tmp_path: Path) -> None:
+    # fable-20260911 round 6 follow-up review (MINOR): when the pushed
+    # source commit has none of the 6 version files at all (rather than a
+    # genuine bump mismatch), all six reads come back empty and `unique`
+    # was 0 -- printing a confusing all-blank "Version mismatch" block
+    # instead of a clear "cannot read version files" skip.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    _git(work, "checkout", "-q", "--orphan", "no-version-files")
+    _git(work, "rm", "-rf", "-q", ".")
+    (work / "README.md").write_text("no version files on this branch\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "orphan commit with no version files")
+    installed = _installed(tmp_path, "1.0.0")
+
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
+    stdin = json.dumps(
+        {"tool_input": {"command": "git push origin no-version-files:main"}},
+        separators=(",", ":"),
+    )
+    proc = subprocess.run(
+        ["bash", str(GUARD)], cwd=work, input=stdin, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Cannot read any of the 6 version files" in proc.stderr
+
+
+def test_url_remote_still_enforces_bump(tmp_path: Path) -> None:
+    # fable-20260911 round 6 follow-up review (MAJOR): the round-5 remote-
+    # name validation (added to catch `-o ci.skip origin main`) rejected any
+    # remote that isn't a NAMED configured remote -- including a direct URL
+    # or SCP-style destination (`git push git@host:repo.git main`,
+    # `git push https://... main`), both completely legitimate and common.
+    # That misparse used to fall through to the "unparseable" fallback,
+    # which defaults to the CHECKED-OUT branch -- silently skipping the
+    # release tier entirely when checked out on a non-release branch while
+    # still pushing real content to "main" by direct URL.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump")
+    _git(work, "checkout", "-q", "-b", "feature")  # checked out on a non-release branch
+    installed = _installed(tmp_path, "1.0.0")
+
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
+    stdin = json.dumps(
+        {"tool_input": {"command": "git push git@example.com:owner/repo.git main"}},
+        separators=(",", ":"),
+    )
+    proc = subprocess.run(
+        ["bash", str(GUARD)], cwd=work, input=stdin, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
+
+
+def test_push_option_flag_with_separate_argument_still_enforces_bump(
+    tmp_path: Path,
+) -> None:
+    # fable-20260911 round 5 follow-up review (MINOR): `-o ci.skip origin
+    # main` -- a flag that takes its own separate argument -- was not
+    # matched by the flag-skipping regex group, so "origin" got misread as
+    # the refspec (one token early) and "main" was never seen as the target
+    # at all, silently skipping the whole release tier.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump")
+    installed = _installed(tmp_path, "1.0.0")
+
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
+    stdin = json.dumps(
+        {"tool_input": {"command": "git push -o ci.skip origin main"}},
+        separators=(",", ":"),
+    )
+    proc = subprocess.run(
+        ["bash", str(GUARD)], cwd=work, input=stdin, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
+
+
+def test_pushing_a_different_local_branch_than_checked_out_still_enforces_bump(
+    tmp_path: Path,
+) -> None:
+    # fable-20260911 round 5 follow-up review (MAJOR): `git push origin main`
+    # pushes the LOCAL branch literally named "main" -- not necessarily HEAD.
+    # The guard used to diff/read everything against hardcoded HEAD, so
+    # running this exact command while a DIFFERENT branch (synced with
+    # origin/main, no diff) was checked out silently checked the wrong
+    # branch's content and never blocked.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump, still on main")
+    # Switch to a branch that matches origin/main exactly (no diff from
+    # HEAD's perspective) -- only "main" itself carries the unbumped change.
+    _git(work, "checkout", "-q", "-b", "other", "origin/main")
+    installed = _installed(tmp_path, "1.0.0")
+
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
+    stdin = json.dumps({"tool_input": {"command": "git push origin main"}}, separators=(",", ":"))
+    proc = subprocess.run(
+        ["bash", str(GUARD)], cwd=work, input=stdin, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
+
+
+def test_all_push_enforces_bump_on_local_main_even_when_checked_out_elsewhere(
+    tmp_path: Path,
+) -> None:
+    # fable-20260911 round 5 follow-up review (MAJOR): --all always includes
+    # local main/master. The ALL fallback used to resolve to the checked-out
+    # branch's own upstream, so being checked out on a SEPARATE, synced
+    # branch while local main carried an unbumped change bypassed the check.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump on main")
+    _git(work, "checkout", "-q", "-b", "feat2", "origin/main")
+    _git(work, "push", "-q", "-u", "origin", "feat2")  # feat2 synced with its own upstream
+    installed = _installed(tmp_path, "1.0.0")
+
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
+    stdin = json.dumps({"tool_input": {"command": "git push --all"}}, separators=(",", ":"))
+    proc = subprocess.run(
+        ["bash", str(GUARD)], cwd=work, input=stdin, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
+
+
+@pytest.mark.parametrize("push_command", ["git push --all", "git push --mirror"])
+def test_all_and_mirror_push_still_enforces_bump(tmp_path: Path, push_command: str) -> None:
+    # fable-20260911 follow-up review (MAJOR): target_branch resolves to the
+    # literal sentinel "ALL" for --all/--mirror (not a real branch), and the
+    # refspec-base fix above made `_release_push_base` return "origin/ALL"
+    # for it -- a ref that never exists -- silently disabling BOTH the
+    # version-bump check and the skills/CHANGELOG coupling check on every
+    # --all/--mirror push. Must fall back to the checked-out branch's own
+    # upstream (or origin/<branch>) for the ALL case instead.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump")
     installed = _installed(tmp_path, "1.0.0")
 
     env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(installed)}
