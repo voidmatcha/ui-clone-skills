@@ -73,6 +73,35 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
+# fable-20260912 follow-up (a running Claude/Codex session loaded its hooks
+# at SESSION START from whatever plugin version was cached then; reinstalling
+# to a NEW version here does not retroactively refresh an already-running
+# session's loaded hook logic — install.sh's own printed guidance says
+# "restart after installation" for exactly this reason). A version-bumped
+# push landing quietly in this hook's noisy install.sh log made that easy to
+# miss, especially for the agent driving the session that just did the push —
+# it would keep retrying whatever the OLD hook blocked, forever, with no
+# visible reason why the fix "didn't take". Compare the installed version
+# before/after and print an unmissable, agent-addressed notice when it
+# actually changed.
+_read_installed_version() {
+  python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for entry in d.get('plugins', {}).get('ui-clone-skills@voidmatcha') or []:
+    v = entry.get('version')
+    if v:
+        print(v)
+        break
+" "$1" 2>/dev/null
+}
+
+_claude_installed_json="${UI_CLONE_INSTALLED_PLUGINS_JSON:-$HOME/.claude/plugins/installed_plugins.json}"
+_version_before=$(_read_installed_version "$_claude_installed_json")
+
 if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ]; then
   INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"
   # Defensive: never wipe the maintainer's working repo even if INSTALL_DIR was
@@ -93,6 +122,22 @@ if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ]; then
     | INSTALL_DIR="$INSTALL_DIR" bash -s -- --no-deps 2>&1 \
     | sed 's/^/[post-push-refresh] /' || \
     echo "⚠️ post-push-refresh: curl install failed — check network / GitHub" >&2
+
+  _version_after=$(_read_installed_version "$_claude_installed_json")
+  if [ -n "$_version_after" ] && [ "$_version_before" != "$_version_after" ]; then
+    echo "" >&2
+    echo "🔴🔴🔴 PLUGIN VERSION CHANGED: ${_version_before:-none} -> ${_version_after} 🔴🔴🔴" >&2
+    echo "Hooks/skills for the CURRENT session were loaded at session start from" >&2
+    echo "the OLD cached version. They were just reinstalled to a NEW version, but" >&2
+    echo "this session keeps running the OLD hook/skill logic until it is" >&2
+    echo "RESTARTED (not /clear) — a stale hook can silently block every" >&2
+    echo "subsequent turn with no visible reason why the fix \"didn't take\"." >&2
+    echo "IF YOU ARE THE AGENT READING THIS TOOL OUTPUT: tell the user now that" >&2
+    echo "this session must be restarted before continuing work that depends on" >&2
+    echo "the just-updated hooks/skills, instead of retrying the same blocked" >&2
+    echo "action again." >&2
+    echo "" >&2
+  fi
 fi
 
 # Run automated review regardless of refresh outcome — catches lint/doc regressions
