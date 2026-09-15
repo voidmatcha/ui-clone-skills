@@ -3193,6 +3193,73 @@ def test_pipeline_written_terminal_with_success_result_still_blocks(tmp_path: Pa
     assert "PASS" in reason and "canonical" in reason.lower()
 
 
+def test_pipeline_written_terminal_block_does_not_claim_zero_gates_ran(
+    tmp_path: Path,
+) -> None:
+    # The block text is evidence the user acts on. A pipeline-recorded terminal
+    # DID run gates — a hard cap records one only after N consecutive failures —
+    # so describing it as self-attested with "ZERO gates run" tells the reader
+    # something the hook can see is false, which is the very defect class this
+    # gate exists to catch. The block must stay; only the reason must be true.
+    _with_result(tmp_path)
+    reason = _block_reason(
+        tmp_path,
+        {
+            "status": "unclonable",
+            "category": "hard-cap-fail",
+            "gate": "post-implement",
+            "reason": "hard cap reached: gate 'post-implement' failed 10 consecutive times",
+            "writtenBy": "pipeline",
+        },
+    )
+    assert reason is not None, "a success-shaped result must still block"
+    assert "ZERO gates run" not in reason
+    assert "self-attest" not in reason.lower()
+    # and it should name what was actually recorded, so the reader can act
+    assert "hard-cap-fail" in reason
+    assert "post-implement" in reason
+
+
+def test_pipeline_terminal_without_gate_evidence_does_not_claim_gates_ran(
+    tmp_path: Path,
+) -> None:
+    # `writtenBy` records WHO wrote the terminal, not whether a gate ran.
+    # _record_unclonable_unlocked stamps "pipeline" for state-corruption and for
+    # extraction-side categories (auth-gated, drm-canvas) that never reach a
+    # verification gate. Claiming gates ran for those would reintroduce, in the
+    # opposite direction, the false statement this branch was written to remove.
+    _with_result(tmp_path)
+    for category in ("state-corruption", "auth-gated", "drm-canvas"):
+        reason = _block_reason(
+            tmp_path,
+            {
+                "status": "unclonable",
+                "category": category,
+                "gate": "reference",
+                "reason": "y",
+                "writtenBy": "pipeline",
+            },
+        )
+        assert reason is not None, f"{category}: a success-shaped result must still block"
+        # The property, not this build's phrasing: the reason must not assert
+        # that gates ran for a record carrying no gate evidence, in any wording.
+        lowered = reason.lower()
+        assert "gates did run" not in lowered, category
+        assert "ran and failed repeatedly" not in lowered, category
+        assert "zero gates run" not in lowered, category
+
+
+def test_self_attested_terminal_block_still_says_zero_gates_ran(tmp_path: Path) -> None:
+    # The converse: a cli-written terminal really did close out with no gates,
+    # and that remains the honest thing to tell its author.
+    _with_result(tmp_path)
+    reason = _block_reason(
+        tmp_path, {"status": "unclonable", "category": "x", "reason": "y", "writtenBy": "cli"}
+    )
+    assert reason is not None
+    assert "ZERO gates run" in reason
+
+
 def _write_failed_verify_report(ref_dir: Path, gate: str) -> None:
     (ref_dir / "verify-report.json").write_text(
         json.dumps(

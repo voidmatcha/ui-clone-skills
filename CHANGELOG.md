@@ -6,6 +6,24 @@
 
 ### Fixed
 
+- Stop the terminal-state gate describing a pipeline record as self-attested.
+  The block text said "A self-attested terminal closes out with ZERO gates run"
+  for a `terminalState` the pipeline itself had written after running the gate
+  ten times (`writtenBy: "pipeline"`, `category: "hard-cap-fail"`). The release
+  exemption requires `category == "canonical-verify-failed"`, so a hard-cap
+  terminal can never satisfy it, and every record that fell through was then
+  described as if a human or agent had declared it by hand. This gate exists to
+  catch a report that says something other than what was measured; its own block
+  reason was doing that. The block is unchanged on both paths — only the reason
+  now depends on the record, naming the recorded category and gate for a
+  pipeline record and keeping the ZERO-gates wording where it is true.
+  `writtenBy` says who wrote the terminal, not whether a gate ran:
+  `_record_unclonable_unlocked` also stamps `"pipeline"` for `state-corruption`
+  and for extraction-side categories (`auth-gated`, `drm-canvas`) that never
+  reach a verification gate, so only a `hard-cap-fail` — recorded after N
+  consecutive failures of the named gate — is described as gate-backed. The
+  reason string also feeds the consecutive-block signature, so this is
+  release-path-neutral rather than literally text-only.
 - Accept the host's human-readable `CronDelete` confirmation ("Cancelled job
   <id>.") as a successful delete. Requiring a structured `{"ok": true}` body
   treated every real delete as a failure and wedged the receipt in `canceling`

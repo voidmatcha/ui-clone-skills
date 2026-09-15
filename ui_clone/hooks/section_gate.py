@@ -518,13 +518,45 @@ def _terminal_state_block_reason(ref_dir: Path, state: PipelineState) -> str | N
     if _result_txt_claims_success(ref_dir) and not _canonical_nonsection_failure_is_live(
         ref_dir, cast(dict[str, object], terminal)
     ):
+        # Describe the record that is actually on disk, and claim only what the
+        # record itself supports. `writtenBy` says who wrote it, NOT whether any
+        # gate ran: `_record_unclonable_unlocked` stamps "pipeline" for
+        # state-corruption and for extraction-side categories (auth-gated,
+        # drm-canvas) that never reached a verification gate. Asserting "gates
+        # ran" from provenance alone would repeat the defect this branch exists
+        # to remove. Only a hard cap is self-evidently gate-backed — it is
+        # recorded after N consecutive failures of the named gate.
+        category = str(terminal.get("category") or "unspecified")
+        gate_name = str(terminal.get("gate") or "unspecified")
+        if written_by == "pipeline":
+            ran_gates = (
+                f"The {gate_name!r} gate ran and failed repeatedly to reach this "
+                f"record. What it cannot do is release Stop"
+                if category == "hard-cap-fail"
+                else "It is not a self-declared close-out, but it also does not carry "
+                "gate evidence this hook can act on"
+            )
+            why = (
+                f"terminalState is {status!r} (a non-success end), recorded by the "
+                f"pipeline as category {category!r} at gate {gate_name!r}, but "
+                f"sections/result.txt does not honestly show failure. {ran_gates}, "
+                f"because the hook accepts only a canonical-verify failure outside "
+                f"section-compare whose declared root gate still fails when "
+                f"re-evaluated now. Close out canonically so that evidence exists "
+                f"and a verify-stamp is written:\n"
+            )
+        else:
+            why = (
+                f"terminalState is {status!r} (a non-success end) but "
+                f"sections/result.txt does not honestly show failure. A self-attested "
+                f"terminal closes out with ZERO gates run, so it cannot certify a "
+                f"SUCCESS. Close out canonically so the gates actually run and a "
+                f"verify-stamp is written:\n"
+            )
         return (
             f"⛔ UI-RE terminal-state gate: success-claiming result.txt cannot "
-            f"self-attest a terminal release for {ref_dir}\n\n"
-            f"terminalState is {status!r} (a non-success end) but sections/result.txt "
-            f"does not honestly show failure. A self-attested terminal closes out with "
-            f"ZERO gates run, so it cannot certify a SUCCESS. Close out canonically so "
-            f"the gates actually run and a verify-stamp is written:\n"
+            f"release a terminal for {ref_dir}\n\n"
+            f"{why}"
             f"  python -m ui_clone.pipeline <url> <component> <session> verify --json\n\n"
             f"Do not invent section FAIL rows to make an all-PASS section result look "
             f"failed. If canonical verify failed at a different gate, rerun verify so "
