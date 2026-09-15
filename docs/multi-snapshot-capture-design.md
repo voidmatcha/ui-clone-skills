@@ -88,7 +88,7 @@ agent-browser --session "${SESSION}-states" eval --stdin --json <<'JS'
     return [h >>> 0, composite];
   };
 
-  while ((performance.now() - startedAt) < 5000) {
+  while ((performance.now() - startedAt) < 10000) {
     const [hash, composite] = computeHash();
     const now = performance.now();
     if (hash !== lastHash) {
@@ -110,9 +110,9 @@ agent-browser --session "${SESSION}-states" eval --stdin --json <<'JS'
     states,
     durationMs: Math.round(performance.now() - startedAt),
     polls: states.length,
-    timedOut: (performance.now() - startedAt) >= 5000,
+    timedOut: (performance.now() - startedAt) >= 10000,
     reason: states.length === 0 ? 'no-change' :
-            (performance.now() - startedAt) >= 5000 ? 'wall-clock-cap' :
+            (performance.now() - startedAt) >= 10000 ? 'wall-clock-cap' :
             'stable-2s',
   };
 })();
@@ -273,7 +273,7 @@ Few, isolated:
   *DOM* state, not canvas frame parity. Canvas-replay mode design
   (`docs/canvas-replay-mode-design.md`) handles that orthogonally.
 
-- **Splash never ends** (broken site): ordinary pages retain the 5s ceiling,
+- **Splash never ends** (broken site): ordinary pages retain the 10s ceiling,
   but a fullscreen overlay observed at navigation start gets an adaptive 15s
   ceiling and exits immediately when that overlay disappears. If it still has
   not exited, Phase A emits the final state with `timedOut: true`; downstream

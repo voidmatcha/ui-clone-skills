@@ -281,11 +281,19 @@ hovered (a hover-mounted menu) is kept as an unproven candidate, and only
 "descendant absent AND activation unchanged" retires the region.
 Successfully observed pairs also replace auto-placeholder hover stubs in
 `transition-spec.json` with live-capture provenance, the actual reference
-frames, and measured property/duration/easing values. A region the bridge
-probed successfully and found inert is removed instead of being promoted as
-evidence. A region whose probe failed (selector not observable, screenshot or
-crop failure, or a computed-style change with no pixel delta) is kept as an
-unproven candidate so a corrected re-run still has something to re-probe.
+frames, and measured property/duration/easing values. The bridge resolves a
+probed region three ways. It RETIRES the candidate from `regions.json` only on
+a reason in `RESOLVED_ABSENCE_REASONS` — `hover produced no observable change`,
+or `affected selector not present in document and hover produced no observable
+change` (the affected selector is absent AND the activation element itself
+shows no delta). It KEEPS a region whose probe FAILED (selector not observable,
+screenshot or crop failure, a computed-style change with no pixel delta, or
+`opener control navigated instead of revealing`) as an unproven candidate, so a
+corrected re-run still has something to re-probe. And it SKIPS without either
+tag in the remaining cases — `scroll produced no observable change`, whose
+negative is too weak to claim absence, and a dispatch-only region under an
+authored spec, which is preserved rather than retired. An untagged skip leaves
+unproven work the reference gate still counts.
 It opens and closes `<project>-region-artifacts`; pass
 `--reuse-session` only when the caller owns the named session lifecycle.
 Auto-generated specs, dispatch-only regions, and interaction inventories are

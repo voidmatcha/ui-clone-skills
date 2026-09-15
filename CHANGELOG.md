@@ -43,7 +43,7 @@
   real pointer path into a closed mega-menu, dropdown, or accordion panel. Both
   frames are captured with the panel open and the observation records
   `openedVia`; a click opener is toggled back before the next region. `a[href]`
-  is never used as an opener, and a control that navigates instead of revealing
+  is never clicked as an opener, and a control that navigates instead of revealing
   (a button that router-pushes) stops the opener walk, walks history back, and
   skips the region with its own reason instead of folding into "none are
   hoverable" — that reason counts as a probe failure, never as measured
@@ -57,11 +57,14 @@
   are routinely drawn outside the border box.
 - Distinguish measured absence from a failed probe in the live-capture bridge.
   A hover rule whose affected selector is not rendered anywhere in the document
-  now skips with `affected selector not present in document`; that reason and
-  the existing `hover`/`scroll produced no observable change` reasons tag the
-  skip row `resolution: absence-measured` and retire the candidate from
-  `regions.json`, including a dispatch-only candidate that a plan-driven run
-  would otherwise have kept for a re-run.
+  AND whose activation element shows no delta of its own now skips with
+  `affected selector not present in document and hover produced no observable
+  change`; that reason and `hover produced no observable change` are the two
+  entries in `RESOLVED_ABSENCE_REASONS`, and they tag the skip row
+  `resolution: absence-measured` and retire the candidate from `regions.json`.
+  `scroll produced no observable change` is deliberately NOT a retirement
+  reason — the scroll ladder's negative is too weak to claim absence — and a
+  dispatch-only region under an authored spec is preserved rather than retired.
 - Accept a tagged measured-absence skip row whose region is no longer claimed in
   `regions.json` in the live-capture provenance gate, provided
   `counts.skipped` equals the number of skip rows. Any other skip, a still-claimed
@@ -71,8 +74,7 @@
   loads cannot go 2s without a change inside 5s, so it hit the cap mid-load and
   recorded `timedOut: true` with a settled bookend taken before the page had
   settled, which `behavior-parity-check` reads as a continuous ref animation
-  the impl lacks. This does not change `authoritativeNegative`, which also
-  requires a single recorded state; pages that never go quiet (autoplaying
+  the impl lacks. Pages that never go quiet (autoplaying
   video, infinite above-the-fold animation) now spend 10s timing out instead
   of 5s.
 - Coerce `_fmt_num` to `float` before calling `.is_integer()`. The signature
@@ -202,7 +204,7 @@
   automatic expiry as the do-nothing option.
 
 - Stop the consecutive-block ledger releasing an unfinished clone silently. The
-  0.8.12 counter keyed blocks by session and ref only, so three unrelated blocks
+  counter added earlier in this release keyed blocks by session and ref only, so three unrelated blocks
   spent the budget of a fourth failure that had never been retried; it never
   reset while a ref was unfinished, because the only reset ran on a turn that
   ended without a block; and on exhaustion it printed the hand-back to stderr on
@@ -224,7 +226,7 @@
   end and assert that an unfinished ref never produces a Stop with no visible
   signal.
 - Judge a click-revealed hover target against its own revealed idle state, and
-  hand the page back after every opener attempt. The 0.8.12 click-to-open walk
+  hand the page back after every opener attempt. The click-to-open walk added earlier in this release
   in `transition-fires-check.sh` measured the revealed target against the
   PHASE1 baseline taken while it was `display:none` (height/width/top all 0),
   so the reveal itself read as the hover delta and a clone that wired the click
@@ -239,7 +241,7 @@
   `no-hovered-snapshot`). The merge replaces both the PHASE1 baseline and the
   synthetic after for a re-baselined entry, so neither hidden-state snapshot is
   ever compared to a revealed one.
-  The hand-back rule is the 0.8.12 one, restored and then tightened. Each
+  The hand-back rule is the one added earlier in this release, restored and then tightened. Each
   attempt now records `fpChanged` — whether the page fingerprint moved off its
   pre-click value at any point — because a ladder rung "restores" by
   fingerprint equality and the fingerprint cannot see an open-only panel shown
@@ -343,7 +345,7 @@
 
 - Make the splash-absence certificate refuse what the lifecycle probe would
   measure, without refusing a page that merely re-mounts. Four holes in the
-  0.8.12 certificate, each reproduced against the shipped sampler through a
+  certificate added earlier in this release, each reproduced against the shipped sampler through a
   fake-DOM harness (`tests/measure/splash_sampler_harness.js` runs the init
   script `capture-states.sh` actually installs, thresholds substituted, and
   hands its payload to the real python writer):

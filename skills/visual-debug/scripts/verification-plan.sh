@@ -541,8 +541,12 @@ if contains_pattern "$INTERACTIONS" '"hasPreloader":\s*true' \
   # absence certificate (see above).
   HAS_SPLASH="true"
 elif [ "$SPLASH_CONTRACT_SIGNAL" != "false" ] && [ -f "$SPLASH_SUMMARY" ]; then
-  # polls > 1 = capture-states.sh recorded at least one class transition
-  # during the splash window (loading → loaded). Treat as splash present.
+  # polls > 1 = capture-states.sh recorded at least one change to the composite
+  # state hash during the splash window. That hash now folds in the covering
+  # identities as well as the root classes, so a hero fading past the covering
+  # threshold adds a poll with no class transition at all. Treat as splash
+  # present: this only dispatches the check, and the absence certificate above
+  # is what clears it.
   SPLASH_POLLS=$("$PYTHON_BIN" -c "
 import json, sys
 try:
