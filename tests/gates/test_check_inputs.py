@@ -316,6 +316,36 @@ def test_capture_artifact_inventory_hash_tracks_root_and_nested_media_only(
     assert renamed_hash != replaced_hash
 
 
+def test_splash_certificate_recapture_busts_splash_lifecycle_hash(tmp_path: Path) -> None:
+    """splash-lifecycle-check.sh reads the Phase A certificate in
+    states/splash/contract.json to annotate its `ref-overlay-absent` FAIL with
+    the reference measurement it is about (re-capture the reference, or inspect
+    the detector that dispatched the check). A cached artifact's guidance must
+    not survive that file appearing, changing (re-capture), or disappearing;
+    and a reference never run through capture-states.sh (no certificate at
+    all) must still be fingerprintable, not unverifiable."""
+    impl = tmp_path / "impl"
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _impl_tree(impl)
+
+    without_certificate = _h(impl, ref, "splash-lifecycle")
+    assert without_certificate
+
+    contract = ref / "states" / "splash" / "contract.json"
+    contract.parent.mkdir(parents=True)
+    contract.write_text('{"detected": false, "capture": {"authoritativeNegative": true}}\n')
+    certified = _h(impl, ref, "splash-lifecycle")
+    assert certified != without_certificate
+
+    contract.write_text('{"detected": false, "capture": {"authoritativeNegative": false}}\n')
+    recaptured = _h(impl, ref, "splash-lifecycle")
+    assert recaptured != certified
+
+    contract.unlink()
+    assert _h(impl, ref, "splash-lifecycle") == without_certificate
+
+
 def test_splash_lifecycle_invalidation_busts_runtime_rollup_hash(tmp_path: Path) -> None:
     impl = tmp_path / "impl"
     ref = tmp_path / "ref"

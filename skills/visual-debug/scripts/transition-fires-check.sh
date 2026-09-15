@@ -354,6 +354,356 @@ function canvasInfo(el){
 }
 JSEOF
 
+# ── Click-to-open opener walk (real-pointer hover pass fallback) ──────────
+# Shared by the hover-pass evals. The owner walk only HOVERS a nav-like
+# ancestor, so a target inside a panel that opens on CLICK is never laid out
+# and its hover measures nothing: on navercorp.com/tech/innovation the
+# .btn-lang__list buttons sit behind .btn-selected (a plain
+# <button type="button">, no aria-expanded) and .search-tab__box behind
+# .btn-search. Neither container matches the nav|menu|gnb|lnb owner test.
+#
+# Safety contract, in order of preference:
+#   1. Do not click. A control is clicked only when it is unambiguously the
+#      hidden branch's disclosure: it names the branch via aria-controls, it is
+#      a recognisable toggle (summary / aria-expanded / aria-haspopup), it is
+#      the container's sole control, or it is the only control sharing a name
+#      token with the branch. Links, submit buttons, tabs, radios, switches,
+#      pressed/selected controls, dialog openers and steppers are refused.
+#   2. Verify the hand-back. Every click records a page fingerprint first and
+#      is undone by a ladder (toggle -> Escape -> outside click) that checks the
+#      fingerprint after each rung instead of assuming the opener toggles.
+#   3. Never re-click a control that already failed, and stop the walk on the
+#      first control that cannot be handed back in-page; the caller then does
+#      a fresh navigate and reports it.
+# Element-level questions go through tagName / getAttribute / parentElement /
+# children / contains rather than selector matching; only tfOverlayCount and
+# the per-entry blobs query the document by selector. That is what lets the
+# decision logic run under node against a fake DOM
+# (tests/measure/test_transition_fires_opener_walk.py).
+read -r -d '' TF_OPENER_LIB_JS <<'JSEOF' || true
+const tfWait = (ms) => new Promise(r => setTimeout(r, ms));
+const tfTag = (el) => String((el && el.tagName) || '').toUpperCase();
+const tfAttr = (el, name) => {
+  if (!el || typeof el.getAttribute !== 'function') return '';
+  const v = el.getAttribute(name);
+  return v == null ? '' : String(v);
+};
+const tfHas = (el, name) => !!(el && typeof el.hasAttribute === 'function' && el.hasAttribute(name));
+const tfRendered = (node) => {
+  if (!node) return false;
+  const cs = getComputedStyle(node);
+  const r = node.getBoundingClientRect();
+  return cs.display !== 'none' && cs.visibility !== 'hidden'
+    && parseFloat(cs.opacity || '1') > 0 && r.width > 0 && r.height > 0;
+};
+// Nearest of el-or-its-ancestors (stopping below <body>) satisfying pred.
+const tfUp = (el, pred) => {
+  let cur = el;
+  while (cur && cur !== document.body && cur !== document.documentElement) {
+    if (pred(cur)) return cur;
+    cur = cur.parentElement;
+  }
+  return null;
+};
+const tfDescendants = (root, out) => {
+  for (const kid of Array.from((root && root.children) || [])) {
+    out.push(kid);
+    tfDescendants(kid, out);
+  }
+  return out;
+};
+const tfIsToggle = (el) => tfTag(el) === 'SUMMARY' || tfHas(el, 'aria-expanded') || tfHas(el, 'aria-haspopup');
+const tfIsControl = (el) => tfIsToggle(el) || tfTag(el) === 'BUTTON' || tfAttr(el, 'role').toLowerCase() === 'button';
+// Controls whose activation is not a reversible open: steppers, dismissers,
+// media, commerce and auth actions, content loaders, and dialog openers.
+const TF_NEVER_LABEL = /(^|[^a-z])(next|prev|previous|arrow|slide|swiper|slick|carousel|close|dismiss|submit|play|pause|mute|more|load|delete|remove|logout|login|signin|signup|cart|buy|download|reload|refresh|share|like|copy|print|modal|dialog|popup|lightbox)([^a-z]|$)/;
+const TF_NEVER_ROLE = /^(tab|radio|checkbox|switch|option|menuitemradio|menuitemcheckbox)$/;
+const TF_GROUP_ROLE = /^(tablist|radiogroup|listbox)$/;
+const tfLabel = (el) => ['class', 'id', 'aria-label', 'title', 'name', 'data-action', 'data-toggle', 'data-bs-toggle']
+  .map((a) => tfAttr(el, a)).join(' ').toLowerCase();
+// Empty string when el may be clicked as an opener for seed; else the reason not to.
+const tfRefusal = (el, seed) => {
+  const tag = tfTag(el);
+  if (el === seed || el.contains(seed) || seed.contains(el)) return 'on-target-path';
+  if (!tfRendered(el)) return 'not-rendered';
+  if (tfUp(el, (n) => tfTag(n) === 'A' && tfHas(n, 'href'))) return 'link';
+  const type = tfAttr(el, 'type').toLowerCase();
+  if (tag === 'BUTTON' && (type === 'submit' || type === 'image' || type === 'reset')) return 'form-submit';
+  // A bare <button> inside a <form> defaults to submit.
+  if (tag === 'BUTTON' && !type && tfUp(el, (n) => tfTag(n) === 'FORM')) return 'form-submit';
+  if (tfHas(el, 'aria-pressed') || tfHas(el, 'aria-selected') || tfHas(el, 'aria-checked')) return 'selection-state';
+  const role = tfAttr(el, 'role').toLowerCase();
+  if (TF_NEVER_ROLE.test(role)) return 'role-' + role;
+  if (tfUp(el, (n) => TF_GROUP_ROLE.test(tfAttr(n, 'role').toLowerCase()))) return 'selection-group';
+  if (tfAttr(el, 'aria-expanded') === 'true') return 'already-open';
+  if (tfAttr(el, 'aria-haspopup').toLowerCase() === 'dialog') return 'opens-dialog';
+  const m = TF_NEVER_LABEL.exec(tfLabel(el));
+  if (m) return 'label-' + m[2];
+  return '';
+};
+// Generic structural / state words that carry no affinity between a control
+// and the branch it might open.
+const TF_STOP_TOKENS = new Set(['button', 'item', 'items', 'list', 'inner', 'wrap', 'wrapper', 'container',
+  'content', 'contents', 'active', 'show', 'hide', 'hidden', 'text', 'icon', 'target', 'area',
+  'block', 'section', 'main', 'body', 'util', 'utils', 'group', 'layer', 'header', 'footer', 'link',
+  'links', 'type', 'size', 'color', 'black', 'white', 'theme']);
+// Site-specific tokens, NOT generic vocabulary. Both were observed on the
+// reference site the walk was built against (named in
+// tests/measure/test_transition_fires_opener_walk.py): `nclick` is that site's
+// click-tracking hook (class nclick-target, attribute data-nclick) stamped on
+// every tracked control, so it would make every such control affine to every
+// branch; `thema` is its spelling of a theme-variant class (header.thema-black).
+// Add a token here only together with the site it was seen on.
+const TF_SITE_STOP_TOKENS = new Set(['nclick', 'thema']);
+// Name tokens (>= 4 chars, stop words removed) from an element's naming attributes.
+const tfTokens = (el) => {
+  const out = new Set();
+  for (const a of ['class', 'id', 'aria-label', 'aria-controls', 'data-target', 'data-bs-target', 'data-toggle', 'data-bs-toggle', 'data-nclick']) {
+    for (const t of tfAttr(el, a).toLowerCase().split(/[^a-z0-9]+/)) {
+      if (t.length >= 4 && !/^[0-9]+$/.test(t) && !TF_STOP_TOKENS.has(t) && !TF_SITE_STOP_TOKENS.has(t)) out.add(t);
+    }
+  }
+  return out;
+};
+// Ancestors of seed strictly below stop, nearest first.
+const tfBranch = (seed, stop) => {
+  const out = [];
+  let n = seed && seed.parentElement;
+  while (n && n !== stop) { out.push(n); n = n.parentElement; }
+  return out;
+};
+const tfChildIndex = (cur, el) => {
+  const top = tfUp(el, (n) => n.parentElement === cur);
+  return top ? Array.from(cur.children || []).indexOf(top) : -1;
+};
+// The candidate closest to the hidden branch in cur's child order, preferring
+// the nearest PRECEDING one: a disclosure button sits before its panel.
+const tfNearest = (cur, seed, list) => {
+  const ref = tfChildIndex(cur, seed);
+  let best = null;
+  let bestScore = Infinity;
+  for (const el of list) {
+    const d = ref - tfChildIndex(cur, el);
+    const score = d >= 0 ? d : 1000 - d;
+    if (score < bestScore) { best = el; bestScore = score; }
+  }
+  return best;
+};
+// At most one opener among cur's rendered controls; {opener: null, pickedBy}
+// names why nothing qualified.
+const tfPickOpener = (cur, seed, tried) => {
+  const branch = tfBranch(seed, cur);
+  const ids = new Set(branch.concat([seed]).map((n) => tfAttr(n, 'id')).filter(Boolean));
+  const pool = tfDescendants(cur, []).filter((n) => tfIsControl(n) && !tried.has(n) && !tfRefusal(n, seed));
+  if (!pool.length) return { opener: null, pickedBy: 'no-candidate' };
+  const named = pool.filter((n) => tfAttr(n, 'aria-controls').split(/\s+/).some((id) => id && ids.has(id)));
+  if (named.length) return { opener: named[0], pickedBy: 'aria-controls' };
+  const branchTokens = new Set();
+  branch.concat([seed]).forEach((n) => tfTokens(n).forEach((t) => branchTokens.add(t)));
+  const affine = (list) => list.filter((n) => Array.from(tfTokens(n)).some((t) => branchTokens.has(t)));
+  const toggles = pool.filter(tfIsToggle);
+  if (toggles.length === 1) return { opener: toggles[0], pickedBy: 'toggle' };
+  if (toggles.length > 1) {
+    const a = affine(toggles);
+    return { opener: tfNearest(cur, seed, a.length ? a : toggles), pickedBy: a.length ? 'toggle-affinity' : 'toggle-nearest' };
+  }
+  // Generic buttons carry no reversibility contract: click one only when the
+  // choice is unambiguous.
+  if (pool.length === 1) return { opener: pool[0], pickedBy: 'sole-control' };
+  const a = affine(pool);
+  if (a.length === 1) return { opener: a[0], pickedBy: 'name-affinity' };
+  return { opener: null, pickedBy: 'ambiguous' };
+};
+const tfDescribe = (el) => {
+  const cls = tfAttr(el, 'class').trim().split(/\s+/).filter(Boolean).slice(0, 4).join('.');
+  const id = tfAttr(el, 'id');
+  return (tfTag(el).toLowerCase() + (id ? '#' + id : '') + (cls ? '.' + cls : '')).replace(/["\\]/g, '').slice(0, 120);
+};
+const tfOverlayCount = () => {
+  let list = [];
+  try {
+    list = Array.from(document.querySelectorAll('[role=dialog],[aria-modal],dialog[open],[class*=modal],[class*=overlay],[class*=drawer],[class*=backdrop],[class*=dimmed],[class*=popup]'));
+  } catch (_) {}
+  return list.filter(tfRendered).length;
+};
+// Page state a click must hand back unchanged: root classes and inline styles
+// (scroll locks, is-open flags), rendered overlays, and the class / open /
+// hidden flags of the opener and of every ancestor of the hidden target.
+// Inline styles below the root are deliberately not compared: a panel that
+// starts with no style attribute commonly ends its close with
+// style="display: none;", which is the same idle state, not a residue.
+const tfFingerprint = (opener, chain) => JSON.stringify({
+  html: [tfAttr(document.documentElement, 'class'), tfAttr(document.documentElement, 'style')],
+  body: [tfAttr(document.body, 'class'), tfAttr(document.body, 'style')],
+  overlays: tfOverlayCount(),
+  opener: [tfAttr(opener, 'class'), tfAttr(opener, 'aria-expanded')],
+  chain: chain.map((n) => [tfAttr(n, 'class'), tfAttr(n, 'open'), tfAttr(n, 'aria-hidden'), tfAttr(n, 'hidden')]),
+});
+// Undo one click. Each rung is followed by a verification, twice (the second
+// after a longer wait so closing transitions and transient scroll classes can
+// settle); returns the rung that restored the page, or null when none did.
+const tfLadder = async (opener, isRestored) => {
+  for (const rung of ['toggle', 'escape', 'outside']) {
+    try {
+      if (rung === 'toggle') {
+        const details = tfTag(opener) === 'SUMMARY' ? opener.parentElement : null;
+        if (details && tfTag(details) === 'DETAILS') details.open = false; else opener.click();
+      } else if (rung === 'escape') {
+        const at = document.activeElement || document.body;
+        for (const type of ['keydown', 'keyup']) {
+          at.dispatchEvent(new KeyboardEvent(type, { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+        }
+      } else {
+        const at = document.documentElement;
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+          const Ctor = (type.indexOf('pointer') === 0 && typeof PointerEvent === 'function') ? PointerEvent : MouseEvent;
+          at.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true, clientX: 1, clientY: 1, button: 0 }));
+        }
+      }
+    } catch (_) {}
+    await tfWait(350);
+    if (isRestored()) return rung;
+    await tfWait(450);
+    if (isRestored()) return rung;
+  }
+  return null;
+};
+// Navigation guards for the duration of fn. Capture-phase listeners cancel
+// link activation and form submit; window.open and the programmatic
+// form.submit() (which fires no submit event) are stubbed; same-document
+// router pushes are counted. location.* assignments cannot be intercepted
+// from page JS — the caller compares location.href afterwards instead.
+const tfWithNavGuards = async (fn) => {
+  const state = { routed: 0, blocked: 0 };
+  const block = (ev) => { state.blocked += 1; ev.preventDefault(); ev.stopPropagation(); };
+  const linkBlock = (ev) => {
+    if (tfUp(ev.target, (n) => tfTag(n) === 'A' && tfHas(n, 'href'))) block(ev);
+  };
+  const saved = {};
+  document.addEventListener('submit', block, true);
+  document.addEventListener('click', linkBlock, true);
+  try {
+    saved.open = window.open;
+    window.open = () => { state.blocked += 1; return null; };
+    if (typeof HTMLFormElement === 'function') {
+      saved.submit = HTMLFormElement.prototype.submit;
+      HTMLFormElement.prototype.submit = function () { state.blocked += 1; };
+    }
+    saved.push = history.pushState;
+    saved.replace = history.replaceState;
+    history.pushState = function () { state.routed += 1; return saved.push.apply(this, arguments); };
+    history.replaceState = function () { state.routed += 1; return saved.replace.apply(this, arguments); };
+  } catch (_) {}
+  try {
+    return await fn(state);
+  } finally {
+    document.removeEventListener('submit', block, true);
+    document.removeEventListener('click', linkBlock, true);
+    try {
+      window.open = saved.open;
+      if (saved.submit) HTMLFormElement.prototype.submit = saved.submit;
+      history.pushState = saved.push;
+      history.replaceState = saved.replace;
+    } catch (_) {}
+  }
+};
+// Reveal the hidden seeds (the entry's selector matches that are not rendered)
+// by clicking at most maxAttempts openers, nearest ancestor first. On success
+// the state tfOpenerClose needs is left on window.__tfOpener.
+const tfOpenerWalk = async (seeds, maxAttempts) => {
+  const seed = seeds[0];
+  const revealed = () => seeds.some(tfRendered);
+  const result = { opened: false, dirty: false, opener: null, depth: null, pickedBy: null, attempts: [], levels: [], routed: 0, blocked: 0 };
+  if (!seed || revealed()) return result;
+  const chain = tfBranch(seed, document.body);
+  const tried = new Set();
+  await tfWithNavGuards(async (guard) => {
+    let cur = seed.parentElement;
+    let depth = 0;
+    while (cur && cur !== document.body && depth < 6 && result.attempts.length < maxAttempts) {
+      const pick = tfPickOpener(cur, seed, tried);
+      if (!pick.opener) {
+        result.levels.push(pick.pickedBy);
+        cur = cur.parentElement;
+        depth += 1;
+        continue;
+      }
+      const opener = pick.opener;
+      tried.add(opener);
+      const fp0 = tfFingerprint(opener, chain);
+      // fpChanged: the fingerprint moved off fp0 at some point after the
+      // click. A ladder rung "restores" by fingerprint equality, so on an
+      // attempt whose fingerprint never moved the restore is vacuous: the
+      // click may have left a side effect the fingerprint cannot see (a
+      // sibling shown through an inline style, a SPA route). The caller
+      // trusts `restored` only together with fpChanged.
+      const attempt = { opener: tfDescribe(opener), depth, pickedBy: pick.pickedBy, revealed: false, restored: null, fpChanged: false };
+      result.attempts.push(attempt);
+      const fpSame = () => {
+        const same = tfFingerprint(opener, chain) === fp0;
+        if (!same) attempt.fpChanged = true;
+        return same;
+      };
+      try { opener.click(); } catch (_) {}
+      await tfWait(450);
+      fpSame();
+      if (revealed()) {
+        attempt.revealed = true;
+        result.opened = true;
+        result.opener = attempt.opener;
+        result.depth = depth;
+        result.pickedBy = pick.pickedBy;
+        window.__tfOpener = { opener, seeds, chain, fp0 };
+        break;
+      }
+      // Not revealed: hand the page back before looking further up, and stop
+      // the walk on the first control that cannot be handed back in-page.
+      attempt.restored = await tfLadder(opener, fpSame);
+      if (!attempt.restored) { result.dirty = true; break; }
+      cur = cur.parentElement;
+      depth += 1;
+    }
+    result.routed = guard.routed;
+    result.blocked = guard.blocked;
+  });
+  return result;
+};
+// Poll `take` every `every` ms until two consecutive readings agree, for at
+// most `cap` ms. Returns { stable, value, polls }. The revealed-state idle
+// baseline is snapped through this: a panel still opening (height/opacity
+// mid-transition) when the walk hands over would otherwise be frozen
+// mid-flight into the baseline and the rest of its own open animation would
+// read as a hover delta.
+const tfSettled = async (take, every, cap) => {
+  let prev = take();
+  let polls = 1;
+  for (let waited = 0; waited < cap; waited += every) {
+    await tfWait(every);
+    const next = take();
+    polls += 1;
+    if (JSON.stringify(next) === JSON.stringify(prev)) return { stable: true, value: next, polls };
+    prev = next;
+  }
+  return { stable: false, value: prev, polls };
+};
+// Close what tfOpenerWalk opened: restored means the seeds are hidden again
+// AND the pre-click fingerprint matches.
+const tfOpenerClose = async () => {
+  const st = window.__tfOpener;
+  try { delete window.__tfOpener; } catch (_) {}
+  if (!st) return { closed: false, via: null, reason: 'no-opener', routed: 0, blocked: 0 };
+  const isRestored = () => !st.seeds.some(tfRendered) && tfFingerprint(st.opener, st.chain) === st.fp0;
+  const out = { closed: false, via: null, routed: 0, blocked: 0 };
+  await tfWithNavGuards(async (guard) => {
+    out.via = await tfLadder(st.opener, isRestored);
+    out.closed = !!out.via;
+    out.routed = guard.routed;
+    out.blocked = guard.blocked;
+  });
+  return out;
+};
+JSEOF
+
 # ── Browser session: navigate, capture BEFORE, drive triggers, capture AFTER ─
 agent-browser --session "$SESSION" set viewport "$VIEW_W" "$VIEW_H" >/dev/null 2>&1
 agent-browser --session "$SESSION" navigate "$URL" >/dev/null 2>&1
@@ -977,23 +1327,48 @@ PY
 if [ -n "$HOVER_ROWS" ]; then
   HOVER_PATCH="$(mktemp)"
   : > "$HOVER_PATCH"
+  # Hover fields whose delta counts as a style change. The merge below and the
+  # click-to-open fallback's "already changed" test read this same list.
+  HOVER_STYLE_FIELDS='"color", "backgroundColor", "borderColor", "outlineColor", "textDecorationColor", "boxShadow", "filter", "backgroundImage", "fontWeight", "pseudoBefore", "pseudoAfter", "opacity", "transform", "width", "height"'
+  # The document URL every opener hand-back is checked against (hash ignored),
+  # as a JSON object like every other blob so unwrap's layer handling is the same.
+  HOVER_HREF0=$(agent-browser --session "$SESSION" eval '(() => JSON.stringify({ href: location.href }))()' 2>/dev/null | unwrap)
+  # Seconds to wait after a forced re-navigate before verifying the page is
+  # back in its idle state. capture-states.sh measured how long this reference
+  # takes to go quiet (states/splash/summary.json durationMs); a fixed 2s on a
+  # page that settles in 5-6s verifies a page that is still moving. A capped
+  # measurement (timedOut) is a floor — the page needed at least that long —
+  # so it is used, not discarded. Clamped so a pathological value cannot stall
+  # the pass; WAIT_MS stays the floor so a fast page is not slowed down.
+  HOVER_NAV_SETTLE_S=$(run_py - "$REF_DIR/states/splash/summary.json" "$WAIT_MS" <<'PY'
+import json, math, sys
+fallback = (int(sys.argv[2]) + 999) // 1000
+try:
+    d = json.load(open(sys.argv[1]))
+    ms = d.get("durationMs")
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms <= 0:
+        raise ValueError
+    print(max(fallback, min(15, math.ceil(ms / 1000) + 1)))
+except Exception:
+    print(fallback)
+PY
+)
+  # If the measurement call itself was lost (no output at all), fall back to
+  # the same WAIT_MS floor the python block uses — never to a flat 2s, which
+  # would wait LESS than the pass did before the measurement existed.
+  : "${HOVER_NAV_SETTLE_S:=$(( (WAIT_MS + 999) / 1000 ))}"
   while IFS=$'\t' read -r HIDX HCANDS_B64; do
     [ -z "$HCANDS_B64" ] && continue
     HJSON='{"found":false}'
     while IFS= read -r HSEL; do
       [ -z "$HSEL" ] && continue
       HSEL_B64=$(printf '%s' "$HSEL" | base64 | tr -d '\n')
-      HOWNER_JS="(() => {
+      HOWNER_JS="(() => { $TF_OPENER_LIB_JS
         document.querySelectorAll('[data-tf-hover-owner]').forEach(n => n.removeAttribute('data-tf-hover-owner'));
         document.querySelectorAll('[data-tf-hover-target]').forEach(n => n.removeAttribute('data-tf-hover-target'));
         let matches = [];
         try { matches = Array.from(document.querySelectorAll(atob('$HSEL_B64'))); } catch (_) {}
-        const visible = matches.filter((node) => {
-          const cs = getComputedStyle(node);
-          const r = node.getBoundingClientRect();
-          return cs.display !== 'none' && cs.visibility !== 'hidden'
-            && parseFloat(cs.opacity || '1') > 0 && r.width > 0 && r.height > 0;
-        });
+        const visible = matches.filter(tfRendered);
         visible.sort((left, right) => {
           const a = left.getBoundingClientRect();
           const b = right.getBoundingClientRect();
@@ -1033,20 +1408,376 @@ if [ -n "$HOVER_ROWS" ]; then
       agent-browser --session "$SESSION" hover "$HSEL" >/dev/null 2>&1 || true
       agent-browser --session "$SESSION" hover "[data-tf-hover-target='$HIDX']" >/dev/null 2>&1 || true
       HSNAP_JS="(async () => { $SNAP_JS
-        const wait = (ms) => new Promise(r => setTimeout(r, ms));
+        $TF_OPENER_LIB_JS
         const el = document.querySelector('[data-tf-hover-target=\"$HIDX\"]');
         if (!el) return JSON.stringify({ found: false });
-        await wait($SETTLE_MS);
-        // NOTE: do NOT echo the selector here. F6 fallbacks are [class*="…"]
+        await tfWait($SETTLE_MS);
+        // NOTE: do NOT echo the selector here. F6 fallbacks are [class*=…]
         // selectors that contain double quotes; round-tripped through
         // agent-browser's double-JSON encoding + unwrap they arrive as \\\" and
         // make this blob invalid JSON, so the merge's json.loads() throws and
         // silently drops the hover patch (except: continue) — a hashed hover then
-        // false-fails. The merge only needs found + after.
-        return JSON.stringify({ found: true, after: snap(el, { kind: 'hover' }) });
+        // false-fails. The merge only needs found + after; rendered + hidden
+        // feed the click-to-open fallback below.
+        let hidden = 0;
+        try { hidden = Array.from(document.querySelectorAll(atob('$HSEL_B64'))).filter((n) => !tfRendered(n)).length; } catch (_) {}
+        return JSON.stringify({ found: true, rendered: tfRendered(el), hidden, after: snap(el, { kind: 'hover' }) });
       })()"
       HRAW=$(agent-browser --session "$SESSION" eval "$HSNAP_JS" 2>/dev/null)
       HJSON=$(printf '%s' "$HRAW" | unwrap)
+      # ── Click-to-open fallback ───────────────────────────────────────────
+      # Runs only for an entry the pass above could not measure: the marked
+      # target is not rendered, or it is rendered with no style delta in both
+      # the CDP and the synthetic pass while other matches of the selector are
+      # hidden. An entry whose rendered target already changed never reaches
+      # this block, so nothing here can alter a passing verdict.
+      HWALK=$(run_py - "$HJSON" "$BEFORE_TMP" "$AFTER_TMP" "$HIDX" "$HOVER_STYLE_FIELDS" <<'PY'
+import json, sys
+try:
+    rec = json.loads(sys.argv[1])
+except Exception:
+    rec = {}
+if not isinstance(rec, dict) or not rec.get("found"):
+    print("skip")
+    raise SystemExit(0)
+hidden = int(rec.get("hidden") or 0)
+if rec.get("rendered") is False:
+    print(f"walk:{hidden}")
+    raise SystemExit(0)
+if hidden <= 0:
+    print("skip")
+    raise SystemExit(0)
+
+
+def load(path):
+    try:
+        return json.load(open(path))
+    except Exception:
+        return {}
+
+
+fields = json.loads("[" + sys.argv[5] + "]")
+baseline = (load(sys.argv[2]).get(sys.argv[4]) or {}).get("before") or {}
+synthetic = (load(sys.argv[3]).get(sys.argv[4]) or {}).get("after") or {}
+
+
+def changed(candidate):
+    return any(str((candidate or {}).get(k)) != str(baseline.get(k)) for k in fields)
+
+
+if changed(rec.get("after")) or changed(synthetic):
+    print("skip")
+else:
+    print(f"walk:{hidden}")
+PY
+)
+      if [ "${HWALK%%:*}" = "walk" ]; then
+        HHIDDEN0="${HWALK#walk:}"
+        HOPEN_JS="(async () => { $TF_OPENER_LIB_JS
+          const TF_STAGE = 'opener-walk';
+          let seeds = [];
+          try { seeds = Array.from(document.querySelectorAll(atob('$HSEL_B64'))).filter((n) => !tfRendered(n)); } catch (_) {}
+          const res = await tfOpenerWalk(seeds, 2);
+          if (res.opened) {
+            // Measure the revealed match, not a match that was visible all along.
+            const vis = seeds.filter(tfRendered);
+            vis.sort((left, right) => {
+              const a = left.getBoundingClientRect();
+              const b = right.getBoundingClientRect();
+              return b.width * b.height - a.width * a.height;
+            });
+            document.querySelectorAll('[data-tf-hover-target]').forEach(n => n.removeAttribute('data-tf-hover-target'));
+            vis[0].setAttribute('data-tf-hover-target', '$HIDX');
+          }
+          res.stage = TF_STAGE;
+          res.href = location.href;
+          return JSON.stringify(res);
+        })()"
+        HCLOSE_JS="(async () => { $TF_OPENER_LIB_JS
+          const TF_STAGE = 'opener-close';
+          const res = await tfOpenerClose();
+          res.stage = TF_STAGE;
+          res.href = location.href;
+          return JSON.stringify(res);
+        })()"
+        HVERIFY_JS="(() => { $TF_OPENER_LIB_JS
+          const TF_STAGE = 'opener-verify';
+          let hidden = 0;
+          try { hidden = Array.from(document.querySelectorAll(atob('$HSEL_B64'))).filter((n) => !tfRendered(n)).length; } catch (_) {}
+          return JSON.stringify({ stage: TF_STAGE, hidden, href: location.href });
+        })()"
+        # Park the pointer first so the fingerprint the walk records is a
+        # no-hover state, the same state the close eval compares against.
+        agent-browser --session "$SESSION" mouse move -100 -100 >/dev/null 2>&1 || true
+        agent-browser --session "$SESSION" wait 150 >/dev/null 2>&1 || true
+        HOPEN_RAW=$(agent-browser --session "$SESSION" eval "$HOPEN_JS" 2>/dev/null)
+        HOPEN_JSON=$(printf '%s' "$HOPEN_RAW" | unwrap)
+        # HCLICKED: the page took a click that must be handed back — the walk
+        # opened a panel, or it clicked anything at all (every attempt, the
+        # rule from before fpChanged existed).
+        # HFORCENAV: the hand-back has to be a fresh navigate whatever the
+        # close eval reports:
+        #   - any attempt that did not reveal the target. Its `restored` rung
+        #     is verified by fingerprint equality only, and the fingerprint
+        #     cannot see an open-only panel shown through an inline style: when
+        #     the fingerprint never moved (fpChanged false/absent) the restore
+        #     was vacuous, and when it moved and came back (a transient class
+        #     on the opener or body that the toggle rung took off again) the
+        #     panel is STILL open. fpChanged is recorded so the artifact says
+        #     which; neither reading lets the attempt skip the navigate.
+        #     tfOpenerClose has nothing to undo here (no-opener), so the
+        #     navigate is the only hand-back verified against the idle page —
+        #     otherwise the residue leaks into the next entry, whose
+        #     display:none PHASE1 baseline reads the reveal as a hover delta
+        #     and passes with no :hover rule;
+        #   - the walk counted a router push (routed > 0), or the document URL
+        #     changed: SPA route residue is not in the fingerprint either.
+        # Only a walk whose every click revealed the target, closed by a rung
+        # the close eval verified against seeds-hidden + fingerprint, is
+        # handed back in-page.
+        read -r HOPENED HCLICKED HFORCENAV <<< "$(run_py - "$HOPEN_JSON" "$HOVER_HREF0" <<'PY'
+import json, sys
+
+
+def page(url):
+    return str(url or "").split("#", 1)[0]
+
+
+try:
+    res = json.loads(sys.argv[1])
+    if not isinstance(res, dict):
+        raise ValueError
+    opened = bool(res.get("opened"))
+    attempts = [a for a in (res.get("attempts") or []) if isinstance(a, dict)]
+    unrevealed = any(not a.get("revealed") for a in attempts)
+    routed = int(res.get("routed") or 0) > 0
+    try:
+        href0 = json.loads(sys.argv[2]).get("href")
+    except Exception:
+        href0 = None
+    moved = bool(href0) and "href" in res and page(res.get("href")) != page(href0)
+    forcenav = unrevealed or routed or moved
+    # The clicked test reads the RAW field, not the isinstance-filtered list:
+    # the filter exists to make a.get() safe, and a malformed non-empty
+    # attempts value (a truncated eval answer) must not filter down to an
+    # empty list and read as "no click was taken".
+    clicked = opened or bool(res.get("attempts")) or forcenav
+except Exception:
+    # The eval never came back: the click most likely navigated or reloaded
+    # the document. Treat it as a click that must be handed back.
+    opened, clicked, forcenav = False, True, False
+print(" ".join("1" if flag else "0" for flag in (opened, clicked, forcenav)))
+PY
+)"
+        HREBASE_NOTE=""
+        if [ "$HOPENED" = "1" ]; then
+          # The PHASE1 baseline for this entry was taken while the target was
+          # display:none (height/width/top all 0). Measured against that, the
+          # reveal itself reads as a hover delta and a clone with the click
+          # wired but NO :hover rule passes. Re-baseline in the revealed state
+          # with the pointer parked, settle, then hover and measure — the
+          # verdict compares (revealed, idle) against (revealed, hovered).
+          HBASE_JS="(async () => { $SNAP_JS
+            $TF_OPENER_LIB_JS
+            const TF_STAGE = 'opener-baseline';
+            const el = document.querySelector('[data-tf-hover-target=\"$HIDX\"]');
+            if (!el) return JSON.stringify({ stage: TF_STAGE, found: false });
+            await tfWait($SETTLE_MS);
+            // Idle-stability: the open animation must have finished before
+            // this reading can serve as the idle side of the comparison.
+            const settled = await tfSettled(() => snap(el, { kind: 'hover' }), 250, 2000);
+            return JSON.stringify({ stage: TF_STAGE, found: true, rendered: tfRendered(el), stable: settled.stable, settlePolls: settled.polls, before: settled.value });
+          })()"
+          HMEASURE_JS="(async () => { $SNAP_JS
+            $TF_OPENER_LIB_JS
+            const TF_STAGE = 'opener-measure';
+            const el = document.querySelector('[data-tf-hover-target=\"$HIDX\"]');
+            if (!el) return JSON.stringify({ stage: TF_STAGE, found: false });
+            await tfWait($SETTLE_MS);
+            let hidden = 0;
+            try { hidden = Array.from(document.querySelectorAll(atob('$HSEL_B64'))).filter((n) => !tfRendered(n)).length; } catch (_) {}
+            return JSON.stringify({ stage: TF_STAGE, found: true, rendered: tfRendered(el), hidden, after: snap(el, { kind: 'hover' }) });
+          })()"
+          agent-browser --session "$SESSION" scrollintoview "[data-tf-hover-target='$HIDX']" >/dev/null 2>&1 || true
+          agent-browser --session "$SESSION" mouse move -100 -100 >/dev/null 2>&1 || true
+          agent-browser --session "$SESSION" wait 250 >/dev/null 2>&1 || true
+          HBASE_RAW=$(agent-browser --session "$SESSION" eval "$HBASE_JS" 2>/dev/null)
+          HBASE_JSON=$(printf '%s' "$HBASE_RAW" | unwrap)
+          agent-browser --session "$SESSION" hover "[data-tf-hover-target='$HIDX']" >/dev/null 2>&1 || true
+          HRAW2=$(agent-browser --session "$SESSION" eval "$HMEASURE_JS" 2>/dev/null)
+          HJSON2=$(printf '%s' "$HRAW2" | unwrap)
+          # Accept the revealed measurement only as a pair: a rendered idle
+          # baseline that had STOPPED MOVING, AND a rendered hovered snapshot.
+          # Anything less keeps the pre-walk record — the snapshot the normal
+          # pass took of the still-hidden target, judged against its PHASE1
+          # baseline exactly as before the walk existed. That is a fallback,
+          # not a verified (idle, hovered) pair: the two snapshots were taken
+          # at different scroll positions and under different owner-hover
+          # states, so nothing here guarantees they are equal. The judge's
+          # exclusion of viewport `top` from the hover verdict is what keeps
+          # the fallback from passing on scroll position alone. The first
+          # output line says why the re-baseline was refused (recorded as
+          # hoverOpener.rebaseline).
+          HREBASED=$(run_py - "$HBASE_JSON" "$HJSON2" <<'PY'
+import json, sys
+
+
+def load(blob):
+    try:
+        value = json.loads(blob)
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+base, meas = load(sys.argv[1]), load(sys.argv[2])
+base_ok = base.get("found") and base.get("rendered") and isinstance(base.get("before"), dict)
+meas_ok = meas.get("found") and meas.get("rendered") and isinstance(meas.get("after"), dict)
+if not base_ok:
+    print("no-idle-baseline")
+elif not base.get("stable"):
+    print("unstable")
+elif not meas_ok:
+    print("no-hovered-snapshot")
+else:
+    meas["before"] = base["before"]
+    meas.pop("stage", None)
+    print("revealed")
+    print(json.dumps(meas, separators=(",", ":")))
+PY
+)
+          HREBASE_NOTE="${HREBASED%%$'\n'*}"
+          if [ "$HREBASE_NOTE" = "revealed" ]; then
+            HJSON="${HREBASED#*$'\n'}"
+          fi
+        fi
+        HCLOSE_JSON='{}'
+        HVERIFY_JSON='{}'
+        HNAV=""
+        if [ "$HCLICKED" = "1" ]; then
+          # Hand the page back BEFORE the next entry is probed. The close eval
+          # reports which rung restored the pre-click state; a missing or
+          # failed report, or a changed URL, falls through to a fresh navigate.
+          agent-browser --session "$SESSION" mouse move -100 -100 >/dev/null 2>&1 || true
+          agent-browser --session "$SESSION" wait 150 >/dev/null 2>&1 || true
+          HCLOSE_RAW=$(agent-browser --session "$SESSION" eval "$HCLOSE_JS" 2>/dev/null)
+          HCLOSE_JSON=$(printf '%s' "$HCLOSE_RAW" | unwrap)
+          # The close eval still runs when the navigate is forced: it shuts a
+          # panel the walk did open, and its rung is recorded (closeVia). Its
+          # verdict is not accepted as the hand-back — see HFORCENAV above.
+          HRESTORED=$(run_py - "$HCLOSE_JSON" "$HOVER_HREF0" "$HFORCENAV" <<'PY'
+import json, sys
+
+
+def page(url):
+    return str(url or "").split("#", 1)[0]
+
+
+def load(blob):
+    try:
+        value = json.loads(blob)
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+res = load(sys.argv[1])
+href0 = load(sys.argv[2]).get("href")
+ok = sys.argv[3] != "1" and bool(res.get("closed")) and page(res.get("href")) == page(href0)
+print(str(res.get("via") or "") if ok else "")
+PY
+)
+          if [ -z "$HRESTORED" ]; then
+            if agent-browser --session "$SESSION" navigate "$URL" >/dev/null 2>&1; then HNAV="ok"; else HNAV="error"; fi
+            sleep "$HOVER_NAV_SETTLE_S"
+            agent-browser --session "$SESSION" mouse move -100 -100 >/dev/null 2>&1 || true
+            HVERIFY_RAW=$(agent-browser --session "$SESSION" eval "$HVERIFY_JS" 2>/dev/null)
+            HVERIFY_JSON=$(printf '%s' "$HVERIFY_RAW" | unwrap)
+          fi
+        fi
+        # Attach the walk record to the hover result so it reaches the
+        # artifact (hoverOpener per entry, hoverOpenerRestore summary).
+        HJSON=$(run_py - "$HJSON" "$HOPEN_JSON" "$HCLOSE_JSON" "$HVERIFY_JSON" "$HNAV" "$HOVER_HREF0" "$HHIDDEN0" "$HOVER_NAV_SETTLE_S" "$HREBASE_NOTE" <<'PY'
+import json, sys
+
+hjson, hopen, hclose, hverify, hnav, href0, hidden0, nav_settle, rebase_note = sys.argv[1:10]
+
+
+def load(blob):
+    try:
+        value = json.loads(blob)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def page(url):
+    return str(url or "").split("#", 1)[0]
+
+
+rec = load(hjson) or {"found": False}
+walk = load(hopen)
+close = load(hclose)
+verify = load(hverify)
+href0 = (load(href0) or {}).get("href")
+info = {"walked": True}
+if walk is None:
+    info["walk"] = "eval-lost"
+    clicked = True
+else:
+    for key in ("opened", "opener", "depth", "pickedBy", "attempts", "levels", "dirty", "routed", "blocked"):
+        if key in walk:
+            info[key] = walk[key]
+    attempts = [a for a in (walk.get("attempts") or []) if isinstance(a, dict)]
+    unrevealed = [a for a in attempts if not a.get("revealed")]
+    # Same rules as HCLICKED / HFORCENAV above; the reasons are recorded so
+    # the artifact says why an entry was re-navigated (forcedNavigate).
+    # fp-blind is informational beside unrevealed-attempt: it names a walk
+    # whose in-page restore was vacuous (fingerprint never moved) as well as
+    # unverifiable. Neither lets an attempt skip the navigate.
+    reasons = []
+    if unrevealed:
+        reasons.append("unrevealed-attempt")
+    if any(a.get("fpChanged") is not True for a in unrevealed):
+        reasons.append("fp-blind")
+    if int(walk.get("routed") or 0) > 0:
+        reasons.append("routed")
+    if href0 and "href" in walk and page(walk.get("href")) != page(href0):
+        reasons.append("href-changed")
+    if reasons:
+        info["forcedNavigate"] = reasons
+    # Raw attempts, as in the HCLICKED read above: a malformed non-empty
+    # value is a click, so the artifact records its hand-back too.
+    clicked = bool(walk.get("opened") or walk.get("attempts") or reasons)
+if rebase_note:
+    info["rebaseline"] = rebase_note
+if clicked:
+    via = None
+    if (
+        "forcedNavigate" not in info and close is not None and close.get("closed")
+        and page(close.get("href")) == page(href0)
+    ):
+        via = close.get("via")
+    if close is not None:
+        info["closeVia"] = close.get("via")
+    if via:
+        info["restored"] = via
+    elif hnav:
+        same = (
+            hnav == "ok"
+            and verify is not None
+            and str(verify.get("hidden")) == str(hidden0)
+            and page(verify.get("href")) == page(href0)
+        )
+        info["restored"] = "navigate" if same else "failed"
+        info["navigateSettleS"] = int(nav_settle)
+    else:
+        info["restored"] = "failed"
+rec["hoverOpener"] = info
+print(json.dumps(rec, separators=(",", ":")))
+PY
+)
+      fi
       if run_py - "$HJSON" <<'PY' >/dev/null 2>&1
 import json, sys
 try:
@@ -1070,7 +1801,7 @@ PY
     printf '%s\t%s\n' "$HIDX" "$HJSON" >> "$HOVER_PATCH"
   done <<< "$HOVER_ROWS"
   PATCHED_TMP="$(mktemp)"
-  run_py - "$AFTER_TMP" "$HOVER_PATCH" "$PATCHED_TMP" "$BEFORE_TMP" <<'PY'
+  run_py - "$AFTER_TMP" "$HOVER_PATCH" "$PATCHED_TMP" "$BEFORE_TMP" "$HOVER_STYLE_FIELDS" <<'PY'
 import json, sys
 try:
     after = json.load(open(sys.argv[1]))
@@ -1080,14 +1811,10 @@ try:
     before = json.load(open(sys.argv[4]))
 except Exception:
     before = {}
+fields = tuple(json.loads("[" + sys.argv[5] + "]"))
+before_dirty = False
 
 def style_changed(candidate, baseline):
-    fields = (
-        "color", "backgroundColor", "borderColor", "outlineColor",
-        "textDecorationColor", "boxShadow", "filter", "backgroundImage",
-        "fontWeight", "pseudoBefore", "pseudoAfter",
-        "opacity", "transform", "width", "height",
-    )
     return any(str((candidate or {}).get(k)) != str((baseline or {}).get(k)) for k in fields)
 
 for line in open(sys.argv[2]):
@@ -1102,9 +1829,25 @@ for line in open(sys.argv[2]):
     if not rec.get("found"):
         continue
     cur = after.get(idx) or {}
+    # The click-to-open walk record travels with the entry whether or not the
+    # pointer measurement below replaces the synthetic one.
+    if rec.get("hoverOpener"):
+        cur["hoverOpener"] = rec["hoverOpener"]
+        after[idx] = cur
+    pointer_after = rec.get("after", {}) or {}
+    if isinstance(rec.get("before"), dict):
+        # The click-to-open walk re-baselined this entry in the revealed state.
+        # Neither the PHASE1 baseline nor the synthetic after (both taken while
+        # the target was display:none) is comparable to it; keeping either
+        # would let the reveal geometry read as a hover delta. Replace both.
+        before[idx] = {**(before.get(idx) or {}), "found": True, "before": rec["before"]}
+        before_dirty = True
+        cur["found"] = True
+        cur["after"] = pointer_after
+        after[idx] = cur
+        continue
     baseline = (before.get(idx) or {}).get("before", {}) or {}
     current_after = cur.get("after", {}) or {}
-    pointer_after = rec.get("after", {}) or {}
     # Keep the synthetic MouseEvent measurement when it already observed a
     # real style delta and the CDP pointer pass did not. This prevents the
     # fallback pass from erasing evidence produced by JS hover handlers while
@@ -1116,6 +1859,8 @@ for line in open(sys.argv[2]):
     cur["after"] = pointer_after
     after[idx] = cur
 json.dump(after, open(sys.argv[3], "w"))
+if before_dirty:
+    json.dump(before, open(sys.argv[4], "w"))
 PY
   mv "$PATCHED_TMP" "$AFTER_TMP"
 fi
@@ -1530,6 +2275,9 @@ for i, t in enumerate(entries):
         # Fresh-context reveal re-probe (L-MEA-8): pre-state + in-flight samples
         # for a one-shot IO reveal that completed during the settle mount sweep.
         "revealProbe": reveal_series.get(str(i)),
+        # Click-to-open opener walk record from the real-pointer hover pass
+        # (None when the walk did not run for this entry).
+        "hoverOpener": a.get("hoverOpener"),
     }
 json.dump(obs, open(out_path, "w"))
 PY
@@ -1650,6 +2398,95 @@ print(",".join(str(row) for row in rows if row))
     fi
   fi
 fi
+
+# ── Surface the click-to-open opener walk in the artifact ─────────────────
+# The verdict module only reads before/after, so the walk record is attached
+# here: hoverOpener on each entry that walked, and a hoverOpenerRestore summary
+# naming the entries whose hand-back needed escalation, a fresh navigate, or
+# failed outright (with every hover entry probed after such a failure, since
+# those ran against a page the walk had mutated). Runs after the responsive
+# merge so rows replaced from the mobile retry keep their own records.
+run_py - "$OUT" "$OBS_TMP" <<'PY'
+import json, sys
+
+out_path, obs_path = sys.argv[1:3]
+try:
+    artifact = json.load(open(out_path))
+    obs = json.load(open(obs_path))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(artifact, dict) or not isinstance(obs, dict):
+    raise SystemExit(0)
+entries = [row for row in (artifact.get("entries") or []) if isinstance(row, dict)]
+for row in entries:
+    rec = (obs.get(str(row.get("id", ""))) or {}).get("hoverOpener")
+    if isinstance(rec, dict) and "hoverOpener" not in row:
+        row["hoverOpener"] = rec
+walked = [row for row in entries if isinstance(row.get("hoverOpener"), dict)]
+if not walked:
+    raise SystemExit(0)
+
+
+def rungs(info):
+    out = [info.get("restored")]
+    out.extend(a.get("restored") for a in (info.get("attempts") or []) if isinstance(a, dict))
+    return {str(r) for r in out if r}
+
+
+escalated, navigated, failed = [], [], []
+for row in walked:
+    info = row["hoverOpener"]
+    eid = str(row.get("id", ""))
+    if info.get("restored") == "failed":
+        failed.append(eid)
+    elif info.get("restored") == "navigate":
+        navigated.append(eid)
+    elif rungs(info) & {"escape", "outside"}:
+        escalated.append(eid)
+after_unrestored = []
+if failed:
+    ids = [str(row.get("id", "")) for row in entries]
+    first = ids.index(failed[0])
+    after_unrestored = [
+        str(row.get("id", ""))
+        for row in entries[first + 1:]
+        if row.get("kind") == "hover"
+    ]
+artifact["hoverOpenerRestore"] = {
+    "walked": [str(row.get("id", "")) for row in walked],
+    "opened": [str(row.get("id", "")) for row in walked if row["hoverOpener"].get("opened")],
+    "escalated": escalated,
+    "navigated": navigated,
+    "failed": failed,
+    "entriesAfterUnrestored": after_unrestored,
+}
+json.dump(artifact, open(out_path, "w"), indent=2)
+for row in walked:
+    info = row["hoverOpener"]
+    print(
+        "transition-fires: hover opener walk for "
+        f"{row.get('id')}: opened={bool(info.get('opened'))} "
+        f"opener={info.get('opener')} pickedBy={info.get('pickedBy')} "
+        f"restored={info.get('restored')}"
+    )
+forced = {
+    str(row.get("id", "")): row["hoverOpener"].get("forcedNavigate")
+    for row in walked
+}
+for eid in navigated:
+    reasons = forced.get(eid)
+    why = (
+        f"was handed back by a fresh navigate ({', '.join(str(r) for r in reasons)})"
+        if isinstance(reasons, list) and reasons
+        else "could not be closed in-page; the page was re-navigated"
+    )
+    print(f"WARNING: transition-fires hover opener for {eid} {why} before the next entry")
+for eid in failed:
+    print(
+        f"WARNING: transition-fires hover opener for {eid} was NOT restored; "
+        f"entries measured after it ran against a mutated page: {after_unrestored}"
+    )
+PY
 
 rm -f "$BEFORE_TMP" "$AFTER_TMP" "$OBS_TMP" "$LOAD_TMP" "$REVEAL_TMP"
 exit $RC

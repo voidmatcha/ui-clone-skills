@@ -11,8 +11,13 @@
 #
 # This script:
 #   - Reads regions.json for entries with a hover triggerType.
-#   - Caps targets at MAX_HOVER_TARGETS (capture-transitions.md already dedupes
-#     before saving, so first-N in document order is a reasonable sample).
+#   - Schedules every hover entry of a non-placeholder transition-spec.json
+#     (live-capture promoted or authored) unconditionally: those are
+#     obligations, not candidates, and the cap never drops them.
+#   - Caps the remaining speculative targets at MAX_HOVER_TARGETS
+#     (capture-transitions.md already dedupes before saving, so first-N in
+#     document order is a reasonable sample) and lists what it dropped in the
+#     result file.
 #   - Runs scripts/verify/video-transition-compare.sh in `hover:<selector>` mode
 #     per target — real-mouse hover via agent-browser, recorded at 60fps,
 #     frame-by-frame SSIM compare.
@@ -21,7 +26,9 @@
 #   bash hover-state-compare.sh <orig-url> <impl-url> <session> <ref-dir>
 #
 # Env:
-#   MAX_HOVER_TARGETS=5    — cap on hover targets evaluated (default 5)
+#   MAX_HOVER_TARGETS=5    — cap on SPECULATIVE hover targets evaluated
+#                            (default 5). transition-spec.json hover
+#                            obligations are exempt and always measured.
 #   HOVER_EXIT_CAPTURE=0   — set to 1 to use `hover-and-out:<sel>` mode, which
 #                            records entry AND exit arcs in one video (total
 #                            duration ≈ 2 × RECORD_DURATION). Off by default
@@ -117,6 +124,41 @@ else
 fi
 VIDEO_COMPARE_DYNAMIC_SELECTORS="$(dynamic_selectors_from_spec "$REF_DIR/transition-spec.json")"
 export VIDEO_COMPARE_DYNAMIC_SELECTORS
+
+# Start recording only after the reference has actually settled.
+#
+# video-transition-compare.sh waits PRE_ACTION_WAIT (default 3s) before the
+# action. capture-states.sh MEASURED how long this reference takes to go quiet
+# and wrote it to states/splash/summary.json `durationMs`. On
+# navercorp.com/tech/innovation that is 6256ms, so a 3s wait records the first
+# seconds of an unsettled ref against a settled impl: the per-frame SSIM climbs
+# monotonically 0.27 -> 0.899 across the run and the target is reported as
+# divergent even though the hover arc itself matches.
+#
+# Use the measured settle plus a small margin, clamped so a pathological or
+# missing measurement cannot stall the sweep. The existing default stays the
+# floor, so a fast page is not slowed down.
+if [ -z "${PRE_ACTION_WAIT:-}" ] && [ -f "$REF_DIR/states/splash/summary.json" ]; then
+  _hs_settle=$(SPLASH_SUMMARY_PATH="$REF_DIR/states/splash/summary.json" python3 -c "
+import json, math, os
+try:
+    d = json.load(open(os.environ['SPLASH_SUMMARY_PATH']))
+    ms = d.get('durationMs')
+    if not isinstance(ms, (int, float)) or isinstance(ms, bool) or ms <= 0:
+        raise ValueError
+    if d.get('timedOut'):
+        raise ValueError  # capped, not settled — the number means nothing
+    print(min(15, max(3, math.ceil(ms / 1000) + 1)))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+  if [ -n "$_hs_settle" ]; then
+    PRE_ACTION_WAIT="$_hs_settle"
+    export PRE_ACTION_WAIT
+    echo "  ▸ pre-action wait ${PRE_ACTION_WAIT}s (from measured ref settle)"
+  fi
+  unset _hs_settle
+fi
 
 TEMP_FILES=()
 ACTIVE_HOVER_SESSION_PREFIXES=()
@@ -1484,6 +1526,13 @@ for item in spec.get("transitions") or []:
         continue
     if activation not in selectors(item.get("target")):
         continue
+    if str(item.get("affectedTargetAbsent") or "").strip():
+        # The bridge measured this rule's descendant as rendered nowhere and
+        # observed the activation in its own right. Falling through to
+        # hover-css-rules.json would re-derive that absent descendant and
+        # compare a target that is not in the document: the activation is
+        # the measurement scope.
+        raise SystemExit(0)
     affected = str(item.get("affectedTarget") or "").strip()
     if affected and affected != activation:
         print(affected)
@@ -1554,51 +1603,165 @@ if command -v jq >/dev/null 2>&1; then
     | .[]
     | "\(.name // .triggerType)\t\(.triggerType)\t\(.selector)"
   ' "$REGIONS" >> "$TARGETS_FILE" 2>/dev/null || true
-  if [ -s "$TARGETS_FILE" ]; then
-    CAPPED_TARGETS="$(mktemp)"
-    track_temp_file "$CAPPED_TARGETS"
-    python3 - "$TARGETS_FILE" "$MAX_HOVER_TARGETS" > "$CAPPED_TARGETS" <<'PY'
-import sys
-
-path = sys.argv[1]
-try:
-    limit = int(sys.argv[2])
-except Exception:
-    limit = 5
-seen = set()
-rows = []
-for line in open(path, encoding="utf-8", errors="ignore"):
-    parts = line.rstrip("\n").split("\t")
-    if len(parts) != 3 or not parts[2] or parts[2] in seen:
-        continue
-    seen.add(parts[2])
-    rows.append(line.rstrip("\n"))
-    if len(rows) >= max(0, limit):
-        break
-print("\n".join(rows))
-PY
-    mv "$CAPPED_TARGETS" "$TARGETS_FILE"
-  fi
 fi
 
 # regions.json and hover-css-rules carried no target. Try hover-candidates and
-# states/hover/manifest before deciding this is a skip.
+# states/hover/manifest before deciding this is a skip. The cap is applied
+# once, below, so a truncation here is reported like every other one.
 if [ ! -s "$TARGETS_FILE" ] && command -v jq >/dev/null 2>&1; then
   if [ ! -s "$TARGETS_FILE" ] && [ -f "$HOVER_CAND" ]; then
     jq -r '(if type=="array" then . else (.candidates // []) end)
       | map(select(.selector!=null)) | unique_by(.selector)
-      | .[0:'"$MAX_HOVER_TARGETS"'] | .[]
+      | .[]
       | "\((.text // .selector)|gsub("[\\t\\n]";" "))\tsynth-hover-candidate\t\(.selector)"' \
       "$HOVER_CAND" 2>/dev/null >> "$TARGETS_FILE" || true
   fi
   if [ ! -s "$TARGETS_FILE" ] && [ -f "$HOVER_MANIFEST" ]; then
     jq -r '(.entries // []) | map(select(.selector!=null)) | unique_by(.selector)
-      | .[0:'"$MAX_HOVER_TARGETS"'] | .[]
+      | .[]
       | "\(.selector)\tsynth-hover-manifest\t\(.selector)"' "$HOVER_MANIFEST" 2>/dev/null >> "$TARGETS_FILE" || true
   fi
 fi
 
-if [ ! -s "$TARGETS_FILE" ]; then
+# Did regions.json / hover-css-rules.json / hover-candidates.json / the
+# states/hover manifest resolve ANY hover target? The cap block below injects
+# transition-spec obligations into TARGETS_FILE, so once it has run a non-empty
+# file no longer proves the reference resolved a hoverable target. The
+# `hover expected but nothing resolvable` hard FAIL keys on THIS pre-injection
+# pool — the rows that check was always meant to consider — so a non-empty
+# non-placeholder transition-spec.json can never suppress it.
+RESOLVED_POOL_EMPTY=0
+[ -s "$TARGETS_FILE" ] || RESOLVED_POOL_EMPTY=1
+
+# ── Spec obligations and the MAX_HOVER_TARGETS cap ──
+# The cap bounds the SPECULATIVE pool: hover-css-rules.json activations,
+# regions.json entries, hover-candidates, the states/hover manifest. Those are
+# guesses about what might be hoverable, and first-N in document order is a
+# fair sample of them. A hover entry in a non-placeholder transition-spec.json
+# is not a guess: the live-capture bridge measured it (or the author declared
+# it) and the implementation is obliged to reproduce it. Letting the cap drop
+# such an entry made this gate self-certify while a measured hover rule went
+# uncompared — on navercorp.com/tech/innovation the deduped activation order
+# put `.header .nav__link` at index 8 against a cap of 5, so the
+# `affectedTargetAbsent` handling in affected_selector_for_hover never ran and
+# `.header .nav__link:hover{font-weight:600}` was never compared; four of the
+# nine promoted spec entries were dropped the same way, and the fallback probe
+# does not plan a `font-weight` channel, so nothing downstream caught it.
+#
+# Spec obligations are therefore EXEMPT from the cap (not merely ordered
+# first: ordering first would still truncate obligations whenever the spec
+# carries more than MAX_HOVER_TARGETS of them, and would push the speculative
+# sample out — looser than before on that path). The cap applies to the
+# remaining speculative rows exactly as before, so the measured set is a
+# superset of the pre-fix set on every input. Whatever the cap drops is
+# written to the result file by selector; a truncation is never silent.
+# Placeholder specs (`placeholder: true` or the extraction auto-stub source)
+# carry no obligation and stay in the speculative pool.
+CAPPED_TARGETS="$(mktemp)"
+track_temp_file "$CAPPED_TARGETS"
+python3 - "$TARGETS_FILE" "$MAX_HOVER_TARGETS" "$REF_DIR/transition-spec.json" "$RESULT" > "$CAPPED_TARGETS" <<'PY'
+import json
+import sys
+
+targets_path, limit_raw, spec_path, result_path = sys.argv[1:5]
+try:
+    limit = int(limit_raw)
+except Exception:
+    limit = 5
+limit = max(0, limit)
+
+AUTO_SOURCE = "ui_clone.extraction_artifacts"
+
+
+def load(path):
+    try:
+        return json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def hover_trigger(value):
+    if isinstance(value, dict):
+        value = value.get("type")
+    return "hover" in str(value or "").strip().lower()
+
+
+def selectors(raw):
+    return [part.strip() for part in str(raw or "").split(",") if part.strip()]
+
+
+spec = load(spec_path)
+spec = spec if isinstance(spec, dict) else {}
+spec_is_obligation = not (
+    bool(spec.get("placeholder")) or str(spec.get("source") or "") == AUTO_SOURCE
+)
+
+protected = []  # (name, triggerType, selector) in spec order
+protected_seen = set()
+if spec_is_obligation:
+    for item in spec.get("transitions") or []:
+        if not isinstance(item, dict) or not hover_trigger(item.get("trigger")):
+            continue
+        for sel in selectors(item.get("target")):
+            if sel in protected_seen:
+                continue
+            protected_seen.add(sel)
+            name = str(item.get("id") or sel).replace("\t", " ").replace("\n", " ")
+            protected.append((name, "spec-hover", sel))
+
+candidates = []
+seen = set()
+try:
+    lines = list(open(targets_path, encoding="utf-8", errors="ignore"))
+except OSError:
+    lines = []
+for line in lines:
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) != 3 or not parts[2] or parts[2] in seen:
+        continue
+    seen.add(parts[2])
+    candidates.append(tuple(parts))
+
+# A speculative row that is also a spec obligation keeps its own provenance
+# label (the calibration paths key on it) but is scheduled as the obligation.
+rows = []
+for name, ttype, sel in protected:
+    match = next((c for c in candidates if c[2] == sel), None)
+    rows.append(match if match else (name, ttype, sel))
+speculative = [c for c in candidates if c[2] not in protected_seen]
+kept = speculative[:limit]
+dropped = speculative[limit:]
+rows.extend(kept)
+
+notes = []
+if protected:
+    notes.append(
+        f"# spec obligations: {len(protected)} hover target(s) from transition-spec.json "
+        f"exempt from MAX_HOVER_TARGETS: " + " | ".join(sel for _, _, sel in protected)
+    )
+if dropped:
+    notes.append(
+        f"# cap: MAX_HOVER_TARGETS={limit} kept {len(kept)} of {len(speculative)} "
+        f"speculative candidate(s); NOT measured by this gate: "
+        + " | ".join(sel for _, _, sel in dropped)
+    )
+if notes:
+    try:
+        with open(result_path, "a", encoding="utf-8") as handle:
+            for note in notes:
+                handle.write(note + "\n")
+            handle.write("\n")
+    except OSError:
+        pass
+    for note in notes:
+        print(note, file=sys.stderr)
+
+if rows:
+    print("\n".join("\t".join(row) for row in rows))
+PY
+mv "$CAPPED_TARGETS" "$TARGETS_FILE"
+
+if [ ! -s "$TARGETS_FILE" ] || [ "$RESOLVED_POOL_EMPTY" = 1 ]; then
   if hover_expected; then
     echo "❌ hover expected (signals.hasHover=true / non-empty hover-css-rules.json / hover-candidates.json) but no hover targets resolvable from regions.json or hover artifacts — hover motion UNVERIFIED" >> "$RESULT"
     echo "Wrote $RESULT"

@@ -822,6 +822,91 @@ def test_runtime_proof_rollup_accepts_measured_splash_mount_and_exit(
     assert "implSamples=2" in splash["note"]
 
 
+def _write_splash_contract(ref: Path, *, certified: bool) -> None:
+    splash = ref / "states" / "splash"
+    splash.mkdir(parents=True, exist_ok=True)
+    (splash / "contract.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "captureMode": "pre-navigation",
+                "detected": False,
+                "overlay": {"everVisible": False, "maxCoverage": 0, "exitObserved": False},
+                "capture": {
+                    "stateCount": 13,
+                    "timedOut": not certified,
+                    "reason": "stable-2s" if certified else "wall-clock-cap",
+                    "authoritativeNegative": certified,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _certified_absence_artifact(*, impl_mounted: bool = False) -> str:
+    """A splash-lifecycle.json that claims a pass on "certified absence": the
+    probe saw no overlay on the reference and states/splash/contract.json
+    certified absence. The check does not write this (a no-overlay reference
+    is `ref-overlay-absent`, a FAIL); it is the shape a hand-edited or stale
+    artifact would take, and the rollup must not honour it."""
+    return json.dumps(
+        {
+            "schemaVersion": 1,
+            "status": "pass",
+            "reason": "ref-overlay-absent-certified",
+            "violations": [],
+            "ref": {"mounted": False, "exited": False, "sampleCount": 6},
+            "impl": {"mounted": impl_mounted, "exited": impl_mounted, "sampleCount": 6},
+            "refAbsence": {
+                "certified": True,
+                "source": "states/splash/contract.json capture.authoritativeNegative",
+            },
+            "refCapture": {"samples": [{"t": index * 50, "overlay": None} for index in range(6)]},
+            "implCapture": {"samples": [{"t": index * 50, "overlay": None} for index in range(6)]},
+        }
+    )
+
+
+def _splash_component(artifact: dict) -> dict:
+    return next(
+        component
+        for component in artifact["components"]
+        if component["artifact"] == "splash-lifecycle.json"
+    )
+
+
+def test_runtime_proof_rollup_rejects_a_splash_pass_without_mount_and_exit_even_if_certified(
+    tmp_path: Path,
+) -> None:
+    """A pass rolls up on mount+exit proof on both sides and on nothing else.
+    "Certified absence" is not a substitute: the certificate comes from a
+    sampler that enumerates elements exactly as the check's probe does, so the
+    two agreeing is one blind spot counted twice (a pseudo-element curtain
+    certifies on one and passes the other). Whatever the artifact's `reason`
+    says and whatever states/splash/contract.json certifies, a pass with no
+    mounted+exited proof is rejected here - with the certificate present and
+    true, absent, and re-captured into an uncertified state alike."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_splash_runtime_plan(ref)
+    (ref / "splash-lifecycle.json").write_text(_certified_absence_artifact(), encoding="utf-8")
+
+    for certified in (True, None, False):
+        if certified is None:
+            (ref / "states" / "splash" / "contract.json").unlink()
+        else:
+            _write_splash_contract(ref, certified=certified)
+
+        proc, artifact = _run_runtime_rollup(ref)
+
+        assert proc.returncode == 1, (certified, proc.stdout + proc.stderr)
+        assert artifact["status"] == "fail"
+        splash = _splash_component(artifact)
+        assert splash["valid"] is False, (certified, splash)
+        assert "mounted+exited" in splash["note"], (certified, splash)
+
+
 _ZERO_SURFACE_PROBE = json.dumps(
     {
         "canvasTotal": 0,

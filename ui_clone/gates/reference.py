@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING, Any
 from ..extraction_artifacts import _is_valid_selector
 from .base import CheckResult
 
+# Mirrors scripts/extract/capture-region-artifacts.py RESOLVED_ABSENCE_MARKER:
+# the prober tags a skip row with it when the browser answered that the
+# candidate carries no runtime motion, and retires the region.
+RESOLVED_ABSENCE_MARKER = "absence-measured"
+
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
 
@@ -201,7 +206,25 @@ def _has_live_capture_provenance(self: Gate, regions: dict[str, Any]) -> bool:
     for key in ("skipped", "unsupported", "notInstantiated"):
         rows = summary.get(key)
         if isinstance(rows, list) and rows:
-            return False
+            # A skip the browser actually answered — the rule's target is not
+            # in this document, or it resolves to the value already shown — is
+            # measured absence, and the prober retires that candidate from
+            # regions.json. Its audit row is evidence, not unproven work. Any
+            # other row, and any row whose region is still claimed, is fatal.
+            if key != "skipped" or any(
+                not isinstance(row, dict)
+                or row.get("resolution") != RESOLVED_ABSENCE_MARKER
+                or str(row.get("region") or "") in by_name
+                for row in rows
+            ):
+                return False
+            # The producer writes counts[key] == len(rows) after the split. A
+            # summary whose count disagrees with its own rows was edited or
+            # came from a different run, so the carve-out must not release it.
+            count = counts.get(key)
+            if isinstance(count, bool) or not isinstance(count, int) or count != len(rows):
+                return False
+            continue
         count = counts.get(key)
         if isinstance(count, int) and count > 0:
             return False

@@ -340,8 +340,26 @@ TRACKED_STYLE_PROPERTIES = (
 
 REGION_MARKER_ATTRIBUTE = "data-uiclone-region"
 OBSERVATION_MARKER_ATTRIBUTE = "data-uiclone-observation"
+OPENER_MARKER_ATTRIBUTE = "data-uiclone-opener"
 
 MIN_HOVER_TARGET_PX = 4
+
+# A hover target inside a closed mega-menu, dropdown, or accordion panel is
+# not hit-testable at idle, so the bare hit-test would report the whole region
+# as unprovable. Hovering the nearest hit-testable ancestor first reproduces
+# the real pointer path a user takes to reach it. The candidate walk stays
+# shallow: beyond a few levels the ancestor stops being the control that opens
+# the panel and becomes an unrelated layout wrapper.
+MAX_OPENER_CANDIDATES = 4
+MAX_OPENER_ANCESTOR_DEPTH = 6
+OPENER_SETTLE_MS = 450
+
+# Only self-contained controls are clicked to reveal a panel. `a[href]` is
+# excluded on purpose: following a link would navigate away and every later
+# region in the run would be probed against the wrong document.
+CONTROL_SELECTOR_LITERAL = json.dumps(
+    'button,summary,[role="button"],[aria-expanded],[aria-haspopup]'
+)
 
 
 def _write_png_rgb(path: Path, width: int, height: int, rows: list[bytes]) -> None:
@@ -416,6 +434,16 @@ IDENTITY_STYLE_VALUES = {
 # fitted to the rect cannot corroborate them no matter how it is taken.
 OUTSIDE_BOX_PROPERTIES = frozenset({"boxShadow", "filter"})
 
+# Generated boxes are sampled alongside the element itself; their keys carry
+# this prefix so a delta says which box moved.
+OBSERVED_PSEUDO_ELEMENTS = ("::before", "::after")
+
+
+def _style_property_name(key: str) -> str:
+    """Strip a pseudo-element prefix so keyed lookups stay property-based."""
+    _, _, name = key.rpartition(":")
+    return name or key
+
 
 def _normalized_style(name: str, value: object) -> str:
     """Collapse values that differ as strings but render identically.
@@ -438,7 +466,8 @@ def _changed_properties(before: dict[str, Any], after: dict[str, Any]) -> list[s
     return sorted(
         key
         for key in set(before) | set(after)
-        if _normalized_style(key, before.get(key)) != _normalized_style(key, after.get(key))
+        if _normalized_style(_style_property_name(key), before.get(key))
+        != _normalized_style(_style_property_name(key), after.get(key))
     )
 
 
@@ -470,6 +499,172 @@ def _resolve_target_js(literal: str, marker: str) -> str:
     )
 
 
+def _resolve_openers_js(literal: str, index: int) -> str:
+    """Tag the hit-testable ancestors that could reveal an occluded target.
+
+    Nearest ancestor first: the control that opens a panel sits close to the
+    hidden content, while the outer wrapper is shared with unrelated regions
+    and hovering it proves nothing.
+    """
+    prefix = json.dumps(f"opener-{index}-")
+    return (
+        "(() => {"
+        f"const nodes=[...document.querySelectorAll({literal})];"
+        f"for(const stale of document.querySelectorAll('[{OPENER_MARKER_ATTRIBUTE}]'))"
+        f"stale.removeAttribute('{OPENER_MARKER_ATTRIBUTE}');"
+        "const seen=new Set();const openers=[];const controls=[];"
+        "const tag=(el,mode,depth)=>{"
+        "const bucket=mode==='hover'?openers:controls;"
+        f"const name={prefix}+mode+'-'+bucket.length;"
+        f"el.setAttribute('{OPENER_MARKER_ATTRIBUTE}',name);"
+        "const cls=String(el.className||'').trim().split(/\\s+/).filter(Boolean).join('.');"
+        "bucket.push({name,mode,depth,path:el.tagName.toLowerCase()+(cls?'.'+cls:'')});"
+        "};"
+        "for(const node of nodes){"
+        "let depth=0;"
+        "for(let el=node.parentElement;el&&depth<"
+        f"{MAX_OPENER_ANCESTOR_DEPTH}"
+        ";el=el.parentElement,depth++){"
+        "if(seen.has(el))continue;"
+        "const r=el.getBoundingClientRect();"
+        f"if(r.width<{MIN_HOVER_TARGET_PX}||r.height<{MIN_HOVER_TARGET_PX})continue;"
+        "const cx=r.left+r.width/2,cy=r.top+r.height/2;"
+        "if(cx<0||cy<0||cx>window.innerWidth||cy>window.innerHeight)continue;"
+        "const hit=document.elementFromPoint(cx,cy);"
+        "if(!hit||!el.contains(hit))continue;"
+        "seen.add(el);"
+        "tag(el,'hover',depth);"
+        f"if(openers.length>={MAX_OPENER_CANDIDATES})break;"
+        "}"
+        f"if(openers.length>={MAX_OPENER_CANDIDATES})break;"
+        "}"
+        # A panel is just as often revealed by a control beside the target as
+        # by an ancestor: the language list sits behind its own toggle button
+        # and the search box behind the header's search button. Those controls
+        # are never ancestors, so scan each candidate ancestor's own interactive
+        # descendants — excluding anything containing the target, which would
+        # re-test the path already known to be occluded.
+        "for(const scope of [...seen]){"
+        f"if(controls.length>={MAX_OPENER_CANDIDATES})break;"
+        f"for(const el of scope.querySelectorAll({CONTROL_SELECTOR_LITERAL})){{"
+        "if(seen.has(el))continue;"
+        "if(nodes.some(node=>el===node||el.contains(node)))continue;"
+        "const r=el.getBoundingClientRect();"
+        f"if(r.width<{MIN_HOVER_TARGET_PX}||r.height<{MIN_HOVER_TARGET_PX})continue;"
+        "const cx=r.left+r.width/2,cy=r.top+r.height/2;"
+        "if(cx<0||cy<0||cx>window.innerWidth||cy>window.innerHeight)continue;"
+        "const hit=document.elementFromPoint(cx,cy);"
+        "if(!hit||!el.contains(hit))continue;"
+        "seen.add(el);"
+        "tag(el,'click',0);"
+        f"if(controls.length>={MAX_OPENER_CANDIDATES})break;"
+        "}"
+        "}"
+        "return {found:(openers.length+controls.length)>0,openers,controls};"
+        "})()"
+    )
+
+
+# A click opener latches: unlike hover it survives the pointer leaving, so the
+# region that opened it owns closing it again before the next region is probed.
+_CLICK_OPENERS: dict[str, str] = {}
+
+
+def _restore_click_opener(session: str) -> None:
+    selector = _CLICK_OPENERS.pop(session, None)
+    if not selector:
+        return
+    _run(session, "click", selector)
+    _run(session, "wait", str(OPENER_SETTLE_MS))
+
+
+def _current_url(session: str) -> str:
+    """Read the document URL in-page; a click opener must not navigate away."""
+    result = _eval(session, "(() => ({found:true,url:location.href}))()")
+    url = result.get("url") if isinstance(result, dict) else None
+    return url if isinstance(url, str) else ""
+
+
+def _release_openers(session: str) -> None:
+    """Drop opener markers so the next region starts from a clean DOM."""
+    _eval(
+        session,
+        (
+            "(() => {"
+            f"for(const el of document.querySelectorAll('[{OPENER_MARKER_ATTRIBUTE}]'))"
+            f"el.removeAttribute('{OPENER_MARKER_ATTRIBUTE}');"
+            "return {found:true};"
+            "})()"
+        ),
+    )
+
+
+def _open_then_resolve(
+    session: str,
+    literal: str,
+    marker: str,
+    index: int,
+) -> tuple[dict[str, Any], str | None]:
+    """Hover each candidate ancestor until the target becomes hit-testable.
+
+    Returns the last resolve result plus a description of the ancestor that
+    worked, so the caller can record how the state was reached. The pointer is
+    left on that ancestor: both the idle and the active frame must be captured
+    with the panel open, and only the target's own hover may differ between
+    them.
+    """
+    candidates = _eval(session, _resolve_openers_js(literal, index))
+    if not isinstance(candidates, dict):
+        return {"found": False}, None
+    ordered: list[dict[str, Any]] = []
+    for key in ("openers", "controls"):
+        rows = candidates.get(key)
+        if isinstance(rows, list):
+            ordered.extend(row for row in rows if isinstance(row, dict))
+    if not ordered:
+        return {"found": False}, None
+
+    resolved: dict[str, Any] = {"found": False}
+    url_before = _current_url(session)
+    for candidate in ordered:
+        name = candidate.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        opener_selector = f'[{OPENER_MARKER_ATTRIBUTE}="{name}"]'
+        mode = "click" if candidate.get("mode") == "click" else "hover"
+        if _run(session, mode, opener_selector).returncode != 0:
+            continue
+        _run(session, "wait", str(OPENER_SETTLE_MS))
+        if mode == "click" and _current_url(session) != url_before:
+            # The control navigated instead of revealing: every later probe
+            # would measure a different document, so stop opening entirely.
+            # `a[href]` is excluded from CONTROL_SELECTOR_LITERAL, but a
+            # button that router-pushes (header search, language toggles)
+            # lands here, so walk the history back and confirm the original
+            # document actually returned. `back` is used rather than re-opening
+            # the URL so no navigation bypasses the origin validator.
+            _run(session, "back")
+            _run(session, "wait", str(OPENER_SETTLE_MS))
+            restored = _current_url(session) == url_before
+            return {"found": False, "navigated": True, "restored": restored}, None
+        resolved = _eval(session, _resolve_target_js(literal, marker))
+        if resolved.get("found") is True:
+            path = candidate.get("path")
+            label = path if isinstance(path, str) and path else name
+            if mode == "click":
+                _CLICK_OPENERS[session] = opener_selector
+            return resolved, f"{mode}:{label}"
+        if mode == "click":
+            # Toggle back so an unrelated open panel does not occlude the next
+            # candidate or leak into the following region's idle frame.
+            _run(session, "click", opener_selector)
+            _run(session, "wait", str(OPENER_SETTLE_MS))
+        # Release before trying the next candidate: a still-open panel from
+        # this attempt would otherwise be credited to the next opener.
+        _run(session, "mouse", "move", "-100", "-100")
+    return resolved, None
+
+
 def _settle_target_js(target_literal: str) -> str:
     """Recenter a marked target after delayed scroll-state work has settled."""
     return (
@@ -490,7 +685,13 @@ def _resolve_observation_target_js(
     affected_literal: str,
     marker: str,
 ) -> str:
-    """Pin an affected node contained by the exact activated region."""
+    """Pin an affected node contained by the exact activated region.
+
+    A pure query: `matches` is the document-wide count of the affected
+    selector, so the caller can tell "rendered nowhere" (the activation is then
+    observed in its own right) from "rendered, but not inside this activation"
+    (a probe failure).
+    """
     marker_literal = json.dumps(marker)
     return (
         "(() => {"
@@ -503,6 +704,15 @@ def _resolve_observation_target_js(
         "if(!observed)return {found:false,activationFound:true,matches:candidates.length};"
         f"observed.setAttribute('{OBSERVATION_MARKER_ATTRIBUTE}',{marker_literal});"
         "return {found:true,activationFound:true,matches:candidates.length};"
+        "})()"
+    )
+
+
+def _count_selector_js(selector_literal: str) -> str:
+    """Count the selector's matches document-wide; no marker, no side effect."""
+    return (
+        "(() => {"
+        f"return {{matches:document.querySelectorAll({selector_literal}).length}};"
         "})()"
     )
 
@@ -522,6 +732,17 @@ def _observe_target_js(
         "const r=el.getBoundingClientRect();"
         "const cs=getComputedStyle(observed);"
         "const styles={};for(const name of tracked)styles[name]=cs[name];"
+        # Underlines, arrows, and overlay washes are routinely drawn with
+        # ::before/::after, so a rule whose only hover effect lives there reads
+        # as "no observable change" against the element's own computed style —
+        # and a 1px underline at the border-box edge is not reliably visible in
+        # the tight crop either. Sample the generated boxes alongside the
+        # element and key them by pseudo so the delta stays attributable.
+        f"for(const pseudo of {json.dumps(list(OBSERVED_PSEUDO_ELEMENTS))}){{"
+        "const ps=getComputedStyle(observed,pseudo);"
+        "if(!ps||ps.content==='none')continue;"
+        "for(const name of tracked)styles[pseudo+':'+name]=ps[name];"
+        "}"
         "return {found:true,x:r.x,y:r.y,width:r.width,height:r.height,styles,"
         "scrollX:window.scrollX,scrollY:window.scrollY,"
         "viewportWidth:window.innerWidth,"
@@ -558,6 +779,9 @@ def _capture_one(
     _run(session, "mouse", "move", "-100", "-100")
 
     def _release() -> None:
+        # Close a latched panel while its opener marker still resolves, then
+        # drop every marker this region added.
+        _restore_click_opener(session)
         _eval(
             session,
             (
@@ -566,19 +790,39 @@ def _capture_one(
                 f"el.removeAttribute('{REGION_MARKER_ATTRIBUTE}');"
                 f"for(const el of document.querySelectorAll('[{OBSERVATION_MARKER_ATTRIBUTE}]'))"
                 f"el.removeAttribute('{OBSERVATION_MARKER_ATTRIBUTE}');"
+                f"for(const el of document.querySelectorAll('[{OPENER_MARKER_ATTRIBUTE}]'))"
+                f"el.removeAttribute('{OPENER_MARKER_ATTRIBUTE}');"
                 "return {found:true};"
                 "})()"
             ),
         )
 
     resolved = _eval(session, _resolve_target_js(literal, marker))
+    matches = int(resolved.get("matches") or 0)
+    opener_selector: str | None = None
+    if resolved.get("found") is not True and matches > 0:
+        # Occluded, not absent: reach the target the way a user does, by
+        # hovering the ancestor that reveals it.
+        resolved, opener_selector = _open_then_resolve(session, literal, marker, index)
+    if resolved.get("navigated") is True:
+        # Distinct from "none are hoverable": the opener walk left the page.
+        # Folding it into the generic skip hid the escape and let every later
+        # region be probed against the wrong document.
+        _restore_click_opener(session)
+        _release_openers(session)
+        if resolved.get("restored") is not True:
+            raise OriginValidationError(
+                "opener control navigated away and history back did not restore the document"
+            )
+        return False, "opener control navigated instead of revealing", None, None
     if resolved.get("found") is not True:
-        matches = int(resolved.get("matches") or 0)
         reason = (
             "selector matches no elements"
             if matches <= 0
             else f"selector matches {matches} elements but none are hoverable"
         )
+        _restore_click_opener(session)
+        _release_openers(session)
         return False, reason, None, None
 
     _run(session, "wait", "300")
@@ -586,6 +830,10 @@ def _capture_one(
     if settled.get("found") is not True:
         _release()
         return False, "selector missing or not observable", None, None
+    # Set when the rule's affected selector is rendered nowhere in this document
+    # (a locale- or variant-only rule). The activation is then observed in its
+    # own right: its absent descendant is not evidence about the activation.
+    affected_target_absent: str | None = None
     if affected_target:
         observation_target_result = _eval(
             session,
@@ -596,8 +844,23 @@ def _capture_one(
             ),
         )
         if observation_target_result.get("found") is not True:
-            _release()
-            return False, "affected selector missing or not observable", None, None
+            if (
+                observation_target_result.get("activationFound") is True
+                and int(observation_target_result.get("matches") or 0) <= 0
+            ):
+                # The rule's descendant is rendered nowhere in this document.
+                # That says nothing about the activation's own hover rules
+                # beside it (`.nav__link:hover .en` with no `.en` rendered sits
+                # next to `.nav__link:hover{font-weight:600}`), so observe the
+                # activation in its own right and let the hover answer.
+                affected_target_absent = affected_target
+                observation_target_literal = None
+            else:
+                # Rendered somewhere but not inside this activation, or the
+                # activation vanished after settling: a failed measurement,
+                # not an answer.
+                _release()
+                return False, "affected selector missing or not observable", None, None
     idle_observation = _eval(
         session,
         _observe_target_js(target_literal, observation_target_literal),
@@ -666,6 +929,15 @@ def _capture_one(
         session,
         _observe_target_js(target_literal, observation_target_literal),
     )
+    # "Rendered nowhere" was measured at idle. A menu that is mounted only
+    # while its opener is hovered, and positioned outside the opener's box,
+    # matches nothing at idle and leaves the opener's own crop and computed
+    # style unchanged — so the descendant question has to be asked again now,
+    # while the hover is held, or that menu retires as measured absence.
+    affected_rendered_on_hover = False
+    if affected_target_absent:
+        hovered_count = _eval(session, _count_selector_js(json.dumps(affected_target_absent)))
+        affected_rendered_on_hover = int(hovered_count.get("matches") or 0) > 0
 
     idle_scroll_x = float(idle_observation.get("scrollX") or 0)
     idle_scroll_y = float(idle_observation.get("scrollY") or 0)
@@ -708,6 +980,15 @@ def _capture_one(
     if not active_ok:
         _discard()
         return False, active_reason, None, None
+
+    if affected_rendered_on_hover:
+        # The descendant exists after all — only while hovered. The activation
+        # was observed in its own right, so nothing measured here can be
+        # attributed to that descendant, and `affectedTargetAbsent` would be a
+        # false claim. Neither a capture nor an answer: the region stays an
+        # unproven candidate for a probe that can pin the hovered descendant.
+        _discard()
+        return False, AFFECTED_RENDERED_ONLY_WHILE_HOVERED, None, None
 
     before = idle_observation.get("styles")
     after = active_observation.get("styles")
@@ -753,6 +1034,11 @@ def _capture_one(
     pixels_differ = _images_differ(idle_pending, active_pending)
     if not changed and not pixels_differ:
         _discard()
+        if affected_target_absent:
+            # Both halves were measured: the rule's descendant is rendered
+            # nowhere, and the activation hovered in its own right did not
+            # move either. Only together do they retire the candidate.
+            return False, AFFECTED_ABSENT_AND_ACTIVATION_UNCHANGED, None, None
         return False, "hover produced no observable change", None, None
 
     if not changed:
@@ -765,7 +1051,22 @@ def _capture_one(
         "to": {key: after.get(key) for key in changed},
         "pixelCorroborated": pixels_differ,
     }
-    outside_box = [key for key in changed if key in OUTSIDE_BOX_PROPERTIES]
+    if affected_target_absent:
+        # The delta is the activation's own; the spec must not attribute it
+        # to a descendant that is not in the document.
+        observation["affectedTargetAbsent"] = affected_target_absent
+    if opener_selector:
+        # Both frames were captured with this ancestor hovered; the delta is
+        # still the target's own hover, but the state is not reachable at idle.
+        observation["openedVia"] = opener_selector
+    outside_box = [
+        key
+        for key in changed
+        # A generated box is frequently drawn outside the border box (an
+        # underline below the text, a ring around it), so it is never required
+        # to corroborate in the tight crop.
+        if _style_property_name(key) in OUTSIDE_BOX_PROPERTIES or key != _style_property_name(key)
+    ]
     if outside_box:
         observation["outsideBoxChange"] = outside_box
     duration = active_observation.get("transitionDuration") or idle_observation.get(
@@ -1229,23 +1530,44 @@ def _capture_regions(
                     capture = _capture_one if trigger in HOVER_TRIGGERS else _capture_scroll_one
                     ok, reason, artifacts, observation = capture(session, item, index, ref_dir)
                     if not ok or artifacts is None or observation is None:
-                        summary["skipped"].append(
-                            {
-                                "region": label,
-                                "selector": selector,
-                                "triggerType": trigger,
-                                "reason": reason,
-                            }
+                        skip_row: dict[str, Any] = {
+                            "region": label,
+                            "selector": selector,
+                            "triggerType": trigger,
+                            "reason": reason,
+                        }
+                        prior_artifacts = item.get("artifacts")
+                        has_prior_artifacts = isinstance(prior_artifacts, dict) and bool(
+                            prior_artifacts
                         )
+                        # A dispatchOnly region is a projection of a
+                        # transition-spec entry, not capture proof. Under an
+                        # authored spec that entry is the author's claim and a
+                        # probe negative cannot discharge it: the region stays
+                        # an unsupported obligation until the author amends the
+                        # spec, exactly as for every other failed capture. Only
+                        # the bridge's own (auto) claims may be retired.
+                        preserved_dispatch = bool(
+                            preserve_failed_dispatch and item.get("dispatchOnly")
+                        )
+                        retired = (
+                            _is_resolved_absence(reason)
+                            and not has_prior_artifacts
+                            and not preserved_dispatch
+                        )
+                        if retired:
+                            # Tag the row so downstream gates can tell a settled
+                            # candidate from one that was never measured.
+                            skip_row["resolution"] = RESOLVED_ABSENCE_MARKER
+                        summary["skipped"].append(skip_row)
+                        if retired:
+                            # Measured absence: retiring the candidate is the
+                            # result, not a loss of evidence.
+                            continue
                         # A probe failure leaves this region unproven. Dropping
                         # it deletes the candidate a corrected re-run needs,
                         # even when sibling regions captured successfully.
-                        prior_artifacts = item.get("artifacts")
-                        if (
-                            (isinstance(prior_artifacts, dict) and bool(prior_artifacts))
-                            or _is_probe_failure(reason)
-                            or (preserve_failed_dispatch and item.get("dispatchOnly"))
-                        ):
+                        if has_prior_artifacts or _is_probe_failure(reason) or preserved_dispatch:
                             kept.append(item)
                         continue
                     updated = dict(item)
@@ -1691,6 +2013,13 @@ def _reconcile_interactions(
     return []
 
 
+# The rule's descendant matched nothing at idle but was present while the
+# activation was hovered: a hover-mounted menu. The activation was observed in
+# its own right, so the measurement cannot be attributed to the descendant and
+# the region is unproven — never `affectedTargetAbsent`, never retired.
+AFFECTED_RENDERED_ONLY_WHILE_HOVERED = (
+    "affected selector rendered only while hovered; activation observed in its own right"
+)
 PROBE_FAILURE_REASONS = frozenset(
     {
         "selector missing or not observable",
@@ -1699,9 +2028,14 @@ PROBE_FAILURE_REASONS = frozenset(
         "viewport screenshot failed",
         "CDP hover failed",
         "affected selector missing or not observable",
+        AFFECTED_RENDERED_ONLY_WHILE_HOVERED,
         "region rect lies outside the viewport",
         "page does not scroll",
         "region is observable at fewer than two scroll positions",
+        # The opener walk left the page and history back restored it. The
+        # region itself was never measured, so this is unproven work, not
+        # measured absence — it must never reach RESOLVED_ABSENCE_REASONS.
+        "opener control navigated instead of revealing",
     }
 )
 
@@ -1715,6 +2049,41 @@ def _is_probe_failure(reason: str) -> bool:
         or reason.startswith("scroll is virtualised by")
         or reason == "selector matches no elements"
     )
+
+
+# The opposite of a probe failure: the browser answered the question and the
+# answer is that this candidate carries no runtime motion. A hovered activation
+# that resolves to the value it already shows in the only state where it is
+# reachable is not an unproven region — keeping it as one would leave the
+# inventory permanently unresolvable. The skip row in the summary remains the
+# audit trail.
+#
+# Absence of a rule's DESCENDANT target is never absence of the ACTIVATION on
+# its own: `.nav__link:hover .en` with no `.en` rendered says nothing about
+# `.nav__link:hover{font-weight:600}` beside it. The activation is hovered in
+# its own right, and only "descendant absent AND activation unchanged" retires.
+#
+# The scroll ladder's "no observable change" is deliberately NOT here. The
+# ladder compares only rungs where the element is in view, each taken after
+# it has stopped changing, so a one-shot reveal that fires on entering the
+# viewport has already completed at the baseline rung and reads as "nothing
+# moved". That negative is not evidence of absence — retiring on it would ship
+# a clone without the reveal — and no reference run has produced the row, so
+# it stays an ordinary skip the reference gate treats as unproven.
+RESOLVED_ABSENCE_MARKER = "absence-measured"
+AFFECTED_ABSENT_AND_ACTIVATION_UNCHANGED = (
+    "affected selector not present in document and hover produced no observable change"
+)
+RESOLVED_ABSENCE_REASONS = frozenset(
+    {
+        AFFECTED_ABSENT_AND_ACTIVATION_UNCHANGED,
+        "hover produced no observable change",
+    }
+)
+
+
+def _is_resolved_absence(reason: str) -> bool:
+    return reason in RESOLVED_ABSENCE_REASONS
 
 
 def _probe_failed(skipped: list[dict[str, Any]]) -> bool:
@@ -1907,7 +2276,13 @@ def _promote_transition_spec(
         }
         if not is_scroll:
             affected_target = hover_rule_affected_targets.get(_hover_activation(item["selector"]))
-            if affected_target:
+            absent_target = observation.get("affectedTargetAbsent")
+            if isinstance(absent_target, str) and absent_target:
+                # The rule's descendant was rendered nowhere; the measured
+                # delta is the activation's own and must not be claimed for a
+                # target the implementation cannot be checked against.
+                generated_transition["affectedTargetAbsent"] = absent_target
+            elif affected_target:
                 generated_transition["affectedTarget"] = affected_target
         transitions.append(generated_transition)
 

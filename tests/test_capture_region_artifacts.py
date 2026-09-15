@@ -99,9 +99,21 @@ elif command == "eval":
         print(json.dumps({"success": True, "data": {"origin": origin, "result": {"found": True, "maxScroll": 1000}}}))
         sys.exit(0)
     found = ".missing" not in script
+    matches = 1 if found else 0
+    if os.environ.get("FAKE_AFFECTED_OUTSIDE") == "1" and "activation.contains(" in script:
+        # The affected selector is rendered in the document, but not inside
+        # the activated region: the observation target cannot be pinned.
+        found = False
+        matches = 1
+    if os.environ.get("FAKE_DESCENDANT_ON_HOVER") == "1" and ".menu" in script:
+        # The descendant is mounted only while the activation is hovered (a
+        # hover-rendered menu): absent at idle, present after the hover.
+        found = bool(state.get(session, False))
+        matches = 1 if found else 0
     result = {
         "found": found,
-        "matches": 1 if found else 0,
+        "activationFound": True,
+        "matches": matches,
         "x": 10,
         "y": (
             150
@@ -136,7 +148,11 @@ elif command == "eval":
             result.update({
                 "styles": {
                     "transform": "matrix(1.1, 0, 0, 1.1, 0, 0)" if active else "none",
-                    "boxShadow": "rgba(0, 0, 0, 0.07) 0px 4px 12px 0px" if scrolled >= 100 else "none",
+                    "boxShadow": (
+                        "rgba(0, 0, 0, 0.07) 0px 4px 12px 0px"
+                        if scrolled >= 100 and os.environ.get("FAKE_NO_CHANGE") != "1"
+                        else "none"
+                    ),
                     "opacity": str(round(scrolled / 1000, 2)) if os.environ.get("FAKE_SCROLL_MODE") == "scrubbed" else "1",
                 },
                 "transitionProperty": "transform",
@@ -222,6 +238,8 @@ def _run(
     delayed_scroll_drift: bool = False,
     no_change: bool = False,
     descendant_style: bool = False,
+    affected_outside: bool = False,
+    descendant_on_hover: bool = False,
     prior_artifacts: bool = False,
     timeout: int = 20,
 ) -> tuple[subprocess.CompletedProcess[str], Path, list[list[str]]]:
@@ -292,6 +310,10 @@ def _run(
         env["FAKE_NO_CHANGE"] = "1"
     if descendant_style:
         env["FAKE_DESCENDANT_STYLE"] = "1"
+    if affected_outside:
+        env["FAKE_AFFECTED_OUTSIDE"] = "1"
+    if descendant_on_hover:
+        env["FAKE_DESCENDANT_ON_HOVER"] = "1"
     args = [
         sys.executable,
         str(SCRIPT),
@@ -1654,3 +1676,307 @@ def test_reused_bridge_does_not_repeat_splash_wait(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert calls[0][2] == "mouse"
     assert not any(call[2:] == ["wait", "8500"] for call in calls)
+
+
+def test_opener_navigation_is_a_probe_failure_not_measured_absence() -> None:
+    """An opener that leaves the page proves nothing about the region.
+
+    The escape used to fold into the generic "none are hoverable" skip, which
+    reads as a probe failure but hides the cause; worse, any reason that ever
+    reached RESOLVED_ABSENCE_REASONS would retire the region from regions.json
+    on the strength of a measurement that never happened.
+    """
+    module = _load_capture_module()
+    reason = "opener control navigated instead of revealing"
+    assert module._is_probe_failure(reason) is True
+    assert module._is_resolved_absence(reason) is False
+    assert reason not in module.RESOLVED_ABSENCE_REASONS
+
+
+def test_navigating_opener_walks_history_back_and_reports_restoration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walk must put the document back before the next region is probed."""
+    module = _load_capture_module()
+    calls: list[tuple[str, ...]] = []
+    urls = iter(["https://ref.test/", "https://ref.test/search", "https://ref.test/"])
+
+    def fake_eval(session: str, javascript: str) -> dict[str, object]:
+        if "location.href" in javascript:
+            return {"found": True, "url": next(urls)}
+        if "openers" in javascript or "controls" in javascript:
+            return {"openers": [], "controls": [{"name": "c0", "mode": "click", "path": "button"}]}
+        return {"found": False, "matches": 1}
+
+    def fake_run(session: str, *args: str) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module, "_eval", fake_eval)
+    monkeypatch.setattr(module, "_run", fake_run)
+
+    resolved, opener = module._open_then_resolve("s", '".t"', "m", 0)
+
+    assert resolved["navigated"] is True
+    assert resolved["restored"] is True
+    assert opener is None
+    assert ("back",) in calls
+
+
+def test_absent_descendant_target_falls_back_to_observing_the_activation(
+    tmp_path: Path,
+) -> None:
+    """A rule's absent descendant retires the descendant, not the activation.
+
+    navercorp.com/tech/innovation ships `.header .nav__link:hover .en` next to
+    `.header .nav__link:hover{font-weight:600}`; `.en` is not rendered, so the
+    prober used to skip the whole activation as measured absence and the real,
+    visible hover on `.nav__link` went unverified while the gate stayed green.
+    """
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "nav-link", "triggerType": "hover", "selector": ".nav-link"}],
+        hover_css_rules={
+            "rules": [
+                {
+                    "selector": ".nav-link:hover .missing",
+                    "activation": ".nav-link",
+                    "affected": ".nav-link .missing",
+                }
+            ]
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads((ref_dir / "regions.json").read_text())
+    assert [region["name"] for region in payload["regions"]] == ["nav-link"]
+    assert sorted(payload["regions"][0]["artifacts"]) == ["active", "idle"]
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["skipped"] == []
+    assert summary["counts"]["captured"] == 1
+    observation = summary["captured"][0]["observation"]
+    assert observation["changedProperties"] == ["transform"]
+    # The delta belongs to the activation: the spec must not attribute it to a
+    # descendant that is not in the document.
+    assert observation["affectedTargetAbsent"] == ".nav-link .missing"
+    spec = json.loads((ref_dir / "transition-spec.json").read_text())
+    transition = spec["transitions"][0]
+    assert transition["target"] == ".nav-link"
+    assert "affectedTarget" not in transition
+    assert transition["affectedTargetAbsent"] == ".nav-link .missing"
+
+
+def test_absent_descendant_with_unchanged_activation_is_still_retired(
+    tmp_path: Path,
+) -> None:
+    """Falling back must not turn a genuine absence into a permanent blocker.
+
+    When the descendant is not rendered AND the activation itself shows no
+    hover delta, the browser has answered: the candidate is retired from
+    regions.json and its audit row is tagged as measured absence.
+    """
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "card", "triggerType": "hover", "selector": ".card"}],
+        hover_css_rules={
+            "rules": [
+                {
+                    "selector": ".card:hover .missing",
+                    "activation": ".card",
+                    "affected": ".card .missing",
+                }
+            ]
+        },
+        no_change=True,
+    )
+
+    payload = json.loads((ref_dir / "regions.json").read_text())
+    assert payload["regions"] == []
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["captured"] == []
+    assert len(summary["skipped"]) == 1
+    row = summary["skipped"][0]
+    assert row["region"] == "card"
+    assert row["resolution"] == "absence-measured"
+    assert "not present in document" in row["reason"]
+    assert "no observable change" in row["reason"]
+    assert proc.returncode != 0
+
+
+def test_scroll_without_observable_change_is_not_retired_as_measured_absence(
+    tmp_path: Path,
+) -> None:
+    """A scroll ladder that saw nothing move has not proven the region absent.
+
+    No reference run has produced this row, and a scroll ladder samples only a
+    handful of rungs, so its negative is not corroborated the way a hover's is.
+    The skip row must stay unmarked so the reference gate treats it as unproven
+    rather than as evidence.
+    """
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "banner", "triggerType": "scroll", "selector": ".banner"}],
+        no_change=True,
+    )
+
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["captured"] == []
+    assert [row["reason"] for row in summary["skipped"]] == [
+        "scroll produced no observable change"
+    ]
+    assert "resolution" not in summary["skipped"][0]
+    assert proc.returncode != 0
+
+
+def test_real_spec_dispatch_only_region_survives_a_measured_absence(
+    tmp_path: Path,
+) -> None:
+    """A CSS-hover negative does not discharge a JS-dispatched obligation.
+
+    `dispatchOnly` means the spec says the transition fires from script, not
+    from `:hover`; hovering it and seeing no CSS delta measures the wrong
+    thing. Under an authored spec the region stays an unsupported obligation
+    exactly as it does for every other failed capture.
+    """
+    hover = {
+        "name": "authored-hover",
+        "triggerType": "hover",
+        "selector": ".button",
+        "dispatchOnly": True,
+    }
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [hover],
+        transition_spec={
+            "source": "agent-authored",
+            "placeholder": False,
+            "transitions": [],
+        },
+        no_change=True,
+    )
+
+    assert proc.returncode != 0
+    payload = json.loads((ref_dir / "regions.json").read_text())
+    assert payload["regions"] == [hover]
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["unsupported"] == [{"region": "authored-hover", "triggerType": "hover"}]
+    assert [row["reason"] for row in summary["skipped"]] == [
+        "hover produced no observable change"
+    ]
+    assert "resolution" not in summary["skipped"][0]
+
+
+def test_absent_activation_is_not_instantiated_before_its_descendant_is_consulted(
+    tmp_path: Path,
+) -> None:
+    """An activation that is not in the document is unproven, not retired.
+
+    The descendant question never arises: the region's own selector matching
+    nothing is recorded as `notInstantiated` and the candidate stays in
+    regions.json for a corrected re-run, even though a hover rule names an
+    absent descendant under it.
+    """
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "gone", "triggerType": "hover", "selector": ".missing"}],
+        hover_css_rules={
+            "rules": [
+                {
+                    "selector": ".missing:hover .missing-child",
+                    "activation": ".missing",
+                    "affected": ".missing .missing-child",
+                }
+            ]
+        },
+    )
+
+    assert proc.returncode != 0
+    payload = json.loads((ref_dir / "regions.json").read_text())
+    assert [region["selector"] for region in payload["regions"]] == [".missing"]
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["captured"] == []
+    assert summary["skipped"] == []
+    assert [row["reason"] for row in summary["notInstantiated"]] == [
+        "selector matches no elements"
+    ]
+    assert "resolution" not in summary["notInstantiated"][0]
+    assert summary["status"] == "fail"
+
+
+def test_descendant_rendered_outside_the_activation_is_a_probe_failure(
+    tmp_path: Path,
+) -> None:
+    """Rendered elsewhere is not rendered nowhere.
+
+    When the affected selector matches somewhere in the document but not inside
+    this activation, the observation target could not be pinned. That is a
+    failed measurement: the activation is not hovered in its own right, the
+    region is neither captured nor retired, and it stays in regions.json.
+    """
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "card", "triggerType": "hover", "selector": ".card"}],
+        hover_css_rules={
+            "rules": [
+                {
+                    "selector": ".card:hover .title",
+                    "activation": ".card",
+                    "affected": ".card .title",
+                }
+            ]
+        },
+        affected_outside=True,
+    )
+
+    assert proc.returncode != 0
+    payload = json.loads((ref_dir / "regions.json").read_text())
+    assert [region["name"] for region in payload["regions"]] == ["card"]
+    assert "artifacts" not in payload["regions"][0]
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["captured"] == []
+    assert [row["reason"] for row in summary["skipped"]] == [
+        "affected selector missing or not observable"
+    ]
+    assert "resolution" not in summary["skipped"][0]
+
+
+def test_descendant_rendered_only_on_hover_is_not_retired_as_measured_absence(
+    tmp_path: Path,
+) -> None:
+    """Absent at idle is not absent: the descendant must be re-queried hovered.
+
+    A menu that is rendered only while its opener is hovered, and positioned
+    outside the opener's box, matches nothing at idle and leaves the opener's
+    own crop and computed style unchanged. Retiring that as "descendant absent
+    AND activation unchanged" ships a clone without the menu. The bridge must
+    ask again after the hover and, on finding the descendant, keep the region
+    as an unproven candidate instead of tagging it `absence-measured`.
+    """
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "card", "triggerType": "hover", "selector": ".card"}],
+        hover_css_rules={
+            "rules": [
+                {
+                    "selector": ".card:hover .menu",
+                    "activation": ".card",
+                    "affected": ".card .menu",
+                }
+            ]
+        },
+        descendant_on_hover=True,
+        no_change=True,
+    )
+
+    assert proc.returncode != 0
+    payload = json.loads((ref_dir / "regions.json").read_text())
+    assert [region["name"] for region in payload["regions"]] == ["card"]
+    assert "artifacts" not in payload["regions"][0]
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["captured"] == []
+    assert len(summary["skipped"]) == 1
+    row = summary["skipped"][0]
+    assert row["region"] == "card"
+    assert "resolution" not in row
+    assert "not present in document" not in row["reason"]
+    assert "hovered" in row["reason"]

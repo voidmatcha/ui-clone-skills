@@ -157,6 +157,9 @@ def test_stop_hook_blocks_tampered_canonical_pin(tmp_path: Path) -> None:
     impl.mkdir()
     state = PipelineState.load(ref)
     state.impl_root = str(impl)
+    # Post-generation: the verify stamp is only enforced once pipeline
+    # state says Step 7 ran, not merely because impl/ exists.
+    state.current_gate = "post-implement"
     state.save(ref)
     _write_canonical_stamp(ref, pin="0" * 64)  # wrong pin
     reason = _enforce_verify_stamp(ref)
@@ -172,6 +175,9 @@ def test_stop_hook_accepts_matching_canonical_pin(tmp_path: Path) -> None:
     impl.mkdir()
     state = PipelineState.load(ref)
     state.impl_root = str(impl)
+    # Post-generation: the verify stamp is only enforced once pipeline
+    # state says Step 7 ran, not merely because impl/ exists.
+    state.current_gate = "post-implement"
     state.save(ref)
     pin = hashlib.sha256(RESULT.encode("utf-8")).hexdigest()
     _write_canonical_stamp(ref, pin=pin)
@@ -202,6 +208,9 @@ def test_mutated_motion_evidence_invalidates_canonical_and_stop_stamp(
     impl.mkdir()
     state = PipelineState.load(ref)
     state.impl_root = str(impl)
+    # Post-generation: the verify stamp is only enforced once pipeline
+    # state says Step 7 ran, not merely because impl/ exists.
+    state.current_gate = "post-implement"
     state.save(ref)
     spec = ref / "transition-spec.json"
     fires = ref / "transition-fires.json"
@@ -301,6 +310,9 @@ def test_canonical_stamp_problem_rejects_impl_changed_after_stamp(tmp_path: Path
     app.write_text("export default function App() { return null }\n", encoding="utf-8")
     state = PipelineState.load(ref)
     state.impl_root = str(impl)
+    # Post-generation: the verify stamp is only enforced once pipeline
+    # state says Step 7 ran, not merely because impl/ exists.
+    state.current_gate = "post-implement"
     state.save(ref)
     pin = hashlib.sha256(RESULT.encode("utf-8")).hexdigest()
     _write_canonical_stamp(ref, pin=pin)

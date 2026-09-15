@@ -17,6 +17,8 @@ import pytest
 
 from ui_clone.hooks import _common
 
+from ._helpers import _set_post_implement_state
+
 
 def test_run_gate_skip_is_loud_and_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*_a: object, **_k: object) -> object:
@@ -149,6 +151,9 @@ def _ref_with_impl(tmp_path: Path) -> Path:
     impl = tmp_path / "impl"
     (impl / "src").mkdir(parents=True)
     (ref_dir / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+    # Closeout stamps are only enforced once pipeline state says Step 7 ran;
+    # an impl dir alone is also produced by pre-generation asset download.
+    _set_post_implement_state(ref_dir)
     return ref_dir
 
 

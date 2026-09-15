@@ -763,3 +763,133 @@ def test_gate_reference_warns_with_capture_error(tmp_path: Path) -> None:
     assert "scroll-video:record-stop" in warnings[0].message
     assert "scroll-video/ref/full-scroll.webm" in warnings[0].message
     assert "No recording in progress" in warnings[0].message
+
+
+def _live_capture_fixture_with_skip(
+    ref: Path, *, skip_row: dict[str, object], counts: dict[str, object]
+) -> None:
+    """Live-capture regions.json plus a passing summary carrying one skip row."""
+    _phase1(ref)
+    clip_dir = ref / "clip" / "ref"
+    clip_dir.mkdir(parents=True)
+    idle = "clip/ref/00-button-idle.png"
+    active = "clip/ref/00-button-active.png"
+    (ref / idle).write_bytes(b"\x89PNG\r\n\x1a\nidle")
+    (ref / active).write_bytes(b"\x89PNG\r\n\x1a\nactive")
+    artifacts = {"idle": idle, "active": active}
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"signals": {"hasHover": True}}),
+        encoding="utf-8",
+    )
+    (ref / "regions.json").write_text(
+        json.dumps(
+            {
+                "placeholder": False,
+                "detectionRan": True,
+                "source": "scripts/extract/capture-region-artifacts.py",
+                "liveCaptureBacked": True,
+                "derivedFrom": ["capture-region-artifacts-summary.json"],
+                "regions": [
+                    {
+                        "name": "button",
+                        "triggerType": "hover",
+                        "selector": ".button",
+                        "artifacts": artifacts,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "capture-region-artifacts-summary.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "counts": counts,
+                "captured": [
+                    {
+                        "region": "button",
+                        "triggerType": "hover",
+                        "selector": ".button",
+                        "artifacts": artifacts,
+                        "observation": {
+                            "changedProperties": ["transform"],
+                            "from": {"transform": "none"},
+                            "to": {"transform": "matrix(1.1, 0, 0, 1.1, 0, 0)"},
+                            "pixelCorroborated": True,
+                        },
+                    }
+                ],
+                "skipped": [skip_row],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "transitions" / "ref" / "scroll.webm").unlink()
+
+
+_ABSENCE_SKIP: dict[str, object] = {
+    "region": "locale-only-link",
+    "triggerType": "hover",
+    "selector": ".locale-only-link",
+    "reason": "affected selector not present in document",
+    "resolution": "absence-measured",
+}
+
+
+def test_gate_reference_accepts_measured_absence_skip_for_retired_region(
+    tmp_path: Path,
+) -> None:
+    """A browser-answered skip whose region was retired is evidence, not a gap."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _live_capture_fixture_with_skip(
+        ref,
+        skip_row=dict(_ABSENCE_SKIP),
+        counts={"captured": 1, "skipped": 1, "unsupported": 0, "notInstantiated": 0},
+    )
+
+    failures = [r for r in Gate(ref).gate_reference() if r.status == "fail"]
+
+    assert failures == [], f"Measured-absence skip must not fail: {failures}"
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        {"captured": 1, "skipped": 0},
+        {"captured": 1, "skipped": 2},
+        {"captured": 1},
+        {"captured": 1, "skipped": "1"},
+        {"captured": 1, "skipped": True},
+    ],
+    ids=["zero", "over", "missing", "string", "bool"],
+)
+def test_gate_reference_rejects_measured_absence_skip_when_counts_disagree(
+    tmp_path: Path, counts: dict[str, object]
+) -> None:
+    """The carve-out must not bypass the counts/rows consistency check."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _live_capture_fixture_with_skip(ref, skip_row=dict(_ABSENCE_SKIP), counts=counts)
+
+    failures = [r for r in Gate(ref).gate_reference() if r.status == "fail"]
+
+    assert failures, "skip count disagreeing with the rows must fail the reference gate"
+
+
+def test_gate_reference_rejects_measured_absence_skip_for_still_claimed_region(
+    tmp_path: Path,
+) -> None:
+    """A tagged skip whose region is still in regions.json is unproven work."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _live_capture_fixture_with_skip(
+        ref,
+        skip_row={**_ABSENCE_SKIP, "region": "button"},
+        counts={"captured": 1, "skipped": 1},
+    )
+
+    failures = [r for r in Gate(ref).gate_reference() if r.status == "fail"]
+
+    assert failures, "absence skip for a claimed region must fail the reference gate"

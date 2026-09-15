@@ -190,6 +190,11 @@ def splash_lifecycle_measure(d: dict) -> tuple[bool, str]:
             "pass but lifecycle samples are empty "
             f"(ref={len(ref_samples)} impl={len(impl_samples)})"
         )
+    # A pass here is a mount/exit proof on both sides, and nothing else. The
+    # check never passes a reference its probe saw no overlay on
+    # (`ref-overlay-absent` is a FAIL that names the reference); a pass that
+    # claims otherwise, whatever its `reason` says and whatever
+    # states/splash/contract.json certifies, does not roll up.
     for side in ("ref", "impl"):
         analysis = d.get(side) or {}
         if not analysis.get("mounted") or not analysis.get("exited"):

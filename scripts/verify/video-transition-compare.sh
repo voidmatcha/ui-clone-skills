@@ -1812,16 +1812,38 @@ PY
   # 0.87 — bounds from the codex design review). A genuinely wrong impl
   # scores far below the band and never reaches this pass; missing frames
   # and sub-band scores keep their FAIL.
+  # Calibration now runs on ANY failing sweep, not only borderline ones. The
+  # borderline gate was backwards: it skipped calibration precisely when the
+  # reference was most unstable, and a large deviation was assumed to be a
+  # genuine defect. Measured on navercorp.com/tech/innovation, capturing the
+  # REFERENCE twice at the same scroll fractions gives ref-vs-ref SSIM 0.640 at
+  # pos-010 while impl-vs-impl at the same position is 1.000000 — the impl
+  # matched the ref (0.797) BETTER than the ref matched itself, and the failing
+  # position set moved between runs ({010,014} then {014,018,019}). Calling
+  # that an implementation defect sends the agent editing component source that
+  # is not wrong.
+  #
+  # A position whose ref-vs-ref score is itself below the threshold carries no
+  # information about the impl. It still FAILS — a silent pass here is the
+  # vacuous-pass pattern this suite exists to prevent — but it is labelled
+  # `ref-unstable` so the reason is the harness, not the clone.
   if [[ "$POSITION_EXIT" -eq 1 && -z "$MASK_MISSING" ]]; then
-    BORDERLINE_ONLY=$(awk -F'\t' -v t="$SSIM_THRESHOLD" '
-      $3 == "missing-impl-frame" { bad = 1 }
-      $3 == "fail" { if ($2 + 0 < t - 0.02) bad = 1 }
-      END { print bad ? "no" : "yes" }' "$OUT_DIR/diff-frames/position-ssim.tsv")
-    if [[ "$BORDERLINE_ONLY" == "yes" ]]; then
-      echo -e "${BOLD}▸ Borderline-only failures — calibrating ref-vs-ref noise floor...${NC}"
+    # A missing impl frame is not a noisy score — the implementation rendered
+    # NOTHING at that position, and no ref-vs-ref measurement can speak to it.
+    # The old BORDERLINE_ONLY awk disqualified the whole calibration on such a
+    # row; dropping that gate to always calibrate would have let a sweep whose
+    # only other failures are within the noise floor reach RECAL_FAIL == 0 and
+    # zero out POSITION_FAIL, turning a missing frame into a PASS. Calibration
+    # still runs (its per-row notes are useful), but it may never release.
+    RECAL_MISSING_FRAME=$(awk -F'\t' '
+      $3 == "missing-impl-frame" { found = 1 }
+      END { print found ? "yes" : "no" }' "$OUT_DIR/diff-frames/position-ssim.tsv")
+    if true; then
+      echo -e "${BOLD}▸ Failing positions — calibrating ref-vs-ref noise floor...${NC}"
       capture_scroll_positions "${SESSION}-refcal" "$ORIG_URL" "$OUT_DIR/refcal-frames" refcal
       agent-browser --session "${SESSION}-refcal" close 2>/dev/null
       RECAL_FAIL=0
+      RECAL_UNSTABLE=0
       RECAL_NOTES=""
       while IFS=$'\t' read -r name ssim verdict; do
         [[ "$verdict" != "fail" ]] && continue
@@ -1832,14 +1854,27 @@ PY
         [[ -z "$REFREF" ]] && REFREF="1"
         if noise_floor_allows "$ssim" "$REFREF" "$SSIM_THRESHOLD"; then
           RECAL_NOTES="${RECAL_NOTES}| ${name} | ${ssim} | ✅ pass-by-noise-floor (refref=${REFREF}) |\n"
+        elif awk -v r="$REFREF" -v t="$SSIM_THRESHOLD" 'BEGIN { exit !(r + 0 < t + 0) }'; then
+          # The reference does not reproduce itself here, so this position
+          # measures the capture environment, not the implementation. Still a
+          # FAIL (never whitelist on an unstable baseline), but named.
+          RECAL_FAIL=$((RECAL_FAIL + 1))
+          RECAL_UNSTABLE=$((RECAL_UNSTABLE + 1))
+          RECAL_NOTES="${RECAL_NOTES}| ${name} | ${ssim} | ❌ ref-unstable — the REFERENCE scores ${REFREF} against a second capture of itself (below the ${SSIM_THRESHOLD} threshold), so this position cannot judge the impl; fix capture stability, not component source |\n"
         else
           RECAL_FAIL=$((RECAL_FAIL + 1))
           RECAL_NOTES="${RECAL_NOTES}| ${name} | ${ssim} | ❌ below noise floor (refref=${REFREF}) |\n"
         fi
       done < "$OUT_DIR/diff-frames/position-ssim.tsv"
       echo -e "$RECAL_NOTES"
-      if [[ "$RECAL_FAIL" -eq 0 ]]; then
-        echo "  ✓ all borderline positions within the measured ref-vs-ref noise floor"
+      if [[ "$RECAL_UNSTABLE" -gt 0 ]]; then
+        echo "  ⚠️  ${RECAL_UNSTABLE} position(s) have an unstable reference (ref-vs-ref below threshold) — those FAILs are harness noise, not clone defects"
+      fi
+      if [[ "$RECAL_MISSING_FRAME" == "yes" ]]; then
+        echo "  ⚠️  a position has no impl frame at all — calibration cannot release this sweep"
+        POSITION_RESULTS="${POSITION_RESULTS}${RECAL_NOTES}"
+      elif [[ "$RECAL_FAIL" -eq 0 ]]; then
+        echo "  ✓ all failing positions within the measured ref-vs-ref noise floor"
         POSITION_PASS=$((POSITION_PASS + POSITION_FAIL))
         POSITION_FAIL=0
         POSITION_RESULTS="${POSITION_RESULTS}${RECAL_NOTES}"

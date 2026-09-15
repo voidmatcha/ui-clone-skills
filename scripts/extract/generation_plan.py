@@ -17,6 +17,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
+# Bare-script invocation (no PYTHONPATH) — put the repo root on the path so the
+# splash absence rule has ONE definition shared with state-structure-spec.py
+# and verification-plan.sh.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from ui_clone.splash_contract import is_authoritative_absence  # noqa: E402
+
 ref_dir = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
 
@@ -1854,28 +1863,10 @@ def _intro_from_page_load_splash_transition(spec):
 
 
 def _splash_contract_blocks_fallback(contract):
-    if not isinstance(contract, dict):
-        return False
-    if contract.get("schemaVersion") is None:
-        return False
-    if contract.get("detected") is not False:
-        return False
-    if contract.get("captureMode") == "reuse-session":
-        return False
-    overlay = contract.get("overlay")
-    capture = contract.get("capture")
-    has_overlay_metadata = isinstance(overlay, dict) and "everVisible" in overlay
-    has_capture_metadata = isinstance(capture, dict)
-    if not has_overlay_metadata and not has_capture_metadata:
-        return True
-    if isinstance(capture, dict) and capture.get("authoritativeNegative") is False:
-        return False
-    if isinstance(capture, dict) and capture.get("authoritativeNegative") is True:
-        return True
-    ever_visible = bool(overlay.get("everVisible")) if isinstance(overlay, dict) else False
-    state_count = capture.get("stateCount") if isinstance(capture, dict) else None
-    timed_out = bool(capture.get("timedOut")) if isinstance(capture, dict) else False
-    return not ever_visible and state_count == 1 and not timed_out
+    # A transition-spec `page-load` trigger is a generic entry reveal, not a
+    # splash-specific claim, so a certified absence may stand in for it. It
+    # never overrides `detected`/`hasSplash`/`requiresOverlay` above.
+    return is_authoritative_absence(contract)
 
 
 _init_intro_required = (

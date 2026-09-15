@@ -142,6 +142,13 @@ $ cat tmp/ref/<c>/transition-spec.json
    the animated descendant selector in `affectedTarget`; the affected match must
    be contained by the exact activated element. Dispatch and hit testing use
    `target`, while style, timing, and tight-ROI measurement use `affectedTarget`.
+   When the bridge measured the rule's descendant as rendered nowhere in the
+   document (at idle AND while hovered) and captured the activation's own
+   delta instead, the entry carries `affectedTargetAbsent` (the unrendered
+   descendant selector) in place of `affectedTarget`; `hover-state-compare`
+   then measures `target` alone and never re-derives that descendant from
+   `hover-css-rules.json`. A descendant rendered only while hovered is neither
+   — the region stays an unproven candidate.
    Legacy `animation.measurement: target-and-descendants` remains readable, but
    new evidence should use the explicit selector split. An ancestor without an
    affected measurement scope is not motion evidence

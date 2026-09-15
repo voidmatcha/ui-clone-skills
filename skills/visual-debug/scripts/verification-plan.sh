@@ -482,49 +482,63 @@ fi
 # some GSAP splash signatures never set hasSplash:true, so no splash check
 # was scheduled. Fall-through to transition-spec entries with page-load
 # trigger keeps a third signal path.
+#
+# What states/splash/contract.json may override. Its absence certificate
+# (ui_clone.splash_contract) is derived from the Phase A samples: overlay
+# probe, covering-element lifecycle, root-class removal, structural DOM shift.
+# It therefore speaks for signals that come from the same capture or that mean
+# only "something animates at load": `polls > 1` (any hash change, which entry
+# choreography produces on a page with no splash) and transition-spec
+# `page-load` triggers (generic entry reveals). It does NOT override detectors
+# that make a splash-specific claim from sources the capture cannot read —
+# `hasPreloader`/`hasSplash` from bundle analysis and `preloaderRemoved`/
+# `splashElements` from the dual-snapshot DOM diff can see a clip-path curtain
+# or a body-background preloader that changes no bounding box, class, or DOM
+# length. Those detectors are deliberately biased toward false positives
+# (splash-extraction.md), and a dispatch they cause is NOT cleared by the
+# certificate: splash-lifecycle-check.sh reads it only to annotate its
+# `ref-overlay-absent` FAIL with which reference measurement it is about
+# (`refAbsence.guidance`). Its probe and the Phase A sampler both enumerate
+# elements and share the same blind spots (pseudo-element curtains, body
+# backgrounds over opacity-gated content), so their two negatives are one
+# measurement, not corroboration. A wrongly vetoed check is a silent miss; a
+# wrongly dispatched one costs a run that fails visibly and names the reference.
 DOM_STATE_DIFF="$REF_DIR/dom-state-diff.json"
 SPLASH_CONTRACT="$REF_DIR/states/splash/contract.json"
 SPLASH_SUMMARY="$REF_DIR/states/splash/summary.json"
 HAS_SPLASH="false"
 SPLASH_CONTRACT_SIGNAL="fallthrough"
 if [ -f "$SPLASH_CONTRACT" ]; then
-  SPLASH_CONTRACT_SIGNAL=$(SPLASH_CONTRACT_PATH="$SPLASH_CONTRACT" "$PYTHON_BIN" -c "
-import json, os
+  # The certificate is read, never re-derived, and the reading lives in
+  # ui_clone.splash_contract so this script, state-structure-spec.py and
+  # generation_plan.py cannot drift apart. The repo root goes AHEAD of
+  # sys.path[0] (the working directory, for `-c`): a `ui_clone/` package in
+  # the caller's cwd must not be able to answer "false" here, which would veto
+  # the polls>1 and page-load dispatches of the splash checks.
+  SPLASH_CONTRACT_SIGNAL=$("$PYTHON_BIN" -c '
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from ui_clone.splash_contract import is_authoritative_absence
 try:
-    data = json.loads(open(os.environ['SPLASH_CONTRACT_PATH']).read())
-    if isinstance(data, dict) and data.get('detected') is True:
-        print('true')
-    elif isinstance(data, dict) and data.get('schemaVersion') is not None and data.get('detected') is False:
-        if data.get('captureMode') == 'reuse-session':
-            print('fallthrough')
-        else:
-            overlay = data.get('overlay') if isinstance(data.get('overlay'), dict) else None
-            capture = data.get('capture') if isinstance(data.get('capture'), dict) else None
-            has_overlay_metadata = overlay is not None and 'everVisible' in overlay
-            has_capture_metadata = capture is not None
-            if not has_overlay_metadata and not has_capture_metadata:
-                print('false')
-            elif capture is not None and capture.get('authoritativeNegative') is False:
-                print('fallthrough')
-            elif capture is not None and capture.get('authoritativeNegative') is True:
-                print('false')
-            else:
-                ever_visible = bool(overlay.get('everVisible')) if overlay is not None else False
-                state_count = capture.get('stateCount') if capture is not None else None
-                timed_out = bool(capture.get('timedOut')) if capture is not None else False
-                print('false' if (not ever_visible and state_count == 1 and not timed_out) else 'fallthrough')
+    data = json.loads(open(sys.argv[2]).read())
+    if isinstance(data, dict) and data.get("detected") is True:
+        print("true")
+    elif is_authoritative_absence(data):
+        print("false")
     else:
-        print('fallthrough')
+        print("fallthrough")
 except Exception:
-    print('fallthrough')
-" 2>/dev/null || echo fallthrough)
+    print("fallthrough")
+' "$ROOT_DIR" "$SPLASH_CONTRACT" 2>/dev/null || echo fallthrough)
   if [ "$SPLASH_CONTRACT_SIGNAL" = "true" ] || [ "$SPLASH_CONTRACT_SIGNAL" = "false" ]; then
     HAS_SPLASH="$SPLASH_CONTRACT_SIGNAL"
   fi
 fi
-if [ "$SPLASH_CONTRACT_SIGNAL" != "false" ] && { contains_pattern "$INTERACTIONS" '"hasPreloader":\s*true' \
+if contains_pattern "$INTERACTIONS" '"hasPreloader":\s*true' \
    || contains_pattern "$INTERACTIONS" '"hasSplash":\s*true' \
-   || contains_pattern "$DOM_STATE_DIFF" '"(dom_changes|splashElements|changes|preloaderRemoved)":\s*\[?[^][}{]'; }; then
+   || contains_pattern "$DOM_STATE_DIFF" '"(dom_changes|splashElements|changes|preloaderRemoved)":\s*\[?[^][}{]'; then
+  # Splash-specific claims from independent detectors: never vetoed by the
+  # absence certificate (see above).
   HAS_SPLASH="true"
 elif [ "$SPLASH_CONTRACT_SIGNAL" != "false" ] && [ -f "$SPLASH_SUMMARY" ]; then
   # polls > 1 = capture-states.sh recorded at least one class transition

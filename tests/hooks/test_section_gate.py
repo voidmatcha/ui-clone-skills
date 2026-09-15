@@ -13,6 +13,7 @@ from ui_clone.hooks import section_gate
 from ui_clone.hooks._common import mark_ref_session
 
 from ._helpers import (
+    _set_post_implement_state,
     make_ref_dir,
     make_search_root,
     run_hook,
@@ -73,6 +74,45 @@ class TestSectionGate:
         data = json.loads(result.stdout.strip())
         assert data.get("decision") == "block"
         return data, ref_dir
+
+    def _armed_stop(
+        self,
+        tmp_path: Path,
+        session_id: str | None = None,
+        session_crons: object = None,
+        include_session_crons: bool = True,
+        ref_dir: Path | None = None,
+        hook_host: str = "claude",
+    ) -> tuple[str, Path]:
+        """Stop with an armed one-shot: the hook reports but must NOT block.
+
+        The armed one-shot already owns resuming this ref, so blocking here
+        would re-invoke the agent for work the scheduled wake is about to do —
+        and the block makes the turn unendable, because the same message also
+        orders the turn to end. The notice goes to stderr instead.
+        """
+        if ref_dir is None:
+            search_root = make_search_root(tmp_path)
+            ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+        mark_ref_session(ref_dir, session_id or self.SESSION_ID, source="test")
+        payload: dict[str, object] = {
+            "hook_event_name": "Stop",
+            "session_id": session_id or self.SESSION_ID,
+        }
+        if include_session_crons:
+            payload["session_crons"] = session_crons
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps(payload),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_CLONE_HOOK_HOST": hook_host,
+            },
+        )
+        assert result.returncode == 0
+        assert not result.stdout.strip(), result.stdout
+        return result.stderr, ref_dir
 
     def test_no_tmp_ref_exits_0(self, tmp_path: Path) -> None:
         """No tmp/ref/ directory → exit 0."""
@@ -358,13 +398,13 @@ class TestSectionGate:
         cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
 
         if session_crons is None:
-            self._blocking_stop(
+            self._armed_stop(
                 tmp_path,
                 include_session_crons=False,
                 ref_dir=ref_dir,
             )
         else:
-            self._blocking_stop(
+            self._armed_stop(
                 tmp_path,
                 session_crons=session_crons,
                 ref_dir=ref_dir,
@@ -381,7 +421,7 @@ class TestSectionGate:
         ref_dir = self._arm_for_ref(tmp_path)
         row = self._cron_row(tmp_path)
 
-        data, _ = self._blocking_stop(
+        stderr, _ = self._armed_stop(
             tmp_path,
             session_crons=[row],
             ref_dir=ref_dir,
@@ -391,8 +431,8 @@ class TestSectionGate:
         assert receipt is not None
         assert receipt["state"] == cc.STATE_ARMED
         assert receipt["cronId"] == self.CRON_ID
-        assert "CronCreate" not in str(data["reason"])
-        assert "end the current assistant turn" in str(data["reason"])
+        assert "CronCreate" not in stderr
+        assert "End the current assistant turn" in stderr
 
     def test_exact_matching_cron_snapshot_confirms_armed_receipt(
         self, tmp_path: Path
@@ -401,7 +441,7 @@ class TestSectionGate:
         cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
         row = self._cron_row(tmp_path)
 
-        data, _ = self._blocking_stop(
+        stderr, _ = self._armed_stop(
             tmp_path,
             session_crons=[row],
             ref_dir=ref_dir,
@@ -411,8 +451,8 @@ class TestSectionGate:
         assert receipt is not None
         assert receipt["state"] == cc.STATE_ARMED
         assert receipt["cronId"] == self.CRON_ID
-        assert "duplicate continuation scheduled tasks" not in str(data["reason"])
-        assert "CronCreate" not in str(data["reason"])
+        assert "duplicate continuation scheduled tasks" not in stderr
+        assert "CronCreate" not in stderr
 
     def test_duplicate_matching_cron_snapshot_prefixes_delete_guidance(
         self, tmp_path: Path
@@ -623,15 +663,14 @@ class TestSectionGate:
         ref_dir = self._arm_for_ref(tmp_path)
         cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
 
-        data, _ = self._blocking_stop(
+        stderr, _ = self._armed_stop(
             tmp_path,
             session_crons=[self._cron_row(tmp_path)],
             ref_dir=ref_dir,
         )
 
-        reason = str(data["reason"])
-        assert "CronCreate" not in reason
-        assert "end the current assistant turn" in reason
+        assert "CronCreate" not in stderr
+        assert "End the current assistant turn" in stderr
 
     def test_unsupported_receipt_keeps_ordinary_one_nudge_gate(
         self, tmp_path: Path
@@ -665,7 +704,7 @@ class TestSectionGate:
         cc.mark_armed(tmp_path, self.SESSION_ID, self.CRON_ID)
         cc.accept_wake(tmp_path, self.SESSION_ID, str(row["prompt"]))
 
-        data, _ = self._blocking_stop(
+        stderr, _ = self._armed_stop(
             tmp_path,
             session_crons=[row],
             ref_dir=ref_dir,
@@ -675,9 +714,8 @@ class TestSectionGate:
         assert receipt is not None
         assert receipt["state"] == cc.STATE_ARMED
         assert receipt["cronId"] == self.CRON_ID
-        reason = str(data["reason"])
-        assert "CronCreate" not in reason
-        assert "end the current assistant turn" in reason
+        assert "CronCreate" not in stderr
+        assert "End the current assistant turn" in stderr
 
     def test_missing_receipt_recovers_exact_existing_one_shot_without_recreating(
         self, tmp_path: Path
@@ -686,7 +724,7 @@ class TestSectionGate:
         row = self._cron_row(tmp_path)
         cc.receipt_path(tmp_path, self.SESSION_ID).unlink()
 
-        data, _ = self._blocking_stop(
+        stderr, _ = self._armed_stop(
             tmp_path,
             session_crons=[row],
             ref_dir=ref_dir,
@@ -696,9 +734,8 @@ class TestSectionGate:
         assert receipt is not None
         assert receipt["state"] == cc.STATE_ARMED
         assert receipt["cronId"] == self.CRON_ID
-        reason = str(data["reason"])
-        assert "CronCreate" not in reason
-        assert "end the current assistant turn" in reason
+        assert "CronCreate" not in stderr
+        assert "End the current assistant turn" in stderr
 
     def test_completed_stop_refreshes_receipt_from_canonical_goal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -778,11 +815,9 @@ class TestSectionGate:
 
         spent = run_hook(self.MODULE, stdin_data=payload, env=env)
         assert spent.returncode == 0
-        assert spent.stdout.strip() == "", (
-            f"a spent budget must release without a block; got: {spent.stdout!r}"
-        )
-        assert "UNFINISHED" in spent.stderr, (
-            "releasing in silence is the stall this bound exists to prevent"
+        assert self._visible_stop_signal(spent) == "handback", (
+            "a spent budget must release without a block, but never in silence "
+            f"(stderr on exit 0 is invisible); got: {spent.stdout!r}"
         )
 
     def test_stop_hook_active_cannot_loop_unboundedly(self, tmp_path: Path) -> None:
@@ -817,7 +852,7 @@ class TestSectionGate:
             env={"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "0"},
         )
         assert result.returncode == 0
-        assert result.stdout.strip() == ""
+        assert self._visible_stop_signal(result) == "handback", result.stdout
 
     def test_stop_hook_inactive_still_blocks(self, tmp_path: Path) -> None:
         """Sanity: with stop_hook_active=false the gate still blocks normally."""
@@ -1279,6 +1314,10 @@ class TestSectionGate:
         set_active_marker(ref_dir)
         impl_dir = tmp_path / "scratch" / "owned-wip" / "impl"
         impl_dir.mkdir(parents=True)
+        # The verify stamp is only enforced once pipeline state says Step 7
+        # ran: an impl dir alone is also produced by pre-generation asset
+        # download, so make this fixture genuinely post-generation.
+        _set_post_implement_state(ref_dir)
         (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
         mark_ref_session(ref_dir, "current-session", source="test")
 
@@ -1303,6 +1342,10 @@ class TestSectionGate:
         set_active_marker(ref_dir)
         impl_dir = tmp_path / "scratch" / "legacy-wip" / "impl"
         impl_dir.mkdir(parents=True)
+        # The verify stamp is only enforced once pipeline state says Step 7
+        # ran: an impl dir alone is also produced by pre-generation asset
+        # download, so make this fixture genuinely post-generation.
+        _set_post_implement_state(ref_dir)
         (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
 
         result = run_hook(
@@ -1353,6 +1396,10 @@ class TestSectionGate:
         impl_dir = tmp_path / "scratch" / "crumbless-own-wip" / "impl"
         impl_dir.mkdir(parents=True)
         (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+        # The verify stamp is only enforced once pipeline state says Step 7
+        # ran: an impl dir alone is also produced by pre-generation asset
+        # download, so make this fixture genuinely post-generation.
+        _set_post_implement_state(ref_dir)
         # No mark_ref_session — the ref has no session crumbs at all.
 
         result = run_hook(
@@ -1365,6 +1412,217 @@ class TestSectionGate:
         data = json.loads(result.stdout.strip())
         assert data.get("decision") == "block"
         assert "verify-stamp.json" in data.get("reason", "")
+
+
+    def test_per_turn_blocks_are_also_capped(self, tmp_path: Path) -> None:
+        """A gate that blocks once per USER-VISIBLE turn must also hit the cap.
+
+        Every such stop arrives with stop_hook_active false, so the re-entrancy
+        branch could never count it and the reset branch cleared a budget that
+        was never spent. Observed in the field: a ref blocked on the
+        verify-stamp gate for dozens of consecutive turns while the attempts
+        ledger still held only a stale key from an unrelated session. The loop
+        had no exit and the user was never told how to get one.
+        """
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+
+        mark_ref_session(ref_dir, "s-1", source="test")
+        payload = json.dumps(
+            {"hook_event_name": "Stop", "stop_hook_active": False, "session_id": "s-1"}
+        )
+        env = {"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "2"}
+
+        for attempt in (1, 2):
+            result = run_hook(self.MODULE, stdin_data=payload, env=env)
+            assert '"decision": "block"' in result.stdout, (
+                f"turn {attempt} should still block while budget remains"
+            )
+
+        spent = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert self._visible_stop_signal(spent) == "handback", (
+            f"a spent budget must release without a block, visibly; got: {spent.stdout!r}"
+        )
+
+    def test_spent_budget_tells_the_user_how_to_clear_the_marker(
+        self, tmp_path: Path
+    ) -> None:
+        """The hand-back must be actionable, not just loud.
+
+        The marker that activates this gate is enforcement state, so the agent
+        is refused when it tries to remove it and the only reset the guard names
+        is deleting the whole ref dir. Name the narrow option and its cost.
+        """
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+
+        mark_ref_session(ref_dir, "s-2", source="test")
+        payload = json.dumps(
+            {"hook_event_name": "Stop", "stop_hook_active": False, "session_id": "s-2"}
+        )
+        env = {"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "0"}
+
+        spent = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert self._visible_stop_signal(spent) == "handback", spent.stdout
+        shown = json.loads(spent.stdout)["systemMessage"]
+        assert f"rm {ref_dir}/.ui-re-active" in shown, (
+            "the exit must name the exact marker path, not a placeholder"
+        )
+        assert "are NOT touched" in shown, (
+            "the user needs to know artifacts survive before running rm"
+        )
+
+    def test_separate_refs_do_not_share_a_block_budget(self, tmp_path: Path) -> None:
+        """One wedged ref must not spend another ref's allowance."""
+        search_root = make_search_root(tmp_path)
+        ref_a = make_ref_dir(search_root, "comp-a")
+        set_active_marker(ref_a)
+
+        mark_ref_session(ref_a, "s-3", source="test")
+        payload = json.dumps(
+            {"hook_event_name": "Stop", "stop_hook_active": False, "session_id": "s-3"}
+        )
+        env = {"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "1"}
+
+        assert '"decision": "block"' in run_hook(
+            self.MODULE, stdin_data=payload, env=env
+        ).stdout
+        assert (
+            self._visible_stop_signal(run_hook(self.MODULE, stdin_data=payload, env=env))
+            == "handback"
+        )
+
+        ledger = json.loads(
+            (tmp_path / "tmp" / "ref" / ".ui-re-stop-attempts.json").read_text()
+        )
+        assert all(str(ref_a) in key for key in ledger if "|" in key), (
+            f"per-ref scoping lost; ledger={ledger}"
+        )
+
+    # -- Bounded loop vs. silent release ------------------------------------
+    #
+    # Under the Stop-hook contract, stderr on exit 0 goes to the debug log
+    # only: neither the model nor the user sees it. The only channels that are
+    # actually visible are a block decision (to the model) and a systemMessage
+    # (to the user). So "hand the run back" has to arrive on one of those, or
+    # an unfinished clone stops indistinguishably from a finished one.
+
+    @staticmethod
+    def _visible_stop_signal(result: subprocess.CompletedProcess) -> str:
+        """Which visible channel a Stop result used: 'block', 'handback', or ''."""
+        out = result.stdout.strip()
+        if not out:
+            return ""
+        data = json.loads(out)
+        if data.get("decision") == "block":
+            return "block"
+        message = data.get("systemMessage")
+        if isinstance(message, str) and "UNFINISHED" in message:
+            return "handback"
+        return ""
+
+    def _unfinished_ref(self, tmp_path: Path, sid: str) -> tuple[Path, str, dict[str, str]]:
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+        mark_ref_session(ref_dir, sid, source="test")
+        payload = json.dumps(
+            {"hook_event_name": "Stop", "stop_hook_active": False, "session_id": sid}
+        )
+        env = {"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_RE_STOP_RETRY_CAP": "1"}
+        return ref_dir, payload, env
+
+    def test_unfinished_ref_never_stops_silently(self, tmp_path: Path) -> None:
+        """No number of Stops on an unfinished ref may produce a silent stop.
+
+        The loop must still be bounded (at least one hand-back happens), but
+        every single Stop has to land on a visible channel. Observed in the
+        field: a ref at current_gate=post-implement with a ledger count of 15
+        against a cap of 3 -- released a dozen times, banner never surfaced.
+        """
+        _ref_dir, payload, env = self._unfinished_ref(tmp_path, "s-silent")
+
+        signals = [
+            self._visible_stop_signal(run_hook(self.MODULE, stdin_data=payload, env=env))
+            for _ in range(6)
+        ]
+
+        assert "" not in signals, f"a Stop produced no visible signal: {signals}"
+        assert "handback" in signals, f"the loop never handed back: {signals}"
+        assert signals[0] == "block", "the first block must still block"
+
+    def test_gate_change_does_not_spend_the_previous_gate_budget(
+        self, tmp_path: Path
+    ) -> None:
+        """Consecutive means identical: a different failure starts a new budget.
+
+        Three unrelated blocks must not release the gate on a fourth failure
+        that has never been retried. The first stop fails the reference gate;
+        the pipeline then advances to post-implement, which fails for its own
+        reasons -- that block must still be a block, not a hand-back.
+        """
+        ref_dir, payload, env = self._unfinished_ref(tmp_path, "s-gate")
+
+        first = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert self._visible_stop_signal(first) == "block"
+
+        _set_post_implement_state(ref_dir)
+        second = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert self._visible_stop_signal(second) == "block", (
+            f"a new failure must get its own retry budget; got {second.stdout!r}"
+        )
+
+        third = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert self._visible_stop_signal(third) == "handback", (
+            f"the identical failure must still be bounded; got {third.stdout!r}"
+        )
+
+    def test_fail_count_drop_resets_the_block_budget(self, tmp_path: Path) -> None:
+        """Real progress on the same gate resets the streak.
+
+        Two failing sections block once; fixing one of them is progress, so the
+        remaining failure must be blocked again rather than released.
+        """
+        from ._helpers import _set_section_compare_state
+
+        ref_dir, payload, env = self._unfinished_ref(tmp_path, "s-progress")
+        _set_section_compare_state(ref_dir)
+        sections = ref_dir / "sections"
+        sections.mkdir(exist_ok=True)
+        (sections / "result.txt").write_text(
+            "| Hero | ❌ | 60% |\n| Footer | ❌ | 70% |\n", encoding="utf-8"
+        )
+
+        first = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert self._visible_stop_signal(first) == "block"
+
+        (sections / "result.txt").write_text(
+            "| Hero | ✅ | 98% |\n| Footer | ❌ | 70% |\n", encoding="utf-8"
+        )
+        second = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert self._visible_stop_signal(second) == "block", (
+            f"progress must reset the budget; got {second.stdout!r}"
+        )
+
+        third = run_hook(self.MODULE, stdin_data=payload, env=env)
+        assert self._visible_stop_signal(third) == "handback"
+
+    def test_handback_carries_the_exit_instructions_on_the_visible_channel(
+        self, tmp_path: Path
+    ) -> None:
+        """The hand-back text the user needs must be where the user can see it."""
+        ref_dir, payload, env = self._unfinished_ref(tmp_path, "s-visible")
+        env["UI_RE_STOP_RETRY_CAP"] = "0"
+
+        spent = run_hook(self.MODULE, stdin_data=payload, env=env)
+        data = json.loads(spent.stdout.strip())
+        assert data.get("decision") != "block"
+        message = data["systemMessage"]
+        assert "UNFINISHED" in message
+        assert f"rm {ref_dir}/.ui-re-active" in message
+        assert "UI-RE Gate" in message, "the failing gate must be named"
 
 
 
@@ -2037,6 +2295,10 @@ class TestDriverSessionBypass:
         impl_dir = tmp_path / "scratch" / "loop-claude-99" / "impl"
         impl_dir.mkdir(parents=True)
         (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+        # The verify stamp is only enforced once pipeline state says Step 7
+        # ran: an impl dir alone is also produced by pre-generation asset
+        # download, so make this fixture genuinely post-generation.
+        _set_post_implement_state(ref_dir)
 
         (tmp_path / ".driver-session.id").write_text("DIFFERENT-session-id\n")
 
@@ -2061,6 +2323,10 @@ class TestDriverSessionBypass:
         impl_dir = tmp_path / "scratch" / "loop-claude-99" / "impl"
         impl_dir.mkdir(parents=True)
         (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+        # The verify stamp is only enforced once pipeline state says Step 7
+        # ran: an impl dir alone is also produced by pre-generation asset
+        # download, so make this fixture genuinely post-generation.
+        _set_post_implement_state(ref_dir)
 
         result = run_hook(
             self.MODULE,
@@ -2083,6 +2349,10 @@ class TestDriverSessionBypass:
         impl_dir = tmp_path / "scratch" / "loop-claude-99" / "impl"
         impl_dir.mkdir(parents=True)
         (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
+        # The verify stamp is only enforced once pipeline state says Step 7
+        # ran: an impl dir alone is also produced by pre-generation asset
+        # download, so make this fixture genuinely post-generation.
+        _set_post_implement_state(ref_dir)
 
         (tmp_path / ".driver-session.id").write_text("\n")
 
@@ -2131,6 +2401,10 @@ class TestDriverSessionBypass:
         set_active_marker(ref_dir)
         impl_dir = tmp_path / "scratch" / "loop-claude-99" / "impl"
         impl_dir.mkdir(parents=True)
+        # The verify stamp is only enforced once pipeline state says Step 7
+        # ran: an impl dir alone is also produced by pre-generation asset
+        # download, so make this fixture genuinely post-generation.
+        _set_post_implement_state(ref_dir)
         (ref_dir / ".impl-root").write_text(str(impl_dir) + "\n")
 
         (tmp_path / ".driver-session.id").write_text("some-session-id\n")

@@ -558,6 +558,66 @@ def test_unowned_crondelete_success_is_noop(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "tool_response",
+    [
+        f"Unable to cancel job {CRON_ID}.",
+        f"Could not delete {CRON_ID}.",
+        f"Cannot remove job {CRON_ID}.",
+        f"No such job {CRON_ID}; nothing was cancelled.",
+    ],
+)
+def test_refusal_naming_the_cron_id_is_not_a_successful_delete(
+    tmp_path: Path, tool_response: str
+) -> None:
+    """A refusal carries the same verb stem as a confirmation.
+
+    "Unable to cancel job <id>" names the cron id and the word "cancel" while
+    matching none of the error markers, so a stem-only predicate accepts it and
+    runs finish_owned_delete over a one-shot that is still armed. The receipt
+    must stay in `canceling` instead.
+    """
+    make_armed(tmp_path)
+    cc.begin_manual_resume(tmp_path, SESSION)
+
+    run_adapter(
+        tmp_path,
+        payload(
+            project=tmp_path,
+            event="PostToolUse",
+            tool="CronDelete",
+            tool_input={"id": CRON_ID},
+            tool_response=tool_response,
+        ),
+    )
+
+    current = cc.load_receipt(tmp_path, SESSION)
+    assert current is not None
+    assert current["state"] == cc.STATE_CANCELING
+
+
+def test_plain_confirmation_naming_the_cron_id_finishes_the_delete(tmp_path: Path) -> None:
+    """The real host confirmation is a bare string, not a structured body."""
+    make_armed(tmp_path)
+    cc.begin_manual_resume(tmp_path, SESSION)
+
+    run_adapter(
+        tmp_path,
+        payload(
+            project=tmp_path,
+            event="PostToolUse",
+            tool="CronDelete",
+            tool_input={"id": CRON_ID},
+            tool_response=f"Cancelled job {CRON_ID}.",
+        ),
+    )
+
+    current = cc.load_receipt(tmp_path, SESSION)
+    assert current is not None
+    assert current["state"] == cc.STATE_RUNNING
+    assert current.get("cronId") is None
+
+
+@pytest.mark.parametrize(
     ("tool_response", "expected_context"),
     [({"error": "CronDelete failed"}, "CronDelete failed"), ({}, "supported successful response")],
 )
@@ -639,3 +699,87 @@ def test_missing_required_payload_fields_fail_closed(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "missing required field: tool_use_id" in context(result.stdout.strip())
+
+
+@pytest.mark.parametrize(
+    "tool_response",
+    [
+        pytest.param({"ok": True}, id="structured"),
+        pytest.param(f"Cancelled job {CRON_ID}.", id="bare-string"),
+        pytest.param({"text": f"Cancelled job {CRON_ID}."}, id="dict-text"),
+        pytest.param(
+            [{"type": "text", "text": f"Cancelled job {CRON_ID}."}],
+            id="content-blocks",
+        ),
+    ],
+)
+def test_crondelete_confirmation_shapes_finish_the_owned_delete(
+    tmp_path: Path, tool_response: object
+) -> None:
+    """Any real confirmation must return the receipt to `running`.
+
+    The host reports a successful delete as human-readable text whose wrapper
+    shape varies by build. Requiring one exact body treated real deletes as
+    failures and wedged the receipt in `canceling`, which blocks every
+    pipeline command for the rest of the session.
+    """
+    make_armed(tmp_path)
+    cc.begin_manual_resume(tmp_path, SESSION)
+
+    result = run_hook(
+        MODULE,
+        stdin_data=json.dumps(
+            {
+                "session_id": SESSION,
+                "cwd": str(tmp_path),
+                "hook_event_name": "PostToolUse",
+                "tool_name": "CronDelete",
+                "tool_input": {"id": CRON_ID},
+                "tool_response": tool_response,
+                "tool_use_id": "toolu_test",
+            }
+        ),
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+
+    assert result.returncode == 0
+    receipt = cc.load_receipt(tmp_path, SESSION)
+    assert receipt is not None
+    assert receipt["state"] == cc.STATE_RUNNING
+    assert receipt.get("cronId") is None
+
+
+@pytest.mark.parametrize(
+    "tool_response",
+    [
+        pytest.param(f"Error: job {CRON_ID} not found", id="error-text"),
+        pytest.param({"text": "Cancelled job some-other-id."}, id="wrong-id"),
+        pytest.param({"ok": False}, id="explicit-failure"),
+    ],
+)
+def test_crondelete_non_confirmations_leave_the_receipt_alone(
+    tmp_path: Path, tool_response: object
+) -> None:
+    make_armed(tmp_path)
+    cc.begin_manual_resume(tmp_path, SESSION)
+
+    result = run_hook(
+        MODULE,
+        stdin_data=json.dumps(
+            {
+                "session_id": SESSION,
+                "cwd": str(tmp_path),
+                "hook_event_name": "PostToolUse",
+                "tool_name": "CronDelete",
+                "tool_input": {"id": CRON_ID},
+                "tool_response": tool_response,
+                "tool_use_id": "toolu_test",
+            }
+        ),
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+
+    assert result.returncode == 0
+    receipt = cc.load_receipt(tmp_path, SESSION)
+    assert receipt is not None
+    assert receipt["state"] == cc.STATE_CANCELING

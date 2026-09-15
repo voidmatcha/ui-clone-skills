@@ -8,10 +8,14 @@ Activation: only fires when a .ui-re-active marker exists in tmp/ref/*/.
 
 Usage: python -m ui_clone.hooks.section_gate
 Outputs {"decision": "block", "reason": "..."} to stdout to block, or exits 0 to allow.
+When the consecutive-identical-block budget is spent on an unfinished ref it
+allows the stop but emits {"systemMessage": "... UNFINISHED ..."} instead, so
+the hand-back is visible; it never exits silently while a ref is unfinished.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -631,6 +635,41 @@ _STOP_ATTEMPTS_NAME = ".ui-re-stop-attempts.json"
 # but it is printed for the user instead of blocking the stop.
 _ADVISORY_ONLY = False
 
+# (project_root, ledger key) for the consecutive-block counter, set in main().
+#
+# The stop_hook_active branch below only counts re-entrant stops — Claude Code's
+# own retry of the SAME stop. It does not count a gate that blocks once per
+# user-visible turn: each of those arrives with stop_hook_active false, takes the
+# reset branch, and clears the budget that was never spent. Observed directly —
+# a ref blocked on the verify-stamp gate for dozens of consecutive turns while
+# tmp/ref/.ui-re-stop-attempts.json still held only a stale key from an
+# unrelated session. The cap existed and never fired, so the loop had no exit
+# and the user was never told how to get one.
+#
+# Count real blocks here instead, keyed by session AND ref AND the failure's
+# signature (`block|<sid>|<ref>|<sig>`), so one wedged ref cannot spend
+# another's budget and -- just as important -- three unrelated blocks cannot
+# spend the budget of a fourth failure that has never been retried. A block
+# with a new signature drops the old streak: the pipeline advancing to another
+# gate, or the failing set shrinking, is progress and earns a fresh allowance.
+# Only the SAME failure repeating verbatim burns the budget down. The streak
+# also ends when a turn ends without blocking at all.
+#
+# When the budget is spent the stop is allowed, but the hand-back goes out on a
+# channel the user actually sees. Under the Stop-hook contract stderr on exit 0
+# is debug-log only, so a stderr-only hand-back is a silent release: observed
+# as a ledger count of 15 against a cap of 3 on a ref still at
+# current_gate=post-implement, with the UNFINISHED banner never surfaced once.
+_BLOCK_LEDGER: tuple[Path, str] | None = None
+_BLOCKED_THIS_RUN = False
+_BLOCK_KEY_PREFIX = "block|"
+_BLOCK_BULLET_RE = re.compile(r"^\s+[-•]\s+(.*\S)\s*$")
+# Measurements that jitter between two runs of the SAME failure: decimals
+# (SSIM 0.640, diff=12.4%) and unit-suffixed integers (6256ms, 1834s, 12px).
+# Bare integers are kept -- "2 section(s) FAILED" -> "1 section(s) FAILED" is
+# the progress signal this signature exists to notice.
+_BLOCK_MEASUREMENT_RE = re.compile(r"\d+\.\d+|\d+(?=\s*(?:%|ms\b|s\b|px\b|fps\b))")
+
 
 def _stop_retry_cap() -> int:
     raw = os.environ.get("UI_RE_STOP_RETRY_CAP", "").strip()
@@ -657,6 +696,139 @@ def _read_stop_attempts(project_root: Path) -> dict[str, int]:
     if not isinstance(data, dict):
         return {}
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, int)}
+
+
+def _consecutive_block_exit_advice(ref_dir: Path | None) -> str:
+    """What the user can actually do about a gate that will not clear.
+
+    A blocking gate that repeats verbatim every turn gives the user no way out:
+    the marker that activates it is enforcement state, so the agent is refused
+    when it tries to remove it, and the only sanctioned reset the guard names is
+    deleting the whole ref dir — which throws away every captured artifact.
+    Name the narrow option too, and say what happens if they do nothing.
+    """
+    target = (
+        f"{ref_dir}/.ui-re-active"
+        if ref_dir is not None
+        else "tmp/ref/<component>/.ui-re-active"
+    )
+    stale_days = int(_get_stale_seconds() // 86400)
+    return (
+        "\nThis gate has now blocked several turns in a row without the run "
+        "advancing, so it is being handed back to you.\n\n"
+        "If the clone is genuinely unfinished, the fix is the gate above.\n\n"
+        "If this ref is abandoned and you just want the gate to stop firing, "
+        "remove its activation marker — the captured artifacts and the "
+        "implementation source are NOT touched:\n\n"
+        f"    rm {target}\n\n"
+        "Run it in your own shell; the agent is refused on that path because "
+        "the marker is enforcement state. Left alone, the marker expires on its "
+        f"own after {stale_days} day(s), or when a third ref becomes active.\n"
+    )
+
+
+def _block_signature(reason: str) -> str:
+    """Identity of a block for streak purposes: which gate, which failing items.
+
+    Built from the reason's head line (gate name, failure kind, fail count) and
+    its bullet items (label plus detail, with measurements normalised -- see
+    _BLOCK_MEASUREMENT_RE). Everything else -- fix commands, escalation
+    ladders, the goal card -- is dropped: it either jitters between identical
+    runs (which would keep resetting the streak and bring the endless loop
+    back) or never changes (which would say nothing). A change in gate, in the
+    failing set, or in how many units fail changes the signature; the same
+    failure repeating with a slightly different score does not.
+    """
+    lines = reason.splitlines()
+    head = lines[0].strip() if lines else ""
+    items: list[str] = []
+    for line in lines[1:]:
+        match = _BLOCK_BULLET_RE.match(line)
+        if match:
+            items.append(_BLOCK_MEASUREMENT_RE.sub("#", match.group(1)))
+    digest = hashlib.sha1("\n".join([head, *sorted(items)]).encode("utf-8"))
+    return digest.hexdigest()[:12]
+
+
+def _block_ledger_prefix(key: str, ref_dir: Path | None) -> str:
+    """`block|<sid>|<ref>|` — the key space one ref's streak lives in."""
+    # Namespaced away from the bare re-entrancy key. Sharing it made the two
+    # counters spend one budget twice, releasing on the first block instead of
+    # the cap'th.
+    scoped = f"{_BLOCK_KEY_PREFIX}{key}"
+    if ref_dir is not None:
+        scoped = f"{scoped}|{ref_dir}"
+    return f"{scoped}|"
+
+
+def _note_block(ref_dir: Path | None = None, signature: str = "") -> bool:
+    """Record one real block. True when the retry budget is now spent.
+
+    Only a streak of IDENTICAL blocks (same signature) spends the budget. A
+    block with a different signature replaces the streak and starts at one, so
+    progress -- or an unrelated failure -- never inherits a spent budget.
+
+    Returns False (keep blocking) when the ledger is unavailable, so a failure
+    to persist the counter can never release a gate.
+    """
+    global _BLOCKED_THIS_RUN
+    _BLOCKED_THIS_RUN = True
+    if _BLOCK_LEDGER is None:
+        return False
+    project_root, key = _BLOCK_LEDGER
+    prefix = _block_ledger_prefix(key, ref_dir)
+    scoped = f"{prefix}{signature}"
+    attempts = _read_stop_attempts(project_root)
+    # Other signatures under this ref are an ended streak; the signature-less
+    # key is the pre-signature ledger format and is retired the same way.
+    for stale in [
+        k for k in attempts if (k.startswith(prefix) or k == prefix[:-1]) and k != scoped
+    ]:
+        attempts.pop(stale, None)
+    used = int(attempts.get(scoped, 0)) + 1
+    attempts[scoped] = used
+    _write_stop_attempts(project_root, attempts)
+    return used > _stop_retry_cap()
+
+
+def _clear_block_ledger(ref_dir: Path | None = None) -> None:
+    """Drop the consecutive-block counter once a turn ends without blocking."""
+    if _BLOCK_LEDGER is None:
+        return
+    project_root, key = _BLOCK_LEDGER
+    attempts = _read_stop_attempts(project_root)
+    base = f"{_BLOCK_KEY_PREFIX}{key}"
+    stale = [k for k in attempts if k == base or k.startswith(f"{base}|")]
+    if ref_dir is not None:
+        stale = [k for k in stale if k == base or k.startswith(f"{base}|{ref_dir}|")]
+    if not stale:
+        return
+    for k in stale:
+        attempts.pop(k, None)
+    _write_stop_attempts(project_root, attempts)
+
+
+def _emit_handback(reason: str, ref_dir: Path | None) -> None:
+    """Allow the stop, but hand the unfinished run back where it can be seen.
+
+    Stderr on exit 0 reaches only the debug log, so it is kept for that log
+    (and for hosts that do surface it) while the same text goes out as a
+    `systemMessage`, which Claude Code shows to the user. No block decision is
+    emitted, so the loop is bounded; nothing here writes completion state, so
+    pipeline-state.json stays at its unfinished gate and every downstream
+    reader still sees an incomplete clone.
+    """
+    banner = (
+        "⛔ ui-clone-skills: STOPPING WITH THE PIPELINE UNFINISHED.\n"
+        f"Continued {_stop_retry_cap()} time(s) and the gate below still "
+        "fails, so the run is being handed back to you rather than looped "
+        "further. The clone is INCOMPLETE — do not treat the current output "
+        "as the finished result.\n"
+    )
+    advice = _consecutive_block_exit_advice(ref_dir)
+    message = f"{banner}{advice}\n{reason}"
+    print(f"\n{message}", file=sys.stderr)
+    print(json.dumps({"systemMessage": message}, ensure_ascii=False))
 
 
 def _write_stop_attempts(project_root: Path, attempts: dict[str, int]) -> None:
@@ -798,7 +970,7 @@ def _fresh_active_dirs(active_dirs: list[Path]) -> list[Path]:
     return [ref_dir for ref_dir, _, _ in fresh_dirs if ref_dir in keep]
 
 
-def _emit_block(reason: str) -> None:
+def _emit_block(reason: str, ref_dir: Path | None = None, signature: str = "") -> None:
     # Headless driver (benchmark_harness): a Stop block ends the turn with no
     # printed answer, so the iteration is spent and the reason only lands on
     # the next one. The driver re-runs the same Python gates between
@@ -807,19 +979,14 @@ def _emit_block(reason: str) -> None:
     if os.environ.get("UI_RE_HEADLESS_DRIVER") == "1":
         print(reason, file=sys.stderr)
         return
-    if _ADVISORY_ONLY:
+    # The signature is taken from the gate's own text, before any continuation
+    # prefix main() prepends, so the same failure hashes the same every turn.
+    budget_spent = _note_block(ref_dir, signature or _block_signature(reason))
+    if _ADVISORY_ONLY or budget_spent:
         # Retry budget spent. Stopping is allowed, but never in silence: this is
         # the last thing the user sees, and without it an unfinished clone is
         # indistinguishable from a finished one.
-        print(
-            "\n⛔ ui-clone-skills: STOPPING WITH THE PIPELINE UNFINISHED.\n"
-            f"Continued {_stop_retry_cap()} time(s) and the gate below still "
-            "fails, so the run is being handed back to you rather than looped "
-            "further. The clone is INCOMPLETE — do not treat the current output "
-            "as the finished result.\n",
-            file=sys.stderr,
-        )
-        print(reason, file=sys.stderr)
+        _emit_handback(reason, ref_dir)
         return
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
 
@@ -937,6 +1104,50 @@ def _newer_impl_files(impl_dir: Path, stamp_path: Path, limit: int = 5) -> list[
     return changed
 
 
+# Pre-generation steps that write into the impl root before Step 7 ever runs:
+# asset-download.sh fills public/, transfer-fonts.sh adds font binaries there,
+# and emit-preflight-neutralize.sh writes one mirrored stylesheet. Source under
+# any other path means an implementation exists.
+_PRE_GENERATION_IMPL_PATHS = ("public", "src/styles/from-ref")
+
+
+def _reached_implementation(ref_dir: Path, impl_dir: Path) -> bool:
+    """Whether an implementation exists, by pipeline state or by source on disk.
+
+    Two independent signals, either of which arms the closeout stamp:
+
+    - pipeline state at or past `state-coverage`, the gate that sits between
+      `pre-generate` and `post-implement`; an unknown gate counts as reached so
+      a corrupt state file fails closed onto the stamp requirement, and
+    - generated source in the impl root, which keeps an off-pipeline clone
+      (source written with no pipeline state at all) fail-closed.
+    """
+    gate = PipelineState.load(ref_dir).current_gate
+    if gate == "done":
+        return True
+    try:
+        if GATE_ORDER.index(gate) >= GATE_ORDER.index("state-coverage"):
+            return True
+    except ValueError:
+        return True
+    return _has_generated_source(impl_dir)
+
+
+def _has_generated_source(impl_dir: Path) -> bool:
+    """Any impl file outside the paths pre-generation steps are allowed to fill."""
+    excluded = [impl_dir / rel for rel in _PRE_GENERATION_IMPL_PATHS]
+    try:
+        for path in impl_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if any(path.is_relative_to(root) for root in excluded):
+                continue
+            return True
+    except OSError:
+        return True  # unreadable impl tree — fail closed onto the stamp
+    return False
+
+
 def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     """Block Stop unless pipeline.execute_verify wrote a fresh stamp.
 
@@ -946,8 +1157,9 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     bypass — Stop blocks unless `verify-stamp.json` exists AND is
     newer than _VERIFY_STAMP_MAX_AGE_S.
 
-    Only fires when impl/ exists (post-generation). Pre-generation
-    loops are governed by the regular current_gate enforcement.
+    Only fires when impl/ exists AND pipeline state says generation has
+    happened. Pre-generation loops are governed by the regular current_gate
+    enforcement.
     """
     # impl/ is resolved via the per-ref-dir impl_root field. The legacy
     # ref_dir.parent.parent.parent / "impl" walk is kept as a fallback
@@ -957,6 +1169,17 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     impl_dir = _resolve_impl_dir(ref_dir)
     if impl_dir is None or not impl_dir.is_dir():
         return None  # pre-generation — no stamp required yet
+
+    # The impl root alone does not mean generation ran. Step 6e
+    # (asset-download.sh) and Step 6e-fonts write into <impl>/public and
+    # <impl>/src/styles/from-ref long before Step 7 emits a component, so
+    # keying off the directory demanded closeout verification from a run still
+    # blocked at pre-generate — and the continuation one-shot forbids pipeline
+    # work in that same turn, leaving the turn unendable. Pipeline state is the
+    # canonical signal for "generation happened"; a missing or unknown gate
+    # still falls through to the stamp requirement.
+    if not _reached_implementation(ref_dir, impl_dir):
+        return None  # pre-generation — current_gate enforcement governs here
 
     # H1: the canonical verify closeout must consult the skip-ledger too, not only
     # the structural path. A fresh, valid verify-stamp.json after an un-recovered
@@ -1408,6 +1631,13 @@ def _coerce_stop_hook_active(value: object) -> bool:
     return bool(value)
 
 
+class _ContinuationArmedRelease(Exception):
+    """Raised when an armed one-shot owns the resume, so Stop must not block.
+
+    Carries the notice to surface before the turn ends.
+    """
+
+
 def _continuation_stop_prefix(
     project_root: Path,
     session_id: str,
@@ -1480,10 +1710,15 @@ def _continuation_stop_prefix(
             "Perform no more pipeline work in this turn.\n\n"
         )
     if state == _continuation.STATE_ARMED:
-        return (
+        # Releasing, not blocking: the one-shot that resumes this ref already
+        # exists, so re-invoking the agent here is exactly what must not
+        # happen. Blocking alongside this message made the turn unendable —
+        # the notice orders the turn to end while the block prevents it, and
+        # the agent loops re-reading the same two directives.
+        raise _ContinuationArmedRelease(
             "⏸ UI-RE continuation one-shot is armed\n\n"
-            "The owned one-shot already exists. You must end the current assistant turn "
-            "immediately and perform no more pipeline work in this turn.\n\n"
+            "The owned one-shot already exists; the scheduled wake-up resumes this ref. "
+            "End the current assistant turn now and perform no more pipeline work in it.\n\n"
         )
     if state == _continuation.STATE_CANCELING:
         cron_id = receipt.get("cronId")
@@ -1605,6 +1840,8 @@ def main() -> None:
     # Allow the stop: the agent was already nudged once, and the driver's STATUS
     # marker + stall watchdog own round closeout. Matches Claude Code guidance.
     attempts_key = stop_scope_session_id or session_id_from_payload or "_nosid"
+    global _BLOCK_LEDGER
+    _BLOCK_LEDGER = (project_root, attempts_key)
     if stop_hook_active:
         cap = _stop_retry_cap()
         attempts = _read_stop_attempts(project_root)
@@ -1624,6 +1861,12 @@ def main() -> None:
     else:
         # A stop that is not itself the product of a block starts a fresh
         # budget, so a later unrelated failure gets its full allowance.
+        #
+        # Only the re-entrant key is cleared here. The per-ref consecutive-block
+        # counters written by _note_block are NOT: every user-visible turn
+        # arrives with stop_hook_active false, so clearing them here is exactly
+        # what stopped the cap from ever firing. They are cleared in
+        # _clear_block_ledger when a turn actually ends without a block.
         attempts = _read_stop_attempts(project_root)
         if attempts.pop(attempts_key, None) is not None:
             _write_stop_attempts(project_root, attempts)
@@ -1720,16 +1963,23 @@ def main() -> None:
     for ref_dir in active_dirs:
         block_reason = _enforce_ref_dir(ref_dir)
         if block_reason:
+            block_signature = _block_signature(block_reason)
             if is_claude_hook:
-                prefix = _continuation_stop_prefix(
-                    project_root,
-                    stop_scope_session_id,
-                    payload,
-                    ref_dir,
-                )
+                try:
+                    prefix = _continuation_stop_prefix(
+                        project_root,
+                        stop_scope_session_id,
+                        payload,
+                        ref_dir,
+                    )
+                except _ContinuationArmedRelease as release:
+                    # The scheduled wake-up owns resuming this ref. Report what
+                    # is still outstanding, then let the turn end.
+                    print(f"{release}{block_reason}", file=sys.stderr)
+                    continue
                 if prefix:
                     block_reason = f"{prefix}{block_reason}"
-            _emit_block(block_reason)
+            _emit_block(block_reason, ref_dir, block_signature)
             sys.exit(0)
         if is_claude_hook:
             _refresh_continuation_final(
@@ -1738,6 +1988,9 @@ def main() -> None:
                 ref_dir,
             )
 
+    if not _BLOCKED_THIS_RUN:
+        # The turn ended clean, so the streak is over.
+        _clear_block_ledger()
     sys.exit(0)
 
 

@@ -172,6 +172,8 @@ print(
     return null;
   };
   const el = findVisible();
+  const stripSelectorQuotes = (s) =>
+    String(s).split(String.fromCharCode(39)).join("").split('"').join("");
   const tokenOf = (s) => {
     const t = s.replace("[class*=", "").split(String.fromCharCode(39)).join("")
       .split('"').join("").replace("]", "");
@@ -196,7 +198,16 @@ print(
     for (const rule of Array.from(rules || [])) {
       const sel = rule.selectorText || "";
       const full = ancestry + " " + sel;
-      const applies = el ? baseMatchesTarget(full) : tokens.some(t => full.indexOf(t) >= 0);
+      // tokenOf() strips quotes from the SPEC target, but the CSSOM re-serialises
+      // attribute selectors WITH quotes: [class^=btn-] comes back as
+      // [class^="btn-"]. Comparing the stripped token against the quoted
+      // selectorText can never match, so a spec target carrying a quoted
+      // attribute selector was unreachable on the unmounted path no matter what
+      // the stylesheet declared. Normalise quoting on BOTH sides.
+      const fullUnquoted = stripSelectorQuotes(full);
+      const applies = el
+        ? baseMatchesTarget(full)
+        : tokens.some(t => fullUnquoted.indexOf(t) >= 0);
       if (rule.style && full.indexOf(":hover") >= 0 && applies) {
         for (let i = 0; i < rule.style.length; i++) {
           const propName = rule.style[i];

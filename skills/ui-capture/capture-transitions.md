@@ -270,7 +270,15 @@ accepts only affected matches contained by that element. Pointer dispatch and
 activation geometry stay on `target`; computed styles, transition parameters,
 and the tight comparison crop come from `affectedTarget`. A missing contained
 affected element is a capture failure, not permission to measure an unrelated
-match elsewhere in the document.
+match elsewhere in the document. When the affected selector matches nothing in
+the document at all — checked at idle and again while the activation is
+hovered — the bridge observes the activation in its own right and records the
+descendant under `affectedTargetAbsent` instead of `affectedTarget`, so the
+delta is never attributed to a target the implementation cannot be checked
+against; `hover-state-compare` honours that field and does not re-derive the
+descendant from `hover-css-rules.json`. A descendant that appears only while
+hovered (a hover-mounted menu) is kept as an unproven candidate, and only
+"descendant absent AND activation unchanged" retires the region.
 Successfully observed pairs also replace auto-placeholder hover stubs in
 `transition-spec.json` with live-capture provenance, the actual reference
 frames, and measured property/duration/easing values. A region the bridge

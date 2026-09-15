@@ -111,6 +111,30 @@ def test_hover_pseudo_change_is_visual_evidence() -> None:
     assert tf.decide(entry, obs, set())["status"] == "pass"
 
 
+def test_hover_top_move_alone_fails() -> None:
+    """The hover driver snaps BEFORE at scroll-top (PHASE1) and scrollintoview()s
+    the target before the real-pointer AFTER snap, so a below-fold target's
+    viewport `top` ALWAYS differs with no :hover rule involved. Counting it
+    passed any below-fold hover entry; the reveal verdict already excludes
+    `top` for exactly this reason. Honest hover signal = a style, opacity,
+    transform, height or child delta."""
+    entry = {
+        "id": "footer-link-hover",
+        "trigger": "hover",
+        "animation": {"type": "css-hover", "property": "backgroundColor"},
+        "target": ".footer__link",
+    }
+    obs = {
+        "found": True,
+        "before": _state(opacity=1.0, transform="none", height=40.0, top=3000.0,
+                         backgroundColor="rgba(0, 0, 0, 0)"),
+        "after": _state(opacity=1.0, transform="none", height=40.0, top=400.0,
+                        backgroundColor="rgba(0, 0, 0, 0)"),
+    }
+    d = tf.decide(entry, obs, set())
+    assert d["status"] == "fail", d
+
+
 def test_obs_merge_forwards_carousel_fingerprint() -> None:
     """T-4 regression guard: the phase-2 probe captures a carousel fingerprint on
     the after-record, and the verdict reads obs['carousel'] — but the obs-merge in

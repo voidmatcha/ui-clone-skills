@@ -170,6 +170,22 @@ REF_GROUNDING: tuple[str, ...] = (
 # (use / substitute / skip), so every asset/transfer/compare check that honours
 # them must re-run when they change.
 REF_ASSET_SUB: tuple[str, ...] = ("asset-substitution.json",)
+# Declared inputs that are documented-optional artifacts. `asset-substitution.md`
+# specifies asset-substitution.json as optional and absent by default — a clone
+# that substituted nothing correctly ships no such file — so a declared side made
+# up only of these matching nothing means "nothing to fingerprint", not "evidence
+# missing". See _declared_side_files.
+# The Phase A splash-absence certificate. splash-lifecycle-check.sh reads it
+# when its probe sees no overlay on the reference, to annotate the
+# `ref-overlay-absent` FAIL with the reference measurement it is about
+# (`refAbsence.certified`/`guidance`: re-capture the reference, or inspect the
+# detector that dispatched the check). It never changes the verdict. The
+# artifact's guidance depends on it, so its appearance, disappearance or
+# re-capture busts a cached splash-lifecycle artifact; a reference never run
+# through capture-states.sh has no such file, which the check handles, so
+# absence is fingerprintable too.
+REF_SPLASH_CERTIFICATE: tuple[str, ...] = ("states/splash/contract.json",)
+OPTIONAL_INPUT_GLOBS: frozenset[str] = frozenset(REF_ASSET_SUB + REF_SPLASH_CERTIFICATE)
 # Rollup constituents: the per-measurement artifacts each rollup aggregates
 # (from runtime-proof-rollup.sh / transition-proof-rollup.sh), plus the plan
 # that defines which missing artifacts are required. Excludes each rollup's own
@@ -369,8 +385,11 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     # scroll-state/header mutations from behavior source.
     "preview-runtime-health": _ci(SRC + PUBLIC + ENTRY),
     # Fresh navigation probes the served first-load runtime, including source,
-    # styles, entry wiring, package behavior, and public splash media.
-    "splash-lifecycle": _ci(BROAD),
+    # styles, entry wiring, package behavior, and public splash media. The ref
+    # side is the absence certificate the check annotates its FAIL with
+    # (optional: see REF_SPLASH_CERTIFICATE), so the guidance in a cached
+    # artifact cannot outlive a re-capture.
+    "splash-lifecycle": _ci(BROAD, REF_SPLASH_CERTIFICATE),
     "tree-diff": _ci(SRC, REF_ASSET_SUB),
     "geometry-sanity": _ci(SRC + PUBLIC, REF_REGIONS),
     "scroll-coverage": _ci(SRC + PUBLIC, REF_REGIONS),
@@ -572,12 +591,23 @@ def _declared_side_files(
     globs: tuple[str, ...],
     side: str,
 ) -> list[tuple[str, Path]]:
-    """Return a fully provable declared side or raise unavailable."""
+    """Return a fully provable declared side or raise unavailable.
+
+    A side built ENTIRELY out of documented-optional globs that matched nothing
+    is available-and-empty, not unprovable: there is genuinely nothing to
+    fingerprint, and its absence is the documented default rather than missing
+    evidence. Without this carve-out the two checks whose ref side is
+    ``REF_ASSET_SUB`` alone — ``masked-region-static`` and ``tree-diff`` — fail
+    with "input fingerprint unverifiable" on every clone that made no asset
+    substitutions, which no implementation change can clear.
+    """
     if root is None:
         raise InputFingerprintUnavailable(f"{side} input root is unavailable")
     root_path = Path(root)
     files = _iter_files(root_path, globs)
     if not files:
+        if globs and all(glob in OPTIONAL_INPUT_GLOBS for glob in globs):
+            return []
         raise InputFingerprintUnavailable(
             f"{side} declared inputs matched no files under {root_path}"
         )

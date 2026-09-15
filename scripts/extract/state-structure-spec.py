@@ -15,6 +15,16 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+# Invoked as a bare script by the capture shells (no PYTHONPATH), so put the
+# repo root on the path before importing the shared splash rule. A hard
+# ImportError here is deliberate: silently falling back to a private copy of
+# the rule is how the three consumers drifted apart in the first place.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from ui_clone.splash_contract import is_authoritative_absence  # noqa: E402
+
 PRODUCER = "scripts/extract/state-structure-spec.py"
 MAX_SIGNATURES = 80
 
@@ -152,26 +162,9 @@ def _build_splash_events(ref_dir: Path) -> list[dict[str, Any]]:
 
 
 def _splash_contract_is_authoritative_negative(contract: dict[str, Any]) -> bool:
-    if contract.get("schemaVersion") is None:
-        return False
-    if contract.get("detected") is not False:
-        return False
-    if contract.get("captureMode") == "reuse-session":
-        return False
-    overlay = contract.get("overlay")
-    capture = contract.get("capture")
-    has_overlay_metadata = isinstance(overlay, dict) and "everVisible" in overlay
-    has_capture_metadata = isinstance(capture, dict)
-    if not has_overlay_metadata and not has_capture_metadata:
-        return True
-    if isinstance(capture, dict) and capture.get("authoritativeNegative") is False:
-        return False
-    if isinstance(capture, dict) and capture.get("authoritativeNegative") is True:
-        return True
-    ever_visible = bool(overlay.get("everVisible")) if isinstance(overlay, dict) else False
-    state_count = capture.get("stateCount") if isinstance(capture, dict) else None
-    timed_out = bool(capture.get("timedOut")) if isinstance(capture, dict) else False
-    return not ever_visible and state_count == 1 and not timed_out
+    # The splash:page-load event is built from the same trajectory the
+    # certificate was derived from, so a certified absence may suppress it.
+    return is_authoritative_absence(contract)
 
 
 def _build_scroll_events(ref_dir: Path) -> list[dict[str, Any]]:

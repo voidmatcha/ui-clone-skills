@@ -610,3 +610,204 @@ printf '{{"schemaVersion":1,"samples":[]}}\\n'
         assert artifact["status"] == "fail"
         assert artifact["reason"] == "invalid-wait-ms"
     assert not marker.exists()
+
+
+# ── a reference with no overlay: a FAIL that names the reference ────────────
+#
+# The check is dispatched by detectors that are deliberately biased toward
+# false positives (splash-extraction.md: `hasPreloader` fires on any one of
+# three signals) and by `summary.json polls > 1`. When the reference has no
+# overlay the probe can see, `ref-overlay-absent` is a statement about the
+# reference, not about the implementation, and nothing the implementer does
+# can clear it. It stays a FAIL. The Phase A certificate in
+# states/splash/contract.json is read only to say which reference measurement
+# the FAIL is about: it comes from a sampler that enumerates elements exactly
+# as this probe does, so the two share their blind spots (a pseudo-element
+# curtain such as html:not(.loaded)::before, a body background over
+# opacity-gated content) and their agreement is one measurement counted twice,
+# not corroboration.
+
+
+def _absent_samples(count: int = 6, *, motion: float = 0.0) -> list[dict[str, Any]]:
+    return [{"t": index * 50, "overlay": None, "viewportMotion": motion, "readyState": "complete"} for index in range(count)]
+
+
+def _mounted_samples() -> list[dict[str, Any]]:
+    overlay = {
+        "selector": "#intro",
+        "signature": "intro",
+        "rect": {"x": 0, "y": 0, "width": 1280, "height": 800},
+        "coverageRatio": 1.0,
+        "opacity": 1,
+        "transform": "",
+    }
+    return [
+        {"t": 0, "overlay": overlay, "viewportMotion": 0.0},
+        {"t": 50, "overlay": dict(overlay, opacity=0.6), "viewportMotion": 0.0},
+        {"t": 400, "overlay": None, "viewportMotion": 0.0},
+        {"t": 450, "overlay": None, "viewportMotion": 0.0},
+    ]
+
+
+def _fake_agent_browser_by_side(
+    tmp_path: Path, ref_samples: list[dict[str, Any]], impl_samples: list[dict[str, Any]], *, ref_open_rc: int = 0
+) -> Path:
+    """A fake `agent-browser` that answers `eval` per side: the check names its
+    sessions `<session>-ref` / `<session>-impl`."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    (fake_bin / "ref.json").write_text(json.dumps({"schemaVersion": 1, "samples": ref_samples}), encoding="utf-8")
+    (fake_bin / "impl.json").write_text(json.dumps({"schemaVersion": 1, "samples": impl_samples}), encoding="utf-8")
+    fake = fake_bin / "agent-browser"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        "session=''; cmd=''\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        '    --session) session="$2"; shift 2 ;;\n'
+        "    --init-script) shift 2 ;;\n"
+        "    --json) shift ;;\n"
+        '    open|eval|wait|close) cmd="$1"; shift; break ;;\n'
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        'case "$session" in *-ref) side=ref ;; *-impl) side=impl ;; *) side=none ;; esac\n'
+        f'if [ "$cmd" = "open" ] && [ "$side" = "ref" ]; then exit {ref_open_rc}; fi\n'
+        'if [ "$cmd" = "eval" ]; then\n'
+        f'  cat "{fake_bin}/$side.json"\n'
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return fake_bin
+
+
+def _write_contract(ref_dir: Path, *, certified: bool) -> None:
+    splash = ref_dir / "states" / "splash"
+    splash.mkdir(parents=True, exist_ok=True)
+    (splash / "contract.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "captureMode": "pre-navigation",
+            "detected": False,
+            "overlay": {"everVisible": False, "maxCoverage": 0, "exitObserved": False},
+            "capture": {
+                "stateCount": 13,
+                "timedOut": not certified,
+                "reason": "stable-2s" if certified else "wall-clock-cap",
+                "authoritativeNegative": certified,
+            },
+        }),
+        encoding="utf-8",
+    )
+
+
+def _run_check(
+    tmp_path: Path, fake_bin: Path, ref_dir: Path, *, cwd: Path | None = None
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    proc = subprocess.run(
+        [str(SCRIPT), "no-overlay", "https://ref.example", "https://impl.example", str(ref_dir)],
+        cwd=cwd or ROOT,
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    artifact = json.loads((ref_dir / "splash-lifecycle.json").read_text(encoding="utf-8"))
+    return proc, artifact
+
+
+def test_ref_without_overlay_fails_even_when_phase_a_certifies(tmp_path: Path) -> None:
+    """Both instruments saw nothing and the certificate is true: that is still
+    `ref-overlay-absent`, because both instruments enumerate elements and a
+    curtain neither can see (html:not(.loaded)::before) certifies on the one
+    and passes the other. The FAIL stands; the artifact says the certificate
+    agreed, names the reference, and points at the detector that dispatched
+    the check instead of at the implementation."""
+    ref_dir = tmp_path / "ref"
+    _write_contract(ref_dir, certified=True)
+    fake_bin = _fake_agent_browser_by_side(tmp_path, _absent_samples(), _absent_samples(motion=3.0))
+
+    proc, artifact = _run_check(tmp_path, fake_bin, ref_dir)
+
+    assert artifact["status"] == "fail", artifact
+    assert "ref-overlay-absent" in artifact["violations"]
+    assert artifact.get("reason") != "ref-overlay-absent-certified"
+    assert artifact["refAbsence"]["certified"] is True
+    guidance = artifact["refAbsence"]["guidance"].lower()
+    assert "reference" in guidance
+    assert "does not clear" in guidance
+    assert proc.returncode == 1
+
+
+def test_impl_overlay_on_a_certified_no_splash_ref_fails(tmp_path: Path) -> None:
+    """An implementation that mounts a splash the reference never had fails on
+    the reference-side violation like any other no-overlay reference; the
+    certificate changes nothing about the verdict."""
+    ref_dir = tmp_path / "ref"
+    _write_contract(ref_dir, certified=True)
+    fake_bin = _fake_agent_browser_by_side(tmp_path, _absent_samples(), _mounted_samples())
+
+    proc, artifact = _run_check(tmp_path, fake_bin, ref_dir)
+
+    assert artifact["status"] == "fail"
+    assert "ref-overlay-absent" in artifact["violations"]
+    assert proc.returncode == 1
+
+
+def test_ref_without_overlay_stays_failed_when_phase_a_does_not_certify(tmp_path: Path) -> None:
+    """The capture timed out (or saw a loading lifecycle the probe cannot
+    classify). The FAIL stands and names the re-capture that would settle
+    what the reference holds."""
+    ref_dir = tmp_path / "ref"
+    _write_contract(ref_dir, certified=False)
+    fake_bin = _fake_agent_browser_by_side(tmp_path, _absent_samples(), _absent_samples())
+
+    proc, artifact = _run_check(tmp_path, fake_bin, ref_dir)
+
+    assert artifact["status"] == "fail"
+    assert "ref-overlay-absent" in artifact["violations"]
+    assert artifact["refAbsence"]["certified"] is False
+    assert "reference" in artifact["refAbsence"]["guidance"].lower()
+    assert "capture-states.sh" in artifact["refAbsence"]["guidance"]
+    assert proc.returncode == 1
+
+
+def test_certificate_lookup_is_not_shadowed_by_a_ui_clone_package_in_cwd(tmp_path: Path) -> None:
+    """The certificate is written into the artifact's guidance, and it is read
+    through ui_clone.splash_contract from a shell. Run from a directory holding
+    a decoy `ui_clone/` whose reader certifies everything: the artifact must
+    still report the reference as uncertified, and still FAIL."""
+    decoy_cwd = tmp_path / "impl-tree"
+    decoy = decoy_cwd / "ui_clone"
+    decoy.mkdir(parents=True)
+    (decoy / "__init__.py").write_text("", encoding="utf-8")
+    (decoy / "splash_contract.py").write_text(
+        "def is_authoritative_absence(contract):\n    return True\n", encoding="utf-8"
+    )
+    ref_dir = tmp_path / "ref"
+    _write_contract(ref_dir, certified=False)
+    fake_bin = _fake_agent_browser_by_side(tmp_path, _absent_samples(), _absent_samples())
+
+    proc, artifact = _run_check(tmp_path, fake_bin, ref_dir, cwd=decoy_cwd)
+
+    assert artifact["status"] == "fail", artifact
+    assert "ref-overlay-absent" in artifact["violations"]
+    assert artifact["refAbsence"]["certified"] is False
+    assert proc.returncode == 1
+
+
+def test_ref_capture_failure_is_not_measured_absence(tmp_path: Path) -> None:
+    """A reference that never opened produced no samples: a capture error,
+    not a measured absence, and no `refAbsence` annotation is written."""
+    ref_dir = tmp_path / "ref"
+    _write_contract(ref_dir, certified=True)
+    fake_bin = _fake_agent_browser_by_side(tmp_path, [], _absent_samples(), ref_open_rc=1)
+
+    proc, artifact = _run_check(tmp_path, fake_bin, ref_dir)
+
+    assert artifact["status"] == "fail"
+    assert "ref-open-failed" in artifact["violations"]
+    assert "refAbsence" not in artifact
+    assert proc.returncode == 1

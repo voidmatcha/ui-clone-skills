@@ -368,6 +368,11 @@
     chooseBestOverlay: chooseBestOverlay,
     selectorFor: selectorFor,
     installSampler: installSampler,
+    // What this probe calls a splash. ui_clone.splash_contract pins its
+    // covering thresholds to these two numbers so the Phase A certificate
+    // refuses every overlay this probe would accept.
+    MIN_AREA_RATIO: MIN_AREA_RATIO,
+    MIN_INITIAL_COVERAGE_RATIO: MIN_INITIAL_COVERAGE_RATIO,
   };
 
   if (typeof module !== "undefined" && module.exports) {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -139,8 +140,25 @@ def test_classifies_repo_reads_and_agent_browser_commands(tmp_path: Path) -> Non
     assert external_read.detail.endswith("skills/handover/SKILL.md")
 
 
-def test_redacts_home_and_macos_temp_paths_from_report_details(tmp_path: Path) -> None:
+# Placeholder tokens the analyzer emits (`<user>`, `<temp>`, `<path>`, `<n>`, ...).
+_PLACEHOLDER_RE = re.compile(r"<[a-z]+>")
+
+
+@pytest.mark.parametrize("username", ["alicewonder", "user"])
+def test_redacts_home_and_macos_temp_paths_from_report_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, username: str
+) -> None:
     analyzer = _load_module()
+    # Pin the home directory so the assertions do not depend on the machine's
+    # real username. "user" is a real-world username that is also a substring
+    # of the `<user>` placeholder, so leak checks strip placeholder tokens
+    # before searching for the username in the redacted output.
+    fake_home = Path("/Users") / username
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    def leaks_username(value: str) -> bool:
+        return username in _PLACEHOLDER_RE.sub("", value)
+
     repo = tmp_path / "repo"
     repo.mkdir()
     macos_temp = "/private/var/folders/61/cache/T/pytest-of-localuser/pytest-1/test_case0/output.txt"
@@ -170,11 +188,11 @@ def test_redacts_home_and_macos_temp_paths_from_report_details(tmp_path: Path) -
 
     assert normalized.startswith("<temp>/")
     assert "localuser" not in normalized
-    assert Path.home().name not in normalized_encoded_home
+    assert not leaks_username(normalized_encoded_home)
     assert "-Users-<user>-Documents-ui-clone-skills" in normalized_encoded_home
     assert command_shape == "tail -<n> <path>"
     assert session["path"] == "~/.claude/projects/demo/session.jsonl"
-    assert Path.home().name not in encoded_home_session["path"]
+    assert not leaks_username(encoded_home_session["path"])
     assert "-Users-<user>-Documents-ui-clone-skills" in encoded_home_session["path"]
 
 

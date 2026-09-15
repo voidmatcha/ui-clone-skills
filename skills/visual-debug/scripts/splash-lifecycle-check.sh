@@ -83,7 +83,42 @@ IMPL_RAW="$TMP_DIR/impl.raw.json"
 capture_side ref "$REF_URL" "$SESSION-ref" "$REF_RAW" || true
 capture_side impl "$IMPL_URL" "$SESSION-impl" "$IMPL_RAW" || true
 
-node - "$PROBE_JS" "$REF_RAW" "$IMPL_RAW" "$OUT" "$REF_URL" "$IMPL_URL" <<'NODE'
+# This check is dispatched by detectors that are deliberately biased toward
+# false positives (splash-extraction.md: `hasPreloader` fires on any one of
+# three signals) and by `summary.json polls > 1`. When the reference mounts no
+# overlay the probe can see, `ref-overlay-absent` describes the reference, not
+# the implementation, and no implementation change can clear it. It stays a
+# FAIL. The Phase A certificate (states/splash/contract.json
+# capture.authoritativeNegative) is read here only to say WHICH reference
+# measurement the FAIL is about - never to clear it: the certificate is derived
+# by a sampler that, like this probe, enumerates elements
+# (`document.querySelectorAll("body *")` here, the rendered-element walk in
+# capture-states.sh there) and reads `getComputedStyle(el)` with no
+# pseudo-element argument. Both are blind to the same curtains - an
+# `html:not(.loaded)::before` overlay, a body background hiding
+# opacity-gated content, a canvas - so two negatives from them are one blind
+# spot counted twice, not corroboration. When the certificate is true the
+# generic dispatches (polls > 1, page-load trigger) were already vetoed in
+# verification-plan.sh; a check that still ran was dispatched by a detector
+# that read bundle source or a DOM diff, and ui_clone.splash_contract does not
+# let the certificate override those.
+#
+# The repo root goes AHEAD of sys.path[0] (the working directory, for
+# `python3 -c`): a `ui_clone/` package in the caller's cwd must not be able to
+# answer this question, because the answer is written into the artifact.
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REF_ABSENCE_CERTIFIED="$(python3 -c '
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from ui_clone.splash_contract import is_authoritative_absence
+try:
+    data = json.loads(open(sys.argv[2], encoding="utf-8").read())
+except Exception:
+    data = None
+print("true" if is_authoritative_absence(data) else "false")
+' "$ROOT_DIR" "$REF_DIR/states/splash/contract.json" 2>/dev/null || echo false)"
+
+node - "$PROBE_JS" "$REF_RAW" "$IMPL_RAW" "$OUT" "$REF_URL" "$IMPL_URL" "$REF_ABSENCE_CERTIFIED" <<'NODE'
 const fs = require("fs");
 const probe = require(process.argv[2]);
 const refRaw = process.argv[3];
@@ -91,6 +126,7 @@ const implRaw = process.argv[4];
 const out = process.argv[5];
 const refUrl = process.argv[6];
 const implUrl = process.argv[7];
+const refAbsenceCertified = process.argv[8] === "true";
 
 function unwrap(value) {
   let current = value;
@@ -127,6 +163,33 @@ const implCapture = readCapture(implRaw);
 const verdict = probe.compareLifecycles(refCapture.samples || [], implCapture.samples || []);
 if (refCapture.status === "error") verdict.violations.push(`ref-${refCapture.reason || "capture-error"}`);
 if (implCapture.status === "error") verdict.violations.push(`impl-${implCapture.reason || "capture-error"}`);
+
+// The reference measured no overlay. Only a reference that was actually
+// sampled counts as measured; an open/eval failure has no samples and is
+// handled by the capture-error violations above. `ref-overlay-absent` stays in
+// the violations either way: the annotation below names the reference
+// measurement the FAIL is about and what would resolve it, and nothing here
+// removes a violation or changes the status.
+const refMeasuredAbsent = refCapture.status !== "error" && verdict.ref.sampleCount > 0 && !verdict.ref.mounted;
+if (refMeasuredAbsent) {
+  const probeStatement = `the lifecycle probe saw no fixed/absolute overlay covering >= ${Math.round(probe.MIN_AREA_RATIO * 100)}% of the viewport on the reference across ${verdict.ref.sampleCount} samples`;
+  if (refAbsenceCertified) {
+    verdict.refAbsence = {
+      certified: true,
+      source: "states/splash/contract.json capture.authoritativeNegative",
+      guidance: `${probeStatement}, and the Phase A capture also certified absence over the whole first load. Both instruments enumerate elements and are blind to the same curtains (a pseudo-element such as html:not(.loaded)::before, a body background over opacity-gated content, a canvas), so agreement between them is not corroboration and does not clear this FAIL. This is a reference measurement, not an implementation defect: this check was dispatched by a detector that read bundle source or a DOM diff (the hasPreloader signal the interactions detector writes into the interactions-detected artifact, splash-extraction artifacts), so inspect that detector's evidence for the loader it saw - and if the reference really has no splash, that dispatch signal is what to correct.`,
+    };
+  } else {
+    // The Phase A capture timed out, saw a loading lifecycle the probe cannot
+    // classify (root class removed, covering element leaving, DOM shift),
+    // predates the covering survey, or was attached after navigation.
+    verdict.refAbsence = {
+      certified: false,
+      source: "states/splash/contract.json capture.authoritativeNegative",
+      guidance: `${probeStatement}, but states/splash/contract.json does not certify absence, so the reference may hold a splash this probe cannot classify. This is a reference measurement, not an implementation defect: re-run scripts/extract/capture-states.sh against the reference so the certificate is derived from the current sampler, then check capture.absenceEvidence for the channel that refused it.`,
+    };
+  }
+}
 verdict.status = verdict.violations.length ? "fail" : "pass";
 verdict.refUrl = refUrl;
 verdict.implUrl = implUrl;

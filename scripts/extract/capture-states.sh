@@ -32,6 +32,7 @@
 #   <ref_dir>/states/splash/0ms.json          — full outerHTML at t=0
 #   <ref_dir>/states/splash/settled.json      — full outerHTML at end-of-loop
 #   <ref_dir>/states/splash/<NNN>ms.json      — full outerHTML when structural mutation > 20%
+#   <ref_dir>/states/splash/contract.json     — splash lifecycle verdict + absence certificate (ui_clone.splash_contract)
 #
 # Exit codes:
 #   0  capture completed (transitions may be 0 — that's the "static page" case)
@@ -134,14 +135,32 @@ EVAL_JS='(async () => {
     ) {
       if (parts.length >= 8) return null;
       const tag = cur.localName;
-      if (!tag || !cur.parentElement) break;
-      const siblings = Array.from(cur.parentElement.children).filter((sibling) => (
+      const parent = cur.parentNode;
+      if (!tag || !parent || !parent.children) break;
+      const siblings = Array.from(parent.children).filter((sibling) => (
         sibling.localName === tag
       ));
       parts.unshift(`${tag}:nth-of-type(${siblings.indexOf(cur) + 1})`);
-      cur = cur.parentElement;
+      if (parent.nodeType === Node.DOCUMENT_FRAGMENT_NODE && parent.host) {
+        // Top of an open shadow tree. Anchor the path on the host so a shadow
+        // child cannot share an identity with a light-DOM element sitting at
+        // the same nth-of-type position.
+        const host = identityFor(parent.host);
+        return host ? `${host} >>> ${parts.join(" > ")}` : null;
+      }
+      cur = parent;
     }
     return parts.length ? `body > ${parts.join(" > ")}` : null;
+  };
+
+  // Every rendered element, descending into open shadow roots.
+  // `document.querySelectorAll("body *")` stops at shadow boundaries, so a
+  // splash mounted inside a web component never reached the probe.
+  const eachRenderedElement = function* (root) {
+    for (const el of root.querySelectorAll("*")) {
+      yield el;
+      if (el.shadowRoot) yield* eachRenderedElement(el.shadowRoot);
+    }
   };
 
   const selectorFor = (el) => {
@@ -157,7 +176,71 @@ EVAL_JS='(async () => {
     return nthOfTypePath(el);
   };
 
-  const identityFor = (el) => {
+  // The identity of an element with no id and no identifying attribute is the
+  // NODE, not its DOM position. Keyed by nth-of-type path alone, a class-only
+  // preloader at body > div:nth-of-type(1) that is removed hands that exact
+  // key to the wrapper behind it, the covering map never records an exit, and
+  // a page with a loader certifies absence. Each such node is given a serial
+  // the first time it is surveyed and keeps it for the life of the page (a
+  // WeakMap, so a sibling inserted in front of it later does not rename it);
+  // the path is kept as a readable label. A node too deep for nthOfTypePath
+  // still gets an identity, so a deeply nested loader cannot fall out of the
+  // survey by depth alone. Ids and identifying attributes stay role-keyed: a
+  // hydration pass that replaces #app with a fresh #app is not a splash exit.
+  //
+  // One replacement is not an exit. A framework re-mount (React/Next hydration
+  // mismatch, a skeleton swapped for its content) throws an id-less node away
+  // and mounts a fresh one in its place; keyed by node alone that reads as the
+  // old node leaving, and a page with no splash is refused. A fresh node
+  // inherits the identity of the node it replaced only when ALL of these hold,
+  // each checked against the immediately preceding survey and nothing older:
+  //   - the fresh node did not exist at the previous survey (never walked,
+  //     rendered or hidden - a wrapper that was merely visibility: hidden and
+  //     is now shown is not fresh, which is the aliasing case above);
+  //   - the previous survey recorded a serial-keyed covering node at the same
+  //     nth-of-type path, and that node is now detached from the document (a
+  //     loader that is still connected but hidden or moved is not replaced);
+  //   - both carry the same tag and the same set of classes.
+  // A loader replaced in place by content of a different class, a loader
+  // removed with its replacement mounted more than one poll later, and the
+  // aliasing case all still record an exit. Same tag, same classes, same
+  // path, same poll: no DOM instrument can tell that from a re-mount.
+  const nodeSerials = new WeakMap();
+  let nextNodeSerial = 1;
+  const surveyedNodes = new WeakSet();
+  let previousCoveringNodes = new Map();
+  let currentCoveringNodes = new Map();
+  const nodeSignature = (el) => {
+    const classes = (el.getAttribute("class") || "").trim().split(/\s+/).filter(Boolean).sort();
+    return `${el.localName || "element"}.${classes.join(".")}`;
+  };
+  const nodeIdentityFor = (el, createdSinceLastSurvey) => {
+    let record = nodeSerials.get(el);
+    if (!record) {
+      const path = nthOfTypePath(el);
+      const predecessor = path ? previousCoveringNodes.get(path) : null;
+      if (
+        createdSinceLastSurvey && predecessor && predecessor.el !== el &&
+        predecessor.el.isConnected === false && predecessor.signature === nodeSignature(el)
+      ) {
+        record = { identity: predecessor.identity, path };
+      } else {
+        record = { identity: `${path || "deep"} @n${nextNodeSerial}`, path };
+        nextNodeSerial += 1;
+      }
+      nodeSerials.set(el, record);
+    }
+    return record.identity;
+  };
+  // Called for every serial-keyed node the current survey records as covering,
+  // so the next survey can recognise an in-place replacement of it.
+  const noteCoveringNode = (el, identity) => {
+    const record = nodeSerials.get(el);
+    if (!record || !record.path) return;
+    currentCoveringNodes.set(record.path, { el, identity, signature: nodeSignature(el) });
+  };
+
+  const identityFor = (el, createdSinceLastSurvey) => {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
     const tag = el.localName || "element";
     if (el.id) return `#${cssEscape(el.id)}`;
@@ -165,34 +248,64 @@ EVAL_JS='(async () => {
       const value = el.getAttribute(attr);
       if (value) return `${tag}[${attr}="${cssString(value)}"]`;
     }
-    return nthOfTypePath(el);
+    return nodeIdentityFor(el, createdSinceLastSurvey === true);
   };
 
-  const detectFullScreenOverlay = () => {
+  // One pass over every rendered element measures two different things.
+  //
+  // `overlay` is the splash probe: the largest viewport-covering element that
+  // is positioned like an overlay (fixed, or absolute with z-index >= 10). Its
+  // lifecycle drives `detected` and exit timing. It cannot classify an in-flow
+  // full-viewport loader or a low-z absolute one, because in a single sample
+  // those look exactly like a hero section.
+  //
+  // `covering` is what makes their lifecycle visible: EVERY rendered element
+  // covering at least COVERING_RECORD_FLOOR of the viewport, keyed by identity,
+  // whatever its position or z-index. A loader leaves; a hero stays. The
+  // python writer compares this map across samples (ui_clone.splash_contract):
+  // an identity that reached COVERING_ENTER and later fell from its own peak
+  // past the writer COVERING_EXIT line, or vanished, is an exit. The floor is
+  // deliberately lower than that exit line, so a curtain that settles at 35%
+  // arrives at the writer as a measured 35% rather than as an absence, and the
+  // 45% mount line stays reachable. Both numbers are substituted below from
+  // ui_clone.splash_contract, where they are pinned to the thresholds of the
+  // lifecycle probe itself: whatever splash-lifecycle-probe.js would call a
+  // candidate, this survey records. (No apostrophes in these comments: EVAL_JS
+  // is a single-quoted shell string.)
+  const COVERING_ENTER = __UI_CLONE_COVERING_ENTER__;
+  const COVERING_RECORD_FLOOR = __UI_CLONE_COVERING_RECORD_FLOOR__;
+  const surveyViewportCoverage = () => {
     const vw = window.innerWidth, vh = window.innerHeight;
-    const candidates = document.querySelectorAll("body *");
     let best = null;
-    for (const el of candidates) {
+    const covering = {};
+    for (const el of eachRenderedElement(document.body)) {
       try {
+        // Recorded before any filter: a node the previous survey walked, even
+        // hidden or too small, is not a fresh node.
+        const createdSinceLastSurvey = !surveyedNodes.has(el);
+        surveyedNodes.add(el);
         const r = el.getBoundingClientRect();
         const visibleWidth = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
         const visibleHeight = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
         const viewportCoverage = Math.min(1, (visibleWidth * visibleHeight) / Math.max(vw * vh, 1));
+        if (viewportCoverage < COVERING_RECORD_FLOOR) continue;
+        const cs = getComputedStyle(el);
+        const opacity = Number.parseFloat(cs.opacity || "1");
+        const rendered = opacity > 0.05 && cs.visibility !== "hidden" && cs.display !== "none";
+        if (!rendered) continue;
+        const identity = identityFor(el, createdSinceLastSurvey);
+        if (identity) {
+          covering[identity] = Math.round(viewportCoverage * 100) / 100;
+          noteCoveringNode(el, identity);
+        }
         const coversViewport = viewportCoverage >= 0.75;
         if (!coversViewport) continue;
-        const cs = getComputedStyle(el);
         const z = parseInt(cs.zIndex || "0", 10) || 0;
-        const opacity = Number.parseFloat(cs.opacity || "1");
         if (cs.position === "sticky") continue;
-        if (
-          (cs.position === "fixed" || (cs.position === "absolute" && z >= 10)) &&
-          opacity > 0.05 &&
-          cs.visibility !== "hidden" &&
-          cs.display !== "none"
-        ) {
+        if (cs.position === "fixed" || (cs.position === "absolute" && z >= 10)) {
           const candidate = {
             selector: selectorFor(el),
-            identity: identityFor(el),
+            identity,
             coverage: Math.round(viewportCoverage * 1000) / 1000,
             visible: true,
             opacity: cs.opacity,
@@ -203,7 +316,13 @@ EVAL_JS='(async () => {
         }
       } catch (e) {}
     }
-    return best || { selector: null, identity: null, coverage: 0, visible: false, opacity: "0" };
+    // Only the immediately preceding survey can vouch for a replacement.
+    previousCoveringNodes = currentCoveringNodes;
+    currentCoveringNodes = new Map();
+    return {
+      overlay: best || { selector: null, identity: null, coverage: 0, visible: false, opacity: "0" },
+      covering,
+    };
   };
 
   const animationEvidence = () => {
@@ -265,7 +384,20 @@ EVAL_JS='(async () => {
   const computeState = () => {
     const html = document.documentElement;
     const body = document.body || { className: "", outerHTML: "" };
-    const overlay = detectFullScreenOverlay();
+    const survey = surveyViewportCoverage();
+    const overlay = survey.overlay;
+    // Only the >= COVERING_ENTER set feeds the hash, so an element the
+    // certificate would count as covering always earns its own sample when it
+    // enters or leaves, while share jitter below that line does not. This can
+    // add a poll or two on a page with no splash (a hero fading in past the
+    // line); `polls` was already "distinct composite hashes" (animation
+    // counts, media readiness), and its readers - the class-hook lookup in
+    // state_coverage.py and the 3x ratio on timed-out refs in
+    // behavior-parity-check.sh - key off class changes and gross ratios, not
+    // exact counts.
+    const coveringIdentities = Object.keys(survey.covering)
+      .filter((identity) => survey.covering[identity] >= COVERING_ENTER)
+      .sort();
     const animations = animationEvidence();
     const media = mediaFingerprint();
     const composite = [
@@ -274,6 +406,7 @@ EVAL_JS='(async () => {
       getComputedStyle(html).overflow,
       body.style ? getComputedStyle(body).overflow : "",
       JSON.stringify(overlay),
+      coveringIdentities.join(","),
       animations.activeCount,
       animations.runningCount,
       media.hash,
@@ -287,6 +420,7 @@ EVAL_JS='(async () => {
       htmlClass: html.className || "",
       domLength: (body.outerHTML || "").length,
       overlay,
+      covering: survey.covering,
       animationEvidence: animations,
       motionEvidence: {
         changed: false,
@@ -311,6 +445,7 @@ EVAL_JS='(async () => {
     compositeDigest: initial.compositeDigest,
     domLength: initial.domLength,
     overlay: initial.overlay,
+    covering: initial.covering,
     animationEvidence: initial.animationEvidence,
     motionEvidence: initial.motionEvidence,
     mediaFingerprint: initial.mediaFingerprint,
@@ -323,11 +458,32 @@ EVAL_JS='(async () => {
   const awaitingInitialOverlayExit = Boolean(
     initial.overlay.visible && initial.overlay.coverage >= 0.75
   );
-  // Ordinary pages retain the 5s ceiling. A page that visibly starts behind a
-  // fullscreen overlay gets a longer evidence window because real loaders are
-  // often gated on media/font readiness and can cross 5s under cold-cache or
-  // network variance. Exit as soon as that same overlay disappears.
-  const captureLimitMs = awaitingInitialOverlayExit ? 15000 : 5000;
+  // A page that visibly starts behind a fullscreen overlay gets the longest
+  // evidence window because real loaders are often gated on media/font
+  // readiness and can cross 5s under cold-cache or network variance. Exit as
+  // soon as that same overlay disappears.
+  //
+  // The no-overlay ceiling was 5000ms, which is shorter than a common entry
+  // choreography: the loop only exits early on `stable-2s`, so a page whose
+  // own entry animations run ~1.6s and whose hero video moves the media
+  // fingerprint (readyState 0 -> 4) while it loads cannot go 2s without a
+  // change inside 5s. It then hits the cap mid-load: `timedOut: true`,
+  // `reason: wall-clock-cap`, and a settled bookend taken before the page
+  // actually settled, which behavior-parity-check reads as a continuous ref
+  // animation the impl lacks. 10000ms lets that choreography finish and stays
+  // well under the overlay-exit window. Measured on navercorp.com/tech/
+  // innovation: 5000ms timed out with motionEvidence ["media",
+  // "active-animation"]; 10000ms settles at ~6.3s with `stable-2s`.
+  //
+  // This does NOT change what `authoritativeNegative` rests on. That
+  // certificate is derived by ui_clone.splash_contract from what the samples
+  // recorded (overlay probe, covering-element lifecycle, root-class removal,
+  // structural DOM shift) and from the run ending at its own settle; a longer
+  // ceiling only gives a page more room to reach that settle. A page that
+  // never goes quiet (autoplaying video moves currentTime every poll; an
+  // infinite animation on a large above-the-fold element) still times out,
+  // is still uncertified, and now spends the full 10s doing so.
+  const captureLimitMs = awaitingInitialOverlayExit ? 15000 : 10000;
 
   while ((performance.now() - startedAt) < captureLimitMs) {
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 100)));
@@ -350,6 +506,7 @@ EVAL_JS='(async () => {
         compositeDigest: cur.compositeDigest,
         domLength: cur.domLength,
         overlay: cur.overlay,
+        covering: cur.covering,
         animationEvidence: cur.animationEvidence,
         motionEvidence: {
           changed: true,
@@ -378,6 +535,7 @@ EVAL_JS='(async () => {
     compositeDigest: final.compositeDigest,
     domLength: final.domLength,
     overlay: final.overlay,
+    covering: final.covering,
     animationEvidence: final.animationEvidence,
     motionEvidence: {
       changed: states.length > 1,
@@ -412,6 +570,38 @@ EVAL_JS='(async () => {
             "stable-2s",
   };
 })();'
+
+# The covering thresholds have exactly one definition, in
+# ui_clone.splash_contract, pinned there to the lifecycle probe's own numbers.
+# Substitute them into the sampler so the survey, the certificate that reads it
+# and the check the certificate can suppress cannot disagree about what covers
+# the viewport. A missing module or a non-numeric value is a hard stop: a
+# sampler running with a placeholder would throw inside the page and the
+# capture would fail closed anyway, but this names the cause.
+#
+# The repo root is placed AHEAD of sys.path[0] (the working directory, for
+# `python3 -c`) rather than appended through PYTHONPATH: a `ui_clone/` package
+# in the caller's cwd - an impl tree, a scratch dir - would otherwise shadow
+# the real module and hand the sampler whatever thresholds it carries.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+COVERING_THRESHOLDS="$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from ui_clone.splash_contract import COVERING_ENTER, COVERING_RECORD_FLOOR
+print(COVERING_ENTER, COVERING_RECORD_FLOOR)
+' "$REPO_ROOT")" || {
+  echo "capture-states: cannot read covering thresholds from ui_clone.splash_contract" >&2
+  exit 3
+}
+read -r COVERING_ENTER COVERING_RECORD_FLOOR <<<"$COVERING_THRESHOLDS"
+for threshold in "$COVERING_ENTER" "$COVERING_RECORD_FLOOR"; do
+  if [[ ! "$threshold" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]]; then
+    echo "capture-states: covering threshold is not a share in [0, 1]: $threshold" >&2
+    exit 3
+  fi
+done
+EVAL_JS="${EVAL_JS//__UI_CLONE_COVERING_ENTER__/$COVERING_ENTER}"
+EVAL_JS="${EVAL_JS//__UI_CLONE_COVERING_RECORD_FLOOR__/$COVERING_RECORD_FLOOR}"
 
 RUN_EVAL_JS="$EVAL_JS"
 
@@ -474,7 +664,7 @@ fi
 # env-var size limits.
 RESPONSE_TMP="$(mktemp -t capture-states-resp.XXXX)"
 printf '%s' "$RESPONSE_RAW" > "$RESPONSE_TMP"
-python3 - "$OUTDIR" "$RESPONSE_TMP" "$CAPTURE_MODE" <<'PY'
+python3 - "$OUTDIR" "$RESPONSE_TMP" "$CAPTURE_MODE" "$SCRIPT_DIR/../.." <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -482,6 +672,12 @@ from pathlib import Path
 outdir = Path(sys.argv[1])
 raw = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
 capture_mode = sys.argv[3]
+
+# The absence certificate has exactly one implementation, shared with every
+# consumer of contract.json. A hard ImportError is deliberate: a private copy
+# of the rule here is how producer and consumers drifted apart before.
+sys.path.insert(0, str(Path(sys.argv[4]).resolve()))
+from ui_clone.splash_contract import absence_evidence, certify_absence  # noqa: E402
 
 # agent-browser may wrap the eval result in a JSON envelope; try both.
 try:
@@ -666,13 +862,16 @@ def _splash_contract(states, capture_mode, summary):
     detected = bool(len(states) > 1 and first_visible and exit_observation)
     timed_out = bool(summary.get("timedOut"))
     reason = summary.get("reason")
-    authoritative_negative = bool(
-        capture_mode == "pre-navigation"
-        and not detected
-        and not first_visible
-        and len(states) == 1
-        and not timed_out
-    )
+    # "This page has no splash" is certified from what every sample recorded
+    # (overlay probe, covering-element lifecycle, html/body class removal,
+    # structural DOM shift) plus the run settling on its own. The rule and its
+    # rationale live in ui_clone/splash_contract.py; the evidence it read is
+    # stamped next to the verdict so a reader can check the verdict against it.
+    # Measured on navercorp.com/tech/innovation - 11-13 polled states from
+    # entry animations and media readiness, classes empty throughout, DOM +2%,
+    # no overlay - this certifies; the old `len(states) == 1` rule refused it.
+    evidence = absence_evidence(states, capture_mode=capture_mode, timed_out=timed_out)
+    authoritative_negative = certify_absence(evidence)
     return {
         "schemaVersion": 1,
         "captureMode": capture_mode,
@@ -691,6 +890,7 @@ def _splash_contract(states, capture_mode, summary):
             "stateCount": len(states),
             "timedOut": timed_out,
             "reason": reason,
+            "absenceEvidence": evidence.to_contract(),
             "authoritativeNegative": authoritative_negative,
         },
         "activeAnimation": {

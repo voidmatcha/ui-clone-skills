@@ -51,6 +51,9 @@ def _as_float(value: object, default: float = 0.0) -> float:
 
 
 def _fmt_num(value: float) -> str:
+    # Coerce first: callers may pass an int (e.g. forced_scroll_y) and
+    # int.is_integer() only exists on Python 3.12+.
+    value = float(value)
     if value.is_integer():
         return str(int(value))
     return f"{value:.3f}".rstrip("0").rstrip(".")

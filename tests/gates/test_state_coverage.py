@@ -279,6 +279,35 @@ def test_splash_constant_html_class_is_not_transition_hook(
     )
 
 
+def test_splash_polls_inflated_by_covering_survey_do_not_demand_class_hooks(
+    ref_dir: Path, impl_root: Path,
+) -> None:
+    """Characterization, not a regression: the Phase A sampler now feeds the
+    set of viewport-covering identities into the state hash, so a hero fading
+    in past the covering line earns a poll of its own. Extra polls whose
+    classes never change must stay N/A here exactly as media/animation polls
+    always have; the gate keys off class hooks, not the poll count.
+    """
+    wrapper = "body > div:nth-of-type(1)"
+    _write_splash(
+        ref_dir,
+        trajectory=[
+            {"ts_ms": 0, "hash": 1, "bodyClass": "", "htmlClass": "", "covering": {wrapper: 1.0}},
+            {"ts_ms": 400, "hash": 2, "bodyClass": "", "htmlClass": "", "covering": {wrapper: 1.0, "#hero": 0.5}},
+            {"ts_ms": 900, "hash": 3, "bodyClass": "", "htmlClass": "", "covering": {wrapper: 1.0, "#hero": 0.98}},
+            {"ts_ms": 2900, "hash": 3, "bodyClass": "", "htmlClass": "", "covering": {wrapper: 1.0, "#hero": 0.98}},
+        ],
+        summary={"checked": True, "polls": 4, "reason": "stable-2s"},
+    )
+    _write_impl_src(impl_root, {"App.tsx": "export function App() { return null; }"})
+    results = Gate(ref_dir).gate_state_coverage()
+    splash_rows = [r for r in results if "splash" in r.label.lower()]
+    assert not splash_rows, (
+        "covering-driven polls with constant classes must be N/A; "
+        f"got: {[(r.label, r.status, r.message) for r in results]}"
+    )
+
+
 def test_scroll_growth_with_scroll_listener_pass(
     ref_dir: Path, impl_root: Path,
 ) -> None:

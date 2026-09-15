@@ -98,16 +98,22 @@ def test_budget_spans_several_stops_then_is_spent(
 def test_advisory_mode_prints_instead_of_blocking(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """With the budget spent the stop is allowed -- but never in silence."""
+    """With the budget spent the stop is allowed -- but never in silence.
+
+    Stderr on exit 0 is debug-log only under the Stop-hook contract, so the
+    hand-back must travel as a systemMessage, which the host shows to the user.
+    """
     monkeypatch.delenv("UI_RE_HEADLESS_DRIVER", raising=False)
     monkeypatch.setattr(section_gate, "_ADVISORY_ONLY", True)
     section_gate._emit_block("GATE: section-compare BLOCKED\n  - hero mismatch")
     captured = capsys.readouterr()
 
-    assert captured.out.strip() == "", "advisory mode must not emit a block decision"
-    assert "UNFINISHED" in captured.err
-    assert "INCOMPLETE" in captured.err
-    assert "hero mismatch" in captured.err, "the user must be told WHICH gate failed"
+    shown = json.loads(captured.out)
+    assert "decision" not in shown, "advisory mode must not emit a block decision"
+    message = shown["systemMessage"]
+    assert "UNFINISHED" in message
+    assert "INCOMPLETE" in message
+    assert "hero mismatch" in message, "the user must be told WHICH gate failed"
 
 
 def test_normal_mode_still_blocks(

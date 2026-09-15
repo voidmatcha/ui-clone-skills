@@ -138,6 +138,62 @@ def _manual_resume_context(receipt: Mapping[str, Any]) -> str:
     )
 
 
+def _crondelete_succeeded(tool_response: object, cron_id: str) -> bool:
+    """Whether CronDelete actually removed the owned one-shot.
+
+    The host returns a human-readable confirmation ("Cancelled job <id>."),
+    not a structured body, so requiring `{"ok": True}` treated every real
+    successful delete as a failure and left the receipt wedged in `canceling`
+    forever — which then blocks all pipeline work for the session. Accept the
+    structured form and a confirmation naming this cron id, and keep rejecting
+    anything that reads as an error.
+    """
+    if isinstance(tool_response, dict) and tool_response.get("ok") is True:
+        return True
+    # The confirmation can arrive as a bare string, a dict, or a list of
+    # content blocks depending on the host build. Flattening to text keeps the
+    # predicate from having to track every wrapper shape — the earlier
+    # dict/str-only version still rejected real deletes and re-wedged the
+    # receipt in `canceling`, which blocks every pipeline command for the
+    # session.
+    if isinstance(tool_response, str):
+        text = tool_response
+    else:
+        try:
+            text = json.dumps(tool_response, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            text = str(tool_response)
+    if not text or not cron_id or cron_id not in text:
+        return False
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("error", "fail", "not found", "unknown")):
+        return False
+    # A refusal names the same verb as a confirmation: "Unable to cancel job
+    # <id>", "Could not delete <id>" and "Cannot remove <id>" all carry the
+    # cron id and a success stem while matching none of the error markers
+    # above. Accepting them would run finish_owned_delete over a one-shot that
+    # is still armed — the inverse of the wedged-receipt bug this predicate
+    # exists to fix, and the worse of the two: the wake still fires.
+    if any(
+        marker in lowered
+        for marker in (
+            "unable",
+            "cannot",
+            "can not",
+            "can't",
+            "could not",
+            "couldn't",
+            "no such",
+            "denied",
+            "refus",
+            "invalid",
+            "missing",
+        )
+    ):
+        return False
+    return any(marker in lowered for marker in ("cancel", "delet", "remov", "stopped"))
+
+
 def _delete_failure_context(tool_response: object) -> str:
     detail = tool_response if isinstance(tool_response, dict) else {"response": tool_response}
     return (
@@ -265,9 +321,10 @@ def _post_crondelete(
     tool_response: object,
 ) -> str | None:
     receipt = _receipt(project_root, session_id)
-    if receipt is None or tool_input.get("id") != receipt.get("cronId"):
+    cron_id = receipt.get("cronId") if receipt is not None else None
+    if receipt is None or tool_input.get("id") != cron_id:
         return None
-    if not (isinstance(tool_response, dict) and tool_response == {"ok": True}):
+    if not _crondelete_succeeded(tool_response, str(cron_id or "")):
         return _emit_context(_EVENT_POST, _delete_failure_context(tool_response))
     cc.finish_owned_delete(project_root, session_id)
     return None

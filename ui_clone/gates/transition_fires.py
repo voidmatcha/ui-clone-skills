@@ -428,7 +428,10 @@ def _stroke_drew(before: dict, after: dict) -> bool:
     return abs(a) < abs(b) - _OPACITY_EPS
 
 
-def _any_visual_change(before: dict, after: dict) -> bool:
+def _any_visual_change(before: dict, after: dict, *, top: bool = True) -> bool:
+    """Any measured before/after delta. `top=False` drops the viewport-top
+    channel for drivers that scrollIntoView() the element between the two
+    snapshots (hover), where `top` moves regardless of animation."""
     discrete_hover_change = any(
         before.get(key) is not None
         and after.get(key) is not None
@@ -438,7 +441,7 @@ def _any_visual_change(before: dict, after: dict) -> bool:
     return (
         _opacity_changed(before, after)
         or _transform_changed(before, after)
-        or _top_moved(before, after)
+        or (top and _top_moved(before, after))
         or _height_changed(before, after)
         or _color_changed(before, after)
         or discrete_hover_change
@@ -1328,7 +1331,13 @@ def decide(
             res["observed"] = "known-skip: reset-only hover rule has no runtime delta"
             res["status"] = "known-skip"
             return res
-        fired = _any_visual_change(before, after)
+        # Deliberately NOT _top_moved (mirrors the reveal branch below): the
+        # PHASE1 baseline is snapped at scroll-top and the real-pointer pass
+        # scrollintoview()s the target before its snapshot, so a below-fold
+        # target's viewport `top` always differs with no :hover rule involved.
+        # It was the channel that passed the click-to-open fallback's pre-walk
+        # record whenever the revealed re-baseline was refused.
+        fired = _any_visual_change(before, after, top=False)
         if not fired and _hover_descendant_measurement_declared(entry):
             fired = _child_changed(before, after)
         res["observed"] = "style change on hover=" + str(fired)
