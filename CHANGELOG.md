@@ -4,6 +4,22 @@
 
 ## [0.8.11] - 2026-09-15
 
+### Documentation
+
+- Name the two gate rows that describe the REFERENCE rather than the clone, so
+  no implementation edit can clear them: `splash-lifecycle` failing
+  `ref-overlay-absent`, and `video-transition-compare` rows tagged
+  `ref-unstable`. Both appeared only inside the check scripts, so they read as
+  ordinary failures, the iterate doctrine pointed at component source, and a run
+  could spend its whole Stop retry budget editing a clone that was never the
+  problem. `iteration-discipline.md` gains a `reference-measurement` bailout;
+  `splash-extraction.md` documents what the deliberate `hasPreloader`
+  false-positive bias costs when the reference turns out to have no splash,
+  which artifacts say which case you are in, and why adding a splash to the
+  implementation to clear the row is a fabricated difference. `docs/agent-cli.md`
+  documents `UI_RE_STOP_RETRY_CAP` and the marker-removal exit for an abandoned
+  ref under the human escape hatches.
+
 ### Fixed
 
 - Stop the terminal-state gate describing a pipeline record as self-attested.

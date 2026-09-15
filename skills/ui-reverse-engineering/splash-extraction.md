@@ -120,6 +120,42 @@ grep -oE '"#js-[a-zA-Z][^"]{2,30}"' tmp/ref/<c>/bundles/*.js | sort -u
 
 If `once()` or `basicTransition` matches → the splash timeline is inside a Barba transition object. Read 200 lines after the match to extract the timeline (anime.js syntax: `anime.timeline().add({ targets, translateY, duration, easing }, offsetMs)`).
 
+## When the detector fires and the reference has no splash
+
+The false-positive bias above has a consequence worth knowing before you see it as
+a gate failure. `hasPreloader: true` dispatches `splash-lifecycle`, which then
+measures BOTH sides. When the reference turns out to have no overlay, the check
+fails with `ref-overlay-absent` — and **no implementation edit can clear it**. The
+clone is not being accused of anything; the dispatch signal is.
+
+Two artifacts tell you which case you are in:
+
+- `states/splash/contract.json` — the Phase A absence certificate. `detected: true`
+  means an overlay was observed. `capture.authoritativeNegative: true` means the
+  capture is strong enough to certify that there is none; `false` means it could
+  not tell, and the check is dispatched on the detector's word alone.
+- `splash-lifecycle.json` — `refAbsence.certified` and `refAbsence.guidance`. The
+  guidance names the detector whose evidence to inspect.
+
+What to do, in order:
+
+1. Read `refAbsence.guidance` and go back to the detector it names — the bundle
+   grep or the DOM diff that set `hasPreloader`. A match on a `loading` class that
+   belongs to a lazy-image observer, or a `preloader` token in a vendor chunk the
+   page never runs, is the usual cause.
+2. If the reference genuinely has no splash, the dispatch signal is what to
+   correct, not the clone.
+3. Do not add a splash to the implementation to make the row pass. That is a
+   fabricated difference, and `masked-region-static` and the section compares will
+   report it as one.
+
+The certificate is deliberately hard to earn. It refuses on a covering element that
+entered and never exited, on a root class removed after the first sample, and on a
+capture that hit its wall-clock cap — because certifying absence wrongly suppresses
+the splash check entirely, and a missing check is invisible in a way a failing one
+is not. A refusal you disagree with is a reference-measurement problem; see
+`iteration-discipline.md` → Bailout cases.
+
 ## Extracted-CSS gap (asset-extraction caveat)
 
 Even after splash is detected, the loader's CSS often **isn't** in `tmp/ref/<c>/css/*.css`. Slater's per-page CSS, Webflow's IX2 styles, Barba's runtime CSS, and many critical-CSS setups are:

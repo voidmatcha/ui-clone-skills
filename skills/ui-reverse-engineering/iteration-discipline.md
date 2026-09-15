@@ -136,8 +136,25 @@ match alone does not establish progress.
 - **Library missing**: gate output references "lenis is not defined" or similar → return with `fixType: "missing-install"`, the main agent installs the package
 - **Contract conflict**: fix requires a `generation-plan.json` change (library swap, component delete) → return with `fixType: "contract-conflict"`
 - **Source forensics required**: compact artifacts cannot explain the next scoped fix or two visual iterations show no AE reduction → return with `fixType: "source-forensics"`, failing section, selectors, and source questions; do not read raw HTML/CSS/JS yourself.
+- **Reference-side measurement**: the failing row describes the REFERENCE, not the
+  clone, so no implementation edit can clear it → return with
+  `fixType: "reference-measurement"` and the row verbatim. The two that occur in
+  practice:
+  - `splash-lifecycle` failing `ref-overlay-absent`. The check was dispatched by a
+    detector that read bundle source or a DOM diff, then measured no overlay on the
+    reference itself. `refAbsence.guidance` in `splash-lifecycle.json` names what to
+    inspect. Editing the clone cannot make the reference grow a splash.
+  - `video-transition-compare` rows tagged `ref-unstable`. The reference does not
+    reproduce itself between captures, so the comparison has no stable baseline to
+    judge the clone against.
 
 These are out-of-scope for visual iteration; they need pipeline-level intervention.
+
+Recognising this class early is what keeps the loop bounded. Left unrecognised it
+reads as an ordinary gate failure, the iterate doctrine above points at component
+source, and the run burns its whole Stop retry budget editing a clone that was
+never the problem. If a row names the reference rather than a selector in your
+implementation, stop and report it — a correct clone cannot make it pass.
 
 ## Output
 

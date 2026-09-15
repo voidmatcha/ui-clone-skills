@@ -228,6 +228,26 @@ past a gate voids the measurement signal the gate exists to produce.
   clone-shaped files without a `tmp/ref/<component>` evidence dir). Set it only
   for genuinely non-clone work; clone work outside the pipeline ships unverified.
 
+- `UI_RE_STOP_RETRY_CAP=<n>` — how many times the SAME Stop block may repeat
+  before the run is handed back (default 3). The counter is keyed by session,
+  ref dir, and a signature of the failure, so progress or a different failure
+  starts a fresh streak and only a genuinely repeating block spends the budget.
+  When it is spent the stop is allowed — the loop stays bounded — but the
+  hand-back arrives as a `systemMessage` naming the failing gate, and pipeline
+  state is untouched, so nothing downstream reads the ref as complete.
+  Raising this makes a wedged run loop longer before it hands back; setting it
+  to `0` restores the pre-cap behaviour of blocking indefinitely.
+
+  If a block repeats and you just want it to stop firing on an ABANDONED ref,
+  the narrow move is to remove that ref's activation marker — the captured
+  artifacts and the implementation source are untouched:
+
+      rm tmp/ref/<component>/.ui-re-active
+
+  Run it yourself; the agent is refused on that path because the marker is
+  enforcement state. Left alone the marker expires on its own after
+  `UI_RE_STALE_DAYS` (default 3).
+
 - `UI_RE_HEADLESS_DRIVER=1` — set by `ui_clone.benchmark_harness` on the
   `claude --print` child. Demotes the section_gate **Stop** block to a stderr
   advisory, because a Stop block under `--print` ends the turn with no printed
