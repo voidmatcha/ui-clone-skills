@@ -2,6 +2,431 @@
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-09-15
+
+### Fixed
+
+- Accept the host's human-readable `CronDelete` confirmation ("Cancelled job
+  <id>.") as a successful delete. Requiring a structured `{"ok": true}` body
+  treated every real delete as a failure and wedged the receipt in `canceling`
+  forever, which blocks all pipeline work for the session. The predicate now
+  flattens str/dict/content-block shapes, requires the cron id to appear, and
+  still rejects anything carrying an error marker. A refusal names the same
+  verb as a confirmation ("Unable to cancel job <id>", "Could not delete
+  <id>"), so negation markers are rejected too — accepting one would finalize
+  the receipt while the one-shot stays armed and its wake still fires.
+- Stop the armed-continuation Stop notice from blocking the turn. The same
+  message ordered the turn to end while the block prevented it, leaving the
+  turn unendable and the agent re-reading both directives in a loop. The
+  notice now releases to stderr instead of blocking.
+- Key the closeout verify-stamp requirement off pipeline state (`state-coverage`
+  or later) or generated source outside the pre-generation paths, rather than
+  the mere existence of an impl root. Step 6e (`asset-download.sh`) and the font
+  transfer write into `<impl>/public` and `<impl>/src/styles/from-ref` long
+  before Step 7 emits a component, so the stamp was demanded from runs still
+  blocked at `pre-generate`. An unknown gate or unreadable impl tree still
+  fails closed onto the stamp.
+- Treat a declared input side made up entirely of documented-optional globs
+  that matched nothing as available-and-empty instead of unprovable. The two
+  checks whose ref side is `asset-substitution.json` alone —
+  `masked-region-static` and `tree-diff` — failed with "input fingerprint
+  unverifiable" on every clone that made no asset substitutions, which no
+  implementation change could clear.
+- Normalise selector quoting on both sides of the unmounted hover-rule match.
+  `tokenOf()` strips quotes from the spec target while the CSSOM re-serialises
+  attribute selectors with them, so a target like `[class^="btn-"]` could never
+  match a stylesheet rule no matter what it declared.
+- Reach hover targets that are not hit-testable at idle by hovering the nearest
+  hit-testable ancestors first (up to 6 levels, 4 candidates), then clicking
+  self-contained controls beside the target (`button`, `summary`,
+  `[role="button"]`, `[aria-expanded]`, `[aria-haspopup]`), reproducing the
+  real pointer path into a closed mega-menu, dropdown, or accordion panel. Both
+  frames are captured with the panel open and the observation records
+  `openedVia`; a click opener is toggled back before the next region. `a[href]`
+  is never used as an opener, and a control that navigates instead of revealing
+  (a button that router-pushes) stops the opener walk, walks history back, and
+  skips the region with its own reason instead of folding into "none are
+  hoverable" — that reason counts as a probe failure, never as measured
+  absence, so the region stays an obligation. If `back` does not restore the
+  original document the run aborts rather than probing every later region
+  against the wrong page.
+- Sample `::before`/`::after` alongside the observed element so a rule whose
+  only hover effect lives in a generated box no longer reads as "no observable
+  change", keep keyed style lookups property-based across the pseudo prefix, and
+  record pseudo-element deltas under `outsideBoxChange` since generated boxes
+  are routinely drawn outside the border box.
+- Distinguish measured absence from a failed probe in the live-capture bridge.
+  A hover rule whose affected selector is not rendered anywhere in the document
+  now skips with `affected selector not present in document`; that reason and
+  the existing `hover`/`scroll produced no observable change` reasons tag the
+  skip row `resolution: absence-measured` and retire the candidate from
+  `regions.json`, including a dispatch-only candidate that a plan-driven run
+  would otherwise have kept for a re-run.
+- Accept a tagged measured-absence skip row whose region is no longer claimed in
+  `regions.json` in the live-capture provenance gate, provided
+  `counts.skipped` equals the number of skip rows. Any other skip, a still-claimed
+  region, or a count that disagrees with the rows still fails the gate.
+- Raise the no-overlay capture ceiling from 5s to 10s. A page whose entry
+  choreography runs ~1.6s while a hero video moves the media fingerprint as it
+  loads cannot go 2s without a change inside 5s, so it hit the cap mid-load and
+  recorded `timedOut: true` with a settled bookend taken before the page had
+  settled, which `behavior-parity-check` reads as a continuous ref animation
+  the impl lacks. This does not change `authoritativeNegative`, which also
+  requires a single recorded state; pages that never go quiet (autoplaying
+  video, infinite above-the-fold animation) now spend 10s timing out instead
+  of 5s.
+- Coerce `_fmt_num` to `float` before calling `.is_integer()`. The signature
+  admits an `int` (`forced_scroll_y`), and `int.is_integer()` exists only on
+  Python 3.12+, so section capture raised `AttributeError` on the declared
+  minimum of Python 3.11.
+
+- Certify splash absence from the overlay's lifecycle instead of from page
+  stillness, and stop the certificate vetoing detectors that can see what it
+  cannot. `authoritativeNegative` required `stateCount == 1`, which conflates
+  "the page never changed class state" with "the page has no splash overlay":
+  navercorp.com/tech/innovation records 13 states with the overlay never visible
+  and settles naturally at 6256ms, and was refused — so the splash checks stayed
+  dispatched against a page that has no splash on either side. Simply dropping
+  that condition is not safe either: `detectFullScreenOverlay` only recognised
+  `position: fixed` (or `absolute` with z-index >= 10) at >= 75% viewport
+  coverage, so an in-flow full-viewport loader, a low-z curtain, or a splash
+  inside a shadow root reported nothing on every poll and the page certified
+  absence while holding a loader.
+  The probe is widened rather than the rule loosened: the sampler now descends
+  into open shadow roots (shadow children are anchored on their host identity so
+  they cannot collide with light-DOM paths) and records, per state, every
+  rendered element covering >= 50% of the viewport regardless of position or
+  z-index. One sample cannot tell an in-flow loader from a hero — both are
+  full-viewport blocks — but their lifecycles differ, so certification now
+  requires a pre-navigation capture that ended at its own settle with: the
+  overlay never visible, no covering identity that reached 75% and later fell
+  below 50% or vanished (hysteresis, so a 76% -> 72% hero reflow is not an
+  exit), no html/body class token present at the first sample and removed later
+  (tokens only added, as a `lenis`/`is-ready` setup does, do not count), and no
+  DOM-length shift beyond 20%. Sample count is no longer an input. The channels
+  are stamped as `capture.absenceEvidence` beside the verdict.
+  The rule lives once, in `ui_clone/splash_contract.py`: the producer imports it
+  and stamps the result, and `state-structure-spec.py`, `generation_plan.py` and
+  `verification-plan.sh` read that stamp instead of re-deriving it, so stored
+  artifacts keep the verdict they were produced under in both directions and
+  there is no second copy to drift. A stamped artifact must also carry an
+  allow-listed `captureMode`, and the pre-metadata contract shape keeps its
+  historical reading.
+  Finally, a certificate no longer vetoes `hasPreloader`/`hasSplash` from bundle
+  analysis or `preloaderRemoved`/`splashElements` from the dual-snapshot DOM
+  diff. Those are splash-specific claims from sources the capture cannot read,
+  and even the widened probe stays blind to a clip-path or mask wipe over a
+  persistent element and to a body-background preloader with a small spinner. It
+  still suppresses `polls > 1` and a transition-spec `page-load` trigger, which
+  are generic "something animates at load" signals derived from the same samples.
+  A wrongly dispatched splash check costs one run in which both sides measure no
+  splash; a wrongly vetoed one is a silent miss.
+- Reach hover entries whose target only exists behind a click-revealed panel,
+  and put the page back afterwards. `transition-fires-check.sh` reported
+  "style change on hover=False" for three entries targeting
+  `.header.thema-black .btn-lang__list button` and
+  `.btn-lang button[class^="btn-"]` while their `:hover` rules were in the
+  mirrored stylesheet the whole time: those live in `.btn-lang__list`, which is
+  `display:none` until `.btn-selected` is CLICKED, and the pre-existing owner
+  walk only HOVERS a nav-like ancestor.
+  The click walk is a FALLBACK, not a new first step: the unchanged owner hover,
+  scrollintoview, real-pointer hover and snapshot all run first, and the walk is
+  entered only when that snapshot shows the target still unrendered, or rendered
+  with no delta in both the CDP and the synthetic pass while other matches of the
+  same selector are hidden. An entry whose target renders and changes can never
+  reach it.
+  What it will click is narrow and evidenced: `a[href]` and its descendants,
+  submit/image/reset buttons, a bare `<button>` inside a `<form>` (whose missing
+  type defaults to submit), selection-state controls (`aria-pressed`,
+  `aria-selected`, `aria-checked`, tab/radio/checkbox/switch/option roles and
+  anything inside a tablist/radiogroup/listbox), already-open
+  `aria-expanded="true"`, and label tokens like next/prev/carousel/close/submit/
+  login/cart are all refused. Per ancestor level it prefers `aria-controls`
+  naming the hidden branch, then a recognisable toggle, then a generic button
+  only when it is that level's sole control or the only one sharing a name token
+  with the hidden branch; an ambiguous level clicks nothing. Generic buttons are
+  reachable at all because the captured bundle shows `.btn-selected` and
+  `.btn-search` are `<button type="button">` with no `aria-expanded` or
+  `aria-controls`, so a toggle-only policy would not have fixed these entries.
+  Depth is capped at 6, attempts at 2 per entry, and a control that failed is
+  never re-clicked at a higher level.
+  The close is verified rather than assumed, because a second click restores
+  nothing on an open-only, step-advancing or radio-style control and leaves the
+  page mutated for every later entry. A fingerprint taken before each click
+  (root classes and inline scroll-lock styles, count of rendered dialog/modal/
+  overlay nodes, the opener's own class and `aria-expanded`, and the class/open/
+  aria-hidden of every ancestor of the hidden target) defines "restored", and a
+  ladder — toggle, then Escape, then a click outside — is re-checked at +350ms
+  and +800ms per rung. If the page still does not match, or the URL moved, the
+  shell re-navigates and re-verifies; if that fails too the entry records
+  `restored: failed`. Every walk writes `hoverOpener` onto the entry and a
+  run-level `hoverOpenerRestore` summary that names the entries probed after the
+  first unrestored close, so a mutated run is visible instead of silent.
+  Scripted navigation is prevented where it can be (capture-phase cancel of
+  `submit` and `a[href]` activation, `window.open` and
+  `HTMLFormElement.prototype.submit` stubbed for the duration) and detected
+  where it cannot (`location` assignment is unforgeable from page JS, so a URL
+  mismatch after the close falls through to the navigate rung, and a walk eval
+  that never returns is treated as "clicked, must be undone").
+- Start hover recording after the reference has actually settled.
+  `PRE_ACTION_WAIT` was a fixed 3s while `capture-states.sh` had already MEASURED
+  this reference settling at 6256ms, so the run recorded an unsettled ref against
+  a settled impl — per-frame SSIM climbed monotonically 0.27 -> 0.899 and the
+  target was reported divergent even though the hover arc matched.
+  `hover-state-compare.sh` now derives the wait from the measured `durationMs`
+  (3s floor, 15s cap, ignored when the capture timed out).
+- Run the ref-vs-ref noise-floor calibration on any failing sweep, not only
+  borderline ones. The borderline gate was backwards — it skipped calibration
+  precisely when the reference was least reproducible. Capturing the REFERENCE
+  twice at the same scroll fractions on navercorp.com/tech/innovation gives
+  ref-vs-ref SSIM 0.640 at pos-010 while impl-vs-impl is 1.000000, and the
+  failing position set moved between runs ({010,014} then {014,018,019}); the
+  impl matched the ref better than the ref matched itself. A position whose
+  ref-vs-ref score is below the threshold is now labelled `ref-unstable` and
+  still FAILS — a pass on an unstable baseline is the vacuous-pass pattern this
+  suite exists to prevent — but names the capture environment rather than the
+  component source as the thing to fix.
+- Make the Stop-hook retry cap actually fire, and say how to get out. The cap
+  and its advisory hand-back already existed, but the counter only advanced when
+  `stop_hook_active` was true — Claude Code's retry of the SAME stop. A gate that
+  blocks once per user-visible turn arrives with that flag false every time, took
+  the reset branch, and cleared a budget it had never spent, so the cap could
+  never be reached: observed as a verify-stamp gate blocking dozens of
+  consecutive turns while `tmp/ref/.ui-re-stop-attempts.json` still held only a
+  stale key from an unrelated session. Real blocks are now counted per session
+  AND per ref (namespaced `block|…` so the two counters cannot spend one budget
+  twice) and cleared only when a turn ends without blocking. When the budget is
+  spent the hand-back also names the exact `.ui-re-active` path to remove, states
+  that artifacts and implementation source survive that removal, notes the agent
+  is refused on that path because the marker is enforcement state, and gives the
+  automatic expiry as the do-nothing option.
+
+- Stop the consecutive-block ledger releasing an unfinished clone silently. The
+  0.8.12 counter keyed blocks by session and ref only, so three unrelated blocks
+  spent the budget of a fourth failure that had never been retried; it never
+  reset while a ref was unfinished, because the only reset ran on a turn that
+  ended without a block; and on exhaustion it printed the hand-back to stderr on
+  exit 0, which the Stop-hook contract routes to the debug log only. Observed in
+  the field: a ledger count of 15 against a cap of 3 on a ref still at
+  `current_gate=post-implement`, with the UNFINISHED banner never surfaced once.
+  The ledger key now includes a signature of the failure (gate, failing items,
+  fail counts; per-item scores normalised so they cannot jitter the streak), so
+  across turns only the SAME block repeating spends the budget and any progress
+  or unrelated failure starts a fresh one. The in-turn re-entrant path
+  (`stop_hook_active`) still shares one per-session counter, so unrelated
+  failures inside a single turn can spend that cap between them; the release
+  there is bounded and visible rather than silent, which is the part this entry
+  guarantees. When the budget is spent the stop is still allowed
+  (the loop stays bounded) but the hand-back travels as a `systemMessage` the
+  user sees, carrying the failing gate and the `.ui-re-active` exit
+  instructions; pipeline state is untouched, so nothing downstream reads the
+  ref as complete. Regression tests drive `ui_clone.hooks.section_gate` end to
+  end and assert that an unfinished ref never produces a Stop with no visible
+  signal.
+- Judge a click-revealed hover target against its own revealed idle state, and
+  hand the page back after every opener attempt. The 0.8.12 click-to-open walk
+  in `transition-fires-check.sh` measured the revealed target against the
+  PHASE1 baseline taken while it was `display:none` (height/width/top all 0),
+  so the reveal itself read as the hover delta and a clone that wired the click
+  but has NO `:hover` rule passed the three entries the walk exists for. The
+  walk now re-baselines in the revealed state with the pointer parked, polls
+  the reading until two consecutive samples agree (`tfSettled`; a panel still
+  opening is not an idle state) and only then hovers and measures; the verdict
+  compares (revealed, idle) against (revealed, hovered). The pair is accepted
+  only whole — a rendered idle baseline that had stopped moving AND a rendered
+  hovered snapshot — otherwise the entry keeps its pre-walk record and the
+  artifact says why (`hoverOpener.rebaseline`: `unstable`, `no-idle-baseline`,
+  `no-hovered-snapshot`). The merge replaces both the PHASE1 baseline and the
+  synthetic after for a re-baselined entry, so neither hidden-state snapshot is
+  ever compared to a revealed one.
+  The hand-back rule is the 0.8.12 one, restored and then tightened. Each
+  attempt now records `fpChanged` — whether the page fingerprint moved off its
+  pre-click value at any point — because a ladder rung "restores" by
+  fingerprint equality and the fingerprint cannot see an open-only panel shown
+  through an inline style. Two intermediate fixes let an attempt whose
+  fingerprint moved and came back skip the hand-back; the auditor showed that a
+  transient class on the opener or body round-trips the fingerprint while the
+  panel stays open, and the residue rendered the next entry's target, which
+  then passed against its hidden baseline with no `:hover` rule. So every
+  attempt that did not reveal the target forces a fresh navigate whatever the
+  close eval reports (`tfOpenerClose` has nothing to undo there), as does a
+  router push counted during the walk or a changed document URL; the reasons
+  are recorded per entry (`hoverOpener.forcedNavigate`: `unrevealed-attempt`,
+  `fp-blind`, `routed`, `href-changed`) and named in the WARNING. Only a walk
+  whose every click revealed the target, closed by a rung the close eval
+  verified against seeds-hidden plus fingerprint, is handed back in-page. The
+  post-navigate settle waits for the reference's measured splash duration
+  (`states/splash/summary.json` `durationMs`, a capped measurement used as a
+  floor, clamped to 15s) instead of a fixed 2s that verified a page still
+  moving. `nclick`/`thema` are removed from the generic stop-token list into a
+  site-specific one so the name-affinity ranking is not silently tuned to one
+  reference.
+  The hover verdict in `ui_clone/gates/transition_fires.py` no longer counts
+  viewport `top`, mirroring the reveal branch: the PHASE1 baseline is snapped
+  at scroll-top and the real-pointer pass `scrollintoview`s the target before
+  its snapshot, so a below-fold target's `top` always differs with no `:hover`
+  rule involved. That channel passed the walk's pre-walk fallback record
+  whenever the re-baseline was refused, and any below-fold hover entry before
+  it. Regression tests drive the shell orchestration against a fake
+  `agent-browser` whose page state follows the walk's own answers, and cover
+  the residue leak in both the fingerprint-blind and fingerprint-round-trip
+  forms, the refused-re-baseline fallback passing on scroll position alone, and
+  the gate verdict directly.
+
+- Stop retiring a hover activation because a rule's descendant is absent. When
+  a hover rule's affected selector is rendered nowhere in the document, the
+  live-capture bridge used to skip the whole activation with
+  `affected selector not present in document` and tag it `absence-measured`,
+  so navercorp.com/tech/innovation's real `.header .nav__link:hover
+  {font-weight:600}` went unverified while `.nav__link:hover .en` (no `.en`
+  rendered) retired the region and the reference gate stayed green. The
+  bridge now observes the activation in its own right: a delta captures the
+  region with `affectedTargetAbsent` recorded in place of `affectedTarget`, so
+  the promoted transition is not attributed to a descendant the implementation
+  cannot be checked against; only "descendant absent AND activation unchanged"
+  retires, under the combined reason `affected selector not present in
+  document and hover produced no observable change`. An affected selector that
+  is rendered elsewhere but not inside the activation remains a probe failure,
+  and an activation that matches nothing remains `notInstantiated`.
+- Make `hover-state-compare` honour `affectedTargetAbsent`. Its
+  `affected_selector_for_hover` read only `affectedTarget`: when the spec
+  entry carried none it fell through to `hover-css-rules.json` and re-derived
+  the very descendant the bridge had measured as unrendered, so
+  `video-transition-compare` reported `no-affected-match`, the row went
+  UNMEASURABLE, and `hover_state_partial_result` accepted it as PARTIAL on the
+  weaker "anything changed" hover criterion — a clone that changed only a
+  colour on hover passed with a warning while the activation's own rule was
+  never compared (and, as the sole target, hard-failed instead). The function
+  now prints nothing for an entry that carries `affectedTargetAbsent`, and
+  that activation is measured as the scope the bridge captured. This is a
+  guarantee about spec entries that carry the field: the existing
+  navercorp.com/tech/innovation capture has no `.header .nav__link` entry
+  (the pre-fix bridge retired it), so on that capture nothing changes until
+  the reference is re-captured with the fixed bridge.
+- Stop `MAX_HOVER_TARGETS` dropping transition-spec hover obligations. The
+  `hover-state-compare` target list was the first five deduped
+  `hover-css-rules.json` activations in rule order, full stop; on
+  navercorp.com/tech/innovation `.header .nav__link` is deduped activation
+  index 8, so the `affectedTargetAbsent` fix above never ran there, four of
+  the nine live-capture promoted spec entries were never scheduled either, the
+  result file did not say so, and the fallback probe (which plans no
+  `font-weight` channel) did not cover the gap. Hover entries of a
+  non-placeholder `transition-spec.json` are obligations the implementation
+  must reproduce, not a sample; they are now scheduled unconditionally and the
+  cap applies only to the remaining speculative candidates, unchanged, so the
+  measured set is a superset of the previous one on every input (the previous
+  five are still measured). A run that drops candidates now lists every
+  dropped selector in `hover-state-result.txt` under `# cap:`. Cost: the gate
+  measures every spec obligation, so a capture with many promoted hover
+  entries runs more compares than before — each of those entries already cost
+  a live capture and is the thing the gate exists to check. Verified against
+  the real fixture's `hover-css-rules.json` with the bridge-shaped
+  `.header .nav__link` entry appended; the bridge half still needs a live
+  re-capture before that rule is compared end to end on the stored capture.
+- Re-ask the descendant question while hovered before retiring. The bridge
+  decided "rendered nowhere" from the idle document alone, so a menu that is
+  mounted only while its opener is hovered, and positioned outside the opener's
+  box, retired as `absence-measured`. The descendant is now counted again with
+  the hover held; if it appears, the region is kept as an unproven candidate
+  under `affected selector rendered only while hovered; activation observed in
+  its own right` and never carries `affectedTargetAbsent`.
+- Drop `scroll produced no observable change` from the measured-absence
+  reasons. The ladder compares only in-view rungs taken after the element has
+  stopped changing, so a reveal that fires on entering the viewport has already
+  completed at the baseline rung and reads as "nothing moved"; that skip stays
+  unproven instead of retiring the candidate.
+- Keep a dispatch-only region under an authored transition spec when its probe
+  reports measured absence. The region projects the author's own spec entry,
+  which a CSS-hover negative cannot discharge, so it stays an unsupported
+  obligation as every other failed capture does; only the bridge's own auto
+  spec claims may be retired.
+
+- Make the splash-absence certificate refuse what the lifecycle probe would
+  measure, without refusing a page that merely re-mounts. Four holes in the
+  0.8.12 certificate, each reproduced against the shipped sampler through a
+  fake-DOM harness (`tests/measure/splash_sampler_harness.js` runs the init
+  script `capture-states.sh` actually installs, thresholds substituted, and
+  hands its payload to the real python writer):
+  - Thresholds. The certificate counted an element as covering only from 75% of
+    the viewport, while `splash-lifecycle-probe.js` calls a reference overlay a
+    splash candidate from 20% (`MIN_AREA_RATIO`) and a mounted splash from 45%
+    (`MIN_INITIAL_COVERAGE_RATIO`): a loader covering 50-74% certified absence
+    while the check the certificate suppresses would have measured it. The two
+    INTAKE numbers are now the probe's own - `COVERING_ENTER` is 0.45 and the
+    sampler's `COVERING_RECORD_FLOOR` is 0.20. `ui_clone.splash_contract` owns
+    them, `capture-states.sh` substitutes them into the sampler at run time, the
+    probe exports its own, and a test sweeps the probe across coverages to prove
+    the two still agree. `COVERING_EXIT` is deliberately NOT pinned to the
+    probe and stays at 0.5: below `MIN_AREA_RATIO` the probe stops seeing a
+    candidate, so an overlay settled at 35% is still present to it (it would
+    report `overlay-never-exited`), while to the certificate a missing exit
+    means the page has no splash - pinning the exit line down to the candidate
+    floor would have made the certificate certify MORE, not less. Because the
+    mount line (45%) now sits below the exit line (50%), the drop is measured
+    against each identity's own peak share, so an element that simply sits at
+    47% for the whole capture is not read as having left.
+  - Root-class removal was anchored on the first sample, so a loading class that
+    landed after the first poll and was removed later (`` -> `is-loading` ->
+    `loaded`) certified. It is now anchored on every earlier sample.
+  - Identity aliasing. An id-less covering element was keyed by its nth-of-type
+    path, so a class-only full-viewport preloader at `body > div:nth-of-type(1)`
+    that is removed handed that exact key to the wrapper behind it; the map
+    recorded no exit and a page with a loader certified absence (the same page
+    with `#preloader` refused, which isolates it to the key). The identity of
+    such an element is now the node: a serial assigned on first sight and kept
+    for the life of the page (WeakMap), with the path as a readable label; an
+    element too deep for the bounded path walk, which previously had no
+    identity at all and so was never recorded, now gets one too. Ids and
+    identifying attributes stay role-keyed, so a hydration pass that replaces
+    `#app` with a fresh `#app` is not an exit. Keying by node alone, though,
+    read every in-place replacement of an id-less element as an exit - a
+    React/Next hydration-mismatch re-render, a framework re-mount, a 50%
+    skeleton swapped for its content - and refused pages with no splash. A
+    fresh node now inherits the identity of the node it replaced only when the
+    immediately preceding survey recorded a serial-keyed covering node at the
+    same path, that node is now detached, the fresh node did not exist at that
+    survey (a wrapper that was merely hidden is not fresh: the aliasing case
+    still refuses), and both carry the same tag and classes. A loader replaced
+    in place by content of another class, and a removal whose replacement
+    lands more than one poll later, still record an exit.
+  - The threshold lookup ran `python3 -c` with the repo on `PYTHONPATH`, which
+    sits behind the working directory on `sys.path`: a `ui_clone/` package in
+    the caller's cwd (an impl tree, a scratch dir) could hand the sampler its
+    own thresholds. Every shell read of `ui_clone.splash_contract` -
+    thresholds in `capture-states.sh`, the certificate in
+    `splash-lifecycle-check.sh` and `verification-plan.sh` - now puts the repo
+    root ahead of `sys.path[0]`.
+  `splash-lifecycle-check.sh` is dispatched by detectors documented as biased
+  toward false positives (`hasPreloader` fires on any one of three signals;
+  `summary.json polls > 1`), and hard-fails `ref-overlay-absent` whenever its
+  probe saw no overlay on the reference - a statement about the reference that
+  no implementation change can clear (navercorp esg/sustainability and
+  tech/innovation: both sides `presentSampleCount 0`, FAIL). That FAIL stands.
+  An earlier draft of this change passed it as "measured absence" when the
+  Phase A certificate also certified, and had `runtime-proof-rollup.sh` honour
+  that pass; both are withdrawn. The two negatives are not independent: the
+  probe walks `document.querySelectorAll("body *")` and the sampler walks the
+  rendered elements, both read `getComputedStyle(el)` with no pseudo-element
+  argument, and both are blind to the same curtains - reproduced with an
+  `html:not(.loaded)::before` fixed overlay, which the sampler certified and
+  the probe never saw, so the draft's pass rolled up as valid. Their agreement
+  is one blind spot counted twice. What the check now does with the
+  certificate is name the measurement: the FAIL artifact carries
+  `refAbsence.certified` and `refAbsence.guidance` saying either that the
+  reference is uncertified and which re-capture would settle it, or that both
+  instruments agree and the detector that dispatched the check (bundle source,
+  DOM diff) is what to inspect, since `verification-plan.sh` already vetoes the
+  generic dispatches on a certified reference and `ui_clone.splash_contract`
+  does not let the certificate override those detectors. The rollup demands
+  mounted+exited proof on both sides for every pass, as before. `check_inputs`
+  declares the certificate as an optional ref input of `splash-lifecycle` so a
+  cached artifact's guidance does not outlive a re-capture.
+  Not yet re-measured: the two navercorp references were captured by the
+  pre-covering sampler, so their `contract.json` carries no `covering` channel
+  and stays uncertified (`coveringSurveyed: false`) until `capture-states.sh` is
+  re-run against them; esg/sustainability also hit the wall-clock cap, which the
+  certificate refuses regardless.
+
 ## [0.8.10] - 2026-09-11
 
 ### Fixed
