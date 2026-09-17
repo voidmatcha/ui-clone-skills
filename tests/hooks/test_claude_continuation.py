@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -69,7 +70,17 @@ def run_adapter(project: Path, data: dict[str, object]) -> str:
 
 
 def run_shim_adapter(project: Path, data: dict[str, object]) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(project)}
+    # shim.sh defaults UV_PROJECT_ENVIRONMENT to the REAL
+    # ~/.cache/ui-clone-skills/hook-venv unless overridden — without this,
+    # every call here syncs (cold: a full ~200MB build) that shared,
+    # user-visible cache as a side effect. sys.prefix is the .venv this test
+    # process already runs in, synced from the SAME uv.lock, so pointing the
+    # shim at it makes the shim's own sync a no-op.
+    env = {
+        **os.environ,
+        "CLAUDE_PROJECT_DIR": str(project),
+        "UI_CLONE_HOOK_VENV": sys.prefix,
+    }
     return subprocess.run(
         ["bash", str(SHIM), MODULE],
         input=json.dumps(data),

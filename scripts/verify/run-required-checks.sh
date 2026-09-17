@@ -31,8 +31,8 @@
 #
 # What it does NOT do:
 #   - Replace gate.py enforcement. The agent still runs
-#     `uv run python -m ui_clone.gate <ref-dir> post-implement` to
-#     get the canonical verdict.
+#     `uv run --project "$PLUGIN_ROOT" --no-dev --frozen python -m ui_clone.gate <ref-dir> post-implement`
+#     to get the canonical verdict.
 #   - Iterate / fix failures. This is one shot per call. The agent
 #     reads the resulting status JSONs and applies targeted fixes
 #     (or invokes visual-debug-iterator).
@@ -573,6 +573,18 @@ except Exception:
     *.py) _row_interp="$PYTHON_BIN" ;;
     *) _row_interp="bash" ;;
   esac
+  # A `.py`-backed row (e.g. replay-track-compare.py) does `from ui_clone...`
+  # at module top level with no sys.path bootstrap. That only ever worked
+  # because uv used to editable-install ui_clone into whatever interpreter
+  # `$PYTHON_BIN` resolved to; `[tool.uv] package = false` removed that
+  # fallback, and this row declares no ENV: prefix in its own args_recipe
+  # (verification-plan.sh), so it got NO PYTHONPATH at all and started
+  # failing with ModuleNotFoundError (fable review; reproduced empirically:
+  # `env -u PYTHONPATH "$PYTHON_BIN" replay-track-compare.py ...` traces
+  # exactly there). Set it as a baseline for every row, same as every other
+  # `ui_clone.*` invocation in this script already does — placed BEFORE the
+  # row's own $env_vars so a row that ever needs a different PYTHONPATH can
+  # still override it (env applies later duplicate keys last).
   # shellcheck disable=SC2086 # intentional word-split on positional
   if [ -n "$env_vars" ]; then
     # shellcheck disable=SC2086 # intentional word-split on env_vars
@@ -580,12 +592,12 @@ except Exception:
       # Put the dispatcher-owned assignment last so a plan row cannot silently
       # defeat the containment; use UI_CLONE_DISPATCH_BASH_COMPAT to override.
       # shellcheck disable=SC2086 # intentional word-split on env_vars/positional
-      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
+      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "PYTHONPATH=$REPO_ROOT" $env_vars "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
         rc=0
       else
         rc=$?
       fi
-    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env $env_vars "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
+    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "PYTHONPATH=$REPO_ROOT" $env_vars "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
@@ -593,12 +605,12 @@ except Exception:
   else
     if [ -n "$_DISPATCH_CHILD_BASH_COMPAT" ]; then
       # shellcheck disable=SC2086 # intentional word-split on positional
-      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
+      if "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "PYTHONPATH=$REPO_ROOT" "BASH_COMPAT=$_DISPATCH_CHILD_BASH_COMPAT" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
         rc=0
       else
         rc=$?
       fi
-    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
+    elif "${_RUN_WITH_TIMEOUT[@]}" "$row_timeout" env "PYTHONPATH=$REPO_ROOT" "$_row_interp" "$script_path" $positional </dev/null 2>&1 | tail -3 | sed 's/^/  /'; then
       rc=0
     else
       rc=$?
@@ -790,7 +802,7 @@ fi
 
 if [ "$FAIL" -gt 0 ]; then
   echo -e "${RED}CHECKS_FAILED count=$FAIL — this is NOT a dispatcher break.${NC}"
-  echo -e "${RED}Run \`uv run python -m ui_clone.gate $REF_DIR post-implement\` for the canonical verdict and per-check fix commands.${NC}"
+  echo -e "${RED}Run \`uv run --project \"\$PLUGIN_ROOT\" --no-dev --frozen python -m ui_clone.gate $REF_DIR post-implement\` for the canonical verdict and per-check fix commands.${NC}"
   exit 1
 fi
 # fable-20260910 follow-up review round 3 (LOW): re-deriving "is this an

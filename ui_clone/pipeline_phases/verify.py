@@ -25,6 +25,7 @@ from ui_clone.hooks._common import deferred_checks_blocker as _deferred_checks_b
 from ui_clone.hooks._common import gate_skip_blocker as _gate_skip_blocker
 from ui_clone.hooks._common import quick_tier_blocker as _quick_tier_blocker
 from ui_clone.pipeline_logs import (
+    _as_text,
     completed_process_output,
     log_tail_lines,
     tail_text,
@@ -442,12 +443,26 @@ def execute_verify(pipeline: Pipeline, json_output: bool = False) -> int:
     for gate_name in gates_post_impl:
         if not json_output:
             print(f"\n{_BOLD}== verify: gate {gate_name}{_NC}")
-        result = subprocess.run(
-            [sys.executable, "-m", "ui_clone.gate", str(pipeline.ref_dir), gate_name],
-            capture_output=True,
-            text=True,
-            env=gate_env,
-        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "ui_clone.gate", str(pipeline.ref_dir), gate_name],
+                capture_output=True,
+                text=True,
+                env=gate_env,
+                # Safety net against a wedged gate (section-compare drives real
+                # browser automation): without this, a hung child means `pipeline
+                # verify` never returns at all. Generous on purpose — this is a
+                # final backstop, not the first timeout to fire; gate-internal
+                # steps have their own, tighter budgets.
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired as exc:
+            result = subprocess.CompletedProcess(
+                exc.cmd,
+                returncode=124,
+                stdout=_as_text(exc.stdout) + f"\n[verify] gate '{gate_name}' timed out after {exc.timeout}s\n",
+                stderr=_as_text(exc.stderr),
+            )
         log_path = _write_gate_log(pipeline.ref_dir, gate_name, result)
         gate_logs[gate_name] = str(log_path)
         gate_exit_codes[gate_name] = result.returncode

@@ -953,6 +953,37 @@ agent-browser --session "$SESSION_IMPL" open "$IMPL_URL" 2>&1 | head -1 || true
 ref_browser wait "$WAIT_REF" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" wait "$WAIT_IMPL" > /dev/null 2>&1
 
+# Opt-in unlock for reference sites that gate their true scrollable document
+# height behind a wrapper with an inline `overflow:clip; max-height:Npx`
+# style tied to scroll interaction (observed on feconf2026.kr's `#fc-scroll-cap`
+# wrapper). Without this, any section below the fold sees a collapsed/blank
+# document and produces a false "blank-ref" or wildly wrong crop. Directly
+# nulling the inline max-height is instant and does not touch the page's
+# scroll position or trigger a real scroll journey — critical for sites with
+# a heavy WebGL/canvas hero, where scrolling far away and back was observed to
+# leave the hero canvas blank on return (a real-browser resource/context
+# effect, not a script bug). Off by default; set REF_SCROLL_CAP_SELECTOR to
+# the gating element's selector for such sites (e.g. "#fc-scroll-cap").
+if [ -n "${REF_SCROLL_CAP_SELECTOR:-}" ] && [ "$REUSE_FROZEN_REF" != "1" ]; then
+  echo "▸ REF_SCROLL_CAP_SELECTOR set — nulling inline max-height on '$REF_SCROLL_CAP_SELECTOR' to unlock scroll-gated content..."
+  ref_eval "(() => { const sel = $(printf '%s' "$REF_SCROLL_CAP_SELECTOR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'); document.querySelectorAll(sel).forEach(el => el.style.setProperty(\"max-height\", \"none\", \"important\")); return {height: document.documentElement.scrollHeight}; })()" > /dev/null 2>&1
+fi
+
+# Opt-in reset for reference-side horizontally-scrollable carousels/tracks
+# (plain `overflow-x: auto` divs, not a Swiper/Splide instance so the
+# existing slider-pin-to-index-0 logic does not cover them) that can
+# accumulate a nonzero scrollLeft between page load and screenshot -- e.g. an
+# auto-advancing "experience" carousel (observed on feconf2026.kr's
+# `#fe-exp-track`) drifts to a different card purely as a function of how
+# much wall-clock time elapses before capture, producing a huge false-FAIL
+# AE that is a capture-timing artifact, not a content/layout defect. Off by
+# default; set REF_RESET_SCROLLLEFT_SELECTOR to the scrollable element's
+# selector for such sites (e.g. "#fe-exp-track").
+if [ -n "${REF_RESET_SCROLLLEFT_SELECTOR:-}" ] && [ "$REUSE_FROZEN_REF" != "1" ]; then
+  echo "▸ REF_RESET_SCROLLLEFT_SELECTOR set — resetting scrollLeft on '$REF_RESET_SCROLLLEFT_SELECTOR' to avoid auto-advance drift..."
+  ref_eval "(() => { const sel = $(printf '%s' "$REF_RESET_SCROLLLEFT_SELECTOR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'); document.querySelectorAll(sel).forEach(el => { el.scrollLeft = 0; }); return {ok: true}; })()" > /dev/null 2>&1
+fi
+
 # Remove common overlays (cookie banners, newsletter popups)
 # The vendor list comes from ui_clone.section_capture so this path and the
 # _pause_js path cannot drift. Drift is not cosmetic: the ref-calib capture

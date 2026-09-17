@@ -109,7 +109,7 @@ elif command -v python3 >/dev/null 2>&1 && python_imports_ui_clone python3; then
   PY_MODE="direct"
   PYBIN="python3"
 elif command -v uv >/dev/null 2>&1 \
-  && (cd "$REPO_ROOT" && python_imports_ui_clone uv run python); then
+  && (export UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}"; cd "$REPO_ROOT" && python_imports_ui_clone uv run --no-dev --frozen python); then
   PY_MODE="uv"
 else
   echo "ERROR: could not find a Python interpreter that can import ui_clone" >&2
@@ -118,7 +118,10 @@ fi
 
 run_py() {
   if [ "$PY_MODE" = "uv" ]; then
-    (cd "$REPO_ROOT" && PYTHONPATH="$REPO_ROOT" uv run python "$@")
+    (
+      export UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}"
+      cd "$REPO_ROOT" && PYTHONPATH="$REPO_ROOT" uv run --no-dev --frozen python "$@"
+    )
   else
     (cd "$REPO_ROOT" && PYTHONPATH="$REPO_ROOT" "$PYBIN" "$@")
   fi

@@ -166,7 +166,7 @@ Follow this path in order: **Inputs → First action → Pipeline → Validation
 >
 > **Silent Bash rule:** After any Bash with no output, verify the side effect: `ls -la <path>` or `echo $?`. Never assume success from silence.
 >
-> **Screenshot rule:** Use `agent-browser --session <s> screenshot` (no shell redirect). The command saves the image to its own path and prints the location. **Never** use `agent-browser --session <s> screenshot > file.png` — shell redirect captures the CLI's text confirmation message, not image data, creating a corrupt file that poisons the session context when Read.
+> **Screenshot rule:** Use `agent-browser --session <s> screenshot` (no shell redirect). The command saves the image to its own path and prints the location. **Never** use `agent-browser --session <s> screenshot > file.png` — shell redirect captures the CLI's text confirmation message, not image data, creating a corrupt file that poisons the session context when Read. **Never** use `screenshot --full`/`-f`, or resize the viewport to page/section height, on ref or impl: single-shot full-page capture expands the layout viewport to page height, which re-runs `position:sticky`, GSAP `ScrollTrigger` pin, and any `innerHeight`-driven layout at that new size — pinned/sticky content renders blank or mid-transform in the PNG even when the real page is correct. A blank pinned section in a full-page or resized-viewport shot is a capture artifact until disproven by `scrollTo(<y>)` + a fixed 1440×900 viewport `screenshot`, or a DOM eval. Whole-page evidence comes from `capture.sh` / `batch-scroll.sh` / `section-compare.sh` (real scroll, fixed viewport), never one tall frame.
 >
 > **Environment rules:** read `agent-environment-rules.md` once per session — covers viewport ordering (`open → set viewport → wait`), zsh word-split, monorepo path resolution, agent-browser CLI verbs, and the flat `tmp/ref/<component>/` layout. Skipping this is the #1 source of "gates pass against an empty repo" silent failures.
 >
@@ -426,8 +426,12 @@ requires it; unrelated full motion sweeps wait until the basic scene is faithful
 Gates run automatically via the Stop hook — you cannot finish until all gates pass. Run manually any time:
 
 ```bash
-uv run --project "$PLUGIN_ROOT" python -m ui_clone.gate tmp/ref/<c> <gate>
+UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}" \
+  PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  uv run --project "$PLUGIN_ROOT" --no-dev --frozen python -m ui_clone.gate tmp/ref/<c> <gate>
 ```
+
+The `UV_PROJECT_ENVIRONMENT` export points at the same shared venv `hooks/shim.sh` uses — omit it and this rebuilds a separate ~200MB venv inside the version-keyed plugin cache. `PYTHONPATH` is required too: `[tool.uv] package = false` keeps that shared venv from installing `ui_clone` itself, so without it `-m` resolves against your CURRENT working directory, not `$PLUGIN_ROOT` — and fails with `ModuleNotFoundError` unless your cwd happens to already be the plugin root.
 
 `<gate>` (with the step it follows): `bundle` (5c-a) · `paid-features` (5c-c) · `spec` (5d) · `pre-generate` (before 7) · `state-coverage` (between `pre-generate` and `post-implement`) · `post-implement` (after each transition) · `boundary` (8-pre-bound) · `font-parity` (8b-pre) · `section-compare` (8b).
 
@@ -466,7 +470,7 @@ Run the classifier eval from `js-animation-extraction.md` Step T1 to detect type
 Long sessions cause context decay — initial rules get diluted as the conversation grows.
 
 **When context is running low** (warning appears or response quality drops):
-1. Run `uv run --project "$PLUGIN_ROOT" python -m ui_clone.pipeline <url> <component> <session> status` — output shows current gate and next action
+1. Run `uv run --project "$PLUGIN_ROOT" python -m ui_clone.pipeline <url> <component> <session> status` (with the same `UV_PROJECT_ENVIRONMENT` and `PYTHONPATH` exports as [Validation gates](#validation-gates) above) — output shows current gate and next action
 2. `pipeline-state.json` in `tmp/ref/<component>/` persists gate progress automatically — no manual save needed
 3. Start a new session — Claude re-reads SKILL.md fresh, then runs `python -m ui_clone.pipeline ... status` to resume
 

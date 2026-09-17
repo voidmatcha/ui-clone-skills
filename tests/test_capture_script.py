@@ -388,7 +388,7 @@ def test_ui_capture_skill_uses_pipeline_as_external_cwd_default() -> None:
     deterministic = skill.index("## Deterministic default")
     manual = skill.index("## Phase 1")
     assert deterministic < manual
-    assert 'uv run --project "$UI_CLONE_ROOT" python -m ui_clone.pipeline' in skill
+    assert 'uv run --project "$UI_CLONE_ROOT" --no-dev --frozen python -m ui_clone.pipeline' in skill
     assert '"$URL" "$COMPONENT" "$SESSION" run --phases 0A,1,2' in skill
     assert "never `uv run --directory`" in skill
     assert "$HOME/.config/ui-clone-skills/root" in skill

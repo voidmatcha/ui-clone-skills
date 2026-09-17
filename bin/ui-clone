@@ -73,13 +73,26 @@ function pythonEnv() {
   return env;
 }
 
+// Mirrors hooks/shim.sh: every installed copy of this CLI points `uv run
+// --project` at the same shared venv so a version bump doesn't rebuild a
+// fresh ~200MB venv inside each disposable plugin-cache copy. `package =
+// false` in pyproject.toml keeps that shared venv from installing
+// ui-clone-skills itself as an editable dependency (whose .pth would get
+// repointed by whichever --project synced last); PYTHONPATH=<root> is what
+// makes `import ui_clone` resolve to THIS invocation's root regardless.
+function sharedUvEnv() {
+  const cacheHome = process.env.XDG_CACHE_HOME || join(process.env.HOME || "/", ".cache");
+  const hookVenv = process.env.UI_CLONE_HOOK_VENV || join(cacheHome, "ui-clone-skills", "hook-venv");
+  return { ...pythonEnv(), UV_PROJECT_ENVIRONMENT: hookVenv };
+}
+
 function runPythonModule(moduleName, moduleArgs) {
   const direct = process.env.UI_CLONE_CLI_PYTHON_DIRECT === "1";
   if (!direct && existsSync(join(root, "pyproject.toml")) && commandExists("uv")) {
     const uvResult = run(
       "uv",
-      ["run", "--project", root, "python", "-m", moduleName, ...moduleArgs],
-      process.env,
+      ["run", "--project", root, "--no-dev", "--frozen", "python", "-m", moduleName, ...moduleArgs],
+      sharedUvEnv(),
     );
     if (!uvResult.error) {
       process.exit(uvResult.status ?? 1);

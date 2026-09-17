@@ -3,7 +3,7 @@
 # Usage: bash shim.sh <python.module.name> [args...]
 # Fast-skip: check CLAUDE_PROJECT_DIR, then git root, then walk up from cwd.
 _found_ref() {
-  [[ -d "${CLAUDE_PROJECT_DIR}/tmp/ref" ]] && return 0
+  [[ -n "${CLAUDE_PROJECT_DIR:-}" && -d "${CLAUDE_PROJECT_DIR}/tmp/ref" ]] && return 0
   local gr; gr="$(git rev-parse --show-toplevel 2>/dev/null)"
   [[ -n "$gr" && -d "$gr/tmp/ref" ]] && return 0
   local d="$PWD"
@@ -23,7 +23,7 @@ _found_ref() {
 #      reach pre_bash so the FIRST crumb can be written in a no-tmp/ref
 #      tree. Payload is captured here and re-fed to the module unchanged.
 _found_crumbs() {
-  [[ -d "${CLAUDE_PROJECT_DIR}/tmp/.ui-re-external-browse" ]] && return 0
+  [[ -n "${CLAUDE_PROJECT_DIR:-}" && -d "${CLAUDE_PROJECT_DIR}/tmp/.ui-re-external-browse" ]] && return 0
   local gr; gr="$(git rev-parse --show-toplevel 2>/dev/null)"
   [[ -n "$gr" && -d "$gr/tmp/.ui-re-external-browse" ]] && return 0
   local d="$PWD"
@@ -36,7 +36,7 @@ _found_crumbs() {
 # An armed continuation stores its receipt in <project>/.ui-re-continuation, which
 # outlives tmp/ref and is the other state claude_continuation acts on.
 _found_receipt() {
-  [[ -d "${CLAUDE_PROJECT_DIR}/.ui-re-continuation" ]] && return 0
+  [[ -n "${CLAUDE_PROJECT_DIR:-}" && -d "${CLAUDE_PROJECT_DIR}/.ui-re-continuation" ]] && return 0
   local gr; gr="$(git rev-parse --show-toplevel 2>/dev/null)"
   [[ -n "$gr" && -d "$gr/.ui-re-continuation" ]] && return 0
   local d="$PWD"
@@ -79,10 +79,38 @@ if command -v realpath >/dev/null 2>&1; then
   script_path="$(realpath "$script_path" 2>/dev/null || printf '%s' "$script_path")"
 fi
 project_root="$(cd "$(dirname "$script_path")/.." && pwd)"
-# PYTHONSAFEPATH keeps the invoking session's cwd off sys.path. Without it a
-# session whose cwd holds its own `ui_clone/` — this repo's dev checkout, or any
-# tree with that package name — shadows the installed plugin package, and every
-# hook dies with ModuleNotFoundError against a version the checkout predates.
+# uv defaults to a `.venv` inside --project, i.e. inside $project_root. For a
+# host-installed plugin that IS a version-keyed cache directory (Claude:
+# ~/.claude/plugins/cache/<market>/<plugin>/<version>; Codex has its own
+# per-version copy) that a version bump or reinstall deletes and recreates —
+# so every bump rebuilds a ~200MB venv from scratch inside a tree meant to be
+# disposable, and stale versions strand their venv copy until orphan cleanup.
+# Point uv at one persistent location outside every copied/cached tree so it
+# is built once and reused; uv resyncs it automatically if the lockfile the
+# invoking copy carries ever differs.
+#
+# Not honoring an inherited UV_PROJECT_ENVIRONMENT: a caller's shell/CI can
+# already export that var pointed at some unrelated project's venv, and this
+# shim must never sync ITS deps into THAT env.
+UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}"
+export UV_PROJECT_ENVIRONMENT
+# The shared venv must never hold the project itself as an editable install
+# (enforced by `[tool.uv] package = false` in pyproject.toml): uv keys an
+# editable install's .pth by whichever --project synced last, so with the
+# package installed, two hook invocations from different roots (Claude cache
+# vs Codex cache vs a version bump vs the dev checkout) racing on the one
+# shared venv can have one process import the OTHER root's `ui_clone` mid-run,
+# or crash with ModuleNotFoundError if a sync repoints the .pth between the
+# other process's env-check and its actual import — empirically reproduced:
+# concurrent `uv run --project A` / `--project B` sharing one venv had
+# processes cross-import the other root's package. With the project excluded
+# from the venv, PYTHONPATH below is what makes `import ui_clone` resolve —
+# deterministically, to the invoking root, never to whatever synced last.
+#
+# PYTHONSAFEPATH keeps the invoking session's cwd off sys.path (it does NOT
+# suppress PYTHONPATH entries). Without it, a session whose cwd holds its own
+# `ui_clone/` — this repo's dev checkout, or any tree with that package name —
+# would shadow the plugin package via cwd instead of via project_root.
 #
 # Never propagate a non-zero status. The hook modules signal every outcome as
 # stdout JSON and only ever call sys.exit(0), so a non-zero status here is always
@@ -94,8 +122,10 @@ project_root="$(cd "$(dirname "$script_path")/.." && pwd)"
 # Re-feed a pre-captured payload (external-browse activation path) or pass
 # stdin straight through (normal path).
 if [[ -n "$_payload" ]]; then
-  PYTHONSAFEPATH=1 uv run --project "$project_root" python -m "$@" <<< "$_payload" || true
+  PYTHONSAFEPATH=1 PYTHONPATH="$project_root" \
+    uv run --project "$project_root" --no-dev --frozen python -m "$@" <<< "$_payload" || true
   exit 0
 fi
-PYTHONSAFEPATH=1 uv run --project "$project_root" python -m "$@" || true
+PYTHONSAFEPATH=1 PYTHONPATH="$project_root" \
+  uv run --project "$project_root" --no-dev --frozen python -m "$@" || true
 exit 0

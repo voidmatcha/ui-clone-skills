@@ -282,7 +282,19 @@ class PipelineState:
         if not path.exists():
             return cls(component=ref_dir.name)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            raw_text = path.read_text(encoding="utf-8")
+            data = json.loads(raw_text)
+            if not isinstance(data, dict):
+                # Valid JSON, wrong shape (`[]`, `null`, `"x"`, ...): every
+                # `data.get(...)` call below would raise AttributeError,
+                # which is NOT caught here, so this file would crash every
+                # hook that loads state and skip the quarantine branch
+                # entirely (a working backstop for corrupt bytes, with none
+                # for wrong-shaped-but-valid ones). Route it through the same
+                # JSONDecodeError handling as truly malformed JSON instead.
+                raise json.JSONDecodeError(
+                    "pipeline-state.json root must be a JSON object", raw_text, 0
+                )
             return cls(
                 component=data.get("component", ref_dir.name),
                 started_at=data.get("started_at", ""),

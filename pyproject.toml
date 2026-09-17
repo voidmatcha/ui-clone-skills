@@ -1,6 +1,6 @@
 [project]
 name = "ui-clone-skills"
-version = "0.8.11"
+version = "0.8.12"
 description = "Clone any live website URL into React + Tailwind code — Claude Code and Codex plugin with extraction-first verification (real CSS, real animation params from JS bundles, AE/SSIM pixel diff)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -66,6 +66,21 @@ dev = [
 ast = [
     "esprima==4.0.1",
 ]
+
+# `hooks/shim.sh` points every installed copy's `uv run --project <root>`
+# at ONE shared venv (~/.cache/ui-clone-skills/hook-venv) so a version bump
+# doesn't rebuild a fresh venv inside each disposable plugin-cache copy.
+# package = false keeps that shared venv from ever installing ui-clone-skills
+# itself as an editable dependency: an editable install's .pth is keyed by
+# whichever --project synced last, so with several copies (Claude cache,
+# Codex cache, a version bump, the dev checkout) sharing the venv, one
+# process could import another root's package mid-run, or crash with
+# ModuleNotFoundError if a concurrent sync repoints the .pth first —
+# reproduced empirically under concurrent --project alternation. With the
+# project excluded here, shim.sh's PYTHONPATH="$project_root" is what makes
+# `import ui_clone` resolve, deterministically, to the invoking root.
+[tool.uv]
+package = false
 
 [build-system]
 requires = ["hatchling"]

@@ -633,7 +633,15 @@ verify_claude_plugin_delivery() {
   fi
 
   local rel missing=""
-  for rel in hooks/hooks.json hooks/shim.sh .claude-plugin/plugin.json ui_clone/__init__.py; do
+  # uv.lock + pyproject.toml: every `uv run --project` shim.sh spawns from
+  # this cache dir passes `--frozen`, which errors loudly on a missing
+  # lockfile — but shim.sh swallows that error (`|| true; exit 0`), so a
+  # cache copy that somehow lost its lockfile would silently no-op every
+  # hook with no signal anywhere else (fable review: this probe's own
+  # exit-status check on the shim is already dead code by design, so the
+  # required-file list here is the only thing that CAN catch this).
+  for rel in hooks/hooks.json hooks/shim.sh .claude-plugin/plugin.json \
+    ui_clone/__init__.py uv.lock pyproject.toml; do
     [ -f "$cache_dir/$rel" ] || missing="$missing $rel"
   done
   if [ -n "$missing" ]; then
@@ -719,6 +727,31 @@ PY
     return 1
   fi
   ok "hook delivery probe: section_gate ran from the host cache"
+
+  # The probe above is also the FIRST real sync of the shared hook venv
+  # (UV_PROJECT_ENVIRONMENT in hooks/shim.sh). `[tool.uv] package = false`
+  # in pyproject.toml is what keeps that shared venv from installing
+  # ui-clone-skills itself as an editable dependency — the exact race this
+  # installer's shared-venv design depends on not happening (fable review:
+  # empirically reproduced cross-copy import corruption when it does). An
+  # old `uv` that predates `[tool.uv] package` support would silently
+  # ignore the setting rather than error, so check the RESULT — dist-info
+  # for this project inside the shared venv means it was ignored — instead
+  # of guessing a version floor.
+  local hook_venv self_dist_info
+  hook_venv="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}"
+  self_dist_info="$(find "$hook_venv" -maxdepth 4 -iname 'ui?clone?skills-*.dist-info' 2>/dev/null | head -1)"
+  if [ -n "$self_dist_info" ]; then
+    err "Shared hook venv has ui-clone-skills installed as a package: $self_dist_info"
+    err "  [tool.uv] package = false in pyproject.toml did not take effect — this"
+    err "  installed uv version likely predates that setting and silently ignored"
+    err "  it, which reintroduces the cross-copy import race the shared venv"
+    err "  design depends on it preventing. Upgrade uv (uv self update) and run:"
+    err "    rm -rf '$hook_venv' && bash '$0' --claude-only"
+  else
+    ok "shared hook venv correctly excludes ui-clone-skills itself (package = false honored)"
+  fi
+
   warn_if_plugin_disabled
   prune_superseded_cache_versions
 }
@@ -761,9 +794,13 @@ PY
 }
 
 prune_superseded_cache_versions() {
-  # The host caches per version and never reclaims old ones. Each live version
-  # also carries a ~220MB uv venv (materialised by the delivery probe above and
-  # by the first real hook fire), so a few releases reach multiple GB.
+  # The host caches per version and never reclaims old ones. Each cached
+  # version copy itself is small — `hooks/shim.sh` points every version at
+  # ONE shared venv (~/.cache/ui-clone-skills/hook-venv, `[tool.uv] package =
+  # false` in pyproject.toml keeps that venv from installing the project
+  # itself), so a version bump no longer rebuilds a ~220MB venv per release.
+  # The shared venv is NOT cleaned up here — it is not part of any version's
+  # cache directory and outlives every version this function prunes.
   # `claude plugin prune` does not cover this — it removes auto-installed
   # dependencies, not superseded versions of a directory-marketplace plugin.
   #

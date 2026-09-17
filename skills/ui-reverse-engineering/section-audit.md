@@ -301,9 +301,11 @@ Before proceeding to generation, verify:
 □ Footer exists if section-map.json shows a <footer> tag
 ```
 
-Run the gate:
+Run the gate (same `UV_PROJECT_ENVIRONMENT`/`PYTHONPATH` exports as SKILL.md's [Validation gates](./SKILL.md#validation-gates)):
 ```bash
-uv run python -m ui_clone.gate tmp/ref/<component> pre-generate
+UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}" \
+  PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  uv run --project "$PLUGIN_ROOT" --no-dev --frozen python -m ui_clone.gate tmp/ref/<component> pre-generate
 ```
 
 ## Stage 7: Post-implementation height verification

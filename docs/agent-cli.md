@@ -13,11 +13,13 @@ node bin/ui-clone --help
 ```
 
 The wrapper dispatches to the Python modules in this package. It prefers
-`uv run --project <package-root> python -m ...` and falls back to `python3`
-with `PYTHONPATH=<package-root>`. Set `UI_CLONE_CLI_PYTHON_DIRECT=1` to skip
-uv entirely and dispatch via `python3` with `PYTHONPATH` (the agent-readable
-actions — status/next/report/state — are stdlib-only and need no scientific
-dependencies).
+`uv run --project <package-root> --no-dev --frozen python -m ...`, pointed at
+the shared hook venv (`UV_PROJECT_ENVIRONMENT`, same one `hooks/shim.sh`
+uses — see the [install guide](../README_detail/install.md#shared-hook-venv)),
+and falls back to `python3` with `PYTHONPATH=<package-root>`. Set
+`UI_CLONE_CLI_PYTHON_DIRECT=1` to skip uv entirely and dispatch via `python3`
+with `PYTHONPATH` (the agent-readable actions — status/next/report/state —
+are stdlib-only and need no scientific dependencies).
 
 > **Local-first while npm publishing is paused:** the registry copy of
 > `ui-clone-cli` may lag this checkout. During local development prefer

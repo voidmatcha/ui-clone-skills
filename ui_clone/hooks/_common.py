@@ -923,7 +923,7 @@ def _clear_gate_skip(ref_dir: Path, gate_name: str) -> None:
 
 
 def run_gate(ref_dir: Path, gate_name: str) -> dict[str, object]:
-    """Run `uv run python -m ui_clone.gate <ref_dir> <gate_name> --json` as a subprocess.
+    """Run `uv run --project <plugin_root> --no-dev --frozen python -m ui_clone.gate <ref_dir> <gate_name> --json` as a subprocess.
 
     Uses `uv run` to guarantee execution inside the ui-clone-skills virtual environment
     (with scikit-image, Pillow installed). Falls back to sys.executable if uv is
@@ -940,6 +940,17 @@ def run_gate(ref_dir: Path, gate_name: str) -> dict[str, object]:
             "run",
             "--project",
             str(_plugin_root()),
+            # Every other `uv run --project` caller (hooks/shim.sh, which is
+            # what invokes this hook process in the first place, plus
+            # bin/ui-clone and auto-verify.sh) carries these two flags so
+            # the shared hook venv (UV_PROJECT_ENVIRONMENT, inherited from
+            # shim.sh's env) never gets the dev group synced into it. This
+            # call was the one left behind (fable review): shim.sh builds
+            # that venv with --no-dev, so the first run_gate call after a
+            # fresh venv had to install pytest/mypy/ruff/etc. into it
+            # inside this call's own 30s timeout below.
+            "--no-dev",
+            "--frozen",
             "python",
             "-m",
             "ui_clone.gate",

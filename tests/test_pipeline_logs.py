@@ -68,6 +68,7 @@ def test_execute_verify_logs_gate_output_without_streaming_full_stdout(
         capture_output: bool,
         text: bool,
         env: dict[str, str],
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         assert capture_output is True
         assert text is True

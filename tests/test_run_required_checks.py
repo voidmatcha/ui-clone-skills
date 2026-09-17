@@ -434,6 +434,79 @@ def test_run_required_checks_dry_run_dispatches_splash_lifecycle_recipe(
     assert f" {ref}|splash-lifecycle.json|block" in proc.stdout
 
 
+def test_run_required_checks_dispatch_sets_pythonpath_for_a_py_row_with_no_env_prefix(
+    tmp_path: Path,
+) -> None:
+    """Regression: replay-track-compare.py (and any other `.py`-backed check
+    row that imports ui_clone at module top level, with no `ENV:` prefix in
+    its own argsRecipe) got NO PYTHONPATH at all once `[tool.uv] package =
+    false` removed the editable install it used to ride on — a real
+    ModuleNotFoundError in production, caught by fable review after a test
+    fix elsewhere masked it by injecting PYTHONPATH into the TEST HARNESS
+    instead of the real dispatcher. This drives an actual (non-dry) dispatch
+    of a `.py` row with an explicitly PYTHONPATH-stripped parent env, so it
+    can only pass if run-required-checks.sh's dispatch loop supplies
+    PYTHONPATH itself."""
+    root = _project_root()
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    ref.mkdir()
+    _make_impl_root(impl)
+    (ref / ".impl-root").write_text(str(impl) + "\n", encoding="utf-8")
+
+    probe = tmp_path / "import-ui-clone-probe.py"
+    probe.write_text(
+        "import sys\n"
+        "import ui_clone  # noqa: F401  — the exact import shape that broke\n"
+        "sys.path  # touch to avoid unused-import lints in some checkers\n"
+        "with open(sys.argv[-1], 'w', encoding='utf-8') as f:\n"
+        "    f.write('ok')\n",
+        encoding="utf-8",
+    )
+
+    (ref / "verification-plan.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "requiredChecks": [
+                    {
+                        "id": "pythonpath-probe",
+                        "script": str(probe),
+                        # No "ENV:" prefix — this is the exact shape that
+                        # left replay-track-compare.py with no PYTHONPATH.
+                        "argsRecipe": "{ref_dir}/pythonpath-probe.out",
+                        "produces": "pythonpath-probe.out",
+                        "severity": "block",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update({"PLUGIN_ROOT": str(root), "PYTHON_BIN": sys.executable})
+    proc = subprocess.run(
+        [
+            "bash",
+            str(root / "scripts" / "verify" / "run-required-checks.sh"),
+            "pythonpath-dispatch-test",
+            "https://ref.example.test",
+            "http://127.0.0.1:4173",
+            str(ref),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (ref / "pythonpath-probe.out").read_text(encoding="utf-8") == "ok"
+
+
 def test_run_required_checks_rejects_python_bin_below_minimum(tmp_path: Path) -> None:
     root = _project_root()
     ref = tmp_path / "ref"
@@ -1183,10 +1256,17 @@ def test_hover_state_cache_helper_accepts_complete_semantic_result(
         encoding="utf-8",
     )
     helper = root / "scripts" / "verify" / "run_required_helpers.py"
+    # section_compare_reusable/etc. do `from ui_clone.gate import Gate` —
+    # every production caller sets PYTHONPATH=$REPO_ROOT explicitly (see
+    # scripts/verify/run-required-checks.sh); match that instead of relying
+    # on sys.executable's ambient site-packages, which `[tool.uv] package =
+    # false` in pyproject.toml correctly stopped populating.
+    helper_env = {**os.environ, "PYTHONPATH": str(root)}
 
     complete = subprocess.run(
         [sys.executable, str(helper), "hover-state-valid", str(ref), str(artifact)],
         cwd=root,
+        env=helper_env,
         capture_output=True,
         text=True,
         timeout=30,
@@ -1200,6 +1280,7 @@ def test_hover_state_cache_helper_accepts_complete_semantic_result(
             str(artifact),
         ],
         cwd=root,
+        env=helper_env,
         capture_output=True,
         text=True,
         timeout=30,
@@ -1261,6 +1342,7 @@ def test_required_text_cache_helper_uses_canonical_plan_gate(
         encoding="utf-8",
     )
     helper = root / "scripts" / "verify" / "run_required_helpers.py"
+    helper_env = {**os.environ, "PYTHONPATH": str(root)}
 
     proc = subprocess.run(
         [
@@ -1272,6 +1354,7 @@ def test_required_text_cache_helper_uses_canonical_plan_gate(
             str(artifact),
         ],
         cwd=root,
+        env=helper_env,
         capture_output=True,
         text=True,
         timeout=30,
@@ -1296,6 +1379,7 @@ def test_section_cache_helper_rejects_missing_footer(
         encoding="utf-8",
     )
     helper = root / "scripts" / "verify" / "run_required_helpers.py"
+    helper_env = {**os.environ, "PYTHONPATH": str(root)}
     command = [
         sys.executable,
         str(helper),
@@ -1307,6 +1391,7 @@ def test_section_cache_helper_rejects_missing_footer(
     valid = subprocess.run(
         command,
         cwd=root,
+        env=helper_env,
         capture_output=True,
         text=True,
         timeout=30,
@@ -1318,6 +1403,7 @@ def test_section_cache_helper_rejects_missing_footer(
     truncated = subprocess.run(
         command,
         cwd=root,
+        env=helper_env,
         capture_output=True,
         text=True,
         timeout=30,

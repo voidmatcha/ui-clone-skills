@@ -110,8 +110,8 @@ exit 77
     (bin_dir / "uv").write_text(
         f"""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> {str(uv_log)!r}
-if [ "$1" = "run" ] && [ "$2" = "python" ]; then
-  shift 2
+if [ "$1" = "run" ] && [ "$2" = "--no-dev" ] && [ "$3" = "--frozen" ] && [ "$4" = "python" ]; then
+  shift 4
   exec {sys.executable!r} "$@"
 fi
 exit 64
@@ -126,7 +126,7 @@ exit 64
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "0/0 transitions fire" in proc.stdout
-    assert uv_log.read_text(encoding="utf-8").startswith("run python")
+    assert uv_log.read_text(encoding="utf-8").startswith("run --no-dev --frozen python")
 
 
 def test_classify_import_failure_exits_setup_error(tmp_path: Path) -> None:

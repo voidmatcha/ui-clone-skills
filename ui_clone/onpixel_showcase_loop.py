@@ -283,7 +283,11 @@ def write_impl_agents(site: SiteWorkspace, plugin_root: Path) -> None:
         "Before claiming done, run both checks from this directory:",
         "",
         f"- `bash \"{plugin_root / 'scripts' / 'verify' / 'completion-report.sh'}\" --check \"{site.ref_dir}\" \"$(pwd)\"`",
-        f"- `uv run --project \"{plugin_root}\" python -m ui_clone.goal \"{site.ref_dir}\" --check-done`",
+        (
+            "- `UV_PROJECT_ENVIRONMENT=\"${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}\" "
+            f"PYTHONPATH=\"{plugin_root}\" "
+            f"uv run --project \"{plugin_root}\" --no-dev --frozen python -m ui_clone.goal \"{site.ref_dir}\" --check-done`"
+        ),
         "",
         "If either check reports missing artifacts, failed rows, or a non-zero exit,",
         "the first line of your final answer must be exactly `INCOMPLETE`, followed",

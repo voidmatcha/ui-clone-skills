@@ -4,13 +4,13 @@
     {
       "id": 1,
       "prompt": "capture baseline screenshots from https://example.com",
-      "expected_output": "tmp/ref/capture/ directory with full-page screenshots in static/ref/ and scroll video in scroll-video/ref/, validated as non-blank and non-bot-detection.",
+      "expected_output": "tmp/ref/capture/ directory with scrolled viewport screenshots in static/ref/ and scroll video in scroll-video/ref/, validated as non-blank and non-bot-detection.",
       "files": [],
       "expectations": [
         "Creates tmp/ref/capture/ directory structure",
         "Opens site with agent-browser",
         "Sets viewport to 1440x900",
-        "Takes full-page screenshot(s) to static/ref/",
+        "Takes scrolled viewport screenshot(s) to static/ref/",
         "Records full scroll video to scroll-video/ref/",
         "Validates screenshots are not blank or bot-detection pages"
       ]

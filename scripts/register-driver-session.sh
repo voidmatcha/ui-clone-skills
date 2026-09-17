@@ -29,8 +29,21 @@ EOF
   exit 0
 fi
 
+# Callers run this from their OWN project directory, not from this plugin's
+# checkout, so a bare `uv run python -m ...` (no --project) resolves against
+# whatever pyproject.toml `uv` finds walking up from the caller's cwd — the
+# caller's own project, not this plugin. Resolve the plugin root from this
+# script's own path (same pattern as hooks/shim.sh) and point at the shared
+# hook venv so this doesn't rebuild a ~200MB venv inside a version-keyed
+# plugin cache copy, or fail outright once `[tool.uv] package = false`
+# stopped an editable install from papering over the missing --project.
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_plugin_root="$(cd "$_script_dir/.." && pwd)"
+export UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}"
+export PYTHONPATH="$_plugin_root${PYTHONPATH:+:$PYTHONPATH}"
+
 if [[ $# -ge 1 && -n "${1:-}" ]]; then
-  exec uv run python -m ui_clone.driver_session register "$1"
+  exec uv run --project "$_plugin_root" --no-dev --frozen python -m ui_clone.driver_session register "$1"
 else
-  exec uv run python -m ui_clone.driver_session register-from-env
+  exec uv run --project "$_plugin_root" --no-dev --frozen python -m ui_clone.driver_session register-from-env
 fi

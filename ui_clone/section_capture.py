@@ -15,11 +15,21 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ui_clone.pipeline_logs import _as_text
+
 if TYPE_CHECKING:
     from typing import TypeGuard
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+# Every `agent-browser` subprocess call below drives a real browser session
+# over CDP; a wedged/hung browser (dead host, network partition, a page that
+# never settles) would otherwise hang this call forever with no way for a
+# caller (verify.py's own 600s gate timeout included) to distinguish "slow"
+# from "dead". `magick` calls in this file operate on local files and are not
+# in scope for this timeout — they don't share this failure mode.
+_AGENT_BROWSER_TIMEOUT = 120
 
 
 def _is_number(value: object) -> TypeGuard[int | float]:
@@ -298,32 +308,37 @@ def _unwrap_eval_json(raw: str) -> dict[str, Any] | None:
     return v if isinstance(v, dict) else None
 
 
+def _run_agent_browser(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """subprocess.run for an `agent-browser` CLI call, bounded so a wedged
+    browser session (dead host, hung page) cannot hang capture forever."""
+    try:
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_AGENT_BROWSER_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            exc.cmd,
+            returncode=124,
+            stdout=_as_text(exc.stdout),
+            stderr=_as_text(exc.stderr) + f"\n[section_capture] agent-browser timed out after {exc.timeout}s\n",
+        )
+
+
 def _run_agent_eval(session: str, js: str) -> None:
-    subprocess.run(
-        ["agent-browser", "--session", session, "eval", js],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    _run_agent_browser(["agent-browser", "--session", session, "eval", js])
 
 
 def _run_agent_eval_text(session: str, js: str) -> str:
-    result = subprocess.run(
-        ["agent-browser", "--session", session, "eval", js],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _run_agent_browser(["agent-browser", "--session", session, "eval", js])
     return (result.stdout or "").strip()
 
 
 def _run_screenshot(session: str, output_path: Path) -> None:
-    subprocess.run(
-        ["agent-browser", "--session", session, "screenshot", str(output_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    _run_agent_browser(["agent-browser", "--session", session, "screenshot", str(output_path)])
 
 
 def _duration_to_seconds(dur: object) -> float | None:
@@ -411,10 +426,9 @@ def _ensure_viewport(
         return
     if setter is None:
         def setter(sess: str, w: int) -> None:  # pragma: no cover - thin wrapper
-            subprocess.run(
+            _run_agent_browser(
                 ["agent-browser", "--session", sess, "set", "viewport",
                  str(w), os.environ.get("SECTION_CAPTURE_VIEW_H") or "900"],
-                capture_output=True, text=True, check=False,
             )
     setter(session, expect_w)
     time.sleep(settle)
@@ -958,17 +972,14 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
         (section_dir / "ref-calib").mkdir(parents=True, exist_ok=True)
         calib_session = f"{session_ref}-cal"
         if calib_vw and calib_vh:
-            subprocess.run(
+            _run_agent_browser(
                 ["agent-browser", "--session", calib_session, "set", "viewport", calib_vw, calib_vh],
-                capture_output=True, text=True, check=False,
             )
-        subprocess.run(
+        _run_agent_browser(
             ["agent-browser", "--session", calib_session, "open", ref_url],
-            capture_output=True, text=True, check=False,
         )
-        subprocess.run(
+        _run_agent_browser(
             ["agent-browser", "--session", calib_session, "wait", "2500"],
-            capture_output=True, text=True, check=False,
         )
         for match in matches:
             name = safe_section_name(match.get("name"))
@@ -993,9 +1004,8 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
             )
             sys.stdout.write(f"  ◇ calib {name}\n")
             sys.stdout.flush()
-        subprocess.run(
+        _run_agent_browser(
             ["agent-browser", "--session", calib_session, "close"],
-            capture_output=True, text=True, check=False,
         )
 
     if confidence_map:

@@ -29,6 +29,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VIEW_W="${VIEW_W:-1440}"
 VIEW_H="${VIEW_H:-900}"
 
+# Mirror hooks/shim.sh: point every `uv run --project` below at the one
+# shared venv so this script doesn't rebuild the per-version venv the shim
+# change eliminated. `[tool.uv] package = false` keeps that venv from
+# installing ui-clone-skills itself; PYTHONPATH picks up the invoking root.
+UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}"
+export UV_PROJECT_ENVIRONMENT
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
 # Cleanup browser sessions on exit (including errors/signals)
 cleanup_browsers() {
   agent-browser --session "${SESSION}-verify" close 2>/dev/null
@@ -211,7 +219,7 @@ done
 
 # Complete the prerequisite before spending time on browser verification.
 run_check "Gate: state-coverage" \
-  uv run --project "$REPO_ROOT" python -m ui_clone.gate "$REF_DIR" state-coverage
+  uv run --project "$REPO_ROOT" --no-dev --frozen python -m ui_clone.gate "$REF_DIR" state-coverage
 if [ "$TOTAL_FAIL" -gt 0 ]; then
   write_visual_debug_stamp "false" 1 "$TOTAL_CHECKS" "$TOTAL_FAIL" "false"
   exit 1
@@ -325,7 +333,7 @@ rm -f "$REF_DIR/visual-debug-stamp.json"
 if [ "$TOTAL_FAIL" -eq 0 ]; then
   write_visual_debug_stamp "true" 0 "$TOTAL_CHECKS" "$TOTAL_FAIL" "$PHASE_E_PRESENT" "true" "$UI_RE_AUTOVERIFY_INFLIGHT"
   run_check "Gate: post-implement" \
-    uv run --project "$REPO_ROOT" python -m ui_clone.gate "$REF_DIR" post-implement
+    uv run --project "$REPO_ROOT" --no-dev --frozen python -m ui_clone.gate "$REF_DIR" post-implement
 else
   echo "BLOCKED: Resolve failed checks before the post-implement gate."
 fi

@@ -85,6 +85,58 @@ def test_hook_shim_resolves_symlink_projection_to_real_project_root() -> None:
     assert 'dirname "$script_path")/..' in text
 
 
+def test_shared_hook_venv_contract_is_present_everywhere_it_must_be() -> None:
+    """Pin the tokens that make the shared hook venv (fable review, this
+    session) actually correct, not just present. A change that silently
+    dropped any one of these — PYTHONPATH in particular, since it is the
+    ONLY thing making `import ui_clone` resolve once the shared venv stops
+    installing the project itself — would otherwise leave the full test
+    suite green while breaking every real invocation. See
+    hooks/shim.sh's own comment on the shared-venv race this guards against.
+    """
+    shim = (REPO_ROOT / "hooks" / "shim.sh").read_text(encoding="utf-8")
+    assert "UI_CLONE_HOOK_VENV" in shim
+    assert 'UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-' in shim
+    assert 'PYTHONPATH="$project_root"' in shim
+    assert "--no-dev --frozen" in shim
+
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "[tool.uv]" in pyproject
+    assert "package = false" in pyproject
+
+    bin_ui_clone = (REPO_ROOT / "bin" / "ui-clone").read_text(encoding="utf-8")
+    assert "UI_CLONE_HOOK_VENV" in bin_ui_clone
+    assert "UV_PROJECT_ENVIRONMENT" in bin_ui_clone
+    assert "--no-dev" in bin_ui_clone and "--frozen" in bin_ui_clone
+
+    auto_verify = (REPO_ROOT / "scripts" / "verify" / "auto-verify.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "UI_CLONE_HOOK_VENV" in auto_verify
+    assert "--no-dev --frozen" in auto_verify
+
+    for skill_md in (
+        REPO_ROOT / "skills" / "ui-capture" / "SKILL.md",
+        REPO_ROOT / "skills" / "ui-reverse-engineering" / "SKILL.md",
+    ):
+        text = skill_md.read_text(encoding="utf-8")
+        assert "UV_PROJECT_ENVIRONMENT" in text, skill_md
+        assert "PYTHONPATH" in text, skill_md
+        assert "--no-dev" in text and "--frozen" in text, skill_md
+
+    # run_gate (ui_clone/hooks/_common.py) is the nested `uv run --project`
+    # every hook gate actually spawns (section_gate.py, pre_generate.py,
+    # pre_bash_rules/dispatcher.py) — it inherits UV_PROJECT_ENVIRONMENT
+    # from whichever shim.sh invocation started the hook, so omitting
+    # --no-dev/--frozen here was the one mirror-caller three independent
+    # fable reviews found left behind: it synced the dev group (pytest,
+    # mypy, ruff, ...) into the shared venv inside its own 30s timeout.
+    common_py = (REPO_ROOT / "ui_clone" / "hooks" / "_common.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"--no-dev",\n            "--frozen",' in common_py
+
+
 def test_codex_install_uses_personal_projection_marketplace() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
@@ -209,6 +261,41 @@ fi
 if [ "$#" -ge 4 ] && [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "uninstall" ]; then
   printf "python3 %s\\n" "$*" >> "$COMMAND_LOG"
   exit 0
+fi
+exec {shlex.quote(real_python)} "$@"
+""",
+    )
+
+
+def _write_owned_editable_python_wrapper(path: Path) -> None:
+    """Like _write_python_wrapper, but deterministically answers
+    remove_owned_editable_install's ownership heredoc as "owned" instead of
+    delegating it to the ambient real python3 (whose actual package state is
+    not hermetic — it depends on whatever this repo's own dev venv or system
+    pythons happen to have editable-installed at test-run time). Every OTHER
+    heredoc script `uninstall_all` runs (e.g. public-skill ownership proofs)
+    still delegates to the real interpreter unchanged, which
+    _write_fake_editable_python does not support (it has no such fallback)."""
+    real_python = shutil.which("python3")
+    assert real_python is not None
+    _write_executable(
+        path,
+        f"""#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = "-c" ] && [[ "$2" == *"sys.version_info >= (3, 11)"* ]]; then
+  printf "%s\\n" {shlex.quote(str(path))}
+  exit 0
+fi
+if [ "$#" -ge 4 ] && [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "uninstall" ]; then
+  printf "python3 %s\\n" "$*" >> "$COMMAND_LOG"
+  exit 0
+fi
+if [ "$#" -eq 1 ] && [ "$1" = "-" ]; then
+  stdin_content="$(cat)"
+  if [[ "$stdin_content" == *"DISTRIBUTION_NAME"* ]]; then
+    printf "owned\\n"
+    exit 0
+  fi
+  exec {shlex.quote(real_python)} - <<< "$stdin_content"
 fi
 exec {shlex.quote(real_python)} "$@"
 """,
@@ -514,7 +601,17 @@ def test_uninstall_removes_owned_artifacts_and_preserves_conflicts(
         fake_bin / "claude",
         '#!/usr/bin/env bash\nprintf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n',
     )
-    _write_python_wrapper(fake_bin / "python3")
+    # Not _write_python_wrapper: its ownership heredoc delegates to the
+    # ambient real python3, which is only "editable-installed" by
+    # coincidence of dev-environment state (pyproject.toml's
+    # `[tool.uv] package = false` stopped uv from installing ui-clone-skills
+    # into ANY uv-managed venv, including this repo's own — so an ambient
+    # python3 resolved from a uv-run PATH no longer has it). This test needs
+    # a python3 that deterministically IS the "owned editable install"
+    # remove_owned_editable_install is being exercised to find and remove,
+    # while still falling back to the real interpreter for every other
+    # ownership-proving heredoc `uninstall_all` runs before that point.
+    _write_owned_editable_python_wrapper(fake_bin / "python3")
 
     plugin_dir.mkdir(parents=True)
     for item in (".codex-plugin", "bin", "README.md"):
@@ -1814,6 +1911,7 @@ def _probe_checkout(tmp_path: Path) -> Path:
     checkout.mkdir()
     shutil.copy2(INSTALL_SH, checkout / "install.sh")
     shutil.copy2(REPO_ROOT / "pyproject.toml", checkout / "pyproject.toml")
+    shutil.copy2(REPO_ROOT / "uv.lock", checkout / "uv.lock")
     for item in (".claude-plugin", "skills", "bin", "hooks", "ui_clone"):
         shutil.copytree(REPO_ROOT / item, checkout / item, symlinks=True)
     return checkout

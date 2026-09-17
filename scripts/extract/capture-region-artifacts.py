@@ -344,6 +344,23 @@ OPENER_MARKER_ATTRIBUTE = "data-uiclone-opener"
 
 MIN_HOVER_TARGET_PX = 4
 
+# Some sites keep a JS-driven eased/virtual scroll (GSAP ScrollSmoother, custom
+# RAF loops) that re-interpolates window.scrollY for several hundred ms after a
+# native jump, even when scrollIntoView is called with behavior:'instant'. A
+# fixed double-rAF wait (~33ms) samples mid-interpolation and reports a
+# correctly-sized, on-screen hover target as unreachable. Poll until scrollY
+# stops moving (bounded) instead of assuming one/two frames is enough.
+_SCROLL_SETTLE_JS = (
+    "await (async()=>{"
+    "let last=window.scrollY,stable=0;"
+    "for(let i=0;i<90;i++){"
+    "await new Promise(resolve=>requestAnimationFrame(resolve));"
+    "if(Math.abs(window.scrollY-last)<0.5){stable++;if(stable>=4)break;}"
+    "else{stable=0;last=window.scrollY;}"
+    "}"
+    "})();"
+)
+
 # A hover target inside a closed mega-menu, dropdown, or accordion panel is
 # not hit-testable at idle, so the bare hit-test would report the whole region
 # as unprovable. Hovering the nearest hit-testable ancestor first reproduces
@@ -484,7 +501,7 @@ def _resolve_target_js(literal: str, marker: str) -> str:
         "const initial=el.getBoundingClientRect();"
         f"if(initial.width<{MIN_HOVER_TARGET_PX}||initial.height<{MIN_HOVER_TARGET_PX})continue;"
         "el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});"
-        "await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));"
+        + _SCROLL_SETTLE_JS +
         "const r=el.getBoundingClientRect();"
         "const cx=r.left+r.width/2,cy=r.top+r.height/2;"
         "if(cx<0||cy<0||cx>window.innerWidth||cy>window.innerHeight)continue;"
@@ -672,7 +689,7 @@ def _settle_target_js(target_literal: str) -> str:
         f"const el=document.querySelector({target_literal});"
         "if(!el)return {found:false};"
         "el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});"
-        "await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));"
+        + _SCROLL_SETTLE_JS +
         "const r=el.getBoundingClientRect();"
         "return {found:true,intersectsViewport:"
         "r.right>0&&r.bottom>0&&r.left<window.innerWidth&&r.top<window.innerHeight};"

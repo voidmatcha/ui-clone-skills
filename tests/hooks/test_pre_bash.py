@@ -603,6 +603,56 @@ importlib.import_module = _stub_import_module
         reason = data["hookSpecificOutput"]["permissionDecisionReason"]
         assert "section-compare" in reason or "post-implement" in reason
 
+    def test_git_commit_blocked_when_chained_after_other_commands(
+        self, tmp_path: Path
+    ) -> None:
+        """A declaration command need not be first in the string: `git add -A &&
+        git commit`, `cd impl && git push`, and `; `-separated chains must all
+        still hit the declaration gate. Regression for the anchor once being
+        plain `^\\s*`, which only matched a declaration at the very start."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+        _set_section_compare_state(ref_dir)
+
+        for cmd in (
+            "git add -A && git commit -m 'done'",
+            "cd impl && git push",
+            "git add . ; git push origin main",
+            "npm test; git push origin main",
+        ):
+            result = run_hook(
+                self.MODULE,
+                stdin_data=_bash_input(cmd),
+                env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            )
+            out = result.stdout.strip()
+            assert out, f"expected deny payload for chained command: {cmd!r}"
+            data = json.loads(out)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny", cmd
+
+    def test_git_commit_blocked_with_leading_whitespace(self, tmp_path: Path) -> None:
+        """Switching the anchor from a bare `^\\s*` to CMD_POSITION_PREFIX (to
+        catch chained forms, see the test above) regressed the plain
+        leading-whitespace case: CMD_POSITION_PREFIX's `^` alternative has no
+        `\\s*` after it, unlike its `;`/`&&`/`||` alternatives. Fable review
+        regression — `_is_declaration_command` now `.lstrip()`s first."""
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root)
+        set_active_marker(ref_dir)
+        _set_section_compare_state(ref_dir)
+
+        for cmd in ("  git push", "\tgit commit -m 'done'"):
+            result = run_hook(
+                self.MODULE,
+                stdin_data=_bash_input(cmd),
+                env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            )
+            out = result.stdout.strip()
+            assert out, f"expected deny payload for leading-whitespace command: {cmd!r}"
+            data = json.loads(out)
+            assert data["hookSpecificOutput"]["permissionDecision"] == "deny", cmd
+
     def test_git_commit_allowed_when_done_and_result_clean(self, tmp_path: Path) -> None:
         """WIP + git commit + state == done + result.txt clean → allow."""
         search_root = make_search_root(tmp_path)

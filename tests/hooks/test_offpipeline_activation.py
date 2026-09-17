@@ -57,8 +57,19 @@ def _write_clone_writes(root: Path, session_id: str) -> None:
 
 def _shim(project_dir: Path, module: str, stdin: str) -> subprocess.CompletedProcess[str]:
     import os
+    import sys
 
-    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir)}
+    # shim.sh defaults UV_PROJECT_ENVIRONMENT to the REAL
+    # ~/.cache/ui-clone-skills/hook-venv unless overridden — without this,
+    # every test in this file syncs (cold: a full ~200MB build) that shared,
+    # user-visible cache as a side effect. sys.prefix is the .venv this test
+    # process is already running in, synced from the SAME uv.lock, so
+    # pointing the shim at it makes the shim's own sync a no-op.
+    env = {
+        **os.environ,
+        "CLAUDE_PROJECT_DIR": str(project_dir),
+        "UI_CLONE_HOOK_VENV": sys.prefix,
+    }
     return subprocess.run(
         ["bash", str(SHIM), module],
         input=stdin,

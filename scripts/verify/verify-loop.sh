@@ -52,11 +52,22 @@ HAS_SPLASH="$(python3 -c "import json; print(json.load(open('$SPLASH_JSON'))['ha
 echo "  hasSplash=$HAS_SPLASH"
 
 # 2. Snapshot helper --------------------------------------------------------
+# Deliberately a viewport screenshot, NOT `screenshot --full`: `--full`
+# expands the layout viewport to document height in a single capture, which
+# re-runs position:sticky / GSAP ScrollTrigger pin / any innerHeight-driven
+# layout at that new size — a pinned or scroll-driven section then renders
+# blank or mid-transform in the PNG even when the real page is correct
+# (fable review, see skills/visual-debug/comparison-fix.md triage row E).
+# This is a real narrowing of scope, not a no-op: before this change the
+# script DID compare full pages via --full; now it compares only the
+# above-the-fold viewport at each breakpoint. The AE threshold below is
+# scaled to match (see its own comment) so it still fails on a real
+# above-the-fold regression instead of silently always passing.
 snap() {
   # snap <session> <viewport-w> <viewport-h> <out-png>
   local session="$1" vw="$2" vh="$3" out="$4"
   agent-browser --session "$session" set viewport "$vw" "$vh" > /dev/null 2>&1
-  agent-browser --session "$session" screenshot --full "$out" 2>&1 | grep -E '^✓|^✗' | head -1
+  agent-browser --session "$session" screenshot "$out" 2>&1 | grep -E '^✓|^✗' | head -1
 }
 
 # 3. Capture matrix ---------------------------------------------------------
@@ -193,8 +204,22 @@ if structural_mode:
     criteria["O2_ae_desktop_advisory"] = {"value": ae_d_val, "verdict": "ADVISORY"}
     criteria["O2_ae_mobile_advisory"] = {"value": ae_m_val, "verdict": "ADVISORY"}
 else:
-    criteria["O2_ae_desktop"] = {"value": ae_d_val, "threshold": 2_000_000, "verdict": verdict(ae_d_val is not None and ae_d_val < 2_000_000)}
-    criteria["O2_ae_mobile"] = {"value": ae_m_val, "threshold": 2_000_000, "verdict": verdict(ae_m_val is not None and ae_m_val < 2_000_000)}
+    # AE is a raw differing-pixel count (ae-compare.sh), so the threshold
+    # must scale with frame size or it silently stops meaning anything.
+    # 2_000_000 was calibrated for full-page (`screenshot --full`) images;
+    # now that snap() takes a plain 1280x800 / 390x844 viewport shot (see
+    # snap()'s header comment — --full was dropped because it desyncs
+    # ScrollTrigger/sticky pin math), that threshold exceeds even the
+    # desktop frame's total pixel count (1,024,000) and can never fail.
+    # Use this codebase's own AE/Mpx convention instead (canonical bands in
+    # ui_clone/gates/section_compare.py: ok<=500, minor<=2000, major<=20000;
+    # section-compare.sh's default "minor" cap is also 2000/Mpx) — gate at
+    # the "major" band (20000/Mpx) scaled by each frame's actual megapixels.
+    AE_MAJOR_PER_MPX = 20_000
+    ae_threshold_desktop = int(AE_MAJOR_PER_MPX * (1280 * 800) / 1_000_000)
+    ae_threshold_mobile = int(AE_MAJOR_PER_MPX * (390 * 844) / 1_000_000)
+    criteria["O2_ae_desktop"] = {"value": ae_d_val, "threshold": ae_threshold_desktop, "verdict": verdict(ae_d_val is not None and ae_d_val < ae_threshold_desktop)}
+    criteria["O2_ae_mobile"] = {"value": ae_m_val, "threshold": ae_threshold_mobile, "verdict": verdict(ae_m_val is not None and ae_m_val < ae_threshold_mobile)}
 criteria["O3_build_dist"] = {"value": dist_exists, "verdict": verdict(dist_exists)}
 criteria["O4_transition_cov"] = {
     "value": ts_cov,

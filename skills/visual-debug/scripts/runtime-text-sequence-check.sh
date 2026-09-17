@@ -30,6 +30,52 @@ if ! command -v agent-browser >/dev/null 2>&1; then
   exit 2
 fi
 
+# Opt-in unlock for reference sites that gate their true scrollable document
+# height behind a wrapper with an inline `overflow:clip; max-height:Npx`
+# style tied to real wheel-scroll interaction (observed on feconf2026.kr's
+# `#fc-scroll-cap` wrapper — see section-compare.sh REF_SCROLL_CAP_SELECTOR).
+# SCROLL_SWEEP_JS below drives `window.scrollTo`, a programmatic scroll that
+# does NOT release that gate, so without this the ref capture never gets past
+# the first viewport and the text-sequence comparison reports dozens of
+# false "extra" blocks that are really just later ref content the capture
+# never reached. Off by default; set REF_SCROLL_CAP_SELECTOR to the
+# gating element's selector for such sites (e.g. "#fc-scroll-cap").
+#
+# Spliced into SCROLL_SWEEP_JS below as plain statements (not a standalone
+# batch command): an earlier version added a 7th batch command for this,
+# which changed the batch's wire shape unconditionally — every consumer of
+# this script's batch result (its own validator here, and every test that
+# pins "6 command results") broke even with both selectors unset. Splicing
+# into the existing sweep means the batch is byte-identical to before this
+# feature existed whenever the env vars are unset (fable review).
+CAP_SELECTOR_JSON=""
+if [ -n "${REF_SCROLL_CAP_SELECTOR:-}" ]; then
+  CAP_SELECTOR_JSON=$(printf '%s' "$REF_SCROLL_CAP_SELECTOR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+fi
+
+# Same rationale as section-compare.sh's REF_RESET_SCROLLLEFT_SELECTOR: a
+# plain `overflow-x: auto` carousel (not Swiper/Splide) can drift to a
+# different scrollLeft purely as a function of elapsed wall-clock time
+# (observed on feconf2026.kr's `#fe-exp-track`), which changes which card
+# numbers/text are within the horizontal viewport and reported as spurious
+# missing/extra blocks. Off by default; set REF_RESET_SCROLLLEFT_SELECTOR
+# to the scrollable element's selector for such sites.
+SCROLLLEFT_SELECTOR_JSON=""
+if [ -n "${REF_RESET_SCROLLLEFT_SELECTOR:-}" ]; then
+  SCROLLLEFT_SELECTOR_JSON=$(printf '%s' "$REF_RESET_SCROLLLEFT_SELECTOR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+fi
+
+# Plain statements, no IIFE wrapper — spliced into SCROLL_SWEEP_JS's own
+# async IIFE body once it's defined below. Empty when both selectors are
+# unset, so SCROLL_SWEEP_JS is left byte-identical to before this feature.
+SCROLL_CAP_UNLOCK_STMTS=""
+if [ -n "$CAP_SELECTOR_JSON" ]; then
+  SCROLL_CAP_UNLOCK_STMTS="${SCROLL_CAP_UNLOCK_STMTS} document.querySelectorAll(${CAP_SELECTOR_JSON}).forEach(el => el.style.setProperty(\"max-height\", \"none\", \"important\"));"
+fi
+if [ -n "$SCROLLLEFT_SELECTOR_JSON" ]; then
+  SCROLL_CAP_UNLOCK_STMTS="${SCROLL_CAP_UNLOCK_STMTS} document.querySelectorAll(${SCROLLLEFT_SELECTOR_JSON}).forEach(el => { el.scrollLeft = 0; });"
+fi
+
 OUT_PATH="$REF_DIR/runtime-text-sequence.json"
 REF_SESSION="${SESSION}-text-ref"
 IMPL_SESSION="${SESSION}-text-impl"
@@ -588,6 +634,14 @@ SCROLL_SWEEP_JS='(async () => {
     finalHeight: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
   });
 })()'
+
+# Run the unlock statements once, before the sweep starts, without touching
+# SCROLL_SWEEP_JS's body: wrap the whole existing async IIFE from outside
+# instead. No-op (SCROLL_SWEEP_JS is left untouched) when both selectors
+# are unset.
+if [ -n "$SCROLL_CAP_UNLOCK_STMTS" ]; then
+  SCROLL_SWEEP_JS="(async () => {${SCROLL_CAP_UNLOCK_STMTS} return await ${SCROLL_SWEEP_JS}; })()"
+fi
 
 run_capture() {
   local url="$1"

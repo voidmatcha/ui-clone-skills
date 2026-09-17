@@ -246,7 +246,7 @@ magick /tmp/<name>-viewport.png -crop <width>x<height>+<x>+<y> +repage \
 Selector crops only need to be decodable and nonempty; they may legitimately
 be smaller than 10KB. A state pair is valid only when the expected state is
 visible and its pixel difference is nonzero. Retain the >10KB floor for
-viewport and full-page screenshots.
+viewport screenshots (never `--full` — see the Screenshot rule).
 
 **For scroll-driven / mousemove / auto-timer regions (video):**
 

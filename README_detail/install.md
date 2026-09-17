@@ -90,6 +90,38 @@ cd ui-clone-skills
 ./install.sh --codex-only       # Codex marketplace only (alias: --codex)
 ```
 
+## Shared hook venv
+
+Every installed copy of this plugin (Claude's version-keyed cache, Codex's own
+cache, and a development checkout) points `uv run --project` at ONE shared
+venv instead of building its own: `${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv`
+(override with `UI_CLONE_HOOK_VENV`). This is what keeps a version bump or
+reinstall from rebuilding a ~200MB venv inside each disposable plugin-cache
+copy — it is one fixed path, not one per version or per lockfile hash, and
+`uv` transparently resyncs it whenever the invoking copy's `uv.lock` differs
+from what's currently installed there, so it stays built once and reused
+across every copy and every version in the common case (matching lockfiles).
+
+`--uninstall` does not remove it: it is not owned by any one installed
+version, regenerable at no cost worse than the first hook fire after deleting
+it (`rm -rf "${UI_CLONE_HOOK_VENV:-$HOME/.cache/ui-clone-skills/hook-venv}"`),
+and removing it on every uninstall would defeat the point of sharing it in
+the first place if you reinstall shortly after.
+
+Every caller that spawns `uv run --project` against this shared venv also
+passes `--no-dev --frozen`: `hooks/shim.sh`, `bin/ui-clone`,
+`scripts/verify/auto-verify.sh`, `scripts/register-driver-session.sh`, and
+the nested gate subprocess `ui_clone/hooks/_common.py`'s `run_gate` spawns for
+every hook-triggered gate — `--no-dev` so the venv never carries the
+dev-only toolchain (pytest, mypy, ruff, ...), `--frozen` so a
+pyproject.toml/uv.lock drift errors loudly instead of silently re-resolving
+inside a cache copy that shouldn't be writable. `install.sh`'s install-time
+probe verifies the load-bearing half of this — that `[tool.uv] package =
+false` in `pyproject.toml` actually kept this shared venv from installing
+`ui-clone-skills` itself — by checking the venv for the project's own
+dist-info after the first real sync, rather than assuming any particular `uv`
+version honors the setting.
+
 ## SKILL.md-only copy (no hooks)
 
 ```bash

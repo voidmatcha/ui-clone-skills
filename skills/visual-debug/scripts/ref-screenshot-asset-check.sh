@@ -6,7 +6,7 @@
 # Detection: scan impl/src/ and impl/public/ for any reference to
 # the ref's screenshot artifacts:
 #   - tmp/ref/<component>/sections/{ref,impl}/*.png  (per-section crops)
-#   - tmp/ref/<component>/static/{ref,impl}/*.png    (full-page screenshots)
+#   - tmp/ref/<component>/static/{ref,impl}/*.png    (scrolled viewport screenshots)
 #   - tmp/ref/<component>/sections/diff/*.png        (AE diff images)
 #   - tmp/ref/<component>/transitions/*.{png,webp,mp4}
 #

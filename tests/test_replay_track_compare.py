@@ -243,6 +243,20 @@ def _run_compare(ref: Path, wrapper: Path, log_path: Path) -> subprocess.Complet
     env["FAKE_CAPTURE_LOG"] = str(log_path)
     env["FAKE_CANDIDATE"] = str(wrapper.parent / "candidate.json")
     env["FAKE_REPO_ROOT"] = str(ROOT)
+    # This test invokes the script directly via sys.executable, bypassing
+    # scripts/verify/run-required-checks.sh's own dispatch loop — which is
+    # the real production caller and, until a fable review caught it, did
+    # NOT set PYTHONPATH for this row (it has no `ENV:` prefix in its
+    # args_recipe in verification-plan.sh). That was a real ModuleNotFoundError
+    # regression once `[tool.uv] package = false` removed the editable
+    # install this script's top-level `from ui_clone...` used to ride on;
+    # the dispatch loop now sets PYTHONPATH="$REPO_ROOT" as a baseline for
+    # every row. Set it here too since this test's direct invocation
+    # doesn't go through that loop at all.
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{ROOT}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else str(ROOT)
+    )
     return subprocess.run(
         [sys.executable, str(SCRIPT), "http://127.0.0.1:3000", str(ref)],
         cwd=ROOT,
@@ -533,6 +547,10 @@ def test_replay_track_compare_verifies_candidate_manifest_before_compare() -> No
         env["FAKE_CANDIDATE"] = str(wrapper.parent / "candidate.json")
         env["FAKE_REPO_ROOT"] = str(ROOT)
         env["FAKE_INVALID_CANDIDATE_MANIFEST"] = "1"
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            f"{ROOT}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else str(ROOT)
+        )
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "http://127.0.0.1:3000", str(ref)],
             cwd=ROOT,

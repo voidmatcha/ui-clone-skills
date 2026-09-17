@@ -1,6 +1,7 @@
 """Declaration-of-done command detection.
 
-Patterns blocked (anchored at start-of-command, after optional whitespace):
+Patterns blocked (at any command-chain position — start of string, or after
+;, &&, ||, |, (, a newline, an env-var/`env` prefix, or `xargs`):
   - git commit ...
   - git push ...
   - gh pr create ...
@@ -15,8 +16,18 @@ from __future__ import annotations
 
 import re
 
+from .._common import CMD_POSITION_PREFIX, sanitize_command_for_deny
+
+# Anchored on CMD_POSITION_PREFIX rather than plain `^\s*`: every other deny
+# matcher in this package uses that prefix precisely because a bare `^\s*`
+# anchor only catches a declaration command when it is the FIRST command in
+# the string. `git add -A && git commit -m x`, `cd impl && git push`, and
+# `git add . ; git push origin main` all start with something else and were
+# verified to slip past the old anchor — the declaration cascade never ran
+# for the most common real-world chained forms, leaving only the Stop hook
+# (which fires after the commit already landed) as a backstop.
 _BLOCK_PATTERNS = re.compile(
-    r"^\s*(?:"
+    rf"{CMD_POSITION_PREFIX}(?:"
     r"git\s+commit\b"
     r"|git\s+push\b"
     r"|gh\s+pr\s+(?:create|merge|close)\b"
@@ -27,4 +38,15 @@ _BLOCK_PATTERNS = re.compile(
 def _is_declaration_command(cmd: str) -> bool:
     if not cmd:
         return False
-    return bool(_BLOCK_PATTERNS.search(cmd))
+    # sanitize_command_for_deny strips heredoc bodies and blanks quoted
+    # arguments, so a declaration keyword inside a commit message or quoted
+    # string (e.g. `git commit -m "run git push later"`) cannot false-match.
+    #
+    # .lstrip(): CMD_POSITION_PREFIX's `^` alternative has no `\s*` after it
+    # (unlike its `;`/`&&`/`||` alternatives, which do), so a command that is
+    # first in the string but has LEADING whitespace — "  git push",
+    # "\tgit commit -m x" — stopped matching when this switched from a bare
+    # `^\s*` anchor to CMD_POSITION_PREFIX (fable review regression). Only
+    # leading whitespace is stripped; a connector's own internal whitespace
+    # is untouched, so chained-form detection is unaffected.
+    return bool(_BLOCK_PATTERNS.search(sanitize_command_for_deny(cmd).lstrip()))

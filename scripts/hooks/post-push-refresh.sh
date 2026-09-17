@@ -111,7 +111,23 @@ if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ]; then
   if [ "$RESOLVED_INSTALL" = "$RESOLVED_REPO" ]; then
     echo "⚠️ post-push-refresh: INSTALL_DIR=$INSTALL_DIR is the working repo — skipping wipe" >&2
   elif [ -d "$INSTALL_DIR" ]; then
-    rm -rf "$INSTALL_DIR"
+    # INSTALL_DIR is a generic name other tools also export (Docker/CI base
+    # images, language installers). The working-repo check above guards one
+    # mis-set case; this guards an unrelated tool's export reaching this
+    # `rm -rf` unmodified — require BOTH a ui-clone-skills sentinel file AND
+    # the directory's own basename before wiping it.
+    case "$RESOLVED_INSTALL" in
+      */ui-clone-skills)
+        if [ -f "$INSTALL_DIR/.claude-plugin/plugin.json" ] && [ -f "$INSTALL_DIR/install.sh" ]; then
+          rm -rf "$INSTALL_DIR"
+        else
+          echo "⚠️ post-push-refresh: INSTALL_DIR=$INSTALL_DIR lacks a ui-clone-skills sentinel — skipping wipe" >&2
+        fi
+        ;;
+      *)
+        echo "⚠️ post-push-refresh: INSTALL_DIR=$INSTALL_DIR does not look like a ui-clone-skills checkout — skipping wipe" >&2
+        ;;
+    esac
   fi
 
   # Wait briefly for the remote to settle so the curl fetch sees the pushed sha.

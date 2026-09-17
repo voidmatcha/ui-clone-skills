@@ -261,6 +261,7 @@ class TestAgentReadableCliSurfaces:
             capture_output: bool,
             text: bool,
             env: dict[str, str] | None = None,
+            timeout: float | None = None,
         ) -> subprocess.CompletedProcess[str]:
             assert env is not None and env.get("UI_CLONE_PHASE") == "strict"
             gate = cmd[-1]
@@ -304,6 +305,7 @@ class TestAgentReadableCliSurfaces:
             capture_output: bool,
             text: bool,
             env: dict[str, str] | None = None,
+            timeout: float | None = None,
         ) -> subprocess.CompletedProcess[str]:
             gate = cmd[-1]
             code = 1 if gate == "post-implement" else 0
@@ -346,6 +348,7 @@ class TestAgentReadableCliSurfaces:
             capture_output: bool,
             text: bool,
             env: dict[str, str] | None = None,
+            timeout: float | None = None,
         ) -> subprocess.CompletedProcess[str]:
             gate = cmd[-1]
             code = 1 if gate == "post-implement" else 0

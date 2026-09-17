@@ -612,7 +612,16 @@ def refresh_goal_state(project: Path, session_id: str) -> dict[str, Any]:
             text=True,
             capture_output=True,
             check=False,
+            # refresh_goal_state's only caller is the Stop hook
+            # (ui_clone/hooks/section_gate.py), which the host itself kills
+            # on a timeout (Codex: 30s). Bounding it here, below that
+            # budget, means a wedged check-done raises a clear
+            # ContinuationError instead of the host silently dropping the
+            # whole hook (and this continuation's enforcement with it).
+            timeout=25,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise ContinuationError(f"goal --check-done timed out after {exc.timeout}s") from exc
     except OSError as exc:
         raise ContinuationError(f"goal --check-done failed: {exc}") from exc
     if result.returncode == 0:

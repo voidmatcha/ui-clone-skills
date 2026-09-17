@@ -2,6 +2,176 @@
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-09-17
+
+### Added
+
+- Opt-in `REF_SCROLL_CAP_SELECTOR` and `REF_RESET_SCROLLLEFT_SELECTOR` for
+  reference sites that gate their true scrollable document height behind an
+  inline `overflow:clip; max-height:Npx` wrapper tied to real wheel-scroll
+  interaction, or that drift a plain `overflow-x: auto` carousel's
+  `scrollLeft` as a function of elapsed wall-clock time (both observed on
+  feconf2026.kr). Set the gating/scrollable element's selector on either
+  variable to unlock it before capture. Off by default; read by
+  `skills/visual-debug/scripts/section-compare.sh` and
+  `skills/visual-debug/scripts/runtime-text-sequence-check.sh`.
+- `scripts/ci/pre-push-security.sh` now runs `uv lock --check` ("Lockfile
+  freshness"): every runtime `uv run` in this repo passes `--frozen`, so a
+  `pyproject.toml`/`uv.lock` drift now errors outright at hook time instead
+  of just costing a slow re-resolve, and `hooks/shim.sh` swallows that error
+  silently — this is the only check that catches the drift before it ships.
+- `install.sh`'s install-time hook delivery probe now also verifies that
+  `[tool.uv] package = false` was actually honored by the installed `uv`,
+  by checking the shared hook venv for the project's own dist-info after
+  the probe's first real sync — rather than assuming any particular `uv`
+  version supports the setting. An old `uv` that silently ignored it would
+  otherwise reintroduce the cross-copy import race below with no signal
+  anywhere.
+
+### Fixed
+
+- Every installed copy's `uv run --project` (hooks, `bin/ui-clone`, manual
+  gate commands, `scripts/register-driver-session.sh`, the nested gate
+  subprocess `run_gate` spawns for every hook-triggered gate) now shares one
+  venv at `~/.cache/ui-clone-skills/hook-venv` instead of rebuilding a
+  ~200MB venv inside each disposable version-keyed plugin cache copy on
+  every reinstall or version bump. `[tool.uv] package = false` keeps that
+  shared venv from installing `ui-clone-skills` itself as an editable
+  dependency — an editable install's `.pth` is keyed by whichever `--project`
+  synced last, so with several copies (Claude cache, Codex cache, a version
+  bump, the dev checkout) sharing one venv, a concurrent hook from a different
+  root could import the wrong copy's code or crash with `ModuleNotFoundError`
+  (reproduced empirically under concurrent `--project` alternation). Every
+  caller now also exports `PYTHONPATH` so `import ui_clone` resolves
+  deterministically to the invoking root instead of whatever synced last,
+  and passes `--no-dev --frozen` so the shared venv never picks up the
+  dev-only toolchain (pytest, mypy, ruff, ...) and a lock drift errors
+  loudly instead of re-resolving inside a copy that shouldn't be writable.
+  `ui_clone/hooks/_common.py`'s `run_gate` — the single most-executed
+  `uv run --project` in the system — was the one caller left behind by an
+  earlier pass of this fix; found independently by three review passes.
+- `scripts/verify/run-required-checks.sh`'s dispatch loop set `PYTHONPATH`
+  only for rows whose plan entry declared an explicit `ENV:` prefix. The
+  `replay-track-compare` row (block severity) declares none, so once
+  `package = false` removed the editable install its top-level
+  `from ui_clone.replay_track import ...` used to ride on, that row started
+  failing every run with `ModuleNotFoundError` — reproduced empirically. The
+  dispatch loop now sets `PYTHONPATH="$REPO_ROOT"` as a baseline for every
+  row, matching every other `ui_clone.*` call this script already made.
+- `hooks/shim.sh`'s fast-skip degrades to a bare `/tmp/ref` check when
+  `CLAUDE_PROJECT_DIR` is unset (Codex, direct calls); a stray `/tmp/ref` on
+  the machine could fire every hook in every project. Guarded.
+- The declaration-of-done guard (`ui_clone/hooks/pre_bash_rules/declaration.py`)
+  only matched a `git commit`/`git push`/`gh pr` command that started the
+  string, so `git add -A && git commit -m x`, `cd impl && git push`, and
+  similar chained forms slipped past the pre-commit gate undetected. Anchored
+  on the same `CMD_POSITION_PREFIX` every other deny matcher uses — which in
+  turn regressed the plain leading-whitespace case (`"  git push"`), since
+  that shared prefix's `^` alternative has no `\s*` after it unlike its
+  `;`/`&&`/`||` alternatives. Now `.lstrip()`s before matching, so both the
+  chained and the plain leading-whitespace forms are caught.
+- Added timeouts to previously-unbounded `subprocess.run` calls that could
+  hang a hook or `pipeline verify` indefinitely on a wedged gate or browser
+  session (`ui_clone/pipeline_phases/verify.py`, `ui_clone/claude_continuation.py`,
+  `ui_clone/section_capture.py`'s `agent-browser` calls).
+- `PipelineState.load` crashed with `AttributeError` on valid-but-wrong-shape
+  JSON (e.g. `[]`, `null`) instead of routing through the existing corruption
+  quarantine, fail-opening every hook that loads pipeline state.
+- `scripts/hooks/post-push-refresh.sh` guarded its `rm -rf "$INSTALL_DIR"`
+  only against matching the working repo; `INSTALL_DIR` is a generic env-var
+  name other tools also export. Now also requires a ui-clone-skills sentinel
+  (`.claude-plugin/plugin.json` + `install.sh`) and the expected basename.
+- `scripts/ci/pre-push-security.sh`'s secret/eval/backdoor scans used
+  `grep --exclude-dir=benchmark`, which matches any directory named
+  `benchmark` by basename — silently excluding the tracked `skills/benchmark/`
+  maintainer skill (not just the intended untracked runtime-capture dir at
+  `./benchmark/`) from every scan. Rewritten to scan `git ls-files` (the
+  shipped surface) directly, which also fixed a second, related regression
+  introduced mid-development: a bare `'ui-clone'` pathspec matches only a
+  root-level path under git's matching rules, unlike `grep --include`'s
+  "basename anywhere" semantics, so `bin/ui-clone` had dropped out of the
+  scan entirely.
+- `install.sh`'s install-time hook delivery probe didn't check for
+  `uv.lock`/`pyproject.toml` in the cached copy; every `uv run` in the cache
+  now runs `--frozen`, which errors on a missing lockfile, and `hooks/shim.sh`
+  swallows that error (`|| true; exit 0`) — a cache copy that somehow lost
+  its lockfile would otherwise silently no-op every hook with no signal
+  anywhere else. Both files are now in the probe's required-file list.
+- `scripts/extract/capture-region-artifacts.py`'s hover-target settle wait was
+  a fixed double-`requestAnimationFrame` (~33ms); a JS-driven eased/virtual
+  scroll (GSAP ScrollSmoother, custom RAF loops) can keep re-interpolating
+  `window.scrollY` for several hundred ms after a native jump, so a
+  correctly-sized, on-screen hover target was reported unreachable. Now polls
+  until `scrollY` stops moving, bounded at 90 frames.
+
+### Changed
+
+- `scripts/verify/verify-loop.sh`'s desktop/mobile snapshot no longer uses
+  `screenshot --full`: on a pinned (`position:sticky`, GSAP `ScrollTrigger`)
+  or scroll-driven page, `--full` expands the layout viewport to document
+  height in a single capture, which re-runs that layout at the new size and
+  can render the pinned/scroll-driven region blank or mid-transform in the
+  PNG even when the real page is correct. This narrows that benchmark
+  script's AE comparison from a full-page diff to the above-the-fold viewport;
+  its AE threshold is rescaled to match (this codebase's AE/Mpx "major" band,
+  scaled to each frame's actual pixel count) rather than left at a value that
+  could never fail once the frame shrank.
+
+### Testing
+
+- Added a static contract test pinning the shared-hook-venv tokens
+  (`UV_PROJECT_ENVIRONMENT`, `PYTHONPATH`, `--no-dev --frozen`,
+  `[tool.uv] package = false`, and `run_gate`'s flags) across every file
+  that must carry them, so a future edit silently dropping one — `PYTHONPATH`
+  in particular, now the only thing making `import ui_clone` resolve — fails
+  a test instead of leaving the suite green.
+- `tests/hooks/test_offpipeline_activation.py` and
+  `tests/hooks/test_claude_continuation.py` shell out to the real
+  `hooks/shim.sh`; they now pin `UI_CLONE_HOOK_VENV` to `sys.prefix` (the
+  same lockfile as the shared venv, so the sync is a no-op) instead of
+  inheriting the ambient environment, which was cold-syncing the real,
+  user-visible `~/.cache/ui-clone-skills/hook-venv` as a side effect of
+  every local test run and CI job.
+- Added regression tests for the declaration-of-done leading-whitespace fix
+  and for `run-required-checks.sh`'s dispatch-loop `PYTHONPATH` fix (a real,
+  non-dry dispatch of a `.py` row with `PYTHONPATH` stripped from the parent
+  environment, which only passes if the dispatcher supplies it itself).
+
+### Documentation
+
+- Added an explicit warning against `agent-browser screenshot --full` (and
+  resizing the viewport to page/section height) on pinned/sticky/scroll-driven
+  sites to `skills/ui-reverse-engineering/SKILL.md`, `skills/ui-capture/SKILL.md`,
+  `skills/ui-capture/report-page.md`, `skills/ui-reverse-engineering/patterns.md`,
+  and a new triage row in `skills/visual-debug/comparison-fix.md`: a blank
+  pinned section in a full-page or resized-viewport shot is a capture
+  artifact until disproven by a real scrolled viewport shot or DOM eval, not
+  an implementation bug.
+- Updated every remaining bare `uv run python -m ui_clone.*` example (no
+  `--project`, no shared-venv exports) that would hit the same
+  `ModuleNotFoundError` this release fixed elsewhere:
+  `skills/ui-capture/SKILL.md`'s evidence-pack snippet,
+  `skills/ui-reverse-engineering/section-audit.md`'s gate command,
+  `ui_clone/onpixel_showcase_loop.py`'s closeout suggestion, the guidance
+  strings in `scripts/verify/run-required-checks.sh` and
+  `ui_clone/hooks/_common.py`'s `run_gate` docstring, and `docs/agent-cli.md`'s
+  description of `bin/ui-clone`'s dispatch (now points at the install
+  guide's "Shared hook venv" section).
+- `README_detail/install.md`'s "Shared hook venv" section now names every
+  caller that shares the venv and explains what the install-time probe
+  actually verifies about `[tool.uv] package = false`.
+- `skills/ui-capture/SKILL.md`'s per-section capture recipe told agents to
+  resize the viewport to the section's height — the same failure class as
+  `--full`, just per section. Rewritten to keep the viewport fixed and crop,
+  matching `ui_clone/section_capture.py`'s actual clamp/crop math.
+
+### Known gap
+
+- `~/.cache/ui-clone-skills/hook-venv` (the new shared venv above) is not
+  removed by `install.sh --uninstall`; it is a small (few-hundred-MB), shared
+  cache at one fixed path (not tied to any one installed version), resynced
+  automatically whenever an invoking copy's `uv.lock` differs.
+
 ## [0.8.11] - 2026-09-15
 
 ### Documentation

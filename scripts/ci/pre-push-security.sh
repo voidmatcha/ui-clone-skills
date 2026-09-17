@@ -37,6 +37,29 @@ SELF="pre-push-security.sh"
 # Excluded from secret scans for the same reason as $SELF.
 DRIFT_TEST="test-parity.sh"
 
+# Grep pattern $1 across git-tracked files matching pathspec glob(s) $2...
+#
+# Tracked files, not `grep --exclude-dir=NAME`, is what actually scopes these
+# scans to the shipped surface: --exclude-dir matches a directory by BASENAME
+# anywhere in the tree, so `--exclude-dir=benchmark` used to hide the tracked
+# skills/benchmark/ maintainer skill from every scan below — along with the
+# untracked top-level ./benchmark/ (captured runtime data) it was meant to
+# exclude — because both share that basename. Untracked dirs (tmp/, scratch/,
+# benchmark/, .omx/, node_modules/, .venv/, caches) never appear in
+# `git ls-files` regardless of name, so this scopes correctly with no explicit
+# exclusion list to keep in sync.
+_scan_tracked() {
+  local pattern="$1" files
+  shift
+  files="$(git ls-files -- "$@" | grep -vE "(^|/)(${SELF}|${DRIFT_TEST})\$")"
+  [ -n "$files" ] || return 0
+  # -H: force the `file:line:` prefix even when only one file matches (a glob
+  # this narrow, e.g. '*.lock', legitimately CAN match exactly one file) —
+  # without it grep drops the prefix for a single-file argument list, and the
+  # `grep -vE "^[^:]*:[0-9]+:"`-shaped filters downstream key on that shape.
+  printf '%s\n' "$files" | xargs grep -EHn "$pattern" -- 2>/dev/null
+}
+
 section "Secrets"
 secret_patterns=(
   'AKIA[0-9A-Z]{16}'                    # AWS access key id
@@ -81,14 +104,16 @@ for p in "${secret_patterns[@]}"; do
   # *.py is the bulk of the published package (ui_clone/), and .npmrc/.env* are
   # the canonical homes of the npm/env tokens above (git-trackable — not in
   # .gitignore). bin/ui-clone (extensionless) ships via npm `files`.
-  hits=$(grep -rEn "$p" \
-    --include='*.sh' --include='*.md' --include='*.json' --include='*.yaml' --include='*.yml' \
-    --include='*.py' --include='*.toml' --include='*.lock' \
-    --include='.npmrc' --include='.env*' --include='ui-clone' \
-    --exclude="$SELF" --exclude="$DRIFT_TEST" \
-    --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules \
-    --exclude-dir=.venv --exclude-dir=.mypy_cache --exclude-dir=.sisyphus \
-    . 2>/dev/null | \
+  # Git pathspec matching is NOT grep --include's "basename anywhere" —
+  # a literal like 'ui-clone' or '.npmrc' matches only that exact path at
+  # the repo ROOT, so bin/ui-clone silently dropped out of this scan when
+  # _scan_tracked replaced the old grep --include walk (fable review).
+  # Name bin/ui-clone's real path explicitly, and add one-level-deep globs
+  # for .npmrc/.env* (nothing nested is tracked today, but a bare literal
+  # would silently drop it exactly like bin/ui-clone did).
+  hits=$(_scan_tracked "$p" \
+    '*.sh' '*.md' '*.json' '*.yaml' '*.yml' '*.py' '*.toml' '*.lock' \
+    '.npmrc' '*/.npmrc' '.env*' '*/.env*' 'bin/ui-clone' | \
     grep -vE 'evals\.json' | \
     _drop_placeholder_token_lines "$p" || true)
   if [ -n "$hits" ]; then
@@ -100,8 +125,7 @@ done
 [ "$secret_hits" -eq 0 ] && ok "no API keys / private keys / tokens"
 
 section "Code injection"
-eval_count=$(grep -rEn '(^|[[:space:];&|])eval[[:space:]"'"'"']' \
-  --include='*.sh' --exclude="$SELF" --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules . 2>/dev/null | \
+eval_count=$(_scan_tracked '(^|[[:space:];&|])eval[[:space:]"'"'"']' '*.sh' | \
   grep -v 'agent-browser' | \
   grep -v "^[^:]*:[0-9]*:[[:space:]]*echo " | \
   grep -vE "^[^:]*:[0-9]+:[[:space:]]*#" | wc -l | tr -d ' ')
@@ -110,15 +134,11 @@ eval_count=$(grep -rEn '(^|[[:space:];&|])eval[[:space:]"'"'"']' \
 # CWE-377: insecure use of fixed temporary file paths (race / symlink attack)
 # tmp/, scratch/, and benchmark/ hold captured agent / third-party site scripts that are
 # not part of the shipped surface — same exclusion as the secret scan above.
-fixed_tmp=$(grep -rEn '/tmp/[a-zA-Z][a-zA-Z0-9_.-]+\.(txt|log|json|tmp)' \
-  --include='*.sh' --exclude="$SELF" \
-  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules . 2>/dev/null | \
+fixed_tmp=$(_scan_tracked '/tmp/[a-zA-Z][a-zA-Z0-9_.-]+\.(txt|log|json|tmp)' '*.sh' | \
   grep -v 'mktemp\|RESULT_FILE\|TEMP_FILE' | wc -l | tr -d ' ')
 [ "$fixed_tmp" -eq 0 ] && ok "no fixed /tmp paths (CWE-377)" || err "fixed /tmp paths found ($fixed_tmp)"
 
-backdoor=$(grep -rEn 'nc -[el]|/dev/tcp/|bash -i.*&|reverse shell|exec [0-9]<>/dev/' \
-  --include='*.sh' --exclude="$SELF" \
-  --exclude-dir=.git --exclude-dir=tmp --exclude-dir=scratch --exclude-dir=benchmark --exclude-dir=.omx --exclude-dir=node_modules . 2>/dev/null | wc -l | tr -d ' ')
+backdoor=$(_scan_tracked 'nc -[el]|/dev/tcp/|bash -i.*&|reverse shell|exec [0-9]<>/dev/' '*.sh' | wc -l | tr -d ' ')
 [ "$backdoor" -eq 0 ] && ok "no reverse-shell / backdoor patterns" || err "backdoor pattern ($backdoor)"
 
 section "Manifest validity"
@@ -217,6 +237,23 @@ if command -v python3 >/dev/null 2>&1; then
   else
     warn "could not extract versions"
   fi
+fi
+
+section "Lockfile freshness"
+# Every runtime `uv run` in this repo now passes --frozen (shim.sh,
+# bin/ui-clone, auto-verify.sh, run_gate, register-driver-session.sh) — a
+# pyproject.toml-vs-uv.lock drift used to just cost a slow re-resolve; now it
+# makes `uv run --frozen` error outright, and hooks/shim.sh swallows that
+# error silently (fable review). `uv lock --check` is the only thing that
+# catches drift before it ships.
+if command -v uv >/dev/null 2>&1; then
+  if uv lock --check --quiet >/dev/null 2>&1; then
+    ok "uv.lock matches pyproject.toml"
+  else
+    err "uv.lock is stale — run 'uv lock' and commit the result"
+  fi
+else
+  warn "uv not found — skipping lockfile freshness check"
 fi
 
 echo ""

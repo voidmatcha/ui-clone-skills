@@ -81,12 +81,20 @@ fi
   exit 2
 }
 export PLUGIN_ROOT="$UI_CLONE_ROOT"
+# Same shared venv hooks/shim.sh uses — omit this and uv rebuilds a separate
+# ~200MB venv inside the version-keyed plugin cache instead of reusing it.
+export UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}"
+# `[tool.uv] package = false` (see pyproject.toml) keeps that shared venv from
+# installing ui_clone itself, so `-m` alone resolves it from the CALLER's cwd
+# — which is the caller's own project directory here, not $UI_CLONE_ROOT.
+# PYTHONPATH is what makes `import ui_clone` find the plugin regardless of cwd.
+export PYTHONPATH="$UI_CLONE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 URL='<reference-url>'
 COMPONENT='<component-or-capture>'
 SESSION='<project-name>'
 WORK_DIR="$PWD"
-uv run --project "$UI_CLONE_ROOT" python -m ui_clone.pipeline \
+uv run --project "$UI_CLONE_ROOT" --no-dev --frozen python -m ui_clone.pipeline \
   "$URL" "$COMPONENT" "$SESSION" run --phases 0A,1,2
 CAPTURE_STATUS=$?
 if [ "$PWD" != "$WORK_DIR" ]; then
@@ -141,7 +149,9 @@ compact worker briefs from the ref dir so downstream skills do not re-read raw
 DOM, screenshots, bundle maps, or transition JSON by default:
 
 ```bash
-uv run python -m ui_clone.evidence_pack "$OUT_DIR" --out-dir "$OUT_DIR/brief"
+UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}" \
+  PYTHONPATH="$UI_CLONE_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  uv run --project "$UI_CLONE_ROOT" --no-dev --frozen python -m ui_clone.evidence_pack "$OUT_DIR" --out-dir "$OUT_DIR/brief"
 ```
 
 This does not replace JS bundle analysis, transition spec generation, or any
@@ -301,11 +311,13 @@ Anti-pattern: bumping `wait` to 30000 "to be safe" — slows every capture in ev
 
 **Screenshot output rule:** `agent-browser --session <s> screenshot [selector] [path]` saves the file itself and prints `Screenshot saved to <path>` on stdout. Omit `selector` for a viewport screenshot; include it before `path` for an element crop. Relative paths resolve against the *shell's* cwd at invocation time (verified). The failure mode to avoid: `cd` between commands inside a loop, or invoking via a wrapper that changes cwd, so half the screenshots land in one directory and half in another. Two safe patterns: (1) pass an absolute path — `agent-browser --session <s> screenshot "$(pwd)/$OUT_DIR/static/ref/section-${i}.png"`, or (2) keep the loop in one shell with a single `cd` up front. After the loop, sanity-check: `ls "$OUT_DIR/static/ref/" | wc -l` should equal the section count.
 
+**Never** use `screenshot --full`/`-f`, or resize the viewport to page/section height, on ref or impl: single-shot full-page capture expands the layout viewport to page height, which re-runs `position:sticky`, GSAP `ScrollTrigger` pin, and any `innerHeight`-driven layout at that new size — pinned/sticky content renders blank or mid-transform in the PNG even though the real page is correct. A blank pinned section in a full-page or resized-viewport shot is a capture artifact until disproven by `scrollTo(<y>)` + a fixed 1440×900 viewport `screenshot`, or a DOM eval. Whole-page evidence comes from scrolled viewport captures (this driver, `batch-scroll.sh`, `section-compare.sh`) or a scroll video — never one tall frame.
+
 **Scroll detection:** Run `detection.md` eval → `scrollType`, `scrollSelector`, `sections[]`.
 - **Instant** (screenshots): `scrollTo(0, Y)` on `window` or `scrollSelector`
 - **Animated** (videos): native → `scrollTo` loop; custom → `agent-browser --session <name> mouse wheel <deltaY>`
 
-**Section screenshots:** Per section: `set viewport 1440 <sectionHeight>` → `scrollTo` → `wait 800` → `screenshot`. Restore 1440×900 after.
+**Section screenshots:** Keep the viewport at 1440×900 for every shot. `scrollTo(<sectionTop>)` → `wait 800` → read the ACTUAL scroll position (`window.scrollY`, since scroll clamps at `document.documentElement.scrollHeight - innerHeight` and can land short of the target near the page bottom) → viewport `screenshot shot.png` → crop with `magick shot.png -crop <width>x<min(sectionHeight, 900-clipTop)>+0+<clipTop> +repage section.png` where `clipTop = sectionTop - actualScrollY` (matches `ui_clone/section_capture.py`'s `planned_crop_top`/`_run_crop`). For a section taller than 900px, don't hand-roll a multi-shot stitch — its bottom-clamp and off-canvas handling is exactly what `section-compare.sh` / `section_capture.py` already do; use those instead of reimplementing the crop math. **Never** resize the viewport to a section's height: a GSAP `ScrollTrigger` pin (or `position:sticky`) computes its start/end and scrub progress from `innerHeight` at init, so changing it mid-capture re-layouts the pin at the new size and the crop comes back blank or mid-transform — same failure class as `screenshot --full`, just per section.
 
 **Scroll video:**
 ```bash
@@ -360,7 +372,7 @@ after Phase 2B-2E and fix any missing files before handing off.
 
 | Artifact | Minimum | Check |
 |---|---|---|
-| Viewport/full-page screenshot | >10KB | Decodable, not blank or bot-challenge, shows expected content |
+| Viewport screenshot | >10KB | Decodable, not blank or bot-challenge, shows expected content |
 | Selector element crop | Decodable, nonempty image | Expected element is visible; state pairs have a nonzero pixel difference |
 | Eval result | non-null | Valid JSON |
 | Video | >50KB, >1s | Duration reasonable |
@@ -380,12 +392,12 @@ the same box, and never discard a region on that zero. See
 
 | Symptom | Fix |
 |---|---|
-| Blank screenshot | `wait 5000` before capture |
+| Blank screenshot | If captured with `--full` or a resized viewport on a pinned/sticky section: recapture at 1440×900 at that `scrollY` first — capture artifact, not an impl bug. Otherwise `wait 5000` before capture. |
 | CAPTCHA | `--headed` mode |
 | Sticky overlay | Remove cookie/banner/modal elements before capture |
 | `scrollHeight` = viewport | Custom scroll — use `scrollSelector` |
 | `scrollTo` no effect | Custom scroll — use `mouse wheel` for animated |
-| Section screenshots same height | Resize viewport per section |
+| Section screenshots same height | Crop the 1440×900 viewport shot at that scroll position — do NOT resize the viewport |
 | Scroll video dead time | Always trim: `ffmpeg -ss 0.3 -t <duration>` |
 | Video wrong scroll pos | `record start` creates fresh context — scroll AFTER record start |
 
