@@ -136,6 +136,15 @@
   `dssim-compare.sh` prefer `static/scroll/{ref,impl}` and fall back to the
   legacy `static/{ref,impl}` layout when it's absent, so older captures
   still compare. `auto-diagnose.sh` above needed a matching update.
+  `scripts/verify/auto-verify.sh`'s own impl-capture fallback path wrote to
+  the legacy `static/impl/` unconditionally, so a ref dir that already had
+  a `static/scroll/ref` (from an earlier `batch-scroll.sh` run) would have
+  `batch-compare.sh` silently ignore the fresh captures in favor of
+  whatever sat at the old path — updated to the same prefer-then-fall-back
+  resolution. Updated the manual capture procedures in
+  `skills/visual-debug/comparison-fix.md`, `verification.md`, and
+  `docs/whole-page-dssim-viewport.md`, and `ui_clone/hooks/post_verify.py`'s
+  diagnostic hint, which still pointed at the legacy paths.
 
 ### Known gap
 

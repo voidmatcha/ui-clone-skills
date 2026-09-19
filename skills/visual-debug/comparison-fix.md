@@ -43,11 +43,13 @@ Rule: every layout / metric edit must answer "what does the **ref** do here?" wi
 Run pixel diff for each position — do NOT read images with the Read tool for comparison (wastes tokens).
 
 ```bash
+# batch-scroll.sh writes to static/scroll/{ref,impl,diff} (0.8.13+); older
+# captures use the legacy static/{ref,impl,diff} — check which exists.
 for POS in top 25pct 50pct 75pct bottom; do
   compare -metric AE \
-    tmp/ref/<component>/static/ref/${POS}.png \
-    tmp/ref/<component>/static/impl/${POS}.png \
-    tmp/ref/<component>/static/diff/${POS}.png 2>&1
+    tmp/ref/<component>/static/scroll/ref/${POS}.png \
+    tmp/ref/<component>/static/scroll/impl/${POS}.png \
+    tmp/ref/<component>/static/scroll/diff/${POS}.png 2>&1
 done
 # → 0 = pass. Non-zero = fail (diff image shows mismatched pixels)
 ```
@@ -347,8 +349,8 @@ If you skip the subagent and read pairs inline, mark the choice explicitly with 
 For each scroll position (0%, 10%, ..., 100%):
 
 ```
-Read tmp/ref/<component>/static/ref/<pos>pct.png
-Read tmp/ref/<component>/static/impl/<pos>pct.png
+Read tmp/ref/<component>/static/scroll/ref/<pos>pct.png
+Read tmp/ref/<component>/static/scroll/impl/<pos>pct.png
 ```
 
 Judge each pair:

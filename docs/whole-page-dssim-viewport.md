@@ -5,8 +5,13 @@ Reusable methodology gotcha for whole-page structural comparison. Kept in-repo
 
 ## The trap
 
-`skills/visual-debug/scripts/dssim-compare.sh` compares `<dir>/static/ref/*.png`
-against `<dir>/static/impl/*.png` by basename. When the two images differ in
+`skills/visual-debug/scripts/dssim-compare.sh` compares
+`<dir>/static/scroll/ref/*.png` against `<dir>/static/scroll/impl/*.png` by
+basename (falling back to the legacy `<dir>/static/{ref,impl}` layout when
+`static/scroll/ref` doesn't exist — see `batch-scroll.sh`, whose captures
+moved there in 0.8.13 so its cleanup step stops deleting `capture.sh`'s
+Phase 1 baseline at the plain `static/ref/section-*.png` path). When the
+two images differ in
 size it force-resizes the impl to the ref dims:
 
 ```sh

@@ -146,7 +146,11 @@ agent-browser --session <s> eval "(() => {
 
 ```bash
 mkdir -p tmp/ref/<component>/frames/{ref,impl,diff}
-mkdir -p tmp/ref/<component>/static/{ref,impl,diff}
+# static/scroll/, not plain static/ — capture.sh's Phase 1 baseline lives at
+# the plain static/ref/section-*.png, and batch-compare.sh/dssim-compare.sh
+# prefer static/scroll/{ref,impl} when present, silently ignoring files
+# written to the legacy path once a static/scroll/ capture exists alongside.
+mkdir -p tmp/ref/<component>/static/scroll/{ref,impl,diff}
 mkdir -p tmp/ref/<component>/transitions/{ref,impl}
 mkdir -p tmp/ref/<component>/responsive
 
@@ -156,23 +160,23 @@ agent-browser --session <s> set viewport 1440 900
 # Static screenshots at each scroll position
 agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/top.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/ref/top.png
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.25))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/25pct.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/ref/25pct.png
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.5))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/50pct.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/ref/50pct.png
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.75))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/75pct.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/ref/75pct.png
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/ref/bottom.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/ref/bottom.png
 ```
 
 ### A-C2: Full-page scroll video
@@ -271,7 +275,7 @@ ffmpeg -i tmp/ref/<component>/ref-transition-carousel.webm -vf fps=60 tmp/ref/<c
 ### Phase A Gate
 
 ```
-□ static/ref/ has 5 screenshots (top, 25%, 50%, 75%, bottom)
+□ static/scroll/ref/ has 5 screenshots (top, 25%, 50%, 75%, bottom)
 □ Spot-check: Read top.png ONCE — confirm it's the actual site (not blank, not bot-detection page). Do not re-read for comparison.
 □ ref-scroll.webm exists and has frames extracted to frames/ref/ at 60 fps
 □ C3 (transitions/) — deferred until Step 5b (needs interaction data from Step 5)
@@ -294,23 +298,23 @@ agent-browser --session <s> set viewport 1440 900
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/top.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/impl/top.png
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.25))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/25pct.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/impl/25pct.png
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.5))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/50pct.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/impl/50pct.png
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight * 0.75))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/75pct.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/impl/75pct.png
 
 agent-browser --session <s> eval "(() => window.scrollTo(0, document.body.scrollHeight))()"
 agent-browser --session <s> wait 500
-agent-browser --session <s> screenshot tmp/ref/<component>/static/impl/bottom.png
+agent-browser --session <s> screenshot tmp/ref/<component>/static/scroll/impl/bottom.png
 ```
 
 ### B-C2: Full-page scroll video

@@ -96,7 +96,10 @@ def main() -> None:
             print(
                 f"⚠️  UI-RE: Verification ran but {fail_count} positions FAILED (only {pass_count} passed)."
             )
-            print(f"    Read diff images in {ref_dir}/static/diff/ to diagnose.")
+            print(
+                f"    Read diff images in {ref_dir}/static/scroll/diff/ "
+                "(or static/diff/ on an older capture) to diagnose."
+            )
             print("    DO NOT declare done with failing positions.")
             print()
 

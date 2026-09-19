@@ -260,7 +260,16 @@ elif [ "$SECTION_RESULT_PASS_MODE" = "true" ]; then
   echo -e "  ${GREEN}SECTION_RESULT${NC}: using sections/result.txt + required anti-cheat gates instead of percent-scroll batch comparison."
 else
   echo -e "\n${BOLD}Capturing implementation screenshots...${NC}"
-  mkdir -p "$REF_DIR/static/impl" "$REF_DIR/static/diff"
+  # batch-scroll.sh writes its own ref/impl/diff captures under
+  # static/scroll/ (0.8.13+, so its cleanup step stops deleting capture.sh's
+  # Phase 1 baseline at the plain static/ref/section-*.png path);
+  # batch-compare.sh below prefers that layout when present, so writing
+  # fresh impl captures to the legacy static/impl/ path would silently be
+  # ignored in favor of whatever (possibly stale) captures already sit at
+  # static/scroll/. Write wherever batch-compare.sh will actually look.
+  VERIFY_SHOT_DIR="$REF_DIR/static/scroll"
+  [ -d "$VERIFY_SHOT_DIR/ref" ] || VERIFY_SHOT_DIR="$REF_DIR/static"
+  mkdir -p "$VERIFY_SHOT_DIR/impl" "$VERIFY_SHOT_DIR/diff"
 
   # Capture impl at same scroll positions as ref
   run_with_timeout 30 agent-browser open "$IMPL_URL" --session "${SESSION}-verify" 2>/dev/null || true
@@ -270,7 +279,7 @@ else
   for pct in 0 10 20 30 40 50 60 70 80 90 100; do
     run_with_timeout 15 agent-browser eval "(()=>{const h=document.documentElement.scrollHeight-window.innerHeight;window.scrollTo(0,h*$pct/100);return $pct})()" --session "${SESSION}-verify" 2>/dev/null || true
     sleep 1
-    run_with_timeout 15 agent-browser screenshot "$REF_DIR/static/impl/${pct}pct.png" --session "${SESSION}-verify" 2>/dev/null || true
+    run_with_timeout 15 agent-browser screenshot "$VERIFY_SHOT_DIR/impl/${pct}pct.png" --session "${SESSION}-verify" 2>/dev/null || true
   done
 
   run_with_timeout 10 agent-browser --session "${SESSION}-verify" close 2>/dev/null || true
@@ -286,11 +295,11 @@ else
       echo -e "\n${BOLD}Fallback: individual AE comparisons${NC}"
       PASS_COUNT=0
       FAIL_COUNT=0
-      for ref_img in "$REF_DIR"/static/ref/*.png; do
+      for ref_img in "$VERIFY_SHOT_DIR"/ref/*.png; do
         fname=$(basename "$ref_img")
-        impl_img="$REF_DIR/static/impl/$fname"
+        impl_img="$VERIFY_SHOT_DIR/impl/$fname"
         if [ -f "$impl_img" ]; then
-          result=$(bash "$VISUAL_DEBUG_SCRIPTS/ae-compare.sh" "$ref_img" "$impl_img" "$REF_DIR/static/diff/$fname" 2>/dev/null)
+          result=$(bash "$VISUAL_DEBUG_SCRIPTS/ae-compare.sh" "$ref_img" "$impl_img" "$VERIFY_SHOT_DIR/diff/$fname" 2>/dev/null)
           status=$(echo "$result" | grep -o 'STATUS=[A-Z]*' | cut -d= -f2)
           ae=$(echo "$result" | grep -o 'AE=[0-9]*' | cut -d= -f2)
           if [ "$status" = "PASS" ]; then
