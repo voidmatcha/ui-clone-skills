@@ -75,3 +75,21 @@ def test_vertical_only_mismatch_stays_valid(tmp_path: Path) -> None:
     proc = _run(tmp_path)
     assert "WIDTH-MISMATCH" not in proc.stdout, proc.stdout
     assert "0 INVALID" in proc.stdout, proc.stdout
+
+
+@_skip
+def test_static_scroll_layout_wins_over_legacy_static(tmp_path: Path) -> None:
+    """batch-scroll.sh (0.8.15) moved its own captures to
+    static/scroll/{ref,impl} so it stops clobbering capture.sh's
+    static/ref/section-*.png baseline; dssim-compare.sh must prefer that
+    layout when both exist rather than silently falling back to whatever
+    stale content sits in the legacy static/ref path."""
+    # Legacy path: a mismatched pair that would score INVALID if read.
+    _png(tmp_path / "static/ref/0pct.png", 200, 300)
+    _png(tmp_path / "static/impl/0pct.png", 100, 300)
+    # New path: a matched pair that scores normally.
+    _png(tmp_path / "static/scroll/ref/0pct.png", 200, 300)
+    _png(tmp_path / "static/scroll/impl/0pct.png", 200, 300)
+    proc = _run(tmp_path)
+    assert "WIDTH-MISMATCH" not in proc.stdout, proc.stdout
+    assert "1/1 PASS, 0 FAIL, 0 INVALID" in proc.stdout, proc.stdout

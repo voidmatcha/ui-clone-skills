@@ -47,6 +47,36 @@ def test_zero_viewport_never_pins() -> None:
     )
 
 
+def test_whole_page_single_section_not_pinned() -> None:
+    """A coarse single-section match whose own height already spans most of
+    the document (an impl matched as one whole-page section instead of
+    ref's granular markup) makes top + height land near scroll_height no
+    matter where the section actually starts. Real footers never approach
+    half the document height, so this degenerate whole-page match must not
+    be pinned to maxScroll."""
+    assert not should_pin_to_bottom(
+        top=0, height=9500, scroll_height=10000, viewport_h=800
+    )
+
+
+def test_just_under_half_height_still_pins() -> None:
+    """The whole-page guard only excludes a section spanning >= half the
+    document — a genuine near-bottom section just under that boundary must
+    still pin normally."""
+    assert should_pin_to_bottom(
+        top=5001, height=4999, scroll_height=10000, viewport_h=800
+    )
+
+
+def test_exact_half_height_is_excluded_from_pinning() -> None:
+    """The whole-page guard boundary is inclusive: a section spanning
+    exactly half the document is excluded from pinning, matching
+    `height >= scroll_height * 0.5`."""
+    assert not should_pin_to_bottom(
+        top=5000, height=5000, scroll_height=10000, viewport_h=800
+    )
+
+
 def test_desired_scroll_mid_page_is_top_minus_50() -> None:
     assert desired_scroll_y(
         top=2000, height=600, scroll_height=20000, viewport_h=800

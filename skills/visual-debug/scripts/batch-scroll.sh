@@ -14,7 +14,9 @@
 # mismatch. Section anchors compare ref section N with impl section N even when
 # their heights differ.
 #
-# Output: <dir>/static/ref/*.png and <dir>/static/impl/*.png
+# Output: <dir>/static/scroll/ref/*.png and <dir>/static/scroll/impl/*.png
+# (own subfolder: the cleanup below must never touch Phase 1's
+#  <dir>/static/ref/section-*.png baseline written by capture.sh)
 #
 # Options (env vars):
 #   VIEW_W=1440        Viewport width (default: 1440)
@@ -78,7 +80,8 @@ cleanup_browsers() {
 }
 trap cleanup_browsers EXIT
 
-mkdir -p "$DIR/static/ref" "$DIR/static/impl" "$DIR/static/diff"
+SHOT_DIR="$DIR/static/scroll"
+mkdir -p "$SHOT_DIR/ref" "$SHOT_DIR/impl" "$SHOT_DIR/diff"
 
 cleanup_generated_pngs() {
   local nullglob_was_set=0
@@ -86,7 +89,7 @@ cleanup_generated_pngs() {
   local -a generated_pngs
   shopt -q nullglob && nullglob_was_set=1
   shopt -s nullglob
-  for capture_dir in "$DIR/static/ref" "$DIR/static/impl" "$DIR/static/diff"; do
+  for capture_dir in "$SHOT_DIR/ref" "$SHOT_DIR/impl" "$SHOT_DIR/diff"; do
     generated_pngs=("$capture_dir"/*.png)
     if [ "${#generated_pngs[@]}" -gt 0 ]; then
       rm -- "${generated_pngs[@]}"
@@ -418,10 +421,10 @@ if [ "$USE_ANCHOR_PLAN" = "1" ]; then
 
     sleep "$(awk "BEGIN { printf \"%.3f\", $WAIT_SCROLL / 1000 }")"
 
-    agent-browser --session "$SESSION_REF" screenshot "$DIR/static/ref/${NAME}.png" 2>&1 > /dev/null
-    agent-browser --session "$SESSION_IMPL" screenshot "$DIR/static/impl/${NAME}.png" 2>&1 > /dev/null
+    agent-browser --session "$SESSION_REF" screenshot "$SHOT_DIR/ref/${NAME}.png" 2>&1 > /dev/null
+    agent-browser --session "$SESSION_IMPL" screenshot "$SHOT_DIR/impl/${NAME}.png" 2>&1 > /dev/null
 
-    if [ ! -s "$DIR/static/ref/${NAME}.png" ] || [ ! -s "$DIR/static/impl/${NAME}.png" ]; then
+    if [ ! -s "$SHOT_DIR/ref/${NAME}.png" ] || [ ! -s "$SHOT_DIR/impl/${NAME}.png" ]; then
       echo "  ⚠️  ${NAME} — screenshot missing or empty (browser may have crashed)"
     else
       echo "  ✓ ${NAME} ($REASON; ref y=$Y_REF, impl y=$Y_IMPL)"
@@ -438,10 +441,10 @@ else
 
     sleep "$(awk "BEGIN { printf \"%.3f\", $WAIT_SCROLL / 1000 }")"
 
-    agent-browser --session "$SESSION_REF" screenshot "$DIR/static/ref/${PCT}pct.png" 2>&1 > /dev/null
-    agent-browser --session "$SESSION_IMPL" screenshot "$DIR/static/impl/${PCT}pct.png" 2>&1 > /dev/null
+    agent-browser --session "$SESSION_REF" screenshot "$SHOT_DIR/ref/${PCT}pct.png" 2>&1 > /dev/null
+    agent-browser --session "$SESSION_IMPL" screenshot "$SHOT_DIR/impl/${PCT}pct.png" 2>&1 > /dev/null
 
-    if [ ! -s "$DIR/static/ref/${PCT}pct.png" ] || [ ! -s "$DIR/static/impl/${PCT}pct.png" ]; then
+    if [ ! -s "$SHOT_DIR/ref/${PCT}pct.png" ] || [ ! -s "$SHOT_DIR/impl/${PCT}pct.png" ]; then
       echo "  ⚠️  ${PCT}% — screenshot missing or empty (browser may have crashed)"
     else
       echo "  ✓ ${PCT}% (ref y=$Y_REF, impl y=$Y_IMPL)"
@@ -450,8 +453,8 @@ else
 fi
 
 # Final count verification
-REF_ACTUAL=$({ find "$DIR/static/ref" -name "*.png" 2>/dev/null || true; } | wc -l | tr -d ' ')
-IMPL_ACTUAL=$({ find "$DIR/static/impl" -name "*.png" 2>/dev/null || true; } | wc -l | tr -d ' ')
+REF_ACTUAL=$({ find "$SHOT_DIR/ref" -name "*.png" 2>/dev/null || true; } | wc -l | tr -d ' ')
+IMPL_ACTUAL=$({ find "$SHOT_DIR/impl" -name "*.png" 2>/dev/null || true; } | wc -l | tr -d ' ')
 echo ""
 echo "▸ Captured: ref=$REF_ACTUAL impl=$IMPL_ACTUAL (expected $EXPECTED_CAPTURE_COUNT each)"
 CAPTURE_RC=0

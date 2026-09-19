@@ -202,7 +202,10 @@ def test_batch_scroll_removes_only_stale_generated_pngs() -> None:
         1,
     )[0]
 
-    assert 'for capture_dir in "$DIR/static/ref" "$DIR/static/impl" "$DIR/static/diff"' in cleanup
+    assert 'SHOT_DIR="$DIR/static/scroll"' in script
+    assert 'for capture_dir in "$SHOT_DIR/ref" "$SHOT_DIR/impl" "$SHOT_DIR/diff"' in cleanup
+    # Phase 1's static/ref/section-*.png baseline (capture.sh) must survive.
+    assert "$DIR/static/ref" not in cleanup
     assert 'generated_pngs=("$capture_dir"/*.png)' in cleanup
     assert 'rm -- "${generated_pngs[@]}"' in cleanup
     assert "shopt -s nullglob" in cleanup

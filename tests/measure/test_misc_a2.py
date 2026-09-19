@@ -81,7 +81,7 @@ _COMPLETION_REQUIRED_STATUS_ARTIFACTS = [
     "svg-provenance.json",
     "color-token-grounding.json",
     "ref-js-loader.json",
-    "proxy-mirror.json",
+    "proxy-mirror-check.json",
     "html-paste.json",
     "ref-screenshot-asset.json",
     "impl-scope.json",

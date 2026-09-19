@@ -4680,12 +4680,13 @@ def render(
             if not _scrub_target_prop:
                 _scrub_target_prop = "scale"
         _scroll_state = _is_scroll_state_translation(tv) and _pos not in ("fixed", "sticky")
-        if (
+        _transform_reveal = bool(
             tv
             and tv != "none"
             and not _centering
             and ("transform" in anim or _scroll_state or _collapsed or _frozen_scale)
-        ):
+        )
+        if _transform_reveal:
             styles = {k: v for k, v in styles.items() if k != "transform"}
             # A pure frozen-scrub-scale target (only _frozen_scale true) is wrapped
             # in <ScrollScrub> via its stamp below; counting it as a REVEAL would
@@ -4696,15 +4697,27 @@ def render(
         ov = styles.get("opacity")
         # Reset a hidden opacity when the element fades in on scroll/load (marker)
         # OR when its transform collapsed it to zero scale (a baked entrance
-        # initial state whose rest is visible).
+        # initial state whose rest is visible). `transition-property: opacity`
+        # (or `all`) alone is NOT enough evidence a captured sub-1 value is
+        # mid-animation: nearly every hover-fade element declares one
+        # (`opacity-60 hover:opacity-100 transition`) while sitting at a
+        # legitimate static resting opacity, and stripping that permanently
+        # brightens it. Trust the marker alone only when opacity is near-zero
+        # (unambiguous "not yet revealed"); for any other sub-1 value also
+        # require a companion transform reveal on the SAME node — real
+        # scroll-reveal/parallax/stagger captures pair a fade with a
+        # positional/scale offset (observed: Framer's opacity 0->1 +
+        # translateY 320px->0px pattern), a static design opacity does not.
         if ("opacity" in anim or _collapsed) and ov is not None:
             try:
-                hidden = float(ov) < 1
+                ov_f = float(ov)
             except (TypeError, ValueError):
-                hidden = False
-            if hidden:
-                styles = {k: v for k, v in styles.items() if k != "opacity"}
-                REVEAL_RESETS[0] += 1  # this element fades in on scroll/load
+                ov_f = None
+            if ov_f is not None and ov_f < 1:
+                hidden = ov_f <= 0.02 or _transform_reveal
+                if hidden:
+                    styles = {k: v for k, v in styles.items() if k != "opacity"}
+                    REVEAL_RESETS[0] += 1  # this element fades in on scroll/load
         styles = _release_css_absolute_centering(node, styles)
         styles = _release_css_owned_absolute_insets(node, styles)
         # Fix 127 — restore auto-centering frozen into fixed symmetric px at the

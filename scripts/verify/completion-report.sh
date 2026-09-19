@@ -217,7 +217,7 @@ if tp and tp.get("status") != "pass":
 print("\n## Tier 5 — No-cheat\n")
 for art_name, label in [
     ("ref-js-loader.json",    "ref-js-loader"),
-    ("proxy-mirror.json",     "proxy-mirror"),
+    ("proxy-mirror-check.json", "proxy-mirror"),
     ("html-paste.json",       "html-paste"),
     ("ref-screenshot-asset.json", "ref-screenshot-asset"),
     ("impl-scope.json",       "impl-scope (gate-cheat block)"),

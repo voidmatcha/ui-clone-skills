@@ -28,8 +28,11 @@ set -uo pipefail
 DIR="${1:?Usage: dssim-compare.sh <dir> [threshold]}"
 THRESHOLD="${2:-0.50}"
 
-REF_DIR="$DIR/static/ref"
-IMPL_DIR="$DIR/static/impl"
+# batch-scroll.sh writes to <dir>/static/scroll/; older runs used <dir>/static/.
+SHOT_DIR="$DIR/static/scroll"
+[ -d "$SHOT_DIR/ref" ] || SHOT_DIR="$DIR/static"
+REF_DIR="$SHOT_DIR/ref"
+IMPL_DIR="$SHOT_DIR/impl"
 
 if ! command -v dssim &>/dev/null; then
   echo "ERROR: dssim not installed. Run: brew install dssim"

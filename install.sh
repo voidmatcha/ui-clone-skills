@@ -661,10 +661,11 @@ verify_claude_plugin_delivery() {
   # install cannot be reported as refreshed. Also reject removed source files
   # left under shipped directories; those can still be imported or discovered.
   # Root host metadata and the staging policy's runtime/build residue are allowed.
-  local content_mismatch
-  content_mismatch="$(
-    SOURCE_ROOT="$CLAUDE_PLUGIN_SRC" CACHE_ROOT="$cache_dir" \
-      RUNTIME_NAMES="$CLAUDE_PLUGIN_SRC_PRUNE" python3 - <<'PY'
+  local content_mismatch attempt
+  for attempt in 1 2; do
+    content_mismatch="$(
+      SOURCE_ROOT="$CLAUDE_PLUGIN_SRC" CACHE_ROOT="$cache_dir" \
+        RUNTIME_NAMES="$CLAUDE_PLUGIN_SRC_PRUNE" python3 - <<'PY'
 import hashlib
 import os
 from pathlib import Path
@@ -696,13 +697,42 @@ for directory in sorted(path for path in source.iterdir() if path.is_dir()):
             if not (source / rel).is_file():
                 print(f"unexpected:{rel}")
 PY
-  )" || return 1
-  if [ -n "$content_mismatch" ]; then
-    err "Hook delivery probe FAILED: Claude kept stale bytes for $PLUGIN_NAME $version."
-    err "  first mismatch: $(printf '%s\n' "$content_mismatch" | head -1)"
-    err "  The cache is version-keyed. Bump all six version files, reinstall, and restart Claude."
-    return 1
-  fi
+    )" || return 1
+    [ -n "$content_mismatch" ] || break
+    if [ "$attempt" -eq 2 ]; then
+      err "Hook delivery probe FAILED: Claude kept stale bytes for $PLUGIN_NAME $version."
+      err "  first mismatch: $(printf '%s\n' "$content_mismatch" | head -1)"
+      err "  A forced cache eviction + reinstall (below) did not clear this —"
+      err "  something outside install.sh is re-populating the cache (a"
+      err "  concurrent install, or another running Claude Code session)."
+      err "  Close other Claude Code sessions and re-run install.sh; if it"
+      err "  persists, bump all six version files to force a fresh cache slot."
+      return 1
+    fi
+    # `claude plugin update` has been observed to report success while
+    # leaving a same-version cache directory's bytes untouched (reproduced
+    # repeatedly in dev sessions that reused a version number after
+    # installing it once with different content) — this is the bug this
+    # whole probe exists to catch, not a corrupt-source false positive
+    # (compared against $CLAUDE_PLUGIN_SRC above, which prepare_claude_plugin_source
+    # just staged fresh). Evict the exact version-keyed cache directory
+    # ourselves — scoped to a path built only from hardcoded constants,
+    # gated on a sentinel file so this can never remove something that
+    # merely happens to share the version number — and fall back to a raw
+    # `plugin install`, which reliably re-populates an absent cache
+    # directory (unlike `update`, whose behavior against an absent
+    # directory is what triggered this in the first place).
+    warn "Detected stale cached bytes for $PLUGIN_NAME $version — evicting the cache slot and reinstalling once before failing."
+    if [ -f "$cache_dir/.claude-plugin/plugin.json" ] || [ -f "$cache_dir/hooks/shim.sh" ]; then
+      rm -rf "$cache_dir"
+    fi
+    claude plugin install "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+    if [ ! -d "$cache_dir" ]; then
+      err "Hook delivery probe FAILED: cache eviction removed $PLUGIN_NAME $version and the reinstall did not recreate it."
+      err "  cache: $cache_dir"
+      return 1
+    fi
+  done
 
   # Run a hook the way hooks.json runs it. File counts cannot prove this:
   # hooks are discovered by directory convention with no manifest field to

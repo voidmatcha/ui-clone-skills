@@ -2420,6 +2420,43 @@ def _derived_ready_wait_ms(ref_dir: Path) -> int:
     return wait_ms
 
 
+def _unlock_scroll_cap(session: str) -> None:
+    """Null an inline scroll-gated max-height cap before hover/region probing.
+
+    Same knob and same instant-unlock mechanism as
+    skills/visual-debug/scripts/section-compare.sh's REF_SCROLL_CAP_SELECTOR:
+    some reference sites gate their true scrollable content behind a wrapper
+    with an inline `overflow:clip; max-height:Npx` style that only relaxes in
+    response to real wheel-scroll input, not this script's `scrollIntoView`
+    hit-testing (observed on feconf2026.kr's `#fc-scroll-cap` wrapper). Every
+    hover-candidate element below that cap sits outside the visible/scrollable
+    bounds, so the hit-test correctly reports it as present but unreachable
+    ("selector matches N elements but none are hoverable") — not a capture
+    bug, but a real gap this script had relative to section-compare.sh and
+    runtime-text-sequence-check.sh, which already carry this unlock.
+
+    Directly nulling the inline max-height is instant and does not touch
+    scroll position or trigger a real scroll journey — unlike a wheel-scroll
+    sweep, which was tried and reverted (fable review): it fires every
+    once-only IntersectionObserver reveal before this script's own capture
+    ladder gets to them, and section-compare.sh's own comment documents a
+    heavy WebGL/canvas hero staying blank after that kind of round trip.
+    Off by default; set REF_SCROLL_CAP_SELECTOR to the gating element's
+    selector for such sites (e.g. "#fc-scroll-cap").
+    """
+    selector = os.environ.get("REF_SCROLL_CAP_SELECTOR", "").strip()
+    if not selector:
+        return
+    _eval(
+        session,
+        "(() => { const sel = "
+        + json.dumps(selector)
+        + "; document.querySelectorAll(sel).forEach(el => "
+        'el.style.setProperty("max-height", "none", "important")); '
+        "return {ok: true}; })()",
+    )
+
+
 def _capture_main(
     args: argparse.Namespace,
     regions: Any,
@@ -2463,6 +2500,7 @@ def _capture_main(
                     (_BROWSER_ENV.get() or {}).get("AGENT_BROWSER_NAMESPACE", ""),
                 ):
                     raise OriginValidationError("agent-browser navigation receipt is invalid")
+            _unlock_scroll_cap(session)
         updated = _capture_regions(
             regions,
             session,

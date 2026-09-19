@@ -25,7 +25,7 @@
 # Writes:
 #   <ref-dir>/scroll-coverage.json      — schemaVersion 1, status, points, fail_count
 #   <ref-dir>/static/scroll-anchors.json — section/sticky anchor plan when available
-#   <ref-dir>/static/{ref,impl}/*.png    — section-anchor or fallback pct captures
+#   <ref-dir>/static/scroll/{ref,impl}/*.png — section-anchor or fallback pct captures
 #
 # Pass criteria:
 #   pass  — fewer than 30% of sampled points exceed AE/Mpx threshold

@@ -246,3 +246,42 @@ def test_animated_hidden_opacity_is_reset(tmp_path: Path) -> None:
     }})
     blob = _run(ref, impl)
     assert 'opacity: "0"' not in blob, "hidden animation-state opacity must be reset to visible"
+
+
+def test_static_hover_fade_opacity_is_preserved(tmp_path: Path) -> None:
+    """A `transition-property: opacity` marker alone is not evidence of a
+    mid-animation capture — a hover-fade element (`opacity-60
+    hover:opacity-100 transition`) declares the same marker while sitting at
+    a legitimate static resting opacity with no companion transform offset.
+    Fix 21 must not brighten it to 1."""
+    ref, impl = _ref_with(tmp_path, {"tag": "a", "text": "secondary link", "styles": {
+        "opacity": "0.6", "transition-property": "opacity",
+    }})
+    blob = _run(ref, impl)
+    assert 'opacity: "0.6"' in blob, "static hover-fade opacity must be preserved"
+
+
+def test_coupled_opacity_and_transform_reveal_is_reset(tmp_path: Path) -> None:
+    """A sub-1 opacity captured alongside a companion transform offset (the
+    Framer whileInView fade+slide-up pattern: opacity 0->1, translateY
+    320px->0px) IS a genuine mid-reveal capture, even at a non-near-zero
+    opacity value — both must reset to rest."""
+    ref, impl = _ref_with(tmp_path, {"tag": "div", "text": "Title", "styles": {
+        "opacity": "0.357648",
+        "transform": "matrix(1, 0, 0, 1, 0, 20)",
+        "transition-property": "opacity, transform",
+    }})
+    blob = _run(ref, impl)
+    assert 'opacity: "0.357648"' not in blob, "coupled reveal opacity must reset to rest"
+    assert "matrix(1, 0, 0, 1, 0, 20)" not in blob, "coupled reveal transform must reset to rest"
+
+
+def test_near_zero_opacity_resets_even_without_companion_transform(tmp_path: Path) -> None:
+    """A near-zero opacity is unambiguous "not yet revealed" evidence on its
+    own (e.g. an intro overlay's own images at opacity:0) — reset even with
+    no transform on the same node."""
+    ref, impl = _ref_with(tmp_path, {"tag": "img", "styles": {
+        "opacity": "0", "transition-property": "opacity",
+    }, "src": "/hero.png"})
+    blob = _run(ref, impl)
+    assert 'opacity: "0"' not in blob, "near-zero opacity must reset even without a companion transform"

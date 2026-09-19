@@ -1182,3 +1182,43 @@ def test_extra_impl_contained_in_matched_section_not_flagged() -> None:
     assert "stray-bottom-hero" in names, out
     # overlapping an existing ref region -> still flagged (dedup "-2" case)
     assert "dup-over-ref" in names, out
+
+
+def test_section_compare_reloads_after_step1_enumeration_not_before() -> None:
+    """The one-way-scroll-latch reload (see CHANGELOG 0.8.15) must run AFTER
+    Step 1's enumerate-sections calls, not before them. Reloading before
+    enumeration would discard the lazy-mounted content the preceding
+    pre-scroll round trip exists to force in, reintroducing MATCH_COUNT=0 on
+    lazy-loading sites; reloading after enumeration only discards the
+    round trip's own scroll-latch corruption, which text-based fingerprinting
+    never depended on. The setup (overlay dismiss, animation pause/finish,
+    opt-in scroll-cap/scrollLeft unlocks) that a reload discards must also be
+    re-applied before any later live-page read (semantic-candidate matching,
+    mask-rect detection, the actual section capture)."""
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "section-compare.sh"
+    ).read_text(encoding="utf-8")
+
+    enumerate_idx = script.index('> "$DIR/sections/impl-sections.json" 2>&1')
+    reload_idx = script.index('ref_browser reload', enumerate_idx)
+    semantic_idx = script.index("IMPL_SEMANTIC_CANDIDATES=", enumerate_idx)
+
+    assert enumerate_idx < reload_idx < semantic_idx, (
+        "reload must sit strictly between Step 1 enumeration and any "
+        "later live-page read"
+    )
+
+    reapply_window = script[reload_idx:semantic_idx]
+    for marker in (
+        'ref_eval "$DISMISS_OVERLAYS"',
+        'ref_eval "$PAUSE_ANIMATIONS"',
+        'ref_eval "$FINISH_ANIMATIONS"',
+    ):
+        assert marker in reapply_window, (
+            f"{marker!r} must be re-applied between the reload and the "
+            "next live-page read"
+        )

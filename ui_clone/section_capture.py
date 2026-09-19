@@ -460,8 +460,25 @@ def should_pin_to_bottom(
     actually scrolled to the end (observed: a footer whose content never
     rendered inside the capture window, producing 2-color background-only
     crops on both sides and an AE=0 vacuous pass).
+
+    A section whose own height already spans most of the document (a
+    coarse single-section match on an impl without ref's granular markup)
+    makes `top + height` land near `scroll_height` no matter where the
+    section actually starts, so the heuristic above misfires and pins a
+    whole-page section to maxScroll — scrolling past all real content into
+    blank territory. Real footers/near-bottom elements never approach half
+    the document height, so excluding that case only removes the
+    degenerate whole-page-as-one-section match, not a legitimate near-end
+    element. Tradeoff: on a short page (e.g. a 2-viewport landing page) a
+    genuinely final, full-viewport-height section can legitimately reach
+    this 50% threshold and lose pinning, cropping its last ~viewport_h/2 of
+    content instead of the true bottom. Symmetric across ref/impl (both
+    captured identically), so it doesn't corrupt the AE verdict — just a
+    known imprecision on short pages, not addressed here.
     """
     if viewport_h <= 0:
+        return False
+    if scroll_height > 0 and height >= scroll_height * 0.5:
         return False
     return top + height >= scroll_height - factor * viewport_h
 

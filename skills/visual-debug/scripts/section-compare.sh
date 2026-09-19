@@ -1427,6 +1427,28 @@ ref_eval "$(_pre_scroll_js "$REF_SCROLLER_SEL")" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" eval "$(_pre_scroll_js "$IMPL_SCROLLER_SEL")" > /dev/null 2>&1
 [ "$REUSE_FROZEN_REF" = "1" ] || _wait_prescroll_done "$SESSION_REF"
 _wait_prescroll_done "$SESSION_IMPL"
+
+# One-way scroll latches (ScrollLatchDriver-style generated drivers: apply an
+# end-state once scroll progress crosses a threshold and never revert it —
+# see scripts/extract/generation_plan.py's scrollLatch.sites, "a latched row
+# is a discrete state the return sweep disagreed with") are, by design, never
+# undone by scrolling back to y=0: the driver's apply() only ADDS a latched
+# end-state on the way down, it has no code path that removes one on the way
+# back up. On a site with a real one-way scroll latch, this round trip
+# permanently corrupts the "top of page" render (observed: an entire
+# above-the-fold hero wrapper latched to opacity:0 by the down-sweep,
+# producing a near-solid-color "blank" screenshot at scrollY=0 even though
+# the page renders correctly on a fresh load — reproduced by running only
+# this pre-scroll step against a live session: crop_unique_colors dropped
+# from 3000+ to 1). A reload discards that corrupted state, but doing it
+# HERE — before Step 1 below reads section text via innerText — would also
+# discard the very lazy-mounted content this pre-scroll exists to force in,
+# reintroducing MATCH_COUNT=0 on lazy-loading sites (fingerprinting reads
+# text content, which survives an opacity:0 latch, so Step 1 still benefits
+# from running on this possibly-latched-but-fully-mounted DOM). The reload
+# is deferred to right after Step 1's enumeration below, then the
+# overlay/animation/carousel setup that a fresh load discards is re-applied
+# before any live-page geometry reads or the actual section capture.
 sleep "$WAIT_LAZY_LOAD"  # Extra time for lazy content (images, IO callbacks) to render
 ref_eval "$(_scroll_js "$REF_SCROLLER_SEL" 0)" > /dev/null 2>&1
 agent-browser --session "$SESSION_IMPL" eval "$(_scroll_js "$IMPL_SCROLLER_SEL" 0)" > /dev/null 2>&1
@@ -1459,6 +1481,48 @@ if [ "$REUSE_FROZEN_REF" != "1" ]; then
   cp "$DIR/sections/ref-sections.json" "$DIR/sections/ref-runtime-sections.json"
 fi
 agent-browser --session "$SESSION_IMPL" eval "$ENUMERATE_SECTIONS" > "$DIR/sections/impl-sections.json" 2>&1
+
+# Reload now that section fingerprints are captured (see the pre-scroll
+# comment above for why this can't happen before Step 1). Discards any
+# one-way scroll-latch corruption from the pre-scroll round trip; the
+# browser's asset/image cache is retained so this is cheap. Everything
+# below this point reads live page geometry/state (semantic-candidate
+# matching, mask-rect detection, the actual section capture), so the
+# overlay-dismiss/animation-pause/animation-finish/opt-in unlock setup that
+# a fresh load discards must be re-applied before any of it runs.
+ref_browser reload > /dev/null 2>&1
+agent-browser --session "$SESSION_IMPL" reload > /dev/null 2>&1
+ref_browser wait "$WAIT_REF" > /dev/null 2>&1
+agent-browser --session "$SESSION_IMPL" wait "$WAIT_IMPL" > /dev/null 2>&1
+sleep "$WAIT_LAZY_LOAD"
+
+if [ -n "${REF_SCROLL_CAP_SELECTOR:-}" ] && [ "$REUSE_FROZEN_REF" != "1" ]; then
+  ref_eval "(() => { const sel = $(printf '%s' "$REF_SCROLL_CAP_SELECTOR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'); document.querySelectorAll(sel).forEach(el => el.style.setProperty(\"max-height\", \"none\", \"important\")); return {height: document.documentElement.scrollHeight}; })()" > /dev/null 2>&1
+fi
+if [ -n "${REF_RESET_SCROLLLEFT_SELECTOR:-}" ] && [ "$REUSE_FROZEN_REF" != "1" ]; then
+  ref_eval "(() => { const sel = $(printf '%s' "$REF_RESET_SCROLLLEFT_SELECTOR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'); document.querySelectorAll(sel).forEach(el => { el.scrollLeft = 0; }); return {ok: true}; })()" > /dev/null 2>&1
+fi
+ref_eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
+agent-browser --session "$SESSION_IMPL" eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
+if [ "${SKIP_PAUSE_ANIMATIONS:-0}" != "1" ]; then
+  ref_eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
+  agent-browser --session "$SESSION_IMPL" eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
+fi
+if [ "${SKIP_FINISH_ANIMATIONS:-0}" != "1" ]; then
+  ref_eval "$FINISH_ANIMATIONS" 2>/dev/null > /dev/null
+  agent-browser --session "$SESSION_IMPL" eval "$FINISH_ANIMATIONS" 2>/dev/null > /dev/null
+fi
+if [ "$NO_IMAGES" = "1" ]; then
+  ref_eval "$HIDE_IMAGES_JS" 2>/dev/null || true
+  agent-browser --session "$SESSION_IMPL" eval "$HIDE_IMAGES_JS" 2>/dev/null || true
+fi
+if [ "${NO_CANVAS:-0}" = "1" ]; then
+  ref_eval "$HIDE_CANVAS_JS" 2>/dev/null || true
+  agent-browser --session "$SESSION_IMPL" eval "$HIDE_CANVAS_JS" 2>/dev/null || true
+fi
+ref_eval "$(_scroll_js "$REF_SCROLLER_SEL" 0)" > /dev/null 2>&1
+agent-browser --session "$SESSION_IMPL" eval "$(_scroll_js "$IMPL_SCROLLER_SEL" 0)" > /dev/null 2>&1
+sleep "$WAIT_SCROLL_SETTLE"
 
 IMPL_SEMANTIC_CANDIDATES='(() => {
   const selectors = "main, section, header, footer, nav, article, [id], [class]";

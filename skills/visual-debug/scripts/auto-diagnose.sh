@@ -144,7 +144,11 @@ agent-browser --session "$SESSION_ORIG" eval "$DISMISS_PRELOADER_JS" >/dev/null 
 # ── Scroll context: diff image may be from a cropped section, not viewport origin ──
 # Detect scroll context from diff image filename:
 #   sections/diff/<section-name>.png → scroll that section into view
-#   static/diff/<N>pct.png → scroll to N% of page
+#   static/diff/<N>pct.png or static/scroll/diff/<N>pct.png → scroll to N% of page
+# batch-scroll.sh moved its own captures from static/{ref,impl,diff} into
+# static/scroll/{ref,impl,diff} (0.8.15) so it stops clobbering capture.sh's
+# static/ref/section-*.png baseline — PARENT_DIR for that layout is "scroll",
+# not "static".
 DIFF_BASENAME=$(basename "$DIFF_IMG" .png)
 DIFF_DIR=$(basename "$(dirname "$DIFF_IMG")")
 
@@ -167,7 +171,7 @@ if [ "$DIFF_DIR" = "diff" ]; then
       }
       return 'section not found';
     })()"
-  elif [ "$PARENT_DIR" = "static" ]; then
+  elif [ "$PARENT_DIR" = "static" ] || [ "$PARENT_DIR" = "scroll" ]; then
     # Scroll position — extract percentage from filename (e.g., 50pct)
     PCT=$(echo "$DIFF_BASENAME" | grep -oE '[0-9]+' | head -1)
     if [ -n "$PCT" ]; then

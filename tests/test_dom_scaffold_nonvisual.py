@@ -264,3 +264,52 @@ def test_dom_scaffold_preserves_class_tokens_past_depth_cap(
     blob = json.dumps(scaffold["tree"], ensure_ascii=False)
     assert '"class": "item-data"' in blob
     assert '"class": "item-title"' in blob
+
+
+def test_dom_scaffold_carries_transition_and_animation_markers(
+    tmp_path: Path,
+) -> None:
+    """scaffold_to_jsx.py's Fix 21 (_animation_state_targets) resets a
+    captured opacity/transform to rest only when it can see transition-property
+    or animation-name on the node. extract-dom.js captures both, but the
+    scaffold used to drop them before Phase 4 ever saw them, silently
+    disabling Fix 21 for every element and baking mid-animation-freeze
+    captures (scroll-reveal, parallax, stagger) in as permanent inline styles.
+    """
+    structure = {
+        "tag": "main",
+        "children": [
+            {
+                "tag": "div",
+                "class": "reveal-hero",
+                "styles": {
+                    "opacity": "0.35",
+                    "transform": "matrix(0.5, 0, 0, 0.5, 0, 0)",
+                    "transition-property": "opacity, transform",
+                    "animation-name": "none",
+                },
+                "children": [],
+            },
+            {
+                "tag": "div",
+                "class": "keyframe-hero",
+                "styles": {
+                    "opacity": "0",
+                    "animation-name": "fadeUp",
+                },
+                "children": [],
+            },
+        ],
+    }
+    scaffold = _run_dom_scaffold(
+        tmp_path,
+        structure,
+        [{"index": 0, "tag": "main", "top": 0, "height": 100}],
+    )
+    node = scaffold["tree"]["children"][0]
+    assert node["styles"]["transition-property"] == "opacity, transform"
+    assert node["styles"]["opacity"] == "0.35"
+    # A real (non-"none") animation-name must survive too — the fixture
+    # above only exercises the noise-filtered "none" case.
+    keyframe_node = scaffold["tree"]["children"][1]
+    assert keyframe_node["styles"]["animation-name"] == "fadeUp"

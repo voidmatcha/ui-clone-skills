@@ -2,6 +2,156 @@
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-09-19
+
+### Fixed
+
+- `install.sh`'s hook delivery probe correctly detected `claude plugin
+  update` leaving stale, same-version cached bytes (Claude's plugin cache
+  is version-keyed, and `update` has been observed to report success while
+  not actually re-copying an unchanged-looking version directory) — but
+  could only report it and tell a human to bump all six version files and
+  reinstall, repeatedly hit across this project's own dev sessions reusing
+  a version number. The probe now self-heals: on a detected mismatch it
+  evicts the exact version-keyed cache directory (scoped to a path built
+  only from hardcoded owner/plugin constants, gated on a sentinel file) and
+  falls back to a raw `plugin install`, which reliably re-populates an
+  absent cache directory the way `update` does not, then re-verifies once
+  before failing. A version bump is no longer required to get a same-version
+  content change actually delivered.
+- `dom-scaffold.sh`'s per-node style allowlist dropped `transition-property`
+  and `animation-name` before `scaffold_to_jsx.py` ever saw them, silently
+  disabling Fix 21 (`_animation_state_targets`) for every element — the reset
+  that turns a mid-animation-freeze capture (scroll-reveal, parallax,
+  stagger) back to its rest state instead of baking the frozen frame in as a
+  permanent inline style. `extract-dom.js` already captures both properties;
+  they were just filtered out one step later. Found via a live
+  `https://mobbin.com/` clone whose hero section rendered as a blank/white
+  scroll region: several elements were frozen at partial opacity
+  (`0.35`–`0.69`) and half-scale transforms from a live capture taken
+  mid-reveal, with no signal left for Fix 21 to act on. Verified with a
+  regression test that fails on the old allowlist and passes with the fix.
+  Un-silencing Fix 21 also exposed a pre-existing gap in its own
+  discriminator: `transition-property: opacity` alone was treated as proof
+  of a mid-animation capture, but that marker is present on nearly every
+  hover-fade element (`opacity-60 hover:opacity-100 transition`) at its
+  legitimate static resting opacity, so those would now get brightened to
+  1. Narrowed the reset to near-zero opacity (unambiguous) or a companion
+  transform reveal on the same node (real scroll-reveal/parallax/stagger
+  captures pair a fade with a positional/scale offset; a static design
+  opacity does not) — with tests for the static-preserved, coupled-reset,
+  and near-zero-reset-alone cases.
+- `skills/visual-debug/scripts/section-compare.sh`'s pre-scroll round trip
+  (down-then-up, to trigger lazy-loaded content before capture) permanently
+  corrupts a page with a genuine one-way scroll latch (a generated
+  `ScrollLatchDriver`-style controller that applies an end-state past a
+  scroll threshold and has no code path to revert it — see
+  `generation_plan.py`'s `scrollLatch.sites`). The round trip's return to
+  `scrollY=0` never undoes the latch, so the "top of page" state handed to
+  the capture phase stays corrupted (observed: an entire above-the-fold hero
+  wrapper latched to `opacity:0`, producing a near-solid-color capture at
+  the top of the page even though a fresh load renders correctly). Fixed by
+  reloading — discards the corrupted DOM/inline-style state while the
+  browser's asset/image cache (warmed by the round trip) stays intact. The
+  reload runs AFTER Step 1's section-fingerprint enumeration, not before: an
+  earlier version of this fix reloaded immediately after the round trip,
+  which discarded the very lazy-mounted content the round trip exists to
+  force in (fingerprinting reads `innerText`, which survives an
+  opacity:0 latch, so enumeration can safely run on the possibly-latched-
+  but-fully-mounted DOM first) and also silently dropped the
+  overlay-dismiss/animation-pause/animation-finish/opt-in scroll-cap setup
+  a fresh load discards, which every later live-page read (semantic-
+  candidate matching, mask-rect detection, the capture itself) depends on —
+  that setup is now re-applied immediately after the (correctly-placed)
+  reload. Locked with a script-structure regression test. Cost: the reload
+  adds `WAIT_REF` + `WAIT_IMPL` + `WAIT_LAZY_LOAD` (default ~14-16s) plus
+  reload time to every run, multiplied per viewport in a fan-out sweep —
+  unconditional rather than gated on detecting an actual latch, since a
+  cheap top-of-page collapse detector was judged not worth the added
+  complexity for a one-time-per-run cost.
+- `skills/visual-debug/scripts/auto-diagnose.sh` derived its scroll-context
+  branch from a diff image's parent directory name, which stayed hardcoded
+  to `"static"` after the `static/scroll/` relocation below moved that
+  directory's own diffs to `static/scroll/diff/`, so a percentage-crop diff
+  from the new layout silently lost its scroll-to-percentage positioning
+  and the diagnostic probe ran at scrollY=0 regardless of the real crop
+  position.
+- `scripts/verify/completion-report.sh`'s Tier-5 no-cheat table read
+  `proxy-mirror.json`, but `proxy-mirror-check.sh` (and every other real
+  consumer — `verification-plan.sh`, `build-decode-receipt.sh`,
+  `check_inputs.py`) writes/expects `proxy-mirror-check.json`. The check
+  itself always passed; the completion report just always reported it
+  missing. A test asserting the old (wrong) filename masked this — updated
+  to the real contract alongside the fix.
+- `ui_clone.section_capture.should_pin_to_bottom` misfired on a coarse
+  single-section match whose own height already spans most of the document
+  (an impl page matched to one section instead of ref's granular markup):
+  `top + height` lands near `scroll_height` regardless of where the section
+  actually starts, so the heuristic pinned a whole-page section to
+  `maxScroll` and scrolled past all real content into blank space. Real
+  footers/near-bottom elements never approach half the document height, so
+  excluding that case only removes the degenerate whole-page match. Added
+  the regression coverage this shipped without.
+- `scripts/extract/capture-region-artifacts.py`'s reference-side hover/region
+  capture had no scroll-cap unlock, unlike `section-compare.sh` and
+  `runtime-text-sequence-check.sh` which already carry one. On a site that
+  gates its true scrollable content behind a wrapper with an inline
+  `overflow:clip; max-height:Npx` style tied to real wheel-scroll input
+  (feconf2026.kr's `#fc-scroll-cap`), every hover-candidate element below
+  that cap sat outside the visible/scrollable bounds, so every region was
+  reported present but unreachable ("selector matches N elements but none
+  are hoverable") and the reference gate failed every run. Verified against
+  the live site: `exit 2`, 0/3 regions captured before the fix;
+  `REF_SCROLL_CAP_SELECTOR=#fc-scroll-cap` set, `exit 0`, 3/3 captured after.
+  Same opt-in env var and the same instant, no-scroll-journey unlock
+  mechanism as its two siblings — off by default.
+- `skills/visual-debug/scripts/live-parity-sweep.sh` raced any reference
+  page with a splash/intro overlay: the fixed `sleep 2` before the DOM
+  census assumed every page settles within 2s, but an overlay's own images
+  mount once and hold a constant count for its whole lifetime, then drop
+  all at once on unmount — so on a page with a longer intro (found via a
+  live `realfood.gov` clone whose intro runs ~3.44s) the census sometimes
+  read the DOM mid-overlay and reported a false `image-count-drift`
+  finding even though the settled DOM matched the reference exactly. A
+  first fix (poll until the image count stops changing) was verified
+  insufficient — the flat-then-drop shape reads as "stable" during the
+  flat part and exits before the drop. Replaced with a poll for the
+  overlay itself: any fixed/sticky, opaque, near-full-viewport element is
+  the generic signature of a splash/intro/loading screen, bounded to 10s,
+  with an immediate return when no such element is present so unaffected
+  sites pay no extra wait. Verified against the live `realfood.gov` clone:
+  `status: fail` (impl 90 vs ref 86 images) before the fix, `status: pass`
+  (86/86 exact match) after.
+
+### Changed
+
+- `skills/visual-debug/scripts/batch-scroll.sh` moved its own scroll-sweep
+  screenshots from `<dir>/static/{ref,impl,diff}` to
+  `<dir>/static/scroll/{ref,impl,diff}`. Its cleanup step deletes every PNG
+  in those directories on each run; sharing the plain `static/ref` path with
+  `capture.sh`'s Phase 1 baseline (`static/ref/section-{0..4}.png`, required
+  by the `reference` and `post-implement` gates) meant any anchor-mode run
+  producing fewer PNGs than expected retroactively deleted that baseline and
+  failed the reference gate on the NEXT run. `batch-compare.sh` and
+  `dssim-compare.sh` prefer `static/scroll/{ref,impl}` and fall back to the
+  legacy `static/{ref,impl}` layout when it's absent, so older captures
+  still compare. `auto-diagnose.sh` above needed a matching update.
+
+### Known gap
+
+- `skills/visual-debug/scripts/runtime-text-sequence-check.sh` has the same
+  one-way-scroll-latch corruption class as `section-compare.sh` above (its
+  final analysis reads page state after the same kind of down-then-up
+  sweep), but splitting its single `agent-browser batch` call into two (with
+  a reload between them, mirroring the `section-compare.sh` fix) breaks its
+  extensive stubbed test harness: the fake `agent-browser` test double
+  models exactly one batch call per session and returns its full canned
+  response for each of the two real calls, doubling the result count and
+  tripping the "batch result contained N/6 command results" retry loop (49
+  test failures). Fixing this properly needs the stub harness itself taught
+  to split its response across two sequential batch calls — left as a
+  follow-up rather than shipped broken or rushed.
+
 ## [0.8.12] - 2026-09-17
 
 ### Added

@@ -1994,7 +1994,7 @@ def test_install_runs_an_installed_hook_from_the_host_cache(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    ("cache_relative", "reject"),
+    ("cache_relative", "detects_staleness"),
     [
         ("skills/ui-capture/SKILL.md", True),
         ("ui_clone/removed_module.py", True),
@@ -2004,10 +2004,15 @@ def test_install_runs_an_installed_hook_from_the_host_cache(tmp_path: Path) -> N
         (".host-install-metadata.json", False),
     ],
 )
-def test_install_rejects_stale_same_version_claude_cache(
-    tmp_path: Path, cache_relative: str, reject: bool
+def test_install_self_heals_stale_same_version_claude_cache(
+    tmp_path: Path, cache_relative: str, detects_staleness: bool
 ) -> None:
-    """A successful host update must not hide immutable same-version bytes."""
+    """A same-version cache directory holding immutable stale bytes (the
+    known `claude plugin update` bug this whole probe exists to catch) must
+    not be silently reported as refreshed. install.sh's recovery — evict the
+    exact version-keyed cache directory, then fall back to a raw `plugin
+    install` — must self-heal it into a clean, successful install rather
+    than requiring a human to bump all six version files."""
     checkout = _probe_checkout(tmp_path)
     home = tmp_path / "home"
     fake_bin = tmp_path / "bin"
@@ -2020,16 +2025,10 @@ def test_install_rejects_stale_same_version_claude_cache(
     version = json.loads(
         (checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
     )["version"]
-    cache_file = (
-        home
-        / ".claude"
-        / "plugins"
-        / "cache"
-        / "voidmatcha"
-        / "ui-clone-skills"
-        / version
-        / cache_relative
+    cache_dir = (
+        home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills" / version
     )
+    cache_file = cache_dir / cache_relative
 
     first = subprocess.run(
         ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
@@ -2043,12 +2042,27 @@ def test_install_rejects_stale_same_version_claude_cache(
 
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     cache_file.write_text("stale same-version bytes\n", encoding="utf-8")
+    # Reports the plugin as already installed (forcing install.sh down the
+    # `plugin update` path, where the staleness bug lives) but — like the
+    # real bug — `update` itself is unimplemented here, a no-op that leaves
+    # the stale byte in place. `plugin install` IS implemented (re-copies
+    # from the recorded marketplace source), simulating that a raw install
+    # reliably re-populates a cache directory the way `update` does not —
+    # the fallback install.sh's recovery now depends on.
     _write_executable(
         fake_bin / "claude",
         '#!/usr/bin/env bash\n'
         'printf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n'
         'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
         '  printf "  ui-clone-skills@voidmatcha\\n"\n'
+        'fi\n'
+        'if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then\n'
+        '  src="$(cat "$HOME/.fake-marketplace-src")"\n'
+        '  dst="$HOME/.claude/plugins/cache/voidmatcha/ui-clone-skills/'
+        + version
+        + '"\n'
+        '  mkdir -p "$dst"\n'
+        '  cp -R "$src"/. "$dst"/\n'
         'fi\n',
     )
     result = subprocess.run(
@@ -2061,13 +2075,21 @@ def test_install_rejects_stale_same_version_claude_cache(
     )
 
     combined = result.stdout + result.stderr
-    if reject:
-        assert result.returncode != 0, combined
-        assert "stale bytes" in combined
-        assert cache_relative in combined
-        assert "Bump all six version files" in combined
+    assert result.returncode == 0, combined
+    if detects_staleness:
+        assert "Detected stale cached bytes" in combined, combined
+        # A recovered "changed" file has new (real) content; a recovered
+        # "unexpected" file (removed from the real source entirely) is gone.
+        assert (
+            not cache_file.exists()
+            or cache_file.read_text(encoding="utf-8") != "stale same-version bytes\n"
+        )
     else:
-        assert result.returncode == 0, combined
+        # Not a real source file (runtime/build residue or host metadata) —
+        # the probe must not flag it, and the corrupted extra file is left
+        # alone (no eviction triggered) rather than silently deleted.
+        assert "Detected stale cached bytes" not in combined, combined
+        assert cache_file.read_text(encoding="utf-8") == "stale same-version bytes\n"
 
 
 def test_claude_launch_notice_does_not_double_load_plugin_dir() -> None:

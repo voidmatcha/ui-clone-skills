@@ -8,7 +8,7 @@
 #     { "name": "lottie-area", "scrollPct": [0, 100], "threshold": 10000, "reason": "lottie" }
 #   ]}
 #
-# Expects: <dir>/static/ref/*.png and <dir>/static/impl/*.png
+# Expects: <dir>/static/scroll/{ref,impl}/*.png (legacy: <dir>/static/{ref,impl})
 # with matching filenames (e.g., 0pct.png, 10pct.png, ...)
 #
 # Output: Markdown table of AE scores + PASS/FAIL status
@@ -23,9 +23,12 @@ DIR="${1:?Usage: batch-compare.sh <dir> [threshold] [dynamic-regions.json]}"
 THRESHOLD="${THRESHOLD:-${2:-500}}"  # env var overrides positional arg
 DYNAMIC_REGIONS="${3:-}"
 
-REF_DIR="$DIR/static/ref"
-IMPL_DIR="$DIR/static/impl"
-DIFF_DIR="$DIR/static/diff"
+# batch-scroll.sh writes to <dir>/static/scroll/; older runs used <dir>/static/.
+SHOT_DIR="$DIR/static/scroll"
+[ -d "$SHOT_DIR/ref" ] || SHOT_DIR="$DIR/static"
+REF_DIR="$SHOT_DIR/ref"
+IMPL_DIR="$SHOT_DIR/impl"
+DIFF_DIR="$SHOT_DIR/diff"
 
 if ! command -v compare &>/dev/null || ! command -v identify &>/dev/null; then
   echo "ERROR: ImageMagick not installed (need 'compare' and 'identify'). Run: brew install imagemagick"

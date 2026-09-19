@@ -74,7 +74,38 @@ for s in "$S_REF" "$S_IMPL"; do
     exit 1
   fi
 done
-sleep 2
+
+# A fixed short sleep here races any page with a splash/intro overlay: its
+# own images (e.g. a food-fly-in intro) mount once and stay mounted at a
+# constant count for the overlay's whole lifetime, then drop all at once
+# when it unmounts. A stability check (wait until the count stops changing)
+# is fooled by that flat-then-drop shape — it reads "stable" during the
+# flat part and exits before the drop. Instead, look for the overlay
+# itself: a fixed/sticky, opaque, near-full-viewport element is the generic
+# signature of a splash/intro/loading screen regardless of site, and we
+# poll until none remain (bounded) rather than assuming the DOM census
+# below is safe to read after one arbitrary window.
+SETTLE_JS='(async () => {
+  const isOverlay = (el) => {
+    const cs = getComputedStyle(el);
+    if (cs.position !== "fixed" && cs.position !== "sticky") return false;
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    if (parseFloat(cs.opacity || "1") <= 0.01) return false;
+    const r = el.getBoundingClientRect();
+    return r.width >= innerWidth * 0.8 && r.height >= innerHeight * 0.8;
+  };
+  const hasOverlay = () => [...document.querySelectorAll("body *")].some(isOverlay);
+  const start = Date.now();
+  if (!hasOverlay()) return JSON.stringify({ overlay: false });
+  while (Date.now() - start < 10000) {
+    await new Promise((r) => setTimeout(r, 300));
+    if (!hasOverlay()) return JSON.stringify({ overlay: true, clearedMs: Date.now() - start });
+  }
+  return JSON.stringify({ overlay: true, timedOut: true, ms: Date.now() - start });
+})()'
+for s in "$S_REF" "$S_IMPL"; do
+  agent-browser --session "$s" eval "$SETTLE_JS" >/dev/null 2>&1 || true
+done
 
 DYNAMIC_PIN_JS='(() => {
   const actions = [];

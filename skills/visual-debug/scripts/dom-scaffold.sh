@@ -74,6 +74,13 @@ STYLE_KEYS = (
     "justify-content", "align-items", "gap", "grid-template-columns",
     "grid-template-rows", "z-index", "min-width", "max-width", "min-height",
     "max-height", "top", "left", "right", "bottom",
+    # scaffold_to_jsx.py's _animation_state_targets() (Fix 21) resets a captured
+    # opacity/transform to rest ONLY when it can see transition-property or
+    # animation-name on the node — without them every mid-animation-freeze
+    # capture (scroll-reveal, parallax, stagger) is baked in as a permanent
+    # inline style instead of being reset, since extract-dom.js captures both
+    # but the scaffold silently dropped them before Phase 4 ever saw them.
+    "transition-property", "animation-name",
 )
 
 # Per-node style shortener — mirrors extract-styles.sh's shorten_styles. The
@@ -125,6 +132,8 @@ _PER_NODE_SHORTHAND = (
     ("left", "left"),
     ("right", "right"),
     ("bottom", "bottom"),
+    ("transition-property", "transition-property"),
+    ("animation-name", "animation-name"),
 )
 _PER_NODE_NOISE = {"", "normal", "none", "auto", "0px", "rgba(0, 0, 0, 0)"}
 
