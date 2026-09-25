@@ -58,7 +58,7 @@ Examples that qualify:
 - A public escape hatch such as canvas replay needs an attested allowlist and
   a matching anti-cheat boundary.
 
-Examples from the 2026-05-25 jsonl/review trail:
+Examples from a past jsonl/review trail:
 
 - `c2b027c` fixed quoted-string `agent-browser` eval output across runtime
   proof scripts. Legitimate: host output changed, multiple generic scripts

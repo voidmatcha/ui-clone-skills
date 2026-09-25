@@ -90,6 +90,27 @@ def test_one_failed_screenshot_does_not_abort_other_sections(
     assert set(positions) == {"hero", "footer"}
 
 
+def test_impl_capture_is_skipped_when_ref_capture_of_that_section_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pairing rule (section_capture module docstring): a section whose reference
+    capture failed gets no implementation capture in the same pass. Other
+    sections keep both sides; the skipped side is not recorded as an impl failure.
+    """
+    _rc, shots = _run(monkeypatch, tmp_path, failing={("ref", "hero"), ("ref", "footer")})
+    section_dir = tmp_path / "sections"
+
+    assert ("impl", "hero") not in shots
+    assert ("impl", "footer") not in shots
+    assert ("impl", "story") in shots
+    assert not (section_dir / "impl" / "hero.png").exists()
+    assert not (section_dir / "impl" / "footer.png").exists()
+    assert (section_dir / "impl" / "story.png").is_file()
+    failures = json.loads((section_dir / "capture-failures.json").read_text())
+    assert set(failures) == {"hero", "footer"}
+    assert all(set(sides) == {"ref"} for sides in failures.values())
+
+
 def test_impl_screenshot_failure_is_recorded_per_side(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

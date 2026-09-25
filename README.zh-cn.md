@@ -17,7 +17,7 @@
   <a href="README.md">🇺🇸 English</a> | <a href="README.ko.md">🇰🇷 한국어</a> | <a href="README.ja.md">🇯🇵 日本語</a> | <strong>🇨🇳 简体中文</strong>
 </p>
 
-<!-- README-CANONICAL-REVISION: sha256=2b51a5f567925721d64501c013522d7989c133da87aa55714e94bfc32d77cac7; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
+<!-- README-CANONICAL-REVISION: sha256=875545761da8a487ea4879ff8fbec5a5e2c10b6096a22c8cd823479cfeb17f1b; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
 
 `ui-clone-skills` 将一个真实网站转化为有证据支撑的 React + Tailwind 实现。它会捕获浏览器实际渲染的页面，下载真实的 CSS 和资源，读取响应式样式与计算样式，从 JavaScript bundle 中还原动画参数，并在不同视口和交互状态下验证结果。
 
@@ -167,7 +167,7 @@ tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatc
 
 ## 文档
 
-三个路由技能保持精简，仅在流水线步骤需要时加载 59 份聚焦的子文档。请先阅读任务级页面，需要确切命令或门禁行为时再查看运维契约。
+三个路由技能保持精简，仅在流水线步骤需要时加载 64 份聚焦的子文档。请先阅读任务级页面，需要确切命令或门禁行为时再查看运维契约。
 
 - [安装与宿主配置](./README_detail/install.md)
 - [完整的逆向工程流水线](./README_detail/ui-reverse-engineering.md)

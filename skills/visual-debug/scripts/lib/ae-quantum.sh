@@ -2,12 +2,12 @@
 # ae-quantum.sh — normalize ImageMagick `compare -metric AE` back to a raw
 # mismatched-pixel COUNT.
 #
-# ROOT CAUSE (2026-07, Fable/empirical): ImageMagick 7.1.2-27 Q16-HDRI (brew,
-# upgraded 2026-07-12) returns `compare -metric AE` as pixel_count * QuantumRange
+# ROOT CAUSE (empirical): recent ImageMagick 7 Q16-HDRI builds (7.1.2-27 and
+# later) return `compare -metric AE` as pixel_count * QuantumRange
 # (= count * 65535 on Q16), NOT the raw count that every AE parser in this repo
 # assumes. The 65535x inflation pushes every nonzero diff past the "saturated"
-# severity band, killing the whole AE gradient (every ebpb run since 2026-07-16
-# read "all saturated" — the report became uninformative and iteration blind).
+# severity band, killing the whole AE gradient (every run on such a build reads
+# "all saturated" — the report becomes uninformative and iteration blind).
 #
 # This helper detects the scale factor by BEHAVIOR (a synthetic 2x2 white/black
 # compare has exactly 4 differing pixels) so it self-corrects if a future IM

@@ -15,7 +15,7 @@
 # (e.g. `<HeroSection><video/><h1>...</h1></HeroSection>`) — dropping the
 # overlay button and the label span. tree-diff catches it via unpaired
 # BUTTON/VIDEO/SPAN/H1 elements, but tree-diff is too noisy on the broader
-# structural divergence (downgraded to advisory in 2026-05-22 retune).
+# structural divergence (downgraded to advisory for that reason).
 # This check is the spot-specific replacement: parse ref's hero subtree,
 # inventory which of the 4 element kinds are present, and verify impl
 # has all of them in the corresponding hero region.

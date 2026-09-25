@@ -107,7 +107,7 @@ forensic artifacts such as `animation-runtime-dump.json`,
 Never cite `generation-plan.json`, `extracted.json`, or self-authored notes as
 motion evidence.
 
-For a detected intro with `requiresChoreographyExtraction=true`, read
+Only when a detected intro has `requiresChoreographyExtraction=true`, read
 `splash-extraction.md` → "From lifecycle evidence to implementation" before
 writing its motion wires. Observed overlay presence is not an authored timeline.
 Recover the transient child layout, asset paths, stagger, exit, and page-reveal

@@ -137,7 +137,7 @@ If `mouseTracked` is non-empty → record in `interactions-detected.json` as `ty
 
 ### Capture hover state delta (MANDATORY for all hoverable elements)
 
-CSS `:hover` only reveals CSS-driven transitions. Many modern sites use **JS-driven hover** (GSAP `mouseenter`/`mouseleave`, Framer Motion `whileHover`, or vanilla `addEventListener`). These produce no CSS trace — the only way to detect them is to **actually hover and measure the delta**.
+CSS `:hover` only reveals CSS-driven transitions. **JS-driven hover** (GSAP `mouseenter`/`mouseleave`, Framer Motion `whileHover`, vanilla `addEventListener`) leaves no CSS trace — the only way to detect it is to **actually hover and measure the delta**.
 
 #### Step 5d-1: Enumerate all hoverable elements
 
@@ -214,28 +214,19 @@ agent-browser --session <s> eval "
 }
 ```
 
-**Why this step is mandatory:**
-- CSS `transition` property tells you the *capability* but not the *actual change*. A button may have `transition: transform 0.45s` but the hover might scale it OR translate it — you can't know without hovering.
-- JS-driven hovers (GSAP, Framer) produce NO CSS trace at all. The only evidence is the runtime style change.
-- Skipping this step → guessing hover effects → "approximately close" implementations that feel wrong.
+**Why this step is mandatory:** a CSS `transition` property names the *capability*, not the *actual change* (`transition: transform 0.45s` may scale OR translate); JS-driven hovers leave no CSS trace at all. Skipping it means guessing hover effects.
 
 > **Full CSS hover delta extraction → `css-extraction.md`.** Use the classify eval above to detect `hasTransition: true`, then run the transition extraction pipeline for precise before/after measurement with SVG stroke tracking.
 
 #### Step 5d-2b: Extract ALL hover CSS rules from page (MANDATORY)
 
-CSS files alone do NOT contain all hover rules. Webflow and many CMS platforms inject hover CSS via **inline `<style>` tags** that aren't in downloaded `.css` files. This is the #1 reason hover transitions are silently missed.
-
-Use the bounded extractor first. It reads live CSSOM for inline `<style>` rules and
-falls back to downloaded `css/*.css` with a deterministic scanner if the browser
-command times out or fails.
+Downloaded CSS files do NOT contain all hover rules: Webflow and many CMS platforms inject hover CSS via **inline `<style>` tags**, the #1 reason hover transitions are silently missed. Use the bounded extractor first — it reads live CSSOM for inline `<style>` rules and falls back to downloaded `css/*.css` with a deterministic scanner if the browser command times out or fails:
 
 ```bash
 bash scripts/extract/extract-hover-css-rules.sh <session> tmp/ref/<component> <url>
 ```
 
-Do not replace this with ad-hoc Python regex over minified CSS. The extractor is
-timeout-bounded (`UI_CLONE_HOVER_CSS_TIMEOUT`, default 20s) and writes the
-canonical top-level artifact.
+Do not replace this with ad-hoc Python regex over minified CSS. The extractor is timeout-bounded (`UI_CLONE_HOVER_CSS_TIMEOUT`, default 20s) and writes the canonical top-level artifact.
 
 ```bash
 agent-browser --session <s> eval "
@@ -260,18 +251,11 @@ agent-browser --session <s> eval "
 
 ⛔ **Gate:** Every hover rule in `hover-css-rules.json` must have a corresponding CSS rule in `globals.css`. If a hover rule exists in the original but not in `globals.css`, add it immediately. Do NOT proceed to generation with missing hover rules.
 
-**Common missed patterns:**
-- `::after` pseudo-elements with `content: attr(data-text)` — text swap on hover
-- `:hover .child-element` — parent hover affecting child transforms (3D card fold, text slide)
-- Inline `<style>` tags injected by Webflow/CMS — NOT in downloaded CSS files
-- `transform-origin` on hover children — required for 3D perspective effects
+**Common missed patterns:** `::after` with `content: attr(data-text)` (text swap), `:hover .child-element` (parent hover driving child transforms — 3D card fold, text slide), inline `<style>` tags injected by Webflow/CMS, and `transform-origin` on hover children (3D perspective effects).
 
 #### Step 5d-2c: Extract hover DOM changes (MANDATORY for interactive buttons)
 
-For each hoverable element, check if hover changes **DOM content** (not just style):
-- `data-text` / `data-label` attributes → text swap on hover via `::after`
-- Child elements that appear/disappear (`display: none → block`)
-- `::before` / `::after` pseudo-elements with new content
+For each hoverable element, check whether hover changes **DOM content** (not just style): `data-text` / `data-label` attributes (text swap via `::after`), children that appear/disappear (`display: none → block`), `::before` / `::after` pseudo-elements with new content.
 
 ```bash
 agent-browser --session <s> eval "
@@ -287,13 +271,11 @@ agent-browser --session <s> eval "
 "
 ```
 
-**If `data-text` attributes exist:** The hover effect includes a text swap — original text slides away and `data-text` value slides in. Implement with `::after { content: attr(data-text) }` + `translateY` transition.
+**If `data-text` attributes exist:** the hover effect includes a text swap — original text slides away and the `data-text` value slides in. Implement with `::after { content: attr(data-text) }` + `translateY` transition.
 
 #### Step 5d-2d: Hover video capture (MANDATORY)
 
-DOM inspection alone cannot reveal the full visual effect of a hover — clip-path animations, 3D transforms, text swaps, and multi-element coordinated effects are invisible in `getComputedStyle` snapshots. **Record hover interactions as video** to capture the exact visual effect.
-
-On splash sites, this is especially critical because the agent session may timeout while waiting for preloader.
+`getComputedStyle` snapshots cannot reveal clip-path animations, 3D transforms, text swaps, or multi-element coordinated effects. **Record hover interactions as video** to capture the exact visual effect — especially on splash sites, where the agent session may time out waiting for the preloader.
 
 ```bash
 # Wait for splash to complete
@@ -316,24 +298,19 @@ mkdir -p tmp/ref/<component>/hover-frames/<element>
 ffmpeg -i tmp/ref/<component>/hover-<element>.webm -vf fps=10 tmp/ref/<component>/hover-frames/<element>/frame-%03d.png -y
 ```
 
-**Read hover frames** to understand the exact visual effect:
-- Text slides up and is replaced? → `translateY` + `::after` text swap
-- Text fades and shrinks in place? → `opacity` + `scale` in same position
-- Text clips from bottom? → `clip-path: inset()` animation
-- 3D rotation? → `perspective` + `rotateX/Y` transform
-- Card elements separate? → child transforms with different `transform-origin`
+**Read hover frames** to map the visual effect to an implementation: text slides up and is replaced → `translateY` + `::after` text swap; text fades and shrinks in place → `opacity` + `scale`; text clips from bottom → `clip-path: inset()`; 3D rotation → `perspective` + `rotateX/Y`; card elements separate → child transforms with different `transform-origin`.
 
 ⛔ **Never conclude "no visual transition" without video evidence.** Bundle grep returning empty does NOT mean no hover effect — CSS `:hover` rules in inline `<style>` tags are invisible to bundle search.
 
 #### Step 5d-3: JS-driven hover timing extraction (MANDATORY)
 
-> **If Step 5d-2 measured a hover delta on an element whose `transitionDuration` is `0s`** (the element AND its children) — the timing lives in JavaScript. Read `hover-timing-extraction.md` for the `getAnimations()` capture procedure and the bundle-grep fallback for GSAP internal tweens. Otherwise skip — pure-CSS hovers already have timing in `getComputedStyle`.
+> If Step 5d-2 measured a hover delta on an element whose `transitionDuration` is `0s` (the element AND its children), the timing lives in JavaScript — read `hover-timing-extraction.md` for the `getAnimations()` capture procedure and the bundle-grep fallback for GSAP internal tweens. Otherwise skip — pure-CSS hovers already have timing in `getComputedStyle`.
 >
 > Output: `tmp/ref/<component>/hover-timing.json`. ⛔ Gate: any element with visual deltas but `timingSource: "unknown"` must be resolved via bundle analysis (Step 5c-a) before generation.
 
 #### Step 5d-4: Hover child cascade detection (MANDATORY)
 
-Step 5d-2 measures the hovered element, but hover effects often cascade to **sibling and child elements** (e.g., hovering a card scales the image, fades in an overlay, shifts the title). Measure ALL children:
+Step 5d-2 measures the hovered element, but hover effects often cascade to **sibling and child elements** (hovering a card scales the image, fades in an overlay, shifts the title). Measure ALL children:
 
 ```bash
 # For each hoverable element, measure all children before/after hover
@@ -425,19 +402,19 @@ agent-browser --session <s> eval "
 
 ### Save interaction detection results (MANDATORY)
 
-Save a summary to `tmp/ref/<component>/interactions-detected.json`. Include all discovered interactions from the evals above. If zero found, save `{ "interactions": [], "note": "static component" }`. This file is required by the Phase 2 Gate and by Step 9. Every interaction saved here MUST later map to a transition-spec entry or a `skipped[]` reason — the Step 5d spec gate enforces this (spec-inventory-coverage).
+Save a summary to `tmp/ref/<component>/interactions-detected.json` with all interactions discovered by the evals above. If zero found, save `{ "interactions": [], "note": "static component" }`. This file is required by the Phase 2 Gate and by Step 9. Every interaction saved here MUST later map to a transition-spec entry or a `skipped[]` reason — the Step 5d spec gate enforces this (spec-inventory-coverage).
 
 ### Capture idle + active states (MANDATORY for hover/click)
 
-> **Capture is delegated to `ui-capture` Phase 2C (Claude slash command: `/ui-capture`).** Do not capture here — interaction-detection only detects. After saving `interactions-detected.json`, Step 5b triggers `ui-capture` Phase 2B–2E which captures idle+active pairs for every detected interaction.
+> **Capture is delegated to `ui-capture` Phase 2C (Claude slash command: `/ui-capture`).** Do not capture here — interaction-detection only detects. After saving `interactions-detected.json`, Step 5b triggers `ui-capture` Phase 2B–2E, which captures idle+active pairs for every detected interaction.
 >
-> **Re-capture trigger (SKILL.md Step 5b):** Re-run `ui-capture` Phase 2B–2E if interaction detection found ANY hover, click, or scroll-triggered element that was not captured in the initial Phase 1 run — i.e., if `interactions-detected.json` contains elements not already in `regions.json`. If `interactions-detected.json` is `{ "interactions": [] }`, skip Step 5b entirely.
+> **Re-capture trigger (SKILL.md Step 5b):** Re-run `ui-capture` Phase 2B–2E if `interactions-detected.json` contains hover, click, or scroll-triggered elements not already in `regions.json` from the initial Phase 1 run. If `interactions-detected.json` is `{ "interactions": [] }`, skip Step 5b entirely.
 
 **Gate:** `python -m ui_clone.gate <ref-dir> pre-generate` checks idle+active pairs exist (produced by ui-capture).
 
 ### Extract click-transition structure (MANDATORY for content-swap)
 
-When clicking triggers a **content swap**, extract the transition's DOM structure at 100ms after click — not just the visual result. See the eval script for capturing `paneCount`, `zIndex`, `background`, `animationName` to determine single-pane vs two-pane, old-on-top vs new-on-top patterns.
+When clicking triggers a **content swap**, extract the transition's DOM structure at 100ms after click — not just the visual result. Capture `paneCount`, `zIndex`, `background`, `animationName` to determine single-pane vs two-pane, old-on-top vs new-on-top patterns.
 
 Save to `tmp/ref/<component>/transition-structure.json`.
 

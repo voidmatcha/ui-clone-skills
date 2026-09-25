@@ -80,8 +80,8 @@ Choose one route and read only its linked material:
    matching capture:** read
    [references/manual-capture.md](references/manual-capture.md), then only the
    phase document it routes to.
-3. **A concrete element, scroll state machine, hover absence, replay track, or
-   compact downstream handoff needs extra evidence:** read
+3. **Only when a concrete element, scroll state machine, hover absence, replay
+   track, or compact downstream handoff needs extra evidence:** read
    [references/evidence-contracts.md](references/evidence-contracts.md).
 
 Do not read all three references by default.
@@ -140,8 +140,8 @@ recording, extraction, and the reference gate. Stop on its structured
 `capture-error.json`; do not replace a failed driver stage with an improvised
 parallel corpus.
 
-For manual transition work, run [detection.md](detection.md) first, classify the
-trigger before recording, and follow
+Only when manual transition work is routed, run [detection.md](detection.md)
+first, classify the trigger before recording, and follow
 [capture-transitions.md](capture-transitions.md). Every `regions.json` entry with
 `triggerType` must list its concrete files in `artifacts`; consumers do not infer
 filenames. Validate the inventory with
@@ -149,8 +149,9 @@ filenames. Validate the inventory with
 
 ## Phase 1 and later manual work
 
-Manual phases are conditional diagnostics, not the fresh-capture default. Read
-the single phase document routed from `references/manual-capture.md`.
+Manual phases are conditional diagnostics, not the fresh-capture default. Only
+when route 2 applies, read the single phase document routed from
+`references/manual-capture.md`.
 
 Scroll controller signals such as `window.scrollTo`, `scrollYProgress`,
 `setTimeout`, `velocity`, or a guard ref require settle/return artifacts in the

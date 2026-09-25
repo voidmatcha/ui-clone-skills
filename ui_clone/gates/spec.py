@@ -1217,7 +1217,7 @@ def gate_spec(self: Gate) -> list[CheckResult]:
                 "capture verification",
                 "warn",
                 f"capture verification missing ({verify_frames} frames — need \u22655). "
-                "See interaction-detection.md 'MANDATORY: Capture Verification'.",
+                "See transition-spec-rules.md 'MANDATORY: Capture Verification (Step 5e)'.",
             )
         )
 

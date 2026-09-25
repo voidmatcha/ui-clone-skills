@@ -1566,7 +1566,7 @@ _init_forensic_mode()
 #   (--carousel-slide-width consumed elsewhere) or aspect-ratio:var(...)
 #   never declares the prop itself, so those bakes stay. Same conservative
 #   direction — the bake keeps capture-width correctness.
-# Empirical acceptance (2026-07-18, fable condition 2): ebpb A/B docH
+# Empirical acceptance (A/B measurement): ebpb A/B docH
 # byte-identical @1440 AND @1280 (zero regression; direct-declaration subset
 # reproduces 8 oracle sites exactly + 4 via the pre-synthesis height path);
 # nvti A/B: 636 props/116 sites dropped, every section top unchanged, footer

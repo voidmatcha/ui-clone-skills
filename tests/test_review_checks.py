@@ -130,12 +130,12 @@ def test_universality_flags_multiplexer_and_workspace_ids(tmp_path: Path) -> Non
 def test_universality_flags_personal_project_name_outside_internal(tmp_path: Path) -> None:
     label = _label("Personal project names")
     assert label in _labels(_scan(tmp_path, "ui_clone/loop.py", "# default: the OnPixel showcase\n"))
-    # internal/ is maintainer-only and excluded; the pyproject path reference is allowlisted.
+    # internal/ is gitignored maintainer scratch and excluded from the scan.
     assert label not in _labels(_scan(tmp_path, "internal/onpixel/loop.py", "# onpixel loop\n"))
-    assert label not in _labels(
+    # No path allowlist: CI wiring must not reference the personal project either.
+    assert label in _labels(
         _scan(tmp_path, "pyproject.toml", 'testpaths = ["tests", "internal/onpixel/tests"]\n')
     )
-    # The path allow covers only the path token, not a bare mention beside it.
     assert label in _labels(
         _scan(tmp_path, "ui_clone/bypass.py", "# the OnPixel loop lives in internal/onpixel\n")
     )
@@ -210,6 +210,32 @@ def test_universality_flags_brand_corpus_and_dated_lab_notes(tmp_path: Path) -> 
     # Historical record and maintainer-only trees stay exempt.
     for relative in ("CHANGELOG.md", "internal/x/a.py", "benchmark/a.md", "tests/test_a.py"):
         assert not _labels(_scan(tmp_path, relative, "# fable-20260910: 26-site loop navercorp\n")), relative
+
+
+def test_universality_flags_bare_date_stamps_in_code(tmp_path: Path) -> None:
+    dated_code = _label("Bare date stamps in code")
+    for text in (
+        "# 2026-05-22 SKILL.md Tier 3 rule:\n",
+        "# Review follow-up 2026-05-22 (Q1): per-node styles win\n",
+        "# orchestrator session in live use (2026-06-12)\n",
+        "# every run since 2026-0X-XX read all saturated\n",
+        "# ROOT CAUSE (2026-07, empirical): QuantumRange inflation\n",
+        '    """2026-05-22 user request: state machine extends beyond <header>.\n',
+    ):
+        for relative in ("ui_clone/a.py", "scripts/a.sh", "skills/x/scripts/a.sh", "hooks/a.json"):
+            assert dated_code in _labels(_scan(tmp_path, relative, text)), (relative, text)
+    for ok in (
+        "# version 7.1.2-27 returns AE as count * 65535\n",
+        "# the port is 2026-5\n",
+        "# ISO timestamp fixtures look like 2026-05-14T00:00:00Z\n",
+        "# id sha-2026-05-2a\n",
+        "# range 12026-05-22\n",
+    ):
+        assert dated_code not in _labels(_scan(tmp_path, "ui_clone/c.py", ok)), ok
+    # Markdown keeps only the narrower dated rule; historical / local trees are exempt.
+    assert dated_code not in _labels(_scan(tmp_path, "docs/design.md", "Reviewed 2026-05-22.\n"))
+    for relative in ("CHANGELOG.md", "internal/x/a.py", "benchmark/a.sh", "tests/test_a.py"):
+        assert not _labels(_scan(tmp_path, relative, "# measured 2026-05-22\n")), relative
 
 
 def test_universality_codex_state_allows_host_config_paths_only(tmp_path: Path) -> None:

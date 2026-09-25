@@ -1980,7 +1980,7 @@ def main() -> None:
         # (browse crumb from pre_bash) AND (B) this session wrote
         # clone-shaped files (write crumb from pre_generate). One-signal
         # activation is context-blind: the browse crumb alone fired on an
-        # orchestrator session in live use (2026-06-12) — browse-only
+        # orchestrator session in live use — browse-only
         # sessions (orchestration, monitoring, research) and write-only
         # sessions (ordinary web dev) must stop freely. Block once
         # (stop_hook_active re-entrancy already returned above) demanding

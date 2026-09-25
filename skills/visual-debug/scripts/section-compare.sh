@@ -275,6 +275,8 @@ if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
     _AGENT_BROWSER_CLEANUP_STATE="ready"
     return 0
   }
+  # _result_status is assigned inside the single-quoted trap body at exit time.
+  # shellcheck disable=SC2154
   trap '_result_status=$?; _cleanup_result_stage; exit "$_result_status"' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
@@ -1024,7 +1026,11 @@ DISMISS_OVERLAYS='(() => {
   return "overlays dismissed";
 })()'
 
+# `2>&1 >/dev/null` is deliberate: the eval's stdout echo is discarded while
+# agent-browser stderr stays in this script's progress log.
+# shellcheck disable=SC2069
 ref_eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
+# shellcheck disable=SC2069
 agent-browser --session "$SESSION_IMPL" eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
 
 # Pause carousels/sliders/auto-advancing animations to get a stable frame for comparison.
@@ -1114,7 +1120,9 @@ if [ "$EXCLUDE_DYNAMIC" = "1" ] && [ "${SKIP_WAIT_CANVAS:-0}" != "1" ]; then
 fi
 
 if [ "${SKIP_PAUSE_ANIMATIONS:-0}" != "1" ]; then
+  # shellcheck disable=SC2069
   ref_eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
+  # shellcheck disable=SC2069
   agent-browser --session "$SESSION_IMPL" eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
 fi
 
@@ -1431,7 +1439,10 @@ JSEOF
 _wait_prescroll_done() {
   local session="$1"
   local max_seconds="${PRESCROLL_TIMEOUT:-30}"
+  # Loop counter only paces the polling; its value is intentionally unused.
+  # shellcheck disable=SC2034
   local i
+  # shellcheck disable=SC2034
   for i in $(seq 1 "$max_seconds"); do
     local out
     out=$(agent-browser --session "$session" eval "(() => window.__SC_PRESCROLL_DONE || 0)()" 2>/dev/null | tail -1 | tr -d '"')
@@ -1521,10 +1532,16 @@ fi
 if [ -n "${REF_RESET_SCROLLLEFT_SELECTOR:-}" ] && [ "$REUSE_FROZEN_REF" != "1" ]; then
   ref_eval "(() => { const sel = $(printf '%s' "$REF_RESET_SCROLLLEFT_SELECTOR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'); document.querySelectorAll(sel).forEach(el => { el.scrollLeft = 0; }); return {ok: true}; })()" > /dev/null 2>&1
 fi
+# `2>&1 >/dev/null` is deliberate: the eval's stdout echo is discarded while
+# agent-browser stderr stays in this script's progress log.
+# shellcheck disable=SC2069
 ref_eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
+# shellcheck disable=SC2069
 agent-browser --session "$SESSION_IMPL" eval "$DISMISS_OVERLAYS" 2>&1 > /dev/null
 if [ "${SKIP_PAUSE_ANIMATIONS:-0}" != "1" ]; then
+  # shellcheck disable=SC2069
   ref_eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
+  # shellcheck disable=SC2069
   agent-browser --session "$SESSION_IMPL" eval "$PAUSE_ANIMATIONS" 2>&1 > /dev/null
 fi
 if [ "${SKIP_FINISH_ANIMATIONS:-0}" != "1" ]; then
@@ -2631,7 +2648,7 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   # Loud tripwire: AE is already normalized to a pixel count by _ae_at, so it
   # must not exceed the crop's pixel budget. If it does, the AE unit divisor is
   # wrong (ImageMagick metric behavior changed again) — warn so the run is not
-  # silently mis-tiered like the 2026-07 65535x inflation was.
+  # silently mis-tiered like the QuantumRange 65535x inflation was.
   if [ -n "$REF_W" ] && [ -n "$REF_H" ] && [ "$REF_W" -gt 0 ] 2>/dev/null; then
     awk -v ae="$AE" -v w="$REF_W" -v h="$REF_H" 'BEGIN{ exit (ae > w*h*1.01) ? 1 : 0 }' || \
       echo "section-compare: WARNING AE $AE > pixels ${REF_W}x${REF_H} for ${NAME} — AE unit divisor may be wrong (see lib/ae-quantum.sh)" >&2

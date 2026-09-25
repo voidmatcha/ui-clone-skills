@@ -59,11 +59,17 @@ PORT=$(python3 -c "from urllib.parse import urlparse; import sys; p = urlparse(s
 SERVING_PID=""
 SERVING_CWD=""
 PORT_OWNER_MISMATCH="false"
+# PORT_CHECK_SKIPPED names why the local port-owner probe was skipped. It is a
+# marker for anyone tracing the branch below (`bash -x`); the JSON report only
+# carries the probe result, so the value itself is not consumed.
+# shellcheck disable=SC2034
 PORT_CHECK_SKIPPED=""
 PLATFORM=$(uname -s 2>/dev/null || echo "unknown")
 if [[ "$PLATFORM" == "MINGW"* || "$PLATFORM" == "MSYS"* || "$PLATFORM" == "CYGWIN"* ]]; then
+  # shellcheck disable=SC2034
   PORT_CHECK_SKIPPED="windows-no-lsof"
 elif ! command -v lsof >/dev/null 2>&1; then
+  # shellcheck disable=SC2034
   PORT_CHECK_SKIPPED="lsof-not-installed"
 elif [ -n "$PORT" ] && [ "$PORT" != "0" ] && [ "$PORT" != "443" ] && [ "$PORT" != "80" ]; then
   # Only check local listening ports (skip remote https/http).

@@ -18,8 +18,10 @@ def test_ci_local_scopes_bash_compat_to_pytest_children() -> None:
 
     assert "export BASH_COMPAT" not in source
     assert 'PYTEST_ENV=(env "BASH_COMPAT=${UI_CLONE_TEST_BASH_COMPAT:-5.0}")' in source
-    pytest_cmd = '"${PYTEST_ENV[@]}" uv run python -m pytest tests/ internal/onpixel/tests -q'
+    pytest_cmd = '"${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q'
     assert source.count(pytest_cmd) == 2
+    # internal/ is gitignored scratch: CI must never wire it into pytest/mypy/ruff.
+    assert "internal/" not in source
     assert source.index("PYTEST_ENV=()") > source.index('PATH="$(dirname "$BASH_BIN"):$PATH"')
     assert source.index("PYTEST_ENV=()") < source.index('# 1. Tests')
     assert source.index("# 2. Type check") > source.rindex(pytest_cmd)

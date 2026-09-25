@@ -47,7 +47,7 @@ section "Tests"
 if [ "${UI_CLONE_REVIEW_SKIP_TESTS:-}" = "1" ]; then
   ok "pytest: skipped (caller already ran)"
 elif command -v uv >/dev/null 2>&1; then
-  TEST_OUT=$(uv run python -m pytest tests/ internal/onpixel/tests -q 2>&1)
+  TEST_OUT=$(uv run python -m pytest tests/ -q 2>&1)
   if echo "$TEST_OUT" | grep -q "passed"; then
     PASS_COUNT=$(echo "$TEST_OUT" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
     ok "pytest: $PASS_COUNT passed"
@@ -191,6 +191,12 @@ if python3 scripts/ci/review_checks.py trigger-boundaries; then
   ok "public skill trigger boundaries mention required route tokens"
 else
   err "public skill trigger boundary drift detected"
+fi
+
+if python3 scripts/ci/review_checks.py eval-grounding >/dev/null; then
+  ok "skill evals only reference existing repo artifacts"
+else
+  err "skill evals reference repo artifacts that do not exist (run: python3 scripts/ci/review_checks.py eval-grounding)"
 fi
 
 # ── 5. Gate-artifact timing ──

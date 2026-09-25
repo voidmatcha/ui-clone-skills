@@ -1161,7 +1161,7 @@ _EXTERNAL_BROWSE_DIR = "tmp/.ui-re-external-browse"
 # KEY=VAL / env tokens; it cannot match a bare tool name (no `=`, not `env`), so
 # the quoted/heredoc/command-v/pgrep-argument exemptions are unaffected.
 CMD_POSITION_PREFIX = r"(?:^|[\n;&|(]\s*|&&\s*|\|\|\s*|\bxargs\s+)(?:(?:\w+=\S*|env)\s+)*"
-# Command-position anchor (orchestrator live-fire false positive 2026-06-12):
+# Command-position anchor (fixes an orchestrator live-fire false positive):
 # the previous bare `search()` matched the literal trigger string INSIDE a
 # heredoc body (a commission doc written via `cat <<EOF`) and crumbed the
 # orchestrator session with the placeholder url `https://<external>``. The

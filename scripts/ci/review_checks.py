@@ -14,6 +14,14 @@ from urllib.parse import unquote
 PUBLIC_SKILLS = ("ui-capture", "ui-reverse-engineering", "visual-debug")
 PUBLIC_SKILL_WORD_ADVISORY = 5_000
 INTERNAL_SKILLS = {"benchmark"}
+# Mandatory-path word budgets per scenario, measured by scripts/ci/skill_read_graph.py.
+# Set slightly above the optimized numbers so the default read path cannot silently
+# regrow; raise a budget only together with a documented reason.
+SKILL_READ_BUDGETS = {
+    "reverse-engineering-full-clone": 52_500,
+    "capture-baseline-only": 1_400,
+    "visual-debug-single-mismatch": 1_100,
+}
 
 
 def _report_errors(errors: list[str]) -> int:
@@ -135,7 +143,56 @@ def report_public_skill_sizes() -> int:
             "WARNING: public skill entrypoints total "
             f"{total_words} words (advisory {PUBLIC_SKILL_WORD_ADVISORY})"
         )
+    for line in skill_read_budget_lines():
+        print(line)
     return 0
+
+
+def skill_read_budget_lines() -> list[str]:
+    """Report mandatory-path words per scenario; WARNING lines mark exceeded budgets."""
+    try:
+        import skill_read_graph
+    except ImportError:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        import skill_read_graph
+    lines: list[str] = []
+    for result in skill_read_graph.measure_all(top=3):
+        name = str(result["scenario"])
+        words = int(result["mandatory_words"])
+        budget = SKILL_READ_BUDGETS.get(name)
+        heavy = ", ".join(
+            f"{pathlib.PurePosixPath(str(row['doc'])).name} {row['words']}"
+            for row in result["top_mandatory"]
+        )
+        lines.append(
+            f"{name}: mandatory path {words} words / {result['mandatory_docs']} docs"
+            f" (budget {budget}; heaviest: {heavy})"
+        )
+        if budget is not None and words > budget:
+            lines.append(
+                f"WARNING: {name} mandatory path grew to {words} words (budget {budget})"
+                " — run scripts/ci/skill_read_graph.py and move the growth behind a"
+                " conditional link or trim the heaviest doc"
+            )
+    return lines
+
+
+def report_skill_reads() -> int:
+    """Print the scenario read-graph report and fail when any budget is exceeded."""
+    lines = skill_read_budget_lines()
+    for line in lines:
+        print(line)
+    return int(any(line.startswith("WARNING:") for line in lines))
+
+
+def check_eval_grounding() -> int:
+    """Fail when an eval asserts on a file, script, flag, or gate the repo does not have."""
+    try:
+        import eval_grounding
+    except ImportError:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        import eval_grounding
+    return eval_grounding.main([])
 
 
 def _local_markdown_targets(text: str) -> list[str]:
@@ -303,9 +360,11 @@ def count_subprocess_without_timeout() -> int:
 
 COMMANDS: dict[str, Callable[[], int]] = {
     "count-subprocess-without-timeout": count_subprocess_without_timeout,
+    "eval-grounding": check_eval_grounding,
     "public-skill-links": check_public_skill_links,
     "public-skills": check_public_skills,
     "skill-context": report_public_skill_sizes,
+    "skill-reads": report_skill_reads,
     "trigger-boundaries": check_trigger_boundaries,
     "trigger-fixtures": check_trigger_fixtures,
     "find-hangul": find_hangul,

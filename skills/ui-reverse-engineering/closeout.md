@@ -120,7 +120,7 @@ All paths exit on `python -m ui_clone.goal <ref-dir> --check-done` exit codes:
 - `2` — ABORT (`pipeline-state.json.unclonable_reasons[]` non-empty: paid font with no substitution, DRM canvas, auth-gated content).
 - non-zero otherwise — keep iterating.
 
-The goal card emits a `STUCK` banner when the active gate has failed ≥3 consecutive runs; route into `diagnosis.md` / `patterns.md` / `visual-debug/SKILL.md` before retrying the same action. When acting as that worker:
+When the goal card emits a `STUCK` banner (the active gate has failed ≥3 consecutive runs), route into `diagnosis.md` / `patterns.md` / `visual-debug/SKILL.md` before retrying the same action. When acting as that worker:
 
 1. Dismiss modals/overlays before capture
 2. Always capture ref frames and compare — "already implemented" is not grounds for skipping

@@ -12,6 +12,8 @@ ui_clone_exclusive_lock_acquire() {
   local lock_dir="$1" token="$2" label="$3" session="$4"
   local attempt owner_pid owner_session
 
+  # `attempt` only bounds the retry loop; its value is intentionally unused.
+  # shellcheck disable=SC2034
   for attempt in 1 2; do
     if mkdir "$lock_dir" 2>/dev/null; then
       printf '%s\n' "$$" > "$lock_dir/pid"

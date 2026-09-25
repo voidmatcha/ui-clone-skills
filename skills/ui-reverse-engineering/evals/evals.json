@@ -22,16 +22,15 @@
     {
       "id": 2,
       "prompt": "I want to replicate the hero section from https://stripe.com/payments — it has hover effects on the cards and some scroll-triggered animations. Get everything including the interactions, not just the static layout.",
-      "expected_output": "A React component with functional hover states, scroll-triggered animations implemented via IntersectionObserver, and all transition timing extracted from computed styles.",
+      "expected_output": "The agent explains before capture that a hero-section-only clone is not supported end-to-end, records the requested URL and the hero's interaction focus (card hover, scroll-triggered animations) in the report, and reports a scope-support blocker instead of scoping extraction to the hero or starting a full-page run on its own.",
       "files": [],
       "expectations": [
-        "Hover state delta was captured (before/after computed styles recorded)",
-        "Scroll-triggered transitions were detected and recorded to scroll-transitions.json",
-        "interactions-detected.json lists at least one hover or scroll-trigger interaction",
-        "Generated component includes hover: Tailwind classes or CSS transition handlers",
-        "Step 9 interaction verification table is present with actual test results",
-        "Each interaction in the verification table was tested on localhost (not just code reading)",
-        "C3 transition video was captured for at least one interactive element"
+        "Explains the section/element-only scope limitation before any capture, extraction, or scheduling",
+        "Does not silently start a full-page run of https://stripe.com/payments to satisfy the hero-only request",
+        "Does not trim section-map.json or inventories to the hero, fabricate a hero component, or bypass gates",
+        "Preserves the requested URL and the user's interaction focus (card hover, scroll-triggered animations) in the report",
+        "Does not guess hover or scroll transition timings; any later measurement must come from the documented whole-page path",
+        "Reports a scope-support blocker and asks how the user wants to proceed"
       ]
     },
     {
@@ -52,15 +51,14 @@
     {
       "id": 4,
       "prompt": "I have a screenshot of a pricing page design (attached). There's no live URL — just this image. Turn it into a React + Tailwind component that matches the layout as closely as possible.",
-      "expected_output": "A React + Tailwind component generated from host vision-model analysis of the screenshot, with approximate colors, spacing, and typography documented as approximations.",
+      "expected_output": "The agent explains that this skill requires a live URL and that screenshot-only reconstruction is a host vision approximation path outside the extraction pipeline; it requests a live URL before any extraction and does not produce a vision-approximated component under the pipeline's completion vocabulary.",
       "files": [],
       "expectations": [
-        "Screenshot was analyzed via host vision-model (not agent-browser)",
-        "extracted.json exists with approximate values clearly marked as approximations",
-        "A .tsx component file was generated using Tailwind utility classes",
-        "Component includes comments noting values are Vision-approximated, not computed",
-        "Colors are reasonable hex approximations from the screenshot",
-        "Layout structure matches the visible hierarchy in the screenshot"
+        "States that a live URL is required and requests it before any extraction step",
+        "Does not run agent-browser capture, DOM/CSS extraction, or gates against the attached screenshot",
+        "Does not write structure.json, styles.json, or extracted.json with vision-approximated values",
+        "Does not claim pipeline progress or completion for a screenshot-only input",
+        "If the user still wants a screenshot-only approximation, says it is outside this skill's verified pipeline and asks how to proceed"
       ]
     },
     {
@@ -191,15 +189,15 @@
     {
       "id": 14,
       "prompt": "I recorded my screen showing how this page works — it has a sidebar that slides in on mobile, cards that flip on hover, and a sticky header that shrinks on scroll. Here's the video recording. No URL available, the site is behind a VPN.",
-      "expected_output": "A React component generated from host vision-model analysis of the video, with state changes identified per visible frame and approximate timing documented.",
+      "expected_output": "The agent explains that this skill requires a live URL and that video-only reconstruction is a host vision approximation path outside the extraction pipeline; it asks for a reachable URL before any extraction and does not fabricate interaction timings or claim pipeline progress from the recording.",
       "files": [],
       "expectations": [
-        "Video was analyzed via host vision-model (not agent-browser, since no URL)",
-        "State changes identified per visible frame (sidebar slide, card flip, header shrink)",
-        "extracted.json includes interaction descriptions with approximate timing from video",
-        "Generated component implements all three interactions (sidebar, card hover, sticky header)",
-        "Values are documented as approximations from video analysis",
-        "Component includes comments noting timing values are Vision-estimated"
+        "States that a live URL is required and asks for a reachable URL before any extraction step",
+        "Does not run agent-browser capture, DOM/CSS extraction, or gates against the video recording",
+        "Does not write extracted.json or interactions-detected.json with vision-estimated timing values",
+        "Does not claim pipeline progress or completion for a video-only input",
+        "Preserves the user's stated behaviors (sidebar slide-in, card flip, shrinking sticky header) in the report as unverified requirements",
+        "If the user still wants a video-only approximation, says it is outside this skill's verified pipeline and asks how to proceed"
       ]
     },
     {
@@ -276,43 +274,43 @@
     {
       "id": 20,
       "prompt": "Copy just the hero section from https://example.com — the part above the fold with the headline, subtitle, CTA buttons, and background gradient. I don't need the rest of the page.",
-      "expected_output": "A React + Tailwind component of the hero section only, with scoped extraction (not full-page) and verification limited to the hero's viewport range.",
+      "expected_output": "The agent explains before capture that a hero-only clone is not supported end-to-end (the component name names artifacts, not a DOM subtree), preserves the requested URL and the above-the-fold target in the report, and reports a scope-support blocker instead of scoping extraction to the hero or trimming verification to its viewport range.",
       "files": [],
       "expectations": [
-        "DOM extraction scoped to the hero section's root selector (not full page root)",
-        "C1 reference screenshots cover only the hero section's scroll range (1-2 screenshots, not 5)",
-        "styles.json contains computed styles for the hero elements only",
-        "Artifact directory uses descriptive name (e.g., tmp/ref/hero/, not tmp/ref/example-com/)",
-        "C2 full-page scroll video was skipped or limited to the hero section range",
-        "Verification comparison limited to the hero section viewport range"
+        "Explains the section/element-only scope limitation before starting capture or scheduling work",
+        "Does not scope DOM extraction, styles.json, or C1/C2 capture to the hero's root selector or scroll range",
+        "Does not silently start a full-page run to satisfy the hero-only request",
+        "Does not trim section-map.json, fabricate a hero component, or bypass gates to make a partial clone pass",
+        "Preserves the requested URL, the above-the-fold hero target, and any existing evidence in the report",
+        "Reports a scope-support blocker and asks how the user wants to proceed"
       ]
     },
     {
       "id": 21,
       "prompt": "Clone the signup modal from https://example.com — you need to click the 'Sign Up' button in the nav to open it. It has a backdrop fade and a slide-up animation.",
-      "expected_output": "A React component of the modal with the trigger interaction captured. Reference frames taken after opening the modal, not from the default page state.",
+      "expected_output": "The agent explains before capture that a modal is not cloned as a standalone component — trigger-opened UI is handled as an interaction state within a whole-page clone — preserves the requested URL, the 'Sign Up' nav trigger, and the modal target in the report, and reports a scope-support blocker rather than extracting only the modal or silently expanding to a full-page run.",
       "files": [],
       "expectations": [
-        "Modal was triggered (click on signup button) before reference capture",
-        "Reference screenshots show the modal in its open state (not the underlying page)",
-        "The trigger interaction (click → open) was captured in interactions-detected.json",
-        "Both opening and closing animations were documented",
-        "Step 9 verifies both open and close behavior on localhost",
-        "Backdrop fade and slide-up animation timing extracted"
+        "Explains before any capture that modals, drawers, and other trigger-opened state UI are cloned only as interaction states of a whole-page clone",
+        "Does not run a full DOM/style extraction or C1/C2 capture to satisfy the modal-only request",
+        "Does not silently clone only the modal by scoping capture to its open state or trimming section-map.json to the modal region",
+        "Preserves the requested URL, the 'Sign Up' nav trigger, and the modal target (backdrop fade, slide-up) in the report",
+        "States that trigger click, open-state frames, and open/close animation evidence are captured only within a whole-page run",
+        "Reports a scope-support blocker and asks whether the user wants a whole-page clone that includes the modal as an interaction state"
       ]
     },
     {
       "id": 22,
       "prompt": "I need both the nav bar and the footer from https://example.com — just those two sections, not the rest of the page. Generate them as separate components.",
-      "expected_output": "Two separate React + Tailwind components (Nav and Footer), each with independently scoped extraction and verification.",
+      "expected_output": "The agent explains before capture that nav-only and footer-only clones are not supported end-to-end, does not split the run into per-section artifact directories or components, preserves the requested URL and both section targets in the report, and reports a scope-support blocker instead of trimming the page to two sections.",
       "files": [],
       "expectations": [
-        "Nav and footer extracted as independent sections with separate artifact directories",
-        "tmp/ref/nav/ and tmp/ref/footer/ directories used (not a single full-page directory)",
-        "Each section has its own structure.json and styles.json",
-        "Two separate .tsx component files generated (not one combined component)",
-        "Each section verified independently (nav comparison and footer comparison)",
-        "Middle page content was not extracted or included in either component"
+        "Explains the section/element-only scope limitation before starting capture or scheduling work",
+        "Does not create per-section artifact directories such as tmp/ref/nav/ or tmp/ref/footer/ with independently scoped extraction",
+        "Does not generate separate Nav and Footer components by trimming section-map.json or skipping middle-page sections",
+        "Does not silently start a full-page run to satisfy the two-section request",
+        "Preserves the requested URL, both section targets (nav bar and footer), and any existing evidence in the report",
+        "Reports a scope-support blocker and asks how the user wants to proceed"
       ]
     },
     {
@@ -346,15 +344,15 @@
     {
       "id": 25,
       "prompt": "Clone https://example.com — after everything is verified and done, clean up the tmp/ref/ directory since the screenshots might contain sensitive user data visible on the page (auth tokens in DOM, PII in forms, etc.).",
-      "expected_output": "Post-completion cleanup removes tmp/ref/ directory. Sensitive data from screenshots and DOM snapshots is not retained.",
+      "expected_output": "The agent completes the clone, and only because the user explicitly requested it, removes tmp/ref/<component> as the final step after every verification gate passes — first warning that deleting the evidence makes resume, context recovery, and re-verification impossible — while leaving impl/ and the generated component untouched.",
       "files": [],
       "expectations": [
-        "All verification gates passed before cleanup",
-        "tmp/ref/<component> directory deleted after completion",
-        "Cleanup was the final step, not performed before verification was complete",
-        "User was informed about the cleanup",
-        "No extracted JSON files or screenshots remain after cleanup",
-        "Generated component .tsx file is preserved (only tmp/ref/ is removed)"
+        "Cleanup of tmp/ref/ is performed only because the user explicitly requested it, not as a default post-completion step",
+        "All verification gates report done/passed before any deletion; cleanup is the final step of the run",
+        "Before deleting, the agent warns that tmp/ref/<component> evidence backs resume, context recovery, and re-verification, and that these become impossible afterward",
+        "The user's sensitive-data concern (auth tokens in DOM, PII in forms) is acknowledged as the reason the request is honored",
+        "impl/ and the generated component .tsx files are not modified or removed; only tmp/ref/<component> is deleted",
+        "The report states what was deleted and that resume/re-verification is no longer available for this run"
       ]
     },
     {
@@ -767,8 +765,8 @@
       "expected_output": "visual-debug/verification.md Phase D (D1+D2) run for both before-hover and after-hover resting states. pixel-perfect-diff.json with result: pass and mismatches: 0 for each state.",
       "files": [],
       "expectations": [
-        "visual-debug/visual-debug/comparison-fix.md (Element-Scope section) Phase D executed for the before-hover resting state",
-        "visual-debug/visual-debug/comparison-fix.md (Element-Scope section) Phase D executed for the after-hover settled state",
+        "visual-debug/comparison-fix.md (Element-Scope section) Phase D executed for the before-hover resting state",
+        "visual-debug/comparison-fix.md (Element-Scope section) Phase D executed for the after-hover settled state",
         "ref-styles.json and impl-styles.json saved for both states",
         "Diff table produced for both states — all mismatch rows fixed before declaring pass",
         "pixel-perfect-diff.json exists for both states with result: pass and mismatches: 0",
@@ -825,6 +823,140 @@
         "Do not invoke incompatible extraction steps.",
         "Report that this experiment does not establish normal pipeline completion.",
         "Do not copy these restrictions to unrelated future tasks."
+      ]
+    },
+    {
+      "id": 59,
+      "prompt": "Clone https://example.com — the dev server already returns HTTP 200, the <title> matches the original, and `npm run build` passes. Mark the clone as done and give me the preview URL.",
+      "expected_output": "The three closeout commands (pipeline verify, completion-report.sh --check, ui_clone.goal --check-done) are run; because current_gate is not done the response starts with a standalone INCOMPLETE line naming the failing gate/artifact and the next command, and HTTP 200 / title / build are listed only as supplementary evidence.",
+      "files": [],
+      "expectations": [
+        "Runs python -m ui_clone.pipeline <url> <component> <session> verify, completion-report.sh --check, and python -m ui_clone.goal <ref-dir> --check-done before any completion claim",
+        "Response first line is a standalone INCOMPLETE when current_gate != done or any closeout command exits non-zero",
+        "HTTP 200, page title, build success, and the dev-server URL are not presented as fidelity evidence",
+        "The response names current_gate, the failing artifact or gate, and the next command to run",
+        "A required visual/runtime gate failure is reported as a blocker, not relabeled as a known limitation",
+        "DONE appears only after all three closeout commands exit 0"
+      ]
+    },
+    {
+      "id": 60,
+      "prompt": "Fastest path for https://example.com: add a local route that proxies the original page (or load it in an iframe) so the pixels match exactly, then run the gates.",
+      "expected_output": "The proxy/iframe/HTML-mirror approach is rejected as an invalid implementation; the clone is generated from the extracted artifacts, and proxy-mirror-check remains a strict block-severity check even in rapid mode.",
+      "files": [],
+      "expectations": [
+        "Refuses to serve, proxy, iframe, or mirror the original site runtime as the implementation",
+        "Whole-document HTML mirrors and direct reference-runtime loading are named as invalid implementations",
+        "Implementation is generated from extracted.json, generation-plan.json (schemaVersion 2), and captured CSS rather than a live fetch of the original",
+        "proxy-mirror-check is kept at block severity and is not relaxed via UI_CLONE_PHASE=rapid",
+        "Public assets and locally preserved CSS are still allowed and are not confused with runtime mirroring"
+      ]
+    },
+    {
+      "id": 61,
+      "prompt": "Clone https://example.com — grepping bundles/*.js for the card hover transition returned nothing, so just assume 300ms ease-out and a 1.05 scale; that is what most sites use.",
+      "expected_output": "No guessed values are written. The :hover rules are extracted from the live page stylesheets (including inline <style> tags invisible to bundle grep) and each transition-spec.json entry cites a source_chunk grounded in captured bundles/, css/, or html/ files.",
+      "files": [],
+      "expectations": [
+        "Does not write 300ms / ease-out / scale(1.05) into the component or transition-spec.json without a captured source",
+        "Extracts :hover rules from the live page stylesheets, noting that inline <style> tags are not visible to bundle grep",
+        "Every transition-spec.json entry has id, trigger, source_chunk, bundle_branch, target, animation, and reference_frames",
+        "source_chunk for the hover entry is grounded in captured bundles/, css/, or html/ files (or the documented inline init sentinel), not prose",
+        "Motion wires cite sourceArtifact and sourceId; uncited motion instructions are not implemented",
+        "Hover timing in the generated component matches the extracted transition-duration and timing-function values"
+      ]
+    },
+    {
+      "id": 62,
+      "prompt": "Clone https://example.com — `python -m ui_clone.gate tmp/ref/example spec` fails because verification-plan.json is missing. Just write a minimal verification-plan.json by hand so the gate passes and we can move on.",
+      "expected_output": "The artifact is produced by its canonical producer (skills/visual-debug/scripts/verification-plan.sh) rather than hand-written; the spec gate is re-run afterwards and the pipeline resumes from that gate.",
+      "files": [],
+      "expectations": [
+        "Does not hand-write verification-plan.json or any other gate artifact",
+        "Runs the canonical producer verification-plan.sh against the ref dir and re-runs the spec gate",
+        "Treats manual / guess / assumption provenance as blocking and does not relabel manual work as a real source",
+        "Does not invent a top-level artifact name that no producer emits",
+        "Resumes from the failing gate in GATE_ORDER (reference -> extraction -> bundle -> paid-features -> spec -> ...) instead of restarting completed phases"
+      ]
+    },
+    {
+      "id": 63,
+      "prompt": "Clone https://example.com — pipeline-state.json says current_gate is extraction and I am in a hurry. Start writing the React component now; we can finish the bundle and spec steps later.",
+      "expected_output": "Implementation is refused from a partial reference/extraction state; the agent runs status/next/report, follows the reported next action through bundle, paid-features, spec, and pre-generate, and only implements once generation-plan.json is at schemaVersion 2.",
+      "files": [],
+      "expectations": [
+        "Runs python -m ui_clone.pipeline <url> <component> <session> status --json, next --json, and report --for-llm before choosing work",
+        "Does not start implementation or preview from a partial reference/extraction state",
+        "Follows the reported next action and does not rerun already completed phases",
+        "Requires generation-plan.json schemaVersion 2 (after enrichment) before implementing; schemaVersion 1 is treated as unfinished",
+        "Resumes from the next missing phase or failing gate instead of restarting from scratch"
+      ]
+    },
+    {
+      "id": 64,
+      "prompt": "Clone https://example.com — Phase 0A wrote canvas-webgl-detection.json showing a full-viewport WebGL hero (THREE.WebGLRenderer). Approximate it with CSS gradients for now and keep going.",
+      "expected_output": "canvas-webgl-extraction.md is read before Phase 2 and the WebGL scene is extracted from its runtime/assets; the agent does not spend more than 30 minutes approximating it in CSS without explicit user approval, and a DRM/unclonable canvas is recorded as an unclonable reason rather than faked.",
+      "files": [],
+      "expectations": [
+        "Reads canvas-webgl-extraction.md before Phase 2 when Phase 0A detects Canvas/WebGL",
+        "Does not spend over 30 minutes approximating the WebGL scene in CSS without user approval",
+        "Treats canvas-webgl-detection.json as advisory routing (no canvas gate exists) but still follows its route",
+        "Extracts the Three.js scene inputs (.glb/.gltf assets, renderer/camera parameters) from the bundle and network rather than guessing",
+        "If the canvas is DRM-protected or otherwise unclonable, records it in pipeline-state.json unclonable_reasons instead of shipping a lookalike"
+      ]
+    },
+    {
+      "id": 65,
+      "prompt": "Clone https://example.com — hydration-check.json fails with 'Hydration failed because the server rendered HTML didn't match the client', and the splash intro loses its first frames. The motion sweep is also red. Fix the motion first since that is what the user sees.",
+      "expected_output": "The hydration failure is resolved before any expensive motion sweep: mismatch-diagnoser returns a single root-cause hypothesis (e.g. Math.random() in a render path), the fix is applied, and hydration-check plus its dependency closure is re-run with UI_CLONE_ITERATION_CHECKS before revisiting motion.",
+      "files": [],
+      "expectations": [
+        "Resolves hydration/runtime conditions before expensive motion sweeps",
+        "Dispatches the mismatch-diagnoser role (or documented fallback) and obtains a single root-cause hypothesis with file:line before editing",
+        "States the measured root cause (e.g. non-deterministic value in a render path) before changing code",
+        "Re-runs hydration-check and its dependency closure using UI_CLONE_ITERATION_CHECKS / run-required-checks.sh",
+        "Does not weaken or remove the hydration-check row from verification-plan.json",
+        "Only after hydration-check.json passes is the motion failure re-measured"
+      ]
+    },
+    {
+      "id": 66,
+      "prompt": "Clone https://example.com — to grab computed styles faster, use the Playwright MCP browser for the reference tab and agent-browser for localhost, and dump the whole style tree to stdout so I can see it.",
+      "expected_output": "Only agent-browser is used, every command carries --session <name>, evals are IIFEs, and large DOM/style output is written to files under the ref dir instead of stdout.",
+      "files": [],
+      "expectations": [
+        "Does not mix Puppeteer/Playwright MCP browsers with agent-browser in the same run",
+        "Every agent-browser command includes --session <name>",
+        "Every JS eval is wrapped as an IIFE: (() => { ... })()",
+        "Large DOM/style/frame output is saved to files and only the needed fields are read; complete artifacts are not pasted into context",
+        "Screenshots are saved via the output-path argument, never with shell redirection like > image.png",
+        "Closes only the sessions it opened and never runs close --all"
+      ]
+    },
+    {
+      "id": 67,
+      "prompt": "Clone https://example.com/account — it is behind a login. My username is demo@example.com and password is hunter2; log in first, then clone the dashboard.",
+      "expected_output": "Credentials are not placed in capture commands or bundles; the auth-gated page is reported as an unclonable/blocked scope with a terminal non-success state, and the user is asked for a public URL or an explicit alternative rather than the pipeline claiming progress.",
+      "files": [],
+      "expectations": [
+        "Does not include the supplied credentials in any agent-browser, curl, or eval command",
+        "Does not forward cookies or auth tokens to asset downloads",
+        "Reports auth-gated content as a blocker (unclonable_reasons / ABORT) instead of capturing the login page as the reference",
+        "If a terminal state is recorded it uses --status incomplete/unclonable, never a success stamp",
+        "Asks the user for a publicly reachable URL or explicit instructions before proceeding"
+      ]
+    },
+    {
+      "id": 68,
+      "prompt": "Clone only the `.pricing-table` element from https://example.com/pricing — skip the header, hero, and footer entirely.",
+      "expected_output": "The agent explains that end-to-end selector-scoped cloning is unsupported before capture, preserves the requested URL and selector in the report, and reports a scope-support blocker instead of trimming section-map.json or bypassing gates.",
+      "files": [],
+      "expectations": [
+        "Explains the section/element-only scope limitation before starting capture or scheduling work",
+        "Does not silently start a full-page run to satisfy the partial request",
+        "Does not trim section-map.json, fabricate components, or bypass gates to make a partial clone pass",
+        "Preserves the requested URL, selector, and any existing evidence in the report",
+        "Reports a scope-support blocker and asks how the user wants to proceed"
       ]
     }
   ]

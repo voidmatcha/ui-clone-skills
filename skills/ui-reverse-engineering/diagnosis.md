@@ -220,7 +220,7 @@ bash "$SCRIPTS/transition-compare.sh" <orig-url> <impl-url> <session> tmp/ref/<c
 
 **Read the output of step 2 first.** Its parent-chain column names the `overflow: hidden` ancestor — if one is listed, you're hitting the IO+clip bug class. Move the observer ref one level up. Step 3 (`transition-compare`) only meaningfully runs once steps 1 and 2 are clean — it cannot distinguish "easing wrong" from "transition never started".
 
-**Pattern recipes (see `transition-implementation.md` → Anti-pattern catalog):**
+**Pattern recipes (see `transition-patterns.md` → Anti-pattern catalog):**
 - **A** — IO-fire-once vs scroll-scrub (ref scrubs forward+back, naive impl flips once and stays)
 - **B** — Viewport-aware scroll-scrub offsets (works on laptop, never reaches `progress=1` on mobile / Footer-CTA bug)
 - **C** — `completeAt` headroom for shuffle/stagger tails (last element stuck ~98% because eased curves never reach 1.0)
@@ -345,7 +345,7 @@ agent-browser --session <s> eval "
 - Don't add a hardcoded large-pixel offset to "push the element to the bottom" — that breaks at every viewport size and on every content change.
 - Don't wrap with a fake fixed-height `position: relative` container just to anchor a stray absolute — that's CSS-by-accident; pick option 1 or 2 instead.
 
-**Pattern recipe:** `transition-implementation.md` → Anti-pattern **G** (Footer-disappeared / stray `position: absolute`) — same root cause, with the framework-agnostic fix pattern restated.
+**Pattern recipe:** `transition-patterns.md` → Anti-pattern catalog → **G. Footer-disappeared** (stray `position: absolute`) — same root cause, with the framework-agnostic fix pattern restated.
 
 ---
 

@@ -3,6 +3,10 @@
 # scroll mode of video-transition-compare.sh. Sourced (not executed);
 # unit-tested by tests/test_scroll_position_compare.py with synthetic frames.
 #
+# POSITION_PASS / POSITION_FAIL / POSITION_TOTAL / POSITION_RESULTS are the
+# library's return channel: they are read by the sourcing script, not here.
+# shellcheck disable=SC2034
+#
 # Why position-aligned instead of time-indexed video frames: the time-indexed
 # scroll sweep quantizes into instant scroll steps scheduled per-side with
 # in-page setTimeout; main-thread contention slides step execution by ±1 step

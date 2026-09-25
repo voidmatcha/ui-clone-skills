@@ -4,7 +4,7 @@
 # Usage:
 #   runtime-proof-rollup.sh <ref-dir>
 #
-# 2026-05-22 SKILL.md Tier 2+4 enforcement: roll-up validator that reads
+# SKILL.md Tier 2+4 enforcement: roll-up validator that reads
 # every existing runtime-measurement artifact and emits a single
 # composite verdict at <ref-dir>/runtime-proof.json. The aggregator does NOT
 # run new browser probes — it

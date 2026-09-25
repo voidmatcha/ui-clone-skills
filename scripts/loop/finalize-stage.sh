@@ -79,11 +79,16 @@ fi
 
 # ── 2. Receipt build (always, even if not converged) ────────────────────────
 receipt_out=""
+# receipt_rc is recorded for the `|| receipt_rc=$?` guard, which keeps a failed
+# receipt build from aborting the report under `set -e`; the report itself
+# derives its verdict from receipt_path, so the value is informational only.
+# shellcheck disable=SC2034
 receipt_rc=0
 if [[ -x "$receipt_script" ]] || [[ -f "$receipt_script" ]]; then
   receipt_out="$(bash "$receipt_script" "$ref" 2>&1)" || receipt_rc=$?
 else
   receipt_out="finalize-stage: receipt script not found at $receipt_script"
+  # shellcheck disable=SC2034
   receipt_rc=1
 fi
 

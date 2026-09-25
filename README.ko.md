@@ -17,7 +17,7 @@
   <a href="README.md">🇺🇸 English</a> | <strong>🇰🇷 한국어</strong> | <a href="README.ja.md">🇯🇵 日本語</a> | <a href="README.zh-cn.md">🇨🇳 简体中文</a>
 </p>
 
-<!-- README-CANONICAL-REVISION: sha256=2b51a5f567925721d64501c013522d7989c133da87aa55714e94bfc32d77cac7; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
+<!-- README-CANONICAL-REVISION: sha256=875545761da8a487ea4879ff8fbec5a5e2c10b6096a22c8cd823479cfeb17f1b; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
 
 `ui-clone-skills`는 실제 웹사이트를 근거 기반의 React + Tailwind 구현으로 바꿉니다. 렌더링된 페이지를 캡처하고, 실제 CSS와 에셋을 내려받으며, 반응형 스타일과 계산된 스타일을 읽고, JavaScript 번들에서 애니메이션 매개변수를 복원한 뒤 여러 뷰포트와 상호작용 상태에서 결과를 검증합니다.
 
@@ -167,7 +167,7 @@ Phase 1에서 임시 참조 증거를 생성한 경우, 같은 실행에서 Phas
 
 ## 문서
 
-세 가지 스킬은 간결하게 유지하며, 각 파이프라인 단계에서 필요할 때만 세부 문서 59개를 불러옵니다. 먼저 작업별 문서로 시작하고, 정확한 명령이나 게이트 동작이 필요할 때 운영 규약을 확인하세요.
+세 가지 스킬은 간결하게 유지하며, 각 파이프라인 단계에서 필요할 때만 세부 문서 64개를 불러옵니다. 먼저 작업별 문서로 시작하고, 정확한 명령이나 게이트 동작이 필요할 때 운영 규약을 확인하세요.
 
 - [설치 및 호스트 설정](./README_detail/install.md)
 - [전체 리버스 엔지니어링 파이프라인](./README_detail/ui-reverse-engineering.md)

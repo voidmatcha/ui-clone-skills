@@ -1944,7 +1944,7 @@ if [ -f "$BUNDLE_MAP" ] || [ -f "$REF_DIR/external-sdks.json" ]; then
 fi
 
 # tree-diff — element pairing via elementFromPoint, per-element style+layout
-# diff. 17-iteration measurement (2026-05-22): hero-area elements
+# diff. Multi-iteration measurement: hero-area elements
 # (BUTTON.hero-video, VIDEO, SPAN.hero-video__label, H1) were unpaired in
 # EVERY iteration because LLMs flatten ref's deeply-nested hero composite
 # into a clean React tree — the impl's BUTTON center now lands on the

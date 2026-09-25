@@ -187,10 +187,10 @@ other layout bands remain unverified. See [iteration discipline](iteration-disci
 for the content/structure checkpoint, matched-state measurements, reuse, and budgets.
 
 Classify reference, implementation, checker, or infrastructure failure before editing.
-State the measured root cause before changing code. For a skipped step or failed
-gate, consult [skip-zones.md](skip-zones.md); before making an unsupported assumption
-or skipping a requirement, consult [no-judgment.md](no-judgment.md). For unexplained
-verification failures, use [comparison-fix.md](../visual-debug/comparison-fix.md).
+State the measured root cause before changing code. If a step was skipped or a
+gate failed, consult [skip-zones.md](skip-zones.md); if you are about to make an
+unsupported assumption or skip a requirement, consult [no-judgment.md](no-judgment.md).
+If a verification failure is unexplained, use [comparison-fix.md](../visual-debug/comparison-fix.md).
 Resolve missing/visible content, assets, geometry, hydration, and runtime conditions
 before expensive motion sweeps. Event firing alone is not trajectory parity.
 Use `UI_CLONE_ITERATION_CHECKS` or `UI_CLONE_CHANGED_FILES` for the affected checks
@@ -201,12 +201,12 @@ Read exact failed rows; do not dump all specs or restart full capture to wake a 
 Clone repair does not authorize shared-tooling edits. Return a checker reproducer
 unless that scope was already authorized; preserve existing authorization across
 workers/compaction. Do not edit installed caches as delivery or clean unrelated WIP.
-Use [operational rules](operational-rules.md) for a stalled run; confirm timestamps,
+When a run stalls, use [operational rules](operational-rules.md); confirm timestamps,
 owned process, pending input, and artifact freshness before declaring progress.
 A denied automatic continuation is not permission to reschedule or change permissions.
-For adding pages or legacy selector collisions, use the applicable heading in
-[operational rules](operational-rules.md). Resolve unfamiliar step/signal references
-through [reference-index.md](reference-index.md), not by reading every sub-document.
+When adding pages or resolving legacy selector collisions, use the applicable heading in
+[operational rules](operational-rules.md). If a step/signal reference is unfamiliar,
+resolve it through [reference-index.md](reference-index.md), not by reading every sub-document.
 
 ## Completion criteria
 

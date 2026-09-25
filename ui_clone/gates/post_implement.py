@@ -304,7 +304,7 @@ def _check_scaffold_base_stamp(self: Gate) -> CheckResult | None:
 def _check_generation_completeness(self: Gate) -> list[CheckResult]:
     """Reject components with empty function bodies / no JSX return.
 
-    audit incident (2026-05-19): agent produced 11 component functions in a
+    Observed failure mode: an agent produced 11 component functions in a
     single `App.tsx`; some had real bodies, but the gaming pattern is
     easy — write the signature, skip the body, let section-compare's
     STRUCTURAL_ONLY rows mark it as 'good enough'. This static check

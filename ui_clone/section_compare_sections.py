@@ -5,6 +5,14 @@ The implementation lives in sibling modules (``section_compare_common``,
 ``_drift``); every name they define is re-exported here so existing imports,
 ``python -m ui_clone.section_compare_sections`` invocations, and monkeypatch
 targets keep working unchanged.
+
+Patch-target pitfall: a re-exported name is looked up in the module that
+calls it. Patching ``ui_clone.section_compare_sections.<name>`` only
+intercepts calls made from code in this module (the ``_cmd_*`` handlers);
+a call inside a sibling module resolves that sibling's own global. Tests
+must patch the module that performs the lookup.
+``tests/test_facade_patch_targets.py`` guards ``__all__`` and the patched
+names of this facade and ``section_capture``.
 """
 
 from __future__ import annotations

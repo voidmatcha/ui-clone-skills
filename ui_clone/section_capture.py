@@ -10,6 +10,24 @@ and the composite steps whose callees tests patch by this module's name
 (``_run_screenshot``, ``_run_crop``, ``_apply_reference_runtime_normalization``)
 stay here so ``monkeypatch.setattr(ui_clone.section_capture, ...)`` keeps
 intercepting them.
+
+Patch-target pitfall
+--------------------
+Functions are resolved by name in the module that *calls* them. Tests must
+monkeypatch the names looked up in this module (``ui_clone.section_capture``),
+not the sibling module that defines them: patching
+``section_capture_browser._run_agent_eval`` does nothing for a call made from
+``_capture_one`` here. ``tests/test_facade_patch_targets.py`` fails when a
+name tests patch stops being defined in, or looked up from, this module.
+
+Pairing rule
+------------
+When the reference capture of a section fails (``capture-failures.json``
+records a ``ref`` entry, including entries carried over from the pass that
+produced a frozen reference), the implementation side of that section is
+skipped on purpose: an impl crop with no reference crop has nothing to pair
+with and would only invite a vacuous or misleading comparison. The section
+is reported as UNMEASURED (capture failed) downstream instead.
 """
 
 from __future__ import annotations

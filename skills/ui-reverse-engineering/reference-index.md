@@ -22,6 +22,7 @@ Look up which sub-doc owns a topic. Read SKILL.md first for pipeline flow; read 
 | `asset-extraction.md` | 2.5 | CSS files, fonts, images, SVGs, videos, head metadata |
 | `style-extraction.md` | 3 | Computed styles, design tokens, em-conversion gate |
 | `responsive-detection.md` | 4 | Viewport sweep, Step 4-C2 multi-viewport sizing |
+| `boundary-collision-sweep.md` | 4-C2b | Manual Tailwind ↔ project `@media` boundary ±1 sweep (read only when the impl mixes both and the deterministic `breakpoint-collision-check.sh` needs debugging) |
 | `interaction-detection.md` | 5 | Hover/scroll/click detection, JS timing, hover CSS rules |
 | `hover-timing-extraction.md` | 5d-3 | JS-driven hover timing via `getAnimations()` + bundle-grep fallback (called from interaction-detection.md when CSS hover timing is unresolved) |
 | `bundle-analysis.md` | 5c-a | JS bundle download, grep, scroll engine detection |
@@ -38,7 +39,9 @@ Look up which sub-doc owns a topic. Read SKILL.md first for pipeline flow; read 
 | `generation-pitfalls.md` | 7 | Common implementation errors to avoid |
 | `transition-implementation.md` | 7 | Bundle → code translation |
 | `gsap-alternatives.md` | 7 | GSAP plugin alternatives for dependency-choice cases (SplitText / MorphSVG / ScrollSmoother / DrawSVG). Read when `transition-spec.json` lists GSAP plugins but the implementation should avoid a GSAP dependency or match a project-native animation stack. |
+| `generation-audits.md` | 7 | Conditional post-generation audits: font size accuracy, CSS value diff, body-scope, font unit (read only when its condition holds) |
 | `post-gen-verification.md` | 7 | Output validation after component generation |
+| `post-gen-state-loops.md` | 7 | Conditional Loops 0.5/1/2/3/4 (state coupling, section bounds, sticky, body state, hover) + animation library wiring (read only when the signal is present) |
 | `style-audit.md` | 7 | Design token consistency validation |
 | `webflow-ix2.md` | W | Webflow IX2 detection + hide-rule extraction + IX2 timeline JSON |
 

@@ -361,7 +361,7 @@ ref_geo_samples: list = []
 impl_geo_samples: list = []
 
 def any_sample_mutates(probe: dict) -> tuple[bool, set]:
-    """2026-05-22 universality audit: check mutation against ALL sample
+    """Check mutation against ALL sample
     snapshots, not just the deepest one. Some sites flip class state
     earlier than our deepest probe; some flip later. Reporting
     mutation if ANY scroll point differs from scroll=0 catches both.
@@ -386,7 +386,7 @@ def any_sample_mutates(probe: dict) -> tuple[bool, set]:
     return bool(union) or any(mutates(at0, s.get("snapshot")) for s in samples), union
 
 def body_or_root_mutates(probe: dict) -> tuple[bool, list]:
-    """2026-05-22 user request: state machine extends beyond <header>.
+    """The state machine extends beyond <header>.
     Some sites toggle classes on document.body or document.documentElement
     (`<html>`) as scroll/theme state changes. Compare allRoots0 vs
     allRootsDeep; report mutation if body or html class delta is non-empty.

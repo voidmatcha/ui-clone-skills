@@ -27,7 +27,7 @@ Diagnose an existing implementation against captured reference evidence with str
 - Use this skill when reference and implementation evidence already exist. Route missing baseline evidence to `ui-capture`; route implementation, regeneration, and full clone orchestration to `ui-reverse-engineering` or the active caller.
 - Diagnose and return the failing artifact, selector or region, likely root cause, recommended fix, and exact verification command. The caller owns source edits unless it explicitly delegated repair.
 - Read `brief/WORKER_BRIEF.md` or `evidence-pack.json` first when present, then only the summaries and named drill-down artifacts needed for the failing hotspot.
-- Before a repair loop, read [`../ui-reverse-engineering/iteration-discipline.md`](../ui-reverse-engineering/iteration-discipline.md). Attempt history and stop conditions survive delegation and compaction. Report checker defects with a reproducer unless shared-tool repair is already authorized; never edit an installed cache.
+- If repair was delegated to you, read [`../ui-reverse-engineering/iteration-discipline.md`](../ui-reverse-engineering/iteration-discipline.md) before the repair loop. Attempt history and stop conditions survive delegation and compaction. Report checker defects with a reproducer unless shared-tool repair is already authorized; never edit an installed cache.
 - Matching text, heights, fired events, or a successful build does not prove appearance or trajectory parity. Compare background and foreground, media fit, and intermediate motion states.
 
 ## Required invariants
@@ -84,7 +84,7 @@ Pipe large browser JSON to files; do not print it into the model context. Every 
 4. Diagnose only failing rows with `auto-diagnose.sh`. Escalate unresolved failures in order to `tree-diff.sh`, `layout-tree-diff.sh`, `hover-tree-diff.sh`, or `keyframes-diff.sh` according to the symptom.
 5. Re-run the affected check and its dependency closure. Use scoped or standard verification during iteration; canonical closeout still requires the caller's full comprehensive verification.
 
-Read [tool-routing.md](tool-routing.md) only when you need exact commands, `ONLY_IF_CHANGED`, masking rules, or tool selection. Read [common-selectors.md](common-selectors.md) only for domain selector sets. Read [verification.md](verification.md) only for standalone full capture/verification mechanics. Read [comparison-fix.md](comparison-fix.md) for repair-loop detail and Phase E dispatch. Do not load all references up front.
+Read [tool-routing.md](tool-routing.md) only when you need exact commands, `ONLY_IF_CHANGED`, masking rules, or tool selection. Read [common-selectors.md](common-selectors.md) only for domain selector sets. Read [verification.md](verification.md) only for standalone full capture/verification mechanics. Read [comparison-fix.md](comparison-fix.md) only when entering the repair loop or dispatching Phase E. Do not load all references up front.
 
 ## Three-axis completion
 

@@ -2,8 +2,8 @@
 
 > Status: **IMPLEMENTED** (Phase A: commit e2e5657, Phase B: 509a498,
 > Phase C: abc5328, state-coverage gate: this commit). Surfaces the
-> largest capture-side architectural gap revealed by the multi-site loop
-> (2026-05-24/25). The requested fix shape: capture until the splash ends,
+> largest capture-side architectural gap revealed by the multi-site loop.
+> The requested fix shape: capture until the splash ends,
 > then capture while scrolling.
 >
 > Each phase landed with codex parallel review (memory policy:

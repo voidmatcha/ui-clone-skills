@@ -115,6 +115,8 @@ if ref_claim and ref_actual and not matches(ref_claim, ref_actual):
 sys.exit(0)
 PY
   then
+    # Read by the sourcing script (section-compare.sh) to count overrides.
+    # shellcheck disable=SC2034
     DSSIM_LAST_CAP_OVERRIDE=1
     return 0
   fi

@@ -7,12 +7,12 @@ Priority order:
 2. Open-source npm packages.
 3. Manual CSS / native API implementation.
 
-> **Anti-patterns embedded in transition-implementation.md** stay in that file even when you use the OSS alternatives here:
-> - SplitText mask wrapper CSS strict rules (`line-height` / `vertical-align` traps)
-> - IntersectionObserver placement for masked reveals (`overflow: hidden` + transform child)
-> - GSAP `stagger` semantics (`each` vs `amount`)
+> **Anti-patterns that still apply when you use the OSS alternatives here:**
+> - SplitText mask wrapper CSS strict rules (`line-height` / `vertical-align` traps) — `transition-patterns.md`
+> - IntersectionObserver placement for masked reveals (`overflow: hidden` + transform child) — `transition-implementation.md`
+> - GSAP `stagger` semantics (`each` vs `amount`) — `transition-patterns.md`
 >
-> Those rules apply to ANY split-text / reveal implementation, GSAP or not — they live in transition-implementation.md because their context is generation, not alternative selection.
+> Those rules apply to ANY split-text / reveal implementation, GSAP or not — their context is generation, not alternative selection.
 
 ---
 
@@ -112,4 +112,4 @@ This ensures the generation step uses the correct alternative without re-discove
 
 ---
 
-After this step, return to `transition-implementation.md`. The SplitText mask wrapper CSS rules and the IntersectionObserver placement rules below the "GSAP Plugin Alternatives" pointer apply to ANY split-text / reveal implementation, regardless of which OSS library you swapped in here.
+After this step, return to `transition-implementation.md`. The IntersectionObserver placement rules there, and the SplitText mask wrapper CSS rules in `transition-patterns.md`, apply to ANY split-text / reveal implementation, regardless of which OSS library you swapped in here.

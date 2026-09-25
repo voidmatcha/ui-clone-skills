@@ -32,9 +32,12 @@
 #      (`ws-XXXXXX`: six alphanumerics with at least one digit and one
 #      uppercase letter, so `ws-client` / `ws-server` pass). Launchers take
 #      these from UI_CLONE_LOOP_* env vars.
-#   8. Personal project names — `onpixel` (lives under internal/, never in
-#      the shipped package).
-#   9. Lab batch labels — `batch-N item N`, `tools-batch-N`.
+#   8. Personal project names — `onpixel` (lives under the gitignored
+#      internal/ tree, never in the shipped package or CI wiring).
+#   9. Lab batch labels — `batch-N item N`, `tools-batch-N`. Bare date
+#      stamps (`YYYY-MM-DD`, `YYYY-MM`, `YYYY-0X-XX`) in shipped code
+#      (.py/.sh/manifests) are reported by their own rule; Markdown keeps the
+#      narrower `review/analysis/audit YYYY-MM-DD` form.
 #  10. Repository owner used as behavior — a hard-coded
 #      `github.com/voidmatcha/...` fetch URL inside hooks/, scripts/, or
 #      ui_clone/. Derive it from UI_CLONE_REPO / `git remote get-url origin`;
@@ -43,10 +46,9 @@
 # Allowlists are explicit per rule in check_universality.py (`allow=`), never
 # a weakened pattern: Codex host-config paths (~/.codex/config.toml,
 # hooks.json, plugins/, skills), the `${UI_CLONE_REPO:-<url>}` /
-# `UI_CLONE_REPO_DEFAULT="<url>"` env-default forms, and the
-# `internal/onpixel` path reference that keeps its tests collected. An allow
-# only covers a hit that sits INSIDE the allowed span — appending an allowed
-# token as a trailing comment does not launder the rest of the line.
+# `UI_CLONE_REPO_DEFAULT="<url>"` env-default forms. An allow only covers a
+# hit that sits INSIDE the allowed span — appending an allowed token as a
+# trailing comment does not launder the rest of the line.
 #
 # Why a gate: the cleanup history shows these creep back in through hook
 # closure comments ("Loop-codex-N closure: agent did X") and finding labels

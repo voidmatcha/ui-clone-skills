@@ -4,7 +4,7 @@
 
 ### Pre-step: Merge runtime-injected transitions (MANDATORY)
 
-If `dom-state-diff.json` exists (from Step 2.6-pre), extract runtime-injected transitions and add them to `globals.css`:
+If `dom-state-diff.json` exists (from Step 2.6-pre), list the runtime-injected transitions and add them to `globals.css`:
 
 ```bash
 node -e "
@@ -24,19 +24,13 @@ if (injected.length > 0) {
 "
 ```
 
-⛔ **These transitions are NOT in the downloaded CSS files.** They must be added manually to `globals.css`. Without them, hover effects will have no animation (instant snap instead of smooth transition).
-
-**Common Webflow runtime-injected transitions:**
-- Button hover: `transform 0.45s linear(...)` — spring bounce
-- Text hover: `clip-path 0.4s, scale 0.3s` — text clip reveal
-- Background: `background 0.3s, font-size 0.3s` — Webflow global body transition
-- Card links: `background 0.3s` — subtle hover feedback
+⛔ **These transitions are NOT in the downloaded CSS files.** Without them in `globals.css`, hover effects snap instead of animating. Typical Webflow runtime injections: `transform 0.45s linear(...)` (button spring), `clip-path 0.4s, scale 0.3s` (text clip reveal), `background 0.3s, font-size 0.3s` (global body transition), `background 0.3s` (card links).
 
 ## Step 3: Extract Computed Styles
 
 ### Key element styles
 
-> **Adapt selectors below to your target component.** Replace `.target` with the actual selector identified in Step 1 (dom-extraction.md). The selectors here are starting points — add or remove based on the actual DOM structure.
+> **Adapt selectors below to your target component.** Replace `.target` with the actual selector identified in Step 1 (dom-extraction.md); add or remove selectors to match the actual DOM structure.
 
 ```bash
 agent-browser --session <s> eval "
@@ -75,9 +69,7 @@ agent-browser --session <s> eval "
 
 ### Extract typography scale system (MANDATORY)
 
-`getComputedStyle` returns **px values** — these are viewport-specific snapshots, NOT the original CSS values. Sites like Webflow use `em`-based typography with a viewport-scaled `body` font-size (e.g., `body { font-size: 0.83vw }`), making all `em` fonts scale proportionally. If you hardcode the computed px values, the font sizes will be **wrong at every viewport width except the one you measured at**.
-
-**This step detects and records the typography scaling system so the implementation can reproduce it.**
+`getComputedStyle` returns **px values** — viewport-specific snapshots, NOT the authored CSS. Sites like Webflow use a viewport-scaled `body` font-size (e.g., `body { font-size: 0.83vw }`) with `em`-based text, so hardcoded computed px values are **wrong at every viewport width except the one you measured at**. This eval records the scaling system so the implementation can reproduce it.
 
 ```bash
 agent-browser --session <s> eval "
@@ -165,11 +157,11 @@ agent-browser --session <s> eval "
 | `em-based` | Copy the `typographyVars` as CSS custom properties. Use `var()` references. |
 | `px-fixed` | Hardcoded px values are safe. But always check at 2+ viewport widths. |
 
-**Common mistake this prevents:** Extracting `fontSize: 26.67px` (computed at 1280px) and hardcoding `fontSize: 30px` (guessing the "design" value). The actual value is `2.5em` relative to a `0.83vw` body font. At 1440px it's 30px, at 1280px it's 26.67px, at 768px it's 16px — one px value cannot represent this.
+**Common mistake this prevents:** a computed `fontSize: 26.67px` (at 1280px) is really `2.5em` of a `0.83vw` body — 30px at 1440px, 16px at 768px. One px value cannot represent it.
 
 ### ⛔ Viewport-scaled font em-conversion gate (MANDATORY)
 
-If `scalingSystem` is `viewport-scaled` or `em-based`, you MUST compute the em conversion table before proceeding. This is a **blocking gate** — do NOT move to Step 4 or generation without `em-conversion.json`.
+If `scalingSystem` is `viewport-scaled` or `em-based`, compute the em conversion table before proceeding. This is a **blocking gate** — do NOT move to Step 4 or generation without `em-conversion.json`.
 
 ```bash
 agent-browser --session <s> eval "
@@ -230,7 +222,7 @@ agent-browser --session <s> eval "
 
 ### Extract advanced visual properties (MANDATORY)
 
-The key element extraction above captures basic layout properties but misses several CSS effects that are invisible in screenshots yet critical for accurate reproduction. Extract these for EVERY element that has non-default values:
+Screenshots hide several CSS effects that break reproduction when omitted. Extract these for EVERY element that has non-default values:
 
 ```bash
 agent-browser --session <s> eval "
@@ -259,16 +251,16 @@ agent-browser --session <s> eval "
 
 **Save output to** `tmp/ref/<component>/advanced-styles.json`
 
-**Why this matters — patterns that are invisible in screenshots but break reproduction:**
-- **`mix-blend-mode: difference`** — text/elements invert color when overlapping images. Without this, overlapping elements just obscure each other
-- **`background-clip: text` + gradient** — gradient text effect. Without this, text appears as solid color
-- **`-webkit-text-fill-color: transparent`** — companion to gradient text. Without this, the gradient is hidden behind solid text fill
-- **`backdrop-filter`** — glass/blur effects on overlapping elements
-- **`body` class toggles** — many sites toggle classes on `<body>` to coordinate dark/light mode transitions across nav, background, and text simultaneously (see "Body-level state transitions" below)
+| Property | Invisible in screenshots, breaks reproduction when missing |
+|---|---|
+| `mix-blend-mode: difference` | Text inverts over images; without it overlapping elements just obscure each other |
+| `background-clip: text` + gradient, `-webkit-text-fill-color: transparent` | Gradient text; without both, text renders as a solid color |
+| `backdrop-filter` | Glass/blur effects on overlapping elements |
+| `body` class toggles | Coordinated dark/light transitions across nav, background, and text — see "Body-level state transitions" |
 
 ### Body-level state transitions
 
-Many sites coordinate visual transitions (light→dark backgrounds, nav color inversion) by toggling CSS classes on `<body>`. This is invisible in DOM extraction but critical for reproduction.
+Many sites coordinate light→dark backgrounds and nav color inversion by toggling CSS classes on `<body>`. This is invisible in DOM extraction but critical for reproduction.
 
 ```bash
 agent-browser --session <s> eval "
@@ -305,12 +297,12 @@ agent-browser --session <s> eval "
 
 **Generation rule:** If `bodyTransition` is not `'all 0s'` or `bodyClassRules` is non-empty, the implementation must:
 1. Toggle the detected class(es) on `document.body` based on scroll position or state
-2. Reproduce all CSS rules targeting `body.<class>` — including nav color inversion (`filter: brightness(0) invert(1)`), background-color transitions, and text color overrides
+2. Reproduce all CSS rules targeting `body.<class>` — nav color inversion (`filter: brightness(0) invert(1)`), background-color transitions, and text color overrides
 3. Use CSS for the cascade (e.g., `body.dark-active .nav-logo { filter: invert(1) }`) rather than React state for each affected element
 
 ### Scan for global overlays (grain, noise, texture)
 
-Many design/architecture sites apply a full-page overlay for visual texture — film grain, noise patterns, paper texture. These are easy to miss because they are `pointer-events: none` and visually subtle, but omitting them makes the implementation look "too clean" compared to the reference.
+Full-page grain/noise/texture overlays are `pointer-events: none` and visually subtle, but omitting them makes the implementation look "too clean" compared to the reference.
 
 ```bash
 agent-browser --session <s> eval "
@@ -365,7 +357,7 @@ agent-browser --session <s> eval "
 
 ### Decorative SVG extraction
 
-Decorative SVGs (curves, geometric patterns, dividers) are often unique to the design and cannot be guessed. Extract them verbatim:
+Decorative SVGs (curves, geometric patterns, dividers) are unique to the design and cannot be guessed. Extract them verbatim:
 
 ```bash
 agent-browser --session <s> eval "
@@ -417,11 +409,7 @@ agent-browser --session <s> wait 800
 # Re-run same eval — compare values
 ```
 
-**Example patterns for stroke hover animations:**
-- Stroke draw-in: idle `dasharray: totalLength 0.1px` (hidden) → hover `dasharray: 0px 999999px` (visible), or vice versa
-- Stroke morph: idle `dasharray: A B` → hover `dasharray: C D` with different segment ratios
-- Both typically need CSS transition rules on `stroke-dasharray` and `stroke-dashoffset`
-- The exact pattern varies per site — always extract idle + hover values, never assume
+Typical patterns: stroke draw-in (idle `dasharray: totalLength 0.1px` → hover `dasharray: 0px 999999px`, or vice versa) and stroke morph (idle `dasharray: A B` → hover `dasharray: C D`); both need CSS transition rules on `stroke-dasharray` and `stroke-dashoffset`. The exact pattern varies per site — always extract idle + hover values, never assume.
 
 ### Post-extraction sanitization check
 
@@ -506,18 +494,15 @@ agent-browser --session <s> eval "
 
 **Save output to** `tmp/ref/<component>/design-bundles.json`
 
-**Bundle semantics — properties that must change together:**
-- **surface** (bg + border + shadow): visual depth. Never change `backgroundColor` without checking `border` and `boxShadow`.
-- **shape** (radius + padding): element form. `borderRadius` and `padding` are proportionally related — a pill button has both large radius and generous padding.
-- **type** (fontSize + weight + family + lineHeight + letterSpacing): text hierarchy. Never change `fontSize` without checking `lineHeight` and `letterSpacing`.
-- **tone** (color + bg + borderColor): semantic color palette. The text color, background, and border of an element form a coherent tone.
-- **motion** (transition + animation): timing feel. Duration and easing function are paired — a long duration with `linear` easing feels different from the same duration with `ease-out`.
+| Bundle | Properties that must change together | Rule |
+|---|---|---|
+| **surface** | bg + border + shadow | Never change `backgroundColor` without checking `border` and `boxShadow` |
+| **shape** | radius + padding | Proportionally related — a pill button has both large radius and generous padding |
+| **type** | fontSize + weight + family + lineHeight + letterSpacing | Never change `fontSize` without checking `lineHeight` and `letterSpacing` |
+| **tone** | color + bg + borderColor | One coherent semantic palette per element |
+| **motion** | transition + animation | Duration and easing are paired — `linear` and `ease-out` at the same duration feel different |
 
-Elements sharing the same bundle ID should receive identical values in the implementation. If two cards share `surface-3`, they must have the same bg + border + shadow.
-
----
-
-> **Next:** Step 4 (Responsive Detection) is in `responsive-detection.md`.
+Elements sharing a bundle ID must receive identical values in the implementation: two cards with `surface-3` get the same bg + border + shadow.
 
 ## Section Height and Inter-Section Spacing (MANDATORY)
 
@@ -548,10 +533,7 @@ agent-browser --session <s> eval "(() => {
 })()"
 ```
 
-Save this as `section-layout.json`. This captures:
-- Exact section heights (use these as `h-[Xpx]` or `min-h-[Xpx]`)
-- Gaps between sections (often 100-300px, invisible in screenshots)
-- Flex/grid container properties that affect spacing
+Save this as `section-layout.json`. It captures exact section heights (use these as `h-[Xpx]` or `min-h-[Xpx]`), gaps between sections (often 100-300px, invisible in screenshots), and the flex/grid container properties that affect spacing.
 
 ### Extract container wrapping properties
 
@@ -576,4 +558,8 @@ agent-browser --session <s> eval "(() => {
 })()"
 ```
 
-**WHY THIS MATTERS:** In a real session, a dark-section wrapper had `gap: 234px` between 4 child sections. Without extracting this, the implementation was 957px shorter than the original, causing every section below to be at a wrong scroll position. This was caught only after 3 rounds of user feedback.
+**WHY THIS MATTERS:** a missed wrapper `gap` (e.g. 234px between 4 child sections) makes the implementation hundreds of px shorter than the original and shifts every section below to the wrong scroll position.
+
+---
+
+> **Next:** Step 4 (Responsive Detection) is in `responsive-detection.md`.

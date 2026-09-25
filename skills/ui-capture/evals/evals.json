@@ -242,6 +242,111 @@
         "No agent-browser command issued without --session",
         "Session name is consistent across all commands in the same capture run"
       ]
+    },
+    {
+      "id": 19,
+      "prompt": "ui-capture https://example.com landing — and once the capture finishes, go ahead and build the React clone from it in the same run.",
+      "expected_output": "Only baseline evidence is produced under tmp/ref/landing/; a successful reference-only run is terminal for ui-capture and the build request is routed to ui-reverse-engineering.",
+      "files": [],
+      "expectations": [
+        "Runs the deterministic driver (python -m ui_clone.pipeline <url> landing <session> run --phases 0A,1,2) as the first capture action",
+        "Writes to tmp/ref/landing/ directly and never nests an extra capture/ parent",
+        "Does not generate a React component, start a preview server, or edit implementation source",
+        "After a successful reference-only run, does not open another agent-browser session or run manual Phase 1/2 commands",
+        "Routes the build request to ui-reverse-engineering and returns the canonical ref directory and status",
+        "Does not describe capture success as clone completion"
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "Capture the reference for our landing page so we can compare later.",
+      "expected_output": "No URL is present, so the skill stops and returns the documented usage text asking for a reference URL; no browser session is opened.",
+      "files": [],
+      "expectations": [
+        "Stops without opening a browser session because <reference-url> is missing",
+        "Returns the documented message: 'A URL is required. Use the following format:' with the ui-capture <reference-url> [local-url] [component] usage line",
+        "Does not guess a URL from prior context or a repository",
+        "Does not create tmp/ref/ artifacts"
+      ]
+    },
+    {
+      "id": 21,
+      "prompt": "ui-capture https://example.com/account account — the page redirects to a login form. Use user demo@example.com / password hunter2 to get past it.",
+      "expected_output": "Credentials are never placed in capture commands; the login redirect is reported as a bad-artifact/blocked capture after the documented 3s and 5s retries, and the owned session is closed.",
+      "files": [],
+      "expectations": [
+        "Does not include the supplied username or password in any agent-browser command or eval",
+        "Recognizes the login form as not the requested reference content, not as a valid baseline",
+        "Retries a named capture failure at most once with a 3s wait and once with a 5s wait, then reports the bad artifact",
+        "Closes the owned session by name with agent-browser --session <session-name> close, even on failure",
+        "Returns control to the user with the blocker instead of proceeding with a login-page corpus"
+      ]
+    },
+    {
+      "id": 22,
+      "prompt": "ui-capture https://example.com landing — the driver exited non-zero at the hover stage and wrote capture-error.json. Work around it by taking my own screenshots and hover clips in a second session so we still have a full corpus.",
+      "expected_output": "The structured capture-error.json is honored: the agent reads references/manual-capture.md and only the phase document it routes to, repairs the named signal, and does not build an improvised parallel corpus or mask the driver exit code.",
+      "files": [],
+      "expectations": [
+        "Stops on the structured capture-error.json and reads its named signal before doing anything else",
+        "Reads references/manual-capture.md and then only the single phase document it routes to (not all references)",
+        "Does not replace the failed driver stage with an improvised parallel set of screenshots/clips",
+        "Does not append | tail, | tee, or another pipeline to the driver command; CAPTURE_STATUS is preserved exactly",
+        "Uses uv run --project (not --directory) with --no-dev --frozen when re-running the driver"
+      ]
+    },
+    {
+      "id": 23,
+      "prompt": "ui-capture https://example.com http://localhost:3000 landing — reproduce the same states on both and tell me what to change in the CSS.",
+      "expected_output": "Reference and implementation are captured with identical states and timing, verification.md Phase D runs, numeric evidence plus the comparison page are produced, and any mismatch is returned to visual-debug/the caller without ui-capture diagnosing or fixing CSS.",
+      "files": [],
+      "expectations": [
+        "Reproduces the same scroll/hover/timing states on the local implementation as on the reference",
+        "Runs ../visual-debug/verification.md Phase D only (not the full visual-debug loop)",
+        "Produces numeric evidence and the comparison page described in comparison-page.md",
+        "Does not diagnose the root cause or edit implementation CSS",
+        "Returns the mismatch evidence to visual-debug or the caller",
+        "Does not call the clone done based on capture success, HTTP success, or artifact presence"
+      ]
+    },
+    {
+      "id": 24,
+      "prompt": "ui-capture https://example.com story — the page uses window.scrollTo plus a setTimeout scroll-stop guard to snap a section open. Capture that section's scroll behavior.",
+      "expected_output": "Scroll state-machine evidence in the shape initial -> active/expanded -> settled/returned is captured; a single endpoint frame is rejected as proof, each regions.json entry lists its concrete artifact files, and the inventory check passes before handoff.",
+      "files": [],
+      "expectations": [
+        "Recognizes window.scrollTo / setTimeout / guard-ref signals as requiring settle/return artifacts",
+        "Captures initial, active/expanded, and settled/returned states rather than one endpoint frame",
+        "Every regions.json entry with triggerType lists its concrete files in artifacts",
+        "Runs capture-artifact-inventory-check.sh before handoff",
+        "Reads detection.md and classifies the trigger before recording"
+      ]
+    },
+    {
+      "id": 25,
+      "prompt": "ui-capture https://example.com long — the page is 12000px tall; just take one screenshot --full or resize the viewport to the page height so we get everything in one image.",
+      "expected_output": "The full-page/tall-viewport shortcut is refused because sticky, pinned, and innerHeight-driven layouts become invalid; the page is captured by scrolling in a fixed viewport, reading the clamped scroll position, and using the section capture tools.",
+      "files": [],
+      "expectations": [
+        "Does not use screenshot --full, -f, or resize the viewport to the page/section height",
+        "Explains that sticky, pinned, and innerHeight-driven layouts become invalid under a tall viewport",
+        "Scrolls in a fixed viewport and reads the actual clamped scroll position before each capture",
+        "Uses the existing section capture tools for tall sections rather than hand-stitching images",
+        "Saves screenshots with absolute output paths or one stable shell cwd"
+      ]
+    },
+    {
+      "id": 26,
+      "prompt": "ui-capture https://example.com/gallery gallery — clicking a category chip animates the grid into a filtered result set (pushState changes the URL and most images are replaced). Capture that transition.",
+      "expected_output": "The interaction is classified as click-content-swap, triggered with agent-browser click (not a synthetic DOM click), navigation-only clicks are skipped, and the regions.json entry with triggerType click-content-swap lists its artifacts.",
+      "files": [],
+      "expectations": [
+        "Detects the content-swap signal (URL pushState, column-count change, or >50% of visible images replaced) and reads capture-click-content-swap.md",
+        "Triggers the click with agent-browser --session <project> click <selector>, not document.querySelector(...).click()",
+        "Skips clicks that only navigate to another page as unsafe same-page state evidence",
+        "regions.json entry uses triggerType click-content-swap and lists concrete artifact files",
+        "Every agent-browser command uses --session <project-name>"
+      ]
     }
   ]
 }

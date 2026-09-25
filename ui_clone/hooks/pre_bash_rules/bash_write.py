@@ -92,7 +92,7 @@ def _bash_write_target(cmd: str) -> str | None:
 # raises the cost of destruction across the natural tools; it is not a sandbox, so
 # determined obfuscation (path built from variables, exotic tools) is out of scope.
 #
-# ⛔ FROZEN VERB SET (Fable + Codex review, 2026-07): do NOT keep adding
+# ⛔ FROZEN VERB SET (settled by review): do NOT keep adding
 # destructive-verb closures (busybox/setfacl/rename-class residuals are known-open
 # and stay open). The threat model is a LAZY agent that stops at the first
 # deny-with-instructions, not an adversary defeating a sandbox — each extra verb

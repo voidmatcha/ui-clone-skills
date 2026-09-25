@@ -120,9 +120,6 @@ echo "═══ Analyzing chunks ═══"
 LIBS="gsap|ScrollTrigger|ScrollSmoother|Lenis|locomotive|Flip|SplitText|motion\.|framer-motion|anime\."
 # Transition-related patterns
 TRANS="clipPath|xPercent|yPercent|autoAlpha|stagger|fromTo|scrollTrigger|\.to\(|\.from\("
-# Selector patterns near animations
-SELS='"[.#][a-zA-Z][^"]{2,40}"'
-
 ANALYSIS="[]"
 
 for f in "$DIR"/bundles/*.js; do

@@ -5,7 +5,7 @@
 # Usage:
 #   completion-report.sh [--check] <ref-dir> <impl-root>
 #
-# 2026-05-22 SKILL.md "Hard Done Criteria" mandates a completion
+# SKILL.md "Hard Done Criteria" mandates a completion
 # report with specific fields (modified files, ref-JS dependency,
 # runtime-proof, transition-proof, scroll/hover/header state proof,
 # gate output, INCOMPLETE markers). This script reads the relevant

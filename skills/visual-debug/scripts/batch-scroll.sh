@@ -122,7 +122,12 @@ echo "▸ Opening both sites..."
 agent-browser --session "$SESSION_REF" ${BROWSER_ARGS:+--args "$BROWSER_ARGS"} open "$ORIG_URL_CB" 2>&1 | head -1
 agent-browser --session "$SESSION_IMPL" ${BROWSER_ARGS:+--args "$BROWSER_ARGS"} open "$IMPL_URL" 2>&1 | head -1
 
+# `2>&1 >/dev/null` is deliberate here and below: agent-browser's stdout echo is
+# discarded while its stderr is folded into this script's progress log (the
+# same stream the `open` lines above merge into), so failures stay visible.
+# shellcheck disable=SC2069
 agent-browser --session "$SESSION_REF" set viewport $VIEW_W $VIEW_H 2>&1 > /dev/null
+# shellcheck disable=SC2069
 agent-browser --session "$SESSION_IMPL" set viewport $VIEW_W $VIEW_H 2>&1 > /dev/null
 
 # Block images to reduce AE noise from dynamic content differences
@@ -148,7 +153,9 @@ HIDE_IMAGES_JS='(() => {
 })()'
 
 # Wait for page JS to fully initialize (GSAP sets section heights, ScrollTrigger binds).
+# shellcheck disable=SC2069
 agent-browser --session "$SESSION_REF" wait "$WAIT_INIT" 2>&1 > /dev/null
+# shellcheck disable=SC2069
 agent-browser --session "$SESSION_IMPL" wait "$WAIT_INIT" 2>&1 > /dev/null
 
 # Smart carousel freeze: find and pause only carousel/auto-rotation timers.
@@ -416,12 +423,16 @@ echo "▸ Capturing (interleaved)..."
 if [ "$USE_ANCHOR_PLAN" = "1" ]; then
   while IFS=$'\t' read -r NAME Y_REF Y_IMPL REASON; do
     [ -n "$NAME" ] || continue
+    # shellcheck disable=SC2069
     agent-browser --session "$SESSION_REF" eval "$(_scroll_js "$ORIG_SEL" "$Y_REF")" 2>&1 > /dev/null
+    # shellcheck disable=SC2069
     agent-browser --session "$SESSION_IMPL" eval "$(_scroll_js "$IMPL_SEL" "$Y_IMPL")" 2>&1 > /dev/null
 
     sleep "$(awk "BEGIN { printf \"%.3f\", $WAIT_SCROLL / 1000 }")"
 
+    # shellcheck disable=SC2069
     agent-browser --session "$SESSION_REF" screenshot "$SHOT_DIR/ref/${NAME}.png" 2>&1 > /dev/null
+    # shellcheck disable=SC2069
     agent-browser --session "$SESSION_IMPL" screenshot "$SHOT_DIR/impl/${NAME}.png" 2>&1 > /dev/null
 
     if [ ! -s "$SHOT_DIR/ref/${NAME}.png" ] || [ ! -s "$SHOT_DIR/impl/${NAME}.png" ]; then
@@ -436,12 +447,16 @@ else
     Y_REF=$(awk "BEGIN { printf \"%d\", $ORIG_HEIGHT * $PCT / 100 }")
     Y_IMPL=$(awk "BEGIN { printf \"%d\", $IMPL_HEIGHT * $PCT / 100 }")
 
+    # shellcheck disable=SC2069
     agent-browser --session "$SESSION_REF" eval "$(_scroll_js "$ORIG_SEL" "$Y_REF")" 2>&1 > /dev/null
+    # shellcheck disable=SC2069
     agent-browser --session "$SESSION_IMPL" eval "$(_scroll_js "$IMPL_SEL" "$Y_IMPL")" 2>&1 > /dev/null
 
     sleep "$(awk "BEGIN { printf \"%.3f\", $WAIT_SCROLL / 1000 }")"
 
+    # shellcheck disable=SC2069
     agent-browser --session "$SESSION_REF" screenshot "$SHOT_DIR/ref/${PCT}pct.png" 2>&1 > /dev/null
+    # shellcheck disable=SC2069
     agent-browser --session "$SESSION_IMPL" screenshot "$SHOT_DIR/impl/${PCT}pct.png" 2>&1 > /dev/null
 
     if [ ! -s "$SHOT_DIR/ref/${PCT}pct.png" ] || [ ! -s "$SHOT_DIR/impl/${PCT}pct.png" ]; then

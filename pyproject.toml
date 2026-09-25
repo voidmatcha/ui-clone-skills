@@ -1,6 +1,6 @@
 [project]
 name = "ui-clone-skills"
-version = "0.8.17"
+version = "0.8.18"
 description = "Clone any live website URL into React + Tailwind code — Claude Code and Codex plugin with extraction-first verification (real CSS, real animation params from JS bundles, AE/SSIM pixel diff)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -90,10 +90,7 @@ build-backend = "hatchling.build"
 packages = ["ui_clone"]
 
 [tool.pytest.ini_options]
-# internal/onpixel/tests covers maintainer-only automation that is kept out of
-# the ui_clone package (see .gitignore: internal/* is scratch, internal/onpixel/
-# is tracked).
-testpaths = ["tests", "internal/onpixel/tests"]
+testpaths = ["tests"]
 # Safety net for subprocess.run calls that shell out to scripts touching
 # agent-browser: one un-timed call against a dead host would hang serial CI.
 # timeout_method=thread terminates the whole process on expiry, even when

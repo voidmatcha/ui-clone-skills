@@ -138,6 +138,20 @@ RULES = (
         ),
     ),
     Rule(
+        # Any calendar stamp in shipped code is a lab note, whatever word
+        # precedes it: `YYYY-MM-DD SKILL.md ...`, `Review follow-up
+        # YYYY-MM-DD`, `(YYYY-MM-DD)`, `since YYYY-MM`, and redacted
+        # placeholders such as `YYYY-0X-XX`. Code comments and messages state
+        # the rule or finding, never the day it was written. Markdown keeps
+        # the narrower rule above (docs may legitimately date a design
+        # record); CHANGELOG / benchmark / internal / tests are excluded trees.
+        "Bare date stamps in code (YYYY-MM-DD / YYYY-MM / YYYY-0X-XX)",
+        re.compile(
+            r"(?<![\w.-])20[0-9]{2}-(?:[01][0-9]|[0-9X]X)(?:-(?:[0-3][0-9]|[0-9X]X))?(?![\w-])"
+        ),
+        frozenset({".py", ".sh", ".json", ".toml", ".yml", ".yaml"}),
+    ),
+    Rule(
         "Codex iteration labels (codex-1N / Codex LN QN / Round N)",
         re.compile(r"\bcodex-(1[0-9]|[2-9][0-9])\b|Codex L[0-9]+ Q[0-9]+|\bRound [12]\b"),
     ),
@@ -174,11 +188,10 @@ RULES = (
         ),
     ),
     Rule(
-        # The only legitimate mention outside internal/ is the path reference
-        # that keeps its test suite collected (pyproject testpaths, ci-local).
+        # Personal projects live under the gitignored internal/ tree and are
+        # never referenced from shipped surfaces or CI wiring.
         "Personal project names (onpixel)",
         re.compile(r"\bonpixel\b", re.IGNORECASE),
-        allow=(re.compile(r"internal/onpixel"),),
     ),
     Rule(
         "Lab batch labels (batch-N item N, tools-batch-N)",

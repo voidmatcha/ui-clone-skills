@@ -1,6 +1,53 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.18] - 2026-09-24
+
+### Changed
+
+- `ui_clone/section_compare_sections.py` (2716 lines) and
+  `ui_clone/section_capture.py` (1566 lines) are split into cohesive sibling
+  modules (`section_compare_{common,synthesis,merge,scoring,pairing,coverage,drift}.py`,
+  `section_capture_{primitives,js,browser}.py`) by a pure move; both original
+  modules stay as facades that re-export every symbol, and the functions tests
+  monkeypatch remain defined in `section_capture.py`.
+- The skill documentation read path is measured by
+  `scripts/ci/skill_read_graph.py` and budgeted by
+  `review_checks.py skill-reads`. Rarely needed detail moved behind
+  conditional links (`generation-modes.md`, `generation-audits.md`,
+  `post-gen-state-loops.md`, `transition-patterns.md`,
+  `boundary-collision-sweep.md`): the full-clone mandatory path drops from
+  about 94.8k to 52.2k words, capture-only to about 1.2k, and single-mismatch
+  visual debugging to about 0.9k.
+- `operational-rules.md` states that trigger-opened UI (modal, drawer) is only
+  cloned as an interaction state inside a whole-page run, and adds
+  "Cleaning up tmp/ref/": cleanup only on explicit request, after all gates,
+  with a warning that resume and re-verification become impossible.
+- Outcome evals grow by 27 cases across the three public skills; stale evals
+  (2, 4, 14, 20, 21, 22, 25) now match the current scope contract.
+  `tests/test_skill_evals.py` validates eval schemas, and
+  `scripts/ci/eval_grounding.py` (`review_checks.py eval-grounding`, wired into
+  `review.sh`) fails when an eval references a file, script, or gate that does
+  not exist.
+- The `spec.py` capture-verification warning points at the section that
+  actually exists (`transition-spec-rules.md`, Step 5e).
+- `internal/` is fully gitignored again; the maintainer-only showcase loop
+  that lived under `internal/onpixel/` is untracked (kept locally only), and
+  `pyproject.toml` testpaths, `scripts/ci/ci-local.sh`, `scripts/ci/review.sh`,
+  and the universality allowlist no longer reference it. CI passes with the
+  directory present or absent.
+- `ui_clone/section_capture.py` documents the pairing rule that an
+  implementation capture is skipped when the reference capture of that section
+  failed (the section reports as UNMEASURED instead), plus the facade
+  patch-target pitfall; `tests/test_facade_patch_targets.py` guards both
+  facades' `__all__` and the names tests monkeypatch.
+- `ui_clone/section_guards.py` pins the `mask-coverage.json` contract: a
+  section absent from the map (the `{}` foreground-roi manifest) is unmeasured
+  and evaluates exactly as an explicit `0.0` row; gate outcomes are unchanged.
+- `scripts/ci/check_universality.py` adds a bare-date rule for shipped code
+  (`YYYY-MM-DD`, `YYYY-MM`, `YYYY-0X-XX` stamps in `.py`/`.sh`/manifests);
+  dated lab notes in hooks, gates, and check scripts were reworded to timeless
+  wording. Shellcheck SC2069/SC2034/SC2154 sites now carry explicit
+  justifications or dropped dead assignments, with no redirect behavior change.
 
 ### Known follow-up
 

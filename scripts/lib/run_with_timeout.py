@@ -5,8 +5,8 @@ Why this exists:
   scripts/lib/timeout-shim.sh's pure-bash fallback (`"$@" &` background +
   watchdog sleep + `kill -TERM`) interacts badly with sub-check process
   groups when invoked inside a pipefail-enabled `if cmd | tail | sed; then`
-  pipeline (revealed by run-required-checks test regressions during the
-  2026-05-25 timeout-injection attempt). The fallback's TERM only hits the
+  pipeline (revealed by run-required-checks test regressions during a
+  timeout-injection attempt). The fallback's TERM only hits the
   immediate child PID, leaving the child's spawned tree (bash → node →
   chromium → …) alive and the wait blocked.
 

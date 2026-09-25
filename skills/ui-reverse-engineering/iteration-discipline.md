@@ -2,13 +2,13 @@
 
 **Audience**: anyone (host-agnostic) repairing generated content, structure, visuals, or behavior during Phase 7.
 
-- **Claude Code path**: invoked via `visual-debug-iterator` sub-agent (`.claude-plugin/agents/visual-debug-iterator.md`). The sub-agent reads this file as its operational contract. The sub-agent's `disallowedTools` field enforces the vision-free rule by blocking `Read(*.png)` etc.
+- **Claude Code path**: invoked via `visual-debug-iterator` sub-agent (`.claude-plugin/agents/visual-debug-iterator.md`), which reads this file as its operational contract. Its `disallowedTools` field enforces the vision-free rule by blocking `Read(*.png)` etc.
 - **Codex native path**: invoked via the `visual-debug-iterator` native subagent (`.codex/agents/visual-debug-iterator.toml`) when Codex/OMX subagent routing is available. The vision-free rule is policy in the TOML instructions: do not read PNG/JPG/WebP/GIF files.
 - **Inline fallback**: if a host has no delegated-worker surface, perform the same work in the main context and state that fallback explicitly. The vision-free rule still applies.
 
 ## Pre-condition
 
-A generated implementation has a failed content, structure, runtime, or visual check. Read that check's artifact before editing. Pixel-specific rules below apply when `section-compare.sh` or `tree-diff.sh` reports FAIL; they do not require pixel capture to validate a text or runtime repair.
+A generated implementation has a failed content, structure, runtime, or visual check. Read that check's artifact before editing. Pixel-specific rules below apply when `section-compare.sh` or `tree-diff.sh` reports FAIL; a text or runtime repair does not require pixel capture to validate.
 
 ## Inputs
 
@@ -23,38 +23,37 @@ A generated implementation has a failed content, structure, runtime, or visual c
 ## First generated draft
 
 Before exhaustive motion checks, compare preserved text/media and section ownership
-against the captured scaffold and inventories. Use the existing text-fidelity,
+against the captured scaffold and inventories with the existing text-fidelity,
 runtime-text-sequence, asset, and structure checks from the verification plan.
 For a missing text row, trace live reference -> captured node -> generated node ->
-rendered state. Recover extraction loss, restore generation loss, or fix visibility
-at its captured trigger; do not duplicate hidden variants just to increase counts.
+rendered state, then recover extraction loss, restore generation loss, or fix
+visibility at its captured trigger; never duplicate hidden variants to raise counts.
 
-Check representative sections at the same viewport and scroll state after these
-foundations pass. Early geometry is a diagnostic for missing/collapsed structure;
-page height is a final aggregate cross-check, never the sizing objective. Fix the
-source layout rule, containing block, font/media metrics, or pin lifecycle instead
-of inserting numeric height floors or blank space. Run affected load-bearing motion
-early when needed to reproduce a section's layout. Do not wait for every unrelated
-hover/click entry to pass before diagnosing that section.
+After these foundations pass, check representative sections at the same viewport
+and scroll state. Early geometry diagnoses missing/collapsed structure; page height
+is a final aggregate cross-check, never the sizing objective. Fix the source layout
+rule, containing block, font/media metrics, or pin lifecycle instead of inserting
+numeric height floors or blank space. Run load-bearing motion early when a
+section's layout depends on it; do not wait for unrelated hover/click entries.
 
 When representative pairs show a semantic mismatch that the numeric/text
 diagnostics do not explain, ask the main agent to delegate Phase E with
-`reviewMode: "diagnostic"` as defined in `../visual-debug/comparison-fix.md`.
-Reuse the existing matched pairs for the affected section or splash. The iterator
-stays vision-free; this early diagnosis cannot satisfy final visual review.
+`reviewMode: "diagnostic"` as defined in `../visual-debug/comparison-fix.md`,
+reusing the existing matched pairs for the affected section or splash. The
+iterator stays vision-free; this early diagnosis cannot satisfy final visual review.
 
 ## Verification cost discipline (inner iterations)
 
-For any known content, structure, runtime, or geometry failure, first read its failing rows and compare
-the reference and implementation under the same viewport, initial state, scroll
-target, and settling conditions. Fix the implementation or recover invalid
-measurement evidence; never weaken a check to clear it. Rerun the failing check
-and its dependency closure using `UI_CLONE_ITERATION_CHECKS=<check-id>` with
-`run-required-checks.sh`. Repeat expensive section/motion capture only after these
-failures clear, or when a specific diagnostic question requires that measurement.
-Route exhaustive transition sweeps through the dispatcher so its prerequisite
-barriers apply. Direct motion probes are for a named diagnostic question or the
-affected IDs, not a way around failed content/section checks.
+For any known content, structure, runtime, or geometry failure, first read its
+failing rows and compare reference and implementation under the same viewport,
+initial state, scroll target, and settling conditions. Fix the implementation or
+recover invalid measurement evidence; never weaken a check to clear it. Rerun the
+failing check and its dependency closure using `UI_CLONE_ITERATION_CHECKS=<check-id>`
+with `run-required-checks.sh`. Repeat expensive section/motion capture only after
+these failures clear, or when a specific diagnostic question requires that
+measurement. Route exhaustive transition sweeps through the dispatcher so its
+prerequisite barriers apply; direct motion probes answer a named diagnostic
+question or cover the affected IDs, never bypass failed content/section checks.
 Report the remaining failed checks even when other sections pass. Process liveness,
 a successful build, and matching total height do not prove visual convergence.
 
@@ -65,30 +64,29 @@ full suite), so inner iterations are SAFE to scope:
 
 1. **Tier:** `UI_CLONE_VERIFY_TIER=standard` while iterating (one-shot browser
    checks, no 60fps video). Use comprehensive for closeout or when the named
-   failure requires frame-by-frame evidence; scope the latter to affected IDs.
+   failure requires frame-by-frame evidence, scoped to the affected IDs.
 2. **Sections:** focus implementation edits on the failing section rows. The
-   section comparer currently measures the captured section inventory;
+   section comparer measures the captured section inventory;
    `UI_CLONE_VERIFY_SECTIONS` has no implemented consumer and does not reduce
-   that scope. Do not advertise it as an optimization or omit required rows.
+   that scope — do not advertise it as an optimization or omit required rows.
 3. **Transitions:** `UI_CLONE_FIRES_IDS=<id1,id2>` re-probes the affected spec
-   entries — writes `transition-fires.scoped.json` so the canonical artifact is
+   entries and writes `transition-fires.scoped.json` so the canonical artifact is
    never clobbered by a partial measurement. Firing alone does not prove the
    correct target, amplitude, or timing; use matched-state trajectory evidence.
 4. **Affected set:** after a scoped fix, test the failed entries and any siblings
    driven by the same changed controller. Broaden only when that dependency
-   requires it, and state why. Do not insist on the full entry set merely because
-   partial evidence cannot certify completion; repair and closeout are different
-   stages. Independent failures need not all be fixed before testing one fix.
+   requires it, and state why. Repair and closeout are different stages:
+   independent failures need not all be fixed before testing one fix.
 5. **Closeout:** the final `pipeline ... verify` must run full comprehensive —
    scoped/standard artifacts cannot satisfy the Stop hook by design.
-6. **Dynamic-reference pinning:** sites with carousels / auto-rotating banners /
-   lazy content change between ref captures, so re-capturing the ref every
-   compare diffs a MOVING target (impl can never converge on it). After the
-   FIRST full ref capture, iterate with `RECATCH_REF=0` (frozen-ref reuse —
-   compares against the same frozen ref crops every cycle); re-capture
-   explicitly only when the ref evidence is genuinely stale. Carousel state is
-   pinned automatically (Swiper/Splide stop + slide 0, videos at frame 0) on
-   BOTH sides, so freeze your impl's initial carousel index at 0 to match.
+6. **Dynamic-reference pinning:** carousels, auto-rotating banners, and lazy
+   content change between ref captures, so re-capturing the ref every compare
+   diffs a moving target the impl can never converge on. After the FIRST full
+   ref capture, iterate with `RECATCH_REF=0` (frozen-ref reuse — the same frozen
+   ref crops every cycle); re-capture explicitly only when the ref evidence is
+   genuinely stale. Carousel state is pinned automatically (Swiper/Splide stop +
+   slide 0, videos at frame 0) on BOTH sides, so freeze your impl's initial
+   carousel index at 0 to match.
 
 ## Waiting and evidence reuse
 
@@ -96,58 +94,57 @@ Keep one owned job per affected capture/check and reuse its job handle. Prefer
 completion notifications or a bounded wait (typically 30–60 seconds) over repeated
 `tail`/status calls. Inspect a bounded log excerpt on completion, a new error, or
 a suspected stall; an unchanged log is not a reason to launch another job. For a
-new status request, check recent session activity and the owned job/process state
-without rerunning verification. A stale "done" banner, an idle metadata field,
-or a living preview server alone cannot establish whether the agent is working.
+status request, check recent session activity and the owned job/process state
+without rerunning verification: a stale "done" banner, an idle metadata field, or
+a living preview server alone cannot establish whether the agent is working.
 Distinguish active work, waiting on a live check, awaiting input, and stopped;
 state uncertainty when those signals disagree. See `operational-rules.md` for
 stalled-run recovery.
 
-Read changed failing rows and diffs, not whole reports on every iteration. Reuse
-existing matched images through the Phase E diagnostic path above; repeatedly
-opening the same screenshots is not a new diagnosis and does not waive the
-iterator's vision-free contract.
+Read changed failing rows and diffs, not whole reports, on every iteration. Reuse
+existing matched images through the Phase E diagnostic path above; re-opening the
+same screenshots is not a new diagnosis and does not waive the vision-free contract.
 
 ## Diagnose the measurement before repairing the implementation
 
 A failed check may indicate a product mismatch, an invalid capture, or a checker
 that exercised the wrong state. Inspect the recorded action selector, measured
-selector, match counts, viewport, and input sequence before assigning the cause.
-Classify each failure as implementation, reference/capture, checker, or unknown.
-For unknown failures, run a bounded diagnostic before editing implementation code.
-For example, a missing measurement descendant is not proved to be an offscreen
-activation; a laid-out video may require viewport entry; a click trigger may be
-outside the measured container. Preserve the original failure artifact and repair
-the producer/checker with both a recovery case and a genuine-failure regression.
-Do not replace ambiguous motion with a PASS, fabricate an absent splash, or relax
-thresholds to accommodate a specific site. Reproduce only the affected check after
-a tool repair; canonical clone completion still requires the normal final gates.
+selector, match counts, viewport, and input sequence, then classify each failure
+as implementation, reference/capture, checker, or unknown. For unknown failures,
+run a bounded diagnostic before editing implementation code: a missing measurement
+descendant is not proof of offscreen activation, a laid-out video may require
+viewport entry, a click trigger may sit outside the measured container. Preserve
+the original failure artifact and repair the producer/checker with both a recovery
+case and a genuine-failure regression. Do not replace ambiguous motion with a PASS,
+fabricate an absent splash, or relax thresholds to accommodate a specific site.
+Reproduce only the affected check after a tool repair; canonical clone completion
+still requires the normal final gates.
 
 Keep checker repairs in an isolated tooling checkout with the reproducer and
-regression results. Do not overwrite installed plugin caches during a clone run.
+regression results; do not overwrite installed plugin caches during a clone run.
 If tooling repair exceeds the assigned worker scope, return the evidence to the
 coordinator. If the user has already authorized that repository and repair scope,
 carry the authorization in the worker brief and continue without asking again.
 The visual-debug iterator remains implementation-only; assign authorized checker
 maintenance to a separate tooling worker, then return its validated evidence.
-Record any checker revision or capture-setting change and remeasure
-the affected baseline before comparing results; a newly passing checker after a
-tool change alone is not evidence that the implementation improved.
+Record any checker revision or capture-setting change and remeasure the affected
+baseline before comparing results; a newly passing checker after a tool change
+alone is not evidence that the implementation improved.
 
 Static appearance controls must not certify runtime behavior. Freezing shader
 time, forcing final styles, removing a scroll container's clipping, or disabling
-an animation may help isolate a diagnostic, but changes the behavior under test.
-Keep those results separate from canonical motion/interaction evidence and rerun
-the affected checks under the unmodified live behavior. Applying a behavior-changing
+an animation may isolate a diagnostic but changes the behavior under test: keep
+those results separate from canonical motion/interaction evidence and rerun the
+affected checks under the unmodified live behavior. Applying a behavior-changing
 override to both sides does not make it valid runtime evidence. Source-to-source
 calibration can identify unstable measurement; it cannot erase a reproducible
 implementation divergence or turn an unmeasured target into PASS.
 
 ## Discipline
 
-1. **VISION-FREE — strict.** Do NOT `Read` any `.png` / `.jpg` / `.jpeg` / `.webp` / `.gif` file. The plugin's value prop is "near-zero vision tokens"; reading diff images here defeats the entire purpose AND introduces host vision-model interpretation variance. Use the text-based signals in order:
+1. **VISION-FREE — strict.** Do NOT `Read` any `.png` / `.jpg` / `.jpeg` / `.webp` / `.gif` file. The plugin's value prop is "near-zero vision tokens"; reading diff images defeats it AND introduces host vision-model interpretation variance. Use the text-based signals in order:
    - **1st: `auto-diagnose.sh`** — `bash $PLUGIN_ROOT/skills/visual-debug/scripts/auto-diagnose.sh <session> <ref-url> <impl-url> tmp/ref/<component>/sections/diff/<worst-failing-section>.png` — hotspot selectors via elementFromPoint + per-selector computed-style diff, all text. (4 args; the diff crop comes from section-compare's `sections/diff/`.)
-   - **2nd: `tree-diff-status.json` + `tree-diff.json`** — DOM/style mismatches in text form (display, flex-direction, position, dimensions, font props). This catches structural fails that pixel diff can't explain.
+   - **2nd: `tree-diff-status.json` + `tree-diff.json`** — DOM/style mismatches in text form (display, flex-direction, position, dimensions, font props). Catches structural fails that pixel diff can't explain.
    - **3rd: `computed-diff.sh`** — per-element computed-style comparison, text only.
    - **4th: `diagnosis.md` catalog (Root Cause A-R)** — classify by symptom, apply by class.
    - **Last resort (only if all above return "nothing actionable"):** request main agent to escalate — do NOT read the PNG yourself.
@@ -173,7 +170,7 @@ implementation divergence or turn an unmeasured target into PASS.
 Measure the signal the fix is intended to change: missing-text rows for content,
 parent/asset/layout differences for structure, affected trigger/trajectory results
 for behavior, and per-section AE for pixel mismatches. Do not require an unrelated
-full visual sweep to prove a content or runtime repair. A build or total-height
+full visual sweep to prove a content or runtime repair; a build or total-height
 match alone does not establish progress.
 
 - Record a compact receipt in the existing iteration log: failing check/row,
@@ -181,27 +178,26 @@ match alone does not establish progress.
   evidence paths. Compare only matching reference evidence, viewport/state,
   checker revision, and settings; mark incompatible results as not comparable.
 - During visual iterations, record per-section AE deltas. For any failure class,
-  two scoped iterations without
-  meaningful improvement require a new source-backed hypothesis or the delegated
-  source-forensics path; do not repeat the same correction or broaden blindly.
+  two scoped iterations without meaningful improvement require a new source-backed
+  hypothesis or the delegated source-forensics path; do not repeat the same
+  correction or broaden blindly.
 - Never obtain convergence by weakening thresholds, hiding content, inventing
   spacers, or excluding failures without reference-backed applicability evidence.
 - Final closeout still requires comprehensive, unscoped checks and canonical stamps.
-  Partial improvements must be reported alongside unresolved failures.
   Report PASS, FAIL, UNMEASURED, SKIP, and STRUCTURAL_ONLY counts separately against
-  the planned scope, including missing expected rows. "All measured sections pass"
-  is not full coverage. A new crop, ROI, recapture, or checker revision changes the
-  comparison basis; do not present a higher pass count as improvement until the
-  same obligations are measured under comparable conditions.
+  the planned scope, including missing expected rows, alongside unresolved failures.
+  "All measured sections pass" is not full coverage. A new crop, ROI, recapture, or
+  checker revision changes the comparison basis; do not present a higher pass count
+  as improvement until the same obligations are measured under comparable conditions.
 
 The coordinator keeps the same compact receipt history across worker handoffs and
-context compaction. Include the failure identity, attempted hypotheses, last
-comparable result, and next diagnostic question. A new worker/job name does not
-restart the attempt budget. After a bounded bailout, either answer that question
-with new evidence or report the unresolved failure; do not dispatch the same loop.
-If the evidence run must end without resolution, use the documented non-success
-terminal state in `$PLUGIN_ROOT/docs/agent-cli.md` and preserve failing artifacts.
-Do not invent a successful stamp or bypass the Stop hook to end a stalled run.
+context compaction: failure identity, attempted hypotheses, last comparable result,
+and next diagnostic question. A new worker/job name does not restart the attempt
+budget. After a bounded bailout, either answer that question with new evidence or
+report the unresolved failure; do not dispatch the same loop. If the evidence run
+must end without resolution, use the documented non-success terminal state in
+`$PLUGIN_ROOT/docs/agent-cli.md` and preserve failing artifacts. Do not invent a
+successful stamp or bypass the Stop hook to end a stalled run.
 
 ## Bailout cases (return immediately)
 
@@ -223,11 +219,9 @@ Do not invent a successful stamp or bypass the Stop hook to end a stalled run.
     judge the clone against.
 
 These are out-of-scope for visual iteration; they need pipeline-level intervention.
-
-Recognising this class early is what keeps the loop bounded. Left unrecognised it
-reads as an ordinary gate failure, the iterate doctrine above points at component
-source, and the run burns its whole Stop retry budget editing a clone that was
-never the problem. If a row names the reference rather than a selector in your
+Recognising this class early keeps the loop bounded: treated as an ordinary gate
+failure, it burns the whole Stop retry budget editing a clone that was never the
+problem. If a row names the reference rather than a selector in your
 implementation, stop and report it — a correct clone cannot make it pass.
 
 ## Output

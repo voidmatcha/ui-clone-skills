@@ -1,6 +1,6 @@
 # Operational rules
 
-Niche execution rules and per-request scope adjustments. Read when your situation matches a heading — these rules don't fire on every run, so they live outside the main SKILL.md pipeline.
+Niche execution rules and per-request scope adjustments. Read when your situation matches a heading; these rules don't fire on every run.
 
 ## Adding pages to an existing project
 
@@ -35,10 +35,18 @@ Niche execution rules and per-request scope adjustments. Read when your situatio
 
 Section/element-only cloning is not supported end-to-end. The component name
 names artifacts, not a DOM subtree; `--scope=desktop|all` selects responsive
-layouts, not sections. Modal verification also needs explicit open/close evidence.
+layouts, not sections. Modals, drawers, and other trigger-opened state UI are
+not cloned standalone either — they are interaction states inside a whole-page
+clone, and verifying them there needs explicit open/close evidence.
 
 Explain this limitation before capture or scheduling. Preserve the requested URL,
 selector, and existing evidence; report a scope-support blocker. Do not start a
 full-page run, trim `section-map.json`, fabricate components, or bypass gates to
 make a partial clone pass. Support requires one persisted selection contract
 shared by capture, generation, and verification, retaining source scroll context.
+
+## Cleaning up `tmp/ref/`
+
+Delete `tmp/ref/<component>` only when the user explicitly asks, as the final
+step after every gate passes. Warn first that resume, context recovery, and
+re-verification depend on that evidence and become impossible; never touch `impl/`.

@@ -72,7 +72,7 @@ agent-browser --session <s> eval "(() => {
 `tailwindMajor` records the cloned site's Tailwind major (3 or 4). The host app you're porting *into* may use a different major. When v3 ↔ v4 is mixed, transform/translate/rotate/scale utilities apply twice (one as a composed `transform:`, one as individual `translate:`/`rotate:`/`scale:` properties). Detect the host major the same way (probe `translate-x-1` on the host page) and **before** generation:
 
 - **Same major on both** — proceed normally.
-- **Different majors** — open `diagnosis.md` Root Cause I and pre-emptively add the `[data-project="<name>"] :is(...) { translate|rotate|scale: none !important }` block to the project's scoped globals.css, listing every shared utility class the JSX uses (`-translate-x-1/2`, `-rotate-90`, `-scale-x-[1]`, plus any `max-lg:` variants). Doing this once at scaffolding cost is cheaper than chasing visual regressions one-by-one later.
+- **Different majors** — if the majors differ, open `diagnosis.md` Root Cause I and pre-emptively add the `[data-project="<name>"] :is(...) { translate|rotate|scale: none !important }` block to the project's scoped globals.css, listing every shared utility class the JSX uses (`-translate-x-1/2`, `-rotate-90`, `-scale-x-[1]`, plus any `max-lg:` variants). Doing this once at scaffolding cost is cheaper than chasing visual regressions one-by-one later.
 
 ## Implementation Approach Gate (MANDATORY — decide before writing ANY code)
 

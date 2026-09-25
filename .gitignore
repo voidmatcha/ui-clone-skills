@@ -32,10 +32,9 @@ scratch/
 # test-parity drift backups — auto-created during CI drift smoke tests
 *.parity-backup
 
-# Internal scratch dir for maintainer-only experiments. internal/onpixel/ is
-# tracked maintainer automation (not shipped in the wheel/npm package).
-internal/*
-!internal/onpixel/
+# Internal scratch dir for maintainer-only experiments and personal
+# automation. Never tracked, never shipped in the wheel/npm package.
+internal/
 
 # Private maintainer growth/marketing research notes — never committed to public repo
 research/

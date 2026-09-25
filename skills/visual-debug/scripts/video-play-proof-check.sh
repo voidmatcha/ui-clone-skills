@@ -34,7 +34,6 @@ SESSION="${1:?Usage: video-play-proof-check.sh <session> <impl-url> <ref-dir>}"
 IMPL_URL="${2:?impl-url required}"
 REF_DIR="${3:?ref-dir required}"
 WAIT_MS="${VIDEO_PLAY_PROOF_WAIT_MS:-2000}"
-WAIT_S=$(awk -v ms="$WAIT_MS" 'BEGIN { printf "%.2f", ms/1000 }')
 
 if ! command -v agent-browser >/dev/null 2>&1; then
   echo "video-play-proof: agent-browser CLI missing" >&2

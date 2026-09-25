@@ -1335,7 +1335,6 @@ PY
   chunk_start=$chunk_end
 done
 agent-browser --session "$SESSION" eval "(() => { document.querySelectorAll('[data-tf-idxs]').forEach(el => el.removeAttribute('data-tf-idxs')); return 'ok'; })()" >/dev/null 2>&1
-AFTER_JSON=$(cat "$AFTER_TMP")
 
 # ── Real-pointer hover pass ────────────────────────────────────────────────
 # CSS `:hover` only activates under a REAL pointer; synthetic MouseEvents

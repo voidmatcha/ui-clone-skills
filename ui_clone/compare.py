@@ -90,7 +90,7 @@ _AE_QUANTUM_DIVISOR: int | None = None
 def _ae_quantum_divisor() -> int:
     """Detect the ImageMagick AE scale factor by behavior, cached per process.
 
-    ImageMagick 7.1.2-27 Q16 (brew, 2026-07-12) returns ``compare -metric AE``
+    Recent ImageMagick 7 Q16 builds (7.1.2-27 and later) return ``compare -metric AE``
     as pixel_count * QuantumRange (= count * 65535), NOT the raw pixel count.
     A synthetic 2x2 white/black compare has exactly 4 differing pixels, so the
     divisor is round(reported / 4). Self-corrects if a future build reverts to

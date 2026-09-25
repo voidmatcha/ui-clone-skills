@@ -45,7 +45,7 @@ is `set viewport`. Verify it took with
 `agent-browser eval '(() => window.innerWidth)()'` — headless sessions silently
 default to 1280 otherwise (the specific regression viewport confound).
 
-## Worked evidence (eBay F-1 vs F-2, 2026-07-05)
+## Worked evidence (eBay F-1 vs F-2)
 
 F-2's nested run reported whole-page dSSIM **worsening** 0.688 (F-1) -> 0.786
 (F-2) after the grid-tile sizing + image-fidelity reader fixes, implying the
@@ -72,7 +72,7 @@ deficit (`DpGlobalFooter` compression). That was WRONG, and the correction is th
 more important lesson: **the reused fixed 1440x4500 proxy does not match the ref
 being cloned.**
 
-Verified 2026-07-09 against live eBay at 1440 (`agent-browser eval`
+Verified against live eBay at 1440 (`agent-browser eval`
 `document.documentElement.scrollHeight`), cross-checked with this run's own
 `component-map.json`:
 

@@ -644,6 +644,13 @@ def evaluate_sections_dir(sections_dir: Path) -> dict[str, Any]:
     if not isinstance(matches, list):
         matches = []
 
+    # mask-coverage.json contract: a flat {section-name: masked-percent} map.
+    # A section absent from the map (including the empty `{}` manifest that
+    # section-compare.sh writes for foreground-roi crops, whose tight crops
+    # are never mask-measured) is UNMEASURED and evaluates exactly as an
+    # explicit 0.0 row: no mask-majority verdict, no fully-masked-media
+    # deferral. Producers must not encode "unmeasured" as a non-numeric
+    # marker value; tests/test_section_guards.py pins the `{}` == 0.0 parity.
     try:
         coverage = json.loads((sections_dir / "mask-coverage.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

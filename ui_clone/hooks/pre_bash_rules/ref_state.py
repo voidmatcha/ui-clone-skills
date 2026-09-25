@@ -50,7 +50,7 @@ _FRESH_FOLDER_ALLOW_PATTERNS = re.compile(
 
 # Tool invocations are denied only at COMMAND POSITION (CMD_POSITION_PREFIX) —
 # a tool NAME inside a quoted pgrep pattern, a `command -v` check, or a grep
-# argument is DATA, not an invocation. (Live-fire false positive 2026-06-12:
+# argument is DATA, not an invocation. (Observed live-fire false positive:
 # `pgrep -fl "ci-local|section-compare|video-motion|agent-browser"` was blocked
 # because the bare `\bagent-browser\b` matched inside the quoted argument.)
 _FRESH_FOLDER_DENY_TOOLS = re.compile(

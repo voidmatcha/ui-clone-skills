@@ -5,7 +5,7 @@
 # Usage:
 #   duration-easing-grounding-check.sh <ref-dir> <impl-root>
 #
-# 2026-05-22 SKILL.md Tier 3 rule:
+# SKILL.md Tier 3 rule:
 #   "Duration / easing / threshold values are extracted from ref
 #    artifacts, bundles, or runtime measurements — never guessed."
 #

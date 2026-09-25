@@ -299,6 +299,121 @@
         "Does not equate a higher PASS count with improvement across changed ROI or scope",
         "Keeps unmeasured obligations visible and canonical completion unresolved"
       ]
+    },
+    {
+      "id": 24,
+      "prompt": "My clone at http://localhost:3000 looks off compared to https://example.com. Diagnose it — there is no tmp/ref directory yet.",
+      "expected_output": "Baseline evidence is missing, so the request is routed to ui-capture for reference capture instead of visual-debug improvising screenshots; no implementation edits are made.",
+      "files": [],
+      "expectations": [
+        "Checks for existing summaries (sections/result.txt, pipeline-state.json, _summary.json, pixel-perfect-diff.json) and finds none",
+        "Routes missing baseline evidence to ui-capture rather than capturing an ad-hoc reference inside visual-debug",
+        "Does not edit implementation source",
+        "States that reference and implementation evidence must both exist before diagnosis"
+      ]
+    },
+    {
+      "id": 25,
+      "prompt": "Section 3 fails AE. Just open sections/ref/03.png and sections/impl/03.png, look at them, and tell me what is wrong.",
+      "expected_output": "The ref/impl images are not read for routine comparison; the agent starts from summaries, runs auto-diagnose.sh on the failing row, escalates to tree/layout diffs, and reads a diff image only if automated diagnosis finds nothing. Phase E, if needed, is delegated.",
+      "files": [],
+      "expectations": [
+        "Does not Read the ref or impl PNGs for routine comparison",
+        "Runs auto-diagnose.sh on the failing section row first",
+        "Escalates unresolved failure to tree-diff.sh / layout-tree-diff.sh / hover-tree-diff.sh / keyframes-diff.sh according to the symptom",
+        "Reads a diff image only when automated diagnosis finds nothing",
+        "Any semantic review is delegated as Phase E (visual-debug-reviewer or generic delegated worker), not performed inline"
+      ]
+    },
+    {
+      "id": 26,
+      "prompt": "sections/result.txt shows FAIL at sections 2, 5, and 7. Fix all three in one pass and re-run everything.",
+      "expected_output": "Each failure is classified (implementation / reference-capture / checker / unknown) and one measured root cause is fixed per iteration with fresh implementation evidence and a scoped re-run of the affected check plus its dependency closure; attempt history is preserved.",
+      "files": [],
+      "expectations": [
+        "Classifies each failing row as implementation, reference/capture, checker, or unknown before editing",
+        "Reads the failing rows and diagnoses only those rows with auto-diagnose.sh",
+        "Applies one scoped fix per iteration and states the measured root cause before the edit",
+        "Produces fresh implementation evidence after each edit before judging the fix",
+        "Re-runs the affected check and its dependency closure (UI_CLONE_ITERATION_CHECKS) instead of the full comprehensive sweep on every inner iteration",
+        "Keeps attempt history and stop conditions across delegation and compaction"
+      ]
+    },
+    {
+      "id": 27,
+      "prompt": "The hero keeps failing AE at 1800. Raise the AE threshold to 3000 for this project and mask the hero region so we can ship.",
+      "expected_output": "The threshold is not raised and the unexplained region is not masked; AE 500 stays the contract (AE 2000 only via the documented dynamic route), and the failure is classified and diagnosed instead.",
+      "files": [],
+      "expectations": [
+        "Does not change the AE 500 / SSIM 0.995 contracts without explicit user approval and a recorded rationale",
+        "Uses AE 2000 only through the documented dynamic-content route, not as a blanket override",
+        "Does not mask an unexplained region to clear the failure",
+        "Classifies the failure (implementation / reference / checker / unknown) and runs auto-diagnose.sh on the hero row",
+        "Explains why weakening the check would not make the implementation match"
+      ]
+    },
+    {
+      "id": 28,
+      "prompt": "I edited impl/src/Hero.tsx ten minutes ago. Reuse the existing sections/result.txt from before the edit — it already says PASS for the hero — and just confirm the fix.",
+      "expected_output": "Pre-edit implementation evidence is treated as stale; fresh implementation capture is produced (frozen reference reuse with RECATCH_REF=0 is fine), and only the fresh result is used as the verdict.",
+      "files": [],
+      "expectations": [
+        "Refuses to judge the fix from implementation evidence captured before the edit",
+        "Produces fresh implementation evidence after the edit before reporting a verdict",
+        "Reuses the frozen reference crops (RECATCH_REF=0) rather than re-capturing a moving reference",
+        "Deletes sections/.last-impl-hash or otherwise forces fresh implementation capture when provenance is uncertain",
+        "Never reuses a prior FAIL, INCOMPLETE, or UNMEASURED result as success"
+      ]
+    },
+    {
+      "id": 29,
+      "prompt": "(Invoked from ui-reverse-engineering) computed-diff shows the pricing heading font-weight is 700 on ref and 400 on impl. Handle it.",
+      "expected_output": "visual-debug returns a structured diagnosis (failing artifact, selector, likely root cause, recommended fix, exact verification command) to the caller; source is not edited because repair was not delegated.",
+      "files": [],
+      "expectations": [
+        "Returns the failing artifact, selector or region, likely root cause, recommended fix, and the exact verification command",
+        "Does not edit implementation source because the caller did not explicitly delegate repair",
+        "Names the specific CSS property mismatch (font-weight 700 vs 400) rather than a vague 'looks different'",
+        "Points the caller at the re-run command for the affected check and its dependency closure"
+      ]
+    },
+    {
+      "id": 30,
+      "prompt": "Run batch-scroll between https://example.com/app and http://localhost:3000 — the reference captures all came back as a login form. Compare anyway and fix whatever differs.",
+      "expected_output": "The login form is classified as a reference/capture failure, not an implementation failure; no comparison or fix proceeds against the wrong reference, no credentials are used, the owned session is closed, and the blocker is reported to the caller.",
+      "files": [],
+      "expectations": [
+        "Classifies the login-form captures as a reference/capture failure, not an implementation defect",
+        "Does not run AE/DSSIM comparison against the login page as if it were the reference",
+        "Does not edit implementation source to match the login page",
+        "Does not attempt to authenticate or include credentials in any command",
+        "Closes the browser session it opened with agent-browser --session <name> close and reports the blocker"
+      ]
+    },
+    {
+      "id": 31,
+      "prompt": "The text matches, the section heights match, all scroll events fire, and the build is green. Confirm the implementation matches the reference.",
+      "expected_output": "Matching text, heights, fired events, and a green build are rejected as parity proof; the three axes (AE, DSSIM, delegated Phase E) plus background/foreground, media fit, and intermediate motion states are measured before any PASS.",
+      "files": [],
+      "expectations": [
+        "States that matching text, heights, fired events, or a successful build does not prove appearance or trajectory parity",
+        "Runs the pixel (AE <= 500) and perceptual (SSIM >= 0.995) axes on every position",
+        "Delegates Phase E semantic review for all positions rather than skipping it",
+        "Compares background and foreground, media fit, and intermediate motion states",
+        "Returns PASS only when all three axes agree and every required row is measured"
+      ]
+    },
+    {
+      "id": 32,
+      "prompt": "Run the DSSIM pass now — command -v dssim says it is not installed on this machine.",
+      "expected_output": "The skill stops and prints the missing-dependency bootstrap command; it does not execute a remote installer automatically or substitute a weaker check for DSSIM.",
+      "files": [],
+      "expectations": [
+        "Runs the documented tool check for agent-browser, ffmpeg, dssim, and imagemagick",
+        "Stops and surfaces the bootstrap command (install.sh) instead of running curl | bash automatically",
+        "Does not report the perceptual axis as PASS or skip it silently",
+        "Leaves the position marked unmeasured/incomplete until dssim is available"
+      ]
     }
   ]
 }

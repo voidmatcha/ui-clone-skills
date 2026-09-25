@@ -5,7 +5,7 @@
 # can replicate the bridge between `is-loading` and `is-loaded`-style states
 # instead of guessing from a single post-settled snapshot.
 #
-# Review follow-up (2026-05-25, docs/multi-snapshot-capture-design.md):
+# Design decisions (see docs/multi-snapshot-capture-design.md):
 #   - Single `agent-browser eval` with in-page Promise loop, not 50 shell
 #     evals @ 100ms (CLI round-trip cost + no latency guarantee).
 #   - State-hash includes html/body class + scroll lock + full-screen overlay

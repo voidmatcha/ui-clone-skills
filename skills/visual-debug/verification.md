@@ -417,7 +417,7 @@ Measure `getComputedStyle` on both ref and impl for all Phase D1 elements:
 
 **Properties**: `fontSize`, `fontWeight`, `lineHeight`, `letterSpacing`, `fontFamily`, `color`, `backgroundColor`, `padding*`, `margin*`, `gap`, `width`, `height`, `display`, `flexDirection`, `alignItems`, `justifyContent`, `gridTemplateColumns`, `borderRadius`, `boxShadow`, `opacity`, `transform`
 
-Build diff table: any property mismatch > 2px = FAIL. Fix and re-run both phases.
+Save the measurements to `tmp/ref/<component>/ref-styles.json` and `tmp/ref/<component>/impl-styles.json` (one file per side; for stateful elements, one pair per state). Build diff table: any property mismatch > 2px = FAIL. Fix and re-run both phases.
 
 ### Gate
 

@@ -301,6 +301,30 @@ def test_cli_writes_guards_artifacts(tmp_path: Path) -> None:
     assert not any(ln.startswith("hero\t") for ln in lines)
 
 
+def test_empty_mask_coverage_manifest_is_unmeasured_and_equals_explicit_zero(
+    tmp_path: Path,
+) -> None:
+    """Contract pinned at the consumer (section_guards.evaluate_sections_dir):
+
+    section-compare.sh writes `{}` as the foreground-roi mask-coverage manifest
+    because those tight crops are never mask-measured. A section missing from
+    the map is UNMEASURED and must evaluate exactly as an explicit 0.0 row —
+    same reasons, same policies, same telemetry — so the empty manifest neither
+    relaxes nor tightens any guard.
+    """
+    explicit = _build_sections_dir(tmp_path / "explicit")
+    unmeasured = _build_sections_dir(tmp_path / "unmeasured")
+    (unmeasured / "mask-coverage.json").write_text("{}", encoding="utf-8")
+    absent = _build_sections_dir(tmp_path / "absent")
+    (absent / "mask-coverage.json").unlink()
+
+    baseline = evaluate_sections_dir(explicit)
+    assert set(baseline["sections"]) == {"footer-2", "hero"}
+    assert baseline["sections"]["footer-2"]["maskPct"] == 0.0
+    assert evaluate_sections_dir(unmeasured) == baseline
+    assert evaluate_sections_dir(absent) == baseline
+
+
 def test_evaluate_sections_records_explicit_non_content_bearing_row(tmp_path: Path) -> None:
     d = _build_sections_dir(tmp_path)
     shutil.copy(FIXTURES / "footer-2-flat-ref.png", d / "ref" / "decorative-panel.png")

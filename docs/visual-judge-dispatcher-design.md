@@ -1,6 +1,6 @@
 # Visual-judge dispatcher — design
 
-> Status: **DESIGN**. Implementation pending. Codex review (2026-05-25) of 6 design decisions applied below.
+> Status: **IMPLEMENTED** (`ui_clone/visual_judge_dispatcher.py`). Codex review of 6 design decisions applied below.
 
 ## Why
 

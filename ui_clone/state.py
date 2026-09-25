@@ -222,7 +222,7 @@ class PipelineState:
     # so external loop drivers (codex /goal, codex exec, headless claude -p) can detect
     # "stuck on same gate" before they exhaust max-iterations.
     gate_fail_counts: dict[str, int] = field(default_factory=dict)
-    # Signature-aware fail counting (2026-06-10): last failing-check
+    # Signature-aware fail counting: last failing-check
     # signature per gate, as provided by the gate dispatcher. When a new
     # failure's signature differs from the stored one, the consecutive
     # counter RESETS — the failing set changed, so the run is converging

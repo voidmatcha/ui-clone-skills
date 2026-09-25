@@ -4,13 +4,7 @@
 
 ### Session management for splash/preloader sites
 
-Sites with splash animations block interaction for 5-10 seconds on every page load. Opening a new `agent-browser` session reloads the page and re-triggers the splash.
-
-**Rules:**
-1. **Open ONE session for the original site and REUSE it for ALL extraction steps** (Steps 1–6). Pass `--session <name>` to every command.
-2. **Wait for splash to complete** using the auto-detect helper below, then keep the session alive.
-3. **Never open a new session unless the previous one timed out.** If it did, wait for splash again.
-4. **Pre-splash extraction (Step 2.6-pre) is the exception** — it intentionally captures before splash completes, using a separate session.
+Opening a new `agent-browser` session reloads the page and re-triggers any splash (5-10s blocked). **Open ONE session for the original site and REUSE it for ALL extraction steps** (Steps 1–6), passing `--session <name>` to every command; wait for the splash via the helper below; never open a new session unless the previous one timed out (then wait for splash again). Pre-splash extraction (Step 2.6-pre) is the exception — it captures before splash completes in a separate session.
 
 ```bash
 # Canonical entry point — opens the session, waits for splash to
@@ -24,9 +18,7 @@ cat tmp/ref/<component>/splash-state.json
 # → {"hasSplash": ..., "splashDone": ..., "durationMs": ..., "signals": {...}}
 ```
 
-`splash-bypass.sh` replaces the inline auto-detect IIFE that used to live in this file. The detection algorithm (4 signals: full-screen overlay, link reachability, scrollability, DOM stability) is unchanged; it just now lives in one canonical place so animation-detection.md and element-capture.md can route through the same primitive. See the script header for the full output schema.
-
-**Never call `agent-browser eval` with an inline splash check anymore** — route through this script so every loop, every site, every nested session gets the same detection logic and a JSON artefact you can compare across runs.
+`splash-bypass.sh` is the one canonical splash detector (4 signals: full-screen overlay, link reachability, scrollability, DOM stability; output schema in the script header). **Never call `agent-browser eval` with an inline splash check** — route through this script so every session gets the same logic and a comparable JSON artefact.
 
 ## Step 1: Open & Snapshot
 
@@ -125,24 +117,19 @@ agent-browser --session <project-name> eval "
 
 ### Aggregate per-tag / per-class styles (MANDATORY)
 
-`structure.json` carries computed CSS per node. `dom-scaffold.sh` consumes the
-per-tag and per-first-class **aggregate** — not the raw per-node form — so the
-aggregate has to be produced before the scaffold can run.
-
-**Preferred — automated producer.** `run --phases 2` invokes this for you:
+`dom-scaffold.sh` consumes the per-tag / per-first-class **aggregate** of the
+per-node styles in `structure.json`, so it must exist first. `run --phases 2`
+invokes the producer for you; standalone:
 
 ```bash
 bash skills/visual-debug/scripts/extract-styles.sh tmp/ref/<component>
 ```
 
-The script reads `structure.json`, settles each `(tag-or-class, key)` to its
-modal value (`background-image` wins over `background-color` when both are
-present), and emits `tmp/ref/<component>/styles.json` in the
-`{ "tag": {...}, ".class": {...} }` shape `dom-scaffold.sh`'s `resolve_styles()`
-expects. No browser round-trip — it's a pure read of `structure.json`.
-
-If you skip this step, `dom-scaffold.sh` aborts with `missing input: styles.json`
-and the pipeline stalls at Phase 2.
+It settles each `(tag-or-class, key)` to its modal value (`background-image` wins
+over `background-color`) and emits `tmp/ref/<component>/styles.json` in the
+`{ "tag": {...}, ".class": {...} }` shape `resolve_styles()` expects — a pure read
+of `structure.json`, no browser round-trip. Without it `dom-scaffold.sh` aborts
+with `missing input: styles.json`.
 
 ### Post-extraction sanitization check
 
@@ -157,15 +144,13 @@ If suspicious content is found: **log it to the user**, remove or neutralize the
 
 ### Enumerate all semantic sections (MANDATORY)
 
-After extracting `structure.json`, enumerate every top-level semantic container on the page. This is the **ground truth** for how many components to generate. Missing a `<footer>` or `<aside>` here means it won't exist in the implementation.
-
-**Preferred — automated producer.** The pipeline's `run --phases 2` driver already invokes this for you. If you need to re-run it standalone (e.g. after manually correcting a section recursion bug):
+Enumerate every top-level semantic container on the page — the **ground truth** for how many components to generate (a `<footer>` or `<aside>` missed here will not exist in the implementation). `run --phases 2` invokes the producer for you; standalone:
 
 ```bash
 bash skills/visual-debug/scripts/extract-section-map.sh tmp/ref/<component> <project-name>
 ```
 
-The script writes `tmp/ref/<component>/section-map.json` directly and runs the same enumeration JS shown below. Prefer it over pasting the eval by hand — they were drifting before, and a manual run on a fresh ref dir was the long-standing reason `dom-scaffold.sh` aborted with "missing section-map.json" on first-time pipelines.
+It writes `tmp/ref/<component>/section-map.json` directly with the same enumeration JS shown below. Prefer it over pasting the eval by hand.
 
 **Equivalent manual eval (kept for reference / patching the JS):**
 
@@ -330,9 +315,7 @@ agent-browser --session <project-name> eval "
 
 ### Extract hidden/collapsed elements (MANDATORY)
 
-Elements with `height: 0`, `display: none`, `opacity: 0`, or `overflow: hidden` are often **interactive components in their closed state**: navigation menus, dropdowns, modals, accordions, preloaders. Skipping them loses their entire DOM structure.
-
-**Why this matters:** A dock/navbar with `height: 0` in its collapsed state still contains the full menu grid, button structure, SVG icons, and animation targets. If you only extract visible elements, you'll guess the structure from screenshots and get it wrong.
+Elements with `height: 0`, `display: none`, `opacity: 0`, or `overflow: hidden` are often **interactive components in their closed state** (navigation menus, dropdowns, modals, accordions, preloaders) that still contain the full menu grid, button structure, SVG icons, and animation targets. Skipping them means guessing that structure from screenshots.
 
 ```bash
 agent-browser --session <project-name> eval "
@@ -378,17 +361,11 @@ agent-browser --session <project-name> eval "
 2. **Save to** `tmp/ref/<component>/hidden-elements.json`
 3. **Restore** the original styles after extraction
 
-**Common hidden elements that get missed:**
-- Navigation menus (`.menu`, `.nav-panel`, `[data-menu-panel]`) — collapsed with `height: 0`
-- Preloaders (`.preloader`) — removed from DOM after animation
-- Modals/overlays — `display: none` until triggered
-- Dropdown contents — `opacity: 0` or `max-height: 0`
+Commonly missed: navigation menus (`.menu`, `.nav-panel`, `[data-menu-panel]`, `height: 0`), preloaders (`.preloader`, removed after animation), modals/overlays (`display: none`), dropdown contents (`opacity: 0` / `max-height: 0`).
 
 ### Detect portal-escaped elements
 
-Elements with `position: fixed` inside a `transform`-ed parent are broken by CSS spec — the `fixed` positioning becomes relative to the transformed ancestor, not the viewport. Sites work around this by rendering such elements outside the main content tree (React `createPortal`, Vue `<Teleport>`, or vanilla `document.body.appendChild`).
-
-**Why this matters:** If the reference site has a custom scroll engine (detected in Step 5), ANY `position: fixed` element inside the scroll wrapper will need portal rendering in the implementation. Missing this produces elements that scroll with content instead of staying fixed.
+`position: fixed` inside a `transform`-ed parent resolves against the transformed ancestor, not the viewport, so sites render such elements outside the main tree (React `createPortal`, Vue `<Teleport>`, `document.body.appendChild`). With a custom scroll engine (Step 5), ANY `position: fixed` element inside the scroll wrapper needs portal rendering in the implementation or it scrolls with content.
 
 ```bash
 agent-browser --session <project-name> eval "
@@ -442,9 +419,7 @@ agent-browser --session <project-name> eval "
 
 ### Detect sticky elements and measure lock points
 
-Sticky elements (`position: sticky`) are constrained by their parent container's height. When a sticky element spans multiple content sections (e.g., a sticky title that floats over service cards), the parent wrapper height determines when the sticky element "unsticks" and begins scrolling away.
-
-**Critical:** Getting the wrapper height wrong by even 50px produces visible layout errors — the sticky element either unsticks too early (leaving dead space) or too late (overrunning into the next section).
+Sticky elements are constrained by their parent container's height, which determines when they "unstick" and scroll away. A wrapper height off by even 50px unsticks too early (dead space) or too late (overrunning the next section).
 
 ```bash
 agent-browser --session <project-name> eval "
@@ -483,10 +458,10 @@ agent-browser --session <project-name> eval "
 **Save output to** `tmp/ref/<component>/sticky-elements.json`
 
 **Generation rules for sticky elements:**
-1. **Container height = exact extracted value.** Do not estimate. Do not round. The container height is the single most important value for sticky behavior.
-2. **Lock point:** If the sticky title should "lock" to the last content item (e.g., stay centered on the last card image as both scroll away together), calculate: `wrapperHeight = lastContentCenter - stickyTopOffset + (viewportHeight - stickyElementCenter)`. Verify by sweeping scroll positions and checking that `diff(stickyCenter, lastContentCenter) ≈ 0` after unstick.
-3. **Multi-section sticky:** If a sticky element spans multiple sections (e.g., title changes from "Consumer Services" to "B2B Services"), the container must wrap ALL sections, not just the first one.
-4. **Section height verification (MANDATORY):** After implementing, measure `lastContentBottom - sectionTop` for each section. The section height should be `lastContentBottom + smallMargin` (50-100px) — not hundreds of pixels of dead space. Compare against extracted values.
+1. **Container height = exact extracted value.** Do not estimate or round.
+2. **Lock point:** if the sticky title should "lock" to the last content item, `wrapperHeight = lastContentCenter - stickyTopOffset + (viewportHeight - stickyElementCenter)`. Verify by sweeping scroll positions: `diff(stickyCenter, lastContentCenter) ≈ 0` after unstick.
+3. **Multi-section sticky:** the container must wrap ALL sections the element spans, not just the first.
+4. **Section height verification (MANDATORY):** after implementing, measure `lastContentBottom - sectionTop` per section; expect `lastContentBottom + smallMargin` (50-100px), not hundreds of pixels of dead space.
 
 ---
 
@@ -496,9 +471,7 @@ agent-browser --session <project-name> eval "
 
 ### Step 2.5b: SVG-as-text detection (MANDATORY)
 
-Many design sites render headings, brand names, or decorative text as **SVG `<path>` elements** instead of font text. These look identical in screenshots but require completely different implementation (SVG markup vs CSS font).
-
-**Detection:** Any SVG with complex path data (`d` attribute > 200 chars) AND wide aspect ratio (width/height > 3) is likely vector text.
+Headings, brand names, or decorative text rendered as **SVG `<path>` elements** look identical in screenshots but need SVG markup, not a CSS font. Any SVG with complex path data (`d` > 200 chars) AND a wide aspect ratio (width/height > 3) is likely vector text.
 
 ```bash
 agent-browser --session <project-name> eval "
@@ -533,19 +506,13 @@ agent-browser --session <project-name> eval "
 
 **Save to** `tmp/ref/<component>/svg-text-elements.json`
 
-**Generation rule:** If `svg-text-elements.json` is non-empty:
-- Do NOT recreate these elements as `<span>` or `<h2>` with CSS fonts
-- Copy the SVG `outerHTML` verbatim into the component (convert attrs to JSX)
-- The SVG `width="100%"` + `viewBox` handles responsive scaling automatically
-- These SVGs often live inside containers with `overflow: hidden` for clipping effects
-
-**Why this matters:** Font rendering varies across browsers/OS. SVG path text is pixel-identical everywhere. Attempting to replicate SVG text with CSS fonts produces visually different results even with the correct font file — wrong kerning, wrong weight synthesis, wrong glyph shapes.
+**Generation rule:** If `svg-text-elements.json` is non-empty, do NOT recreate these as `<span>`/`<h2>` with CSS fonts — copy the SVG `outerHTML` verbatim (convert attrs to JSX); `width="100%"` + `viewBox` handles responsive scaling, and these often sit inside `overflow: hidden` containers for clipping effects. SVG path text is pixel-identical everywhere; a CSS font gives wrong kerning, weight synthesis, and glyph shapes even with the correct font file.
 
 ---
 
 ## Step 2.6: Per-Section HTML Structure + Computed CSS (MANDATORY)
 
-> **This step is the #1 differentiator between accurate and inaccurate clones.** Without it, code generation guesses the HTML structure from screenshots. Screenshots show the RESULT but not the STRUCTURE — a flexbox row and a CSS grid can look identical in a screenshot but require completely different code.
+> **This step is the #1 differentiator between accurate and inaccurate clones.** Screenshots show the RESULT, not the STRUCTURE — a flexbox row and a CSS grid can look identical but need completely different code.
 
 Run the automated extraction script:
 
@@ -557,17 +524,9 @@ This produces per-section files in `tmp/ref/<component>/html/`:
 - `<section-name>.json` — complete element tree (2 levels deep) with computed styles for every element
 - `_summary.json` — section index with rect positions, child/media counts
 
-**What it captures per section:**
-1. **Element hierarchy**: tag, id, class, text content, nesting depth
-2. **Computed CSS for EVERY element**: display, position, width, height, fontSize, fontWeight, fontFamily, color, backgroundColor, padding, margin, borderRadius, backdropFilter, flexDirection, justifyContent, alignItems, gap, gridTemplateColumns, transform, backgroundImage
-3. **Media elements**: `<video>` (src, autoplay, muted, loop, playsInline, poster), `<source>` (src, type), `<img>` (src, alt, width, height)
+**What it captures per section:** element hierarchy (tag, id, class, text content, nesting depth — the exact HTML to write); computed CSS for EVERY element (display, position, width, height, fontSize, fontWeight, fontFamily, color, backgroundColor, padding, margin, borderRadius, backdropFilter, flexDirection, justifyContent, alignItems, gap, gridTemplateColumns, transform, backgroundImage — the exact Tailwind classes or inline styles to use); media elements (`<video>` src/autoplay/muted/loop/playsInline/poster, `<source>` src/type, `<img>` src/alt/width/height — so a video background becomes `<video autoPlay muted loop>`, not `<img>`).
 
-**Why each matters:**
-- **Element hierarchy** → tells you exactly what HTML to write (not guessing from screenshots)
-- **Computed CSS** → tells you exactly what Tailwind classes or inline styles to use
-- **Media elements** → tells you to use `<video autoPlay muted loop>` not `<img>`, what poster to set, what video sources to provide
-
-**HARD RULE: Before writing ANY component code, Read the corresponding `html/<section>.json` file.** It contains the exact structure you need to reproduce. Do not guess layout from screenshots alone.
+**HARD RULE: Before writing ANY component code, Read the corresponding `html/<section>.json` file.** Do not guess layout from screenshots alone.
 
 **Gate:**
 ```
@@ -577,45 +536,9 @@ This produces per-section files in `tmp/ref/<component>/html/`:
 □ Video elements detected in hero section (if original has video background)
 ```
 
-### Lazy-load attribute rewrite (MANDATORY for sites that ship a runtime lazy-loader)
+### Lazy-load attribute rewrite (sites that ship a runtime lazy-loader)
 
-Captured HTML often contains placeholder attributes that the original site's runtime lazy-loader rewrites *after* page load (`data-src`, `data-lazy`, `data-srcset`, `data-bg`, `lazyload` class, `loading="lazy"`). When this HTML is injected verbatim into the impl (e.g. via `dangerouslySetInnerHTML` per Step 7), there is no runtime to rewrite the attributes — `<img>` tags render with no `src` and stay broken. The bug is silent: the page renders, just with missing images, and `visible-images.json` (Step 2.5) doesn't catch it because that script collects from `img.src` not `img.dataset.src`.
-
-Two root causes overlap on the same page:
-1. **Captured before lazy-loader fired** — image is below the fold at capture time, only `data-src` is set
-2. **Captured after lazy-loader fired** — same `<img>` now has both `data-src` (placeholder) and `src` (real), so the attribute count differs by viewport/scroll position
-
-**Fix:** before writing any component, scan section HTML for these patterns and rewrite at extraction time:
-
-```bash
-# Detect — flags any section file with src-less <img> still carrying a data-src placeholder
-grep -lE '<(img|source|video)[^>]*\bdata-(src|srcset|lazy|bg)=' tmp/ref/<component>/html/*.json | while read f; do
-  python3 -c "import json,re,sys; d=json.load(open(sys.argv[1])); h=json.dumps(d); print(sys.argv[1], len(re.findall(r'data-(src|srcset|lazy|bg)=', h)))" "$f"
-done
-
-# Rewrite (per-section HTML strings) — data-src → src, drop data-lazy / lazyload class.
-# Use python (not sed) for portability + correct data-bg handling: BSD sed (`sed -i ''`)
-# and GNU sed (`sed -i`) take incompatible -i syntax, and the data-bg rewrite needs
-# to capture the URL value and emit a fully-closed `style="background-image:url(<v>)"`
-# (a sed one-liner with a pasted-in `style="background-image:url(` produces broken
-# output that swallows the trailing quote).
-python3 - <<'PY'
-import json, re, glob, pathlib
-RE_BG  = re.compile(r'\bdata-bg=(["\'])(.*?)\1')
-RE_SRC = re.compile(r'\bdata-(src|srcset)=')
-RE_LZ  = re.compile(r'\s+data-lazy=(["\']).*?\1')
-RE_CLS = re.compile(r'\s+class=(["\'])lazyload\1')
-for path in glob.glob("tmp/ref/<component>/html/*.json"):
-    text = pathlib.Path(path).read_text()
-    text = RE_BG.sub(lambda m: f'style="background-image:url({m.group(2)})"', text)
-    text = RE_SRC.sub(lambda m: f'{m.group(1)}=', text)
-    text = RE_LZ.sub('', text)
-    text = RE_CLS.sub('', text)
-    pathlib.Path(path).write_text(text)
-PY
-```
-
-Run an additional pre-scroll *before* this step on lazy-loaded pages so the captured HTML is in its post-lazy-load form everywhere — see `../visual-debug/comparison-fix.md` triage row D for the `scrollTo(0, document.body.scrollHeight)` warmup.
+If the captured `html/<section>.json` carries `data-src` / `data-srcset` / `data-lazy` / `data-bg` / `lazyload` placeholders, read `generation-modes.md` → "Lazy-load attribute rewrite" only then: injected verbatim, that HTML has no runtime to rewrite the attributes and `<img>` tags render with no `src` (silently — `visible-images.json` collects from `img.src`, not `img.dataset.src`). On lazy-loaded pages run a `scrollTo(0, document.body.scrollHeight)` warmup before this step (`../visual-debug/comparison-fix.md` triage row D).
 
 ### Expected fields in extracted.json (assembled at Step 6b)
 
@@ -644,7 +567,7 @@ At Step 6b, merge `head.json` and `assets.json` into `extracted.json` alongside 
 
 ## Step 2.6a: Catalog GSAP-Baked Inline Styles
 
-Scraped HTML contains inline `style` attributes set by GSAP/Framer Motion at scrape time. These are animation initialization states — NOT desired defaults. They make elements invisible.
+Scraped HTML contains inline `style` attributes set by GSAP/Framer Motion at scrape time — animation initialization states, NOT desired defaults, that make elements invisible.
 
 ```bash
 agent-browser --session <project-name> eval "
