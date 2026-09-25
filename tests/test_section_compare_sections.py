@@ -21,8 +21,10 @@ from ui_clone.section_compare_sections import (
 def test_section_compare_system_python_paths_avoid_runtime_pep604_unions() -> None:
     root = Path(__file__).resolve().parents[1]
     execution_surfaces = (
-        root / "ui_clone" / "section_compare_sections.py",
-        root / "ui_clone" / "section_capture.py",
+        # The section_compare_sections / section_capture facades import these
+        # siblings, so every one of them runs under the same system Python.
+        *sorted((root / "ui_clone").glob("section_compare_*.py")),
+        *sorted((root / "ui_clone").glob("section_capture*.py")),
         root / "ui_clone" / "section_dynamic.py",
         root / "skills" / "visual-debug" / "scripts" / "section-compare.sh",
     )

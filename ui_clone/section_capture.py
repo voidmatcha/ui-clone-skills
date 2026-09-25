@@ -2,13 +2,21 @@
 
 The shell wrapper delegates matched-section capture here so selector-derived
 section names and scroller selectors are handled as data, not shell syntax.
+
+Primitives live in sibling modules (``section_capture_primitives``,
+``section_capture_js``, ``section_capture_browser``) and are re-exported here.
+The capture orchestration (``_capture_one`` / ``capture_matched_sections``)
+and the composite steps whose callees tests patch by this module's name
+(``_run_screenshot``, ``_run_crop``, ``_apply_reference_runtime_normalization``)
+stay here so ``monkeypatch.setattr(ui_clone.section_capture, ...)`` keeps
+intercepting them.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
+import re  # noqa: F401 - kept as a module attribute for import-compat
 import shutil
 import subprocess
 import sys
@@ -16,145 +24,95 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ui_clone.pipeline_logs import _as_text
+from ui_clone.pipeline_logs import _as_text  # noqa: F401 - kept for import-compat
+from ui_clone.section_capture_browser import (
+    _AGENT_BROWSER_TIMEOUT,
+    _ensure_viewport,
+    _resolve_live_section_rect,
+    _run_agent_browser,
+    _run_agent_eval,
+    _run_agent_eval_text,
+    _scroll_metrics,
+    _unwrap_eval_json,
+)
+from ui_clone.section_capture_js import (
+    CMP_OVERLAY_SELECTORS,
+    _canvas_underlay_js,
+    _disable_smooth_scroll_js,
+    _finish_js,
+    _fixed_overlay_toggle_js,
+    _live_section_rect_js,
+    _pause_js,
+    _reference_runtime_normalization_js,
+    _scroll_js,
+    _scroll_metrics_js,
+    _settle_js,
+)
+from ui_clone.section_capture_primitives import (
+    _MULTI_UNDERSCORE_RE,
+    _SAFE_NAME_RE,
+    _as_float,
+    _canvas_height,
+    _crop_is_blank,
+    _duration_to_seconds,
+    _fmt_num,
+    _is_number,
+    _rect_from_capture,
+    crop_is_off_canvas,
+    crop_unique_colors,
+    derive_settle_seconds,
+    desired_scroll_y,
+    safe_section_name,
+    should_pin_to_bottom,
+    write_transparent_stub,
+)
 
 if TYPE_CHECKING:
-    from typing import TypeGuard
+    from typing import TypeGuard  # noqa: F401 - kept for import-compat
 
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_MULTI_UNDERSCORE_RE = re.compile(r"_+")
-
-# Every `agent-browser` subprocess call below drives a real browser session
-# over CDP; a wedged/hung browser (dead host, network partition, a page that
-# never settles) would otherwise hang this call forever with no way for a
-# caller (verify.py's own 600s gate timeout included) to distinguish "slow"
-# from "dead". `magick` calls in this file operate on local files and are not
-# in scope for this timeout — they don't share this failure mode.
-_AGENT_BROWSER_TIMEOUT = 120
-
-
-def _is_number(value: object) -> TypeGuard[int | float]:
-    """Keep shell entrypoints compatible with macOS system Python 3.9."""
-    return isinstance(value, int) or isinstance(value, float)
-
-
-def safe_section_name(raw: object, *, max_length: int = 80) -> str:
-    """Return a filename-safe section name.
-
-    Section names originate from reference DOM ids/classes. Treat them as
-    untrusted display data: remove path traversal punctuation, shell metachars,
-    whitespace, and quotes while preserving readable alphanumeric tokens.
-    """
-    text = str(raw or "")
-    text = text.replace("\\", "_").replace("/", "_")
-    text = _SAFE_NAME_RE.sub("_", text)
-    text = _MULTI_UNDERSCORE_RE.sub("_", text).strip("._-")
-    if not text:
-        text = "section"
-    return text[:max_length]
-
-
-def _as_float(value: object, default: float = 0.0) -> float:
-    try:
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return default
-
-
-def _fmt_num(value: float) -> str:
-    # Coerce first: callers may pass an int (e.g. forced_scroll_y) and
-    # int.is_integer() only exists on Python 3.12+.
-    value = float(value)
-    if value.is_integer():
-        return str(int(value))
-    return f"{value:.3f}".rstrip("0").rstrip(".")
-
-
-def _scroll_js(scroll_y: float, scroller_selector: str) -> str:
-    y = _fmt_num(scroll_y)
-    if scroller_selector == "__document__":
-        return f"(() => {{ window.scrollTo(0, {y}); document.documentElement.setAttribute('data-section-compare-scrolled', ({y} > 0 ? '1' : '0')); return {y}; }})()"
-
-    selector_literal = json.dumps(scroller_selector)
-    return (
-        "(() => {"
-        f"const w = document.querySelector({selector_literal});"
-        f"if (!w) {{ window.scrollTo(0, {y}); document.documentElement.setAttribute('data-section-compare-scrolled', ({y} > 0 ? '1' : '0')); return {y}; }}"
-        f"w.scrollTop = {y};"
-        "w.dispatchEvent(new Event('scroll'));"
-        "return w.scrollTop;"
-        "})()"
-    )
-
-
-def _disable_smooth_scroll_js() -> str:
-    """Neutralize Lenis/smooth-scroll so a forced `scrollTo` actually sticks.
-
-    A Lenis/Framer smooth-scroll controller intercepts the native scroll and
-    animates back toward its own target during settle, collapsing the capture's
-    forced_scroll_y to actualY=0 (specific regression: scrubbed sections all crop the start
-    frame). This sets a capture flag the generator can honor, forces
-    scroll-behavior:auto, and best-effort stops/destroys a live Lenis instance.
-    Idempotent (guarded by a marker), so it is safe to call before every shot.
-    """
-    return (
-        "(() => {"
-        "try { window.__UI_CLONE_CAPTURE__ = true; } catch(e){}"
-        "if (!document.getElementById('__sc-smooth-off__')) {"
-        "const ns = document.createElement('style');"
-        "ns.id = '__sc-smooth-off__';"
-        "ns.textContent = 'html,body{scroll-behavior:auto !important;}';"
-        "document.head.appendChild(ns);"
-        "}"
-        "try {"
-        "['lenis','__lenis','Lenis','smoothScroll','__smoothScroll'].forEach(k => {"
-        "const o = window[k];"
-        "if (o && typeof o === 'object') { try { o.stop && o.stop(); } catch(e){} try { o.destroy && o.destroy(); } catch(e){} }"
-        "});"
-        "} catch(e){}"
-        "return 'smooth-off';"
-        "})()"
-    )
-
-
-def _reference_runtime_normalization_js() -> str:
-    """Reapply opt-in reference state that a reload or page script can undo.
-
-    The shell wrapper applies these controls after opening the reference page,
-    but section capture can run in a separate calibration session and dynamic
-    pages can restore their inline scroll cap while the capture loop is active.
-    Keeping the normalization reference-only preserves the implementation as
-    the thing under test.
-    """
-    cap_selector = (os.environ.get("REF_SCROLL_CAP_SELECTOR") or "").strip()
-    reset_selector = (
-        os.environ.get("REF_RESET_SCROLLLEFT_SELECTOR") or ""
-    ).strip()
-    if not cap_selector and not reset_selector:
-        return "undefined"
-    return (
-        "(() => {"
-        f"const capSelector = {json.dumps(cap_selector)};"
-        f"const resetSelector = {json.dumps(reset_selector)};"
-        "let capCount = 0; let resetCount = 0;"
-        "if (capSelector) { try {"
-        "const nodes = document.querySelectorAll(capSelector);"
-        "nodes.forEach(el => el.style.setProperty('max-height','none','important'));"
-        "capCount = nodes.length;"
-        "} catch (_error) {} }"
-        "if (resetSelector) { try {"
-        "const nodes = document.querySelectorAll(resetSelector);"
-        "nodes.forEach(el => { el.scrollLeft = 0; });"
-        "resetCount = nodes.length;"
-        "} catch (_error) {} }"
-        "let residualCap = 0;"
-        "if (capSelector) { try {"
-        "residualCap = Array.from(document.querySelectorAll(capSelector)).filter(el => "
-        "el.style.getPropertyValue('max-height') !== 'none').length;"
-        "} catch (_error) { residualCap = -1; } }"
-        "return JSON.stringify({capCount, resetCount, residualCap, height: document.documentElement.scrollHeight});"
-        "})()"
-    )
+__all__ = [
+    "CMP_OVERLAY_SELECTORS",
+    "_AGENT_BROWSER_TIMEOUT",
+    "_MULTI_UNDERSCORE_RE",
+    "_SAFE_NAME_RE",
+    "_apply_reference_runtime_normalization",
+    "_as_float",
+    "_canvas_height",
+    "_canvas_underlay_js",
+    "_capture_one",
+    "_crop_is_blank",
+    "_disable_smooth_scroll_js",
+    "_duration_to_seconds",
+    "_ensure_viewport",
+    "_finish_js",
+    "_fixed_overlay_toggle_js",
+    "_fmt_num",
+    "_is_number",
+    "_live_section_rect_js",
+    "_pause_js",
+    "_rect_from_capture",
+    "_reference_runtime_normalization_js",
+    "_resolve_live_section_rect",
+    "_run_agent_browser",
+    "_run_agent_eval",
+    "_run_agent_eval_text",
+    "_run_crop",
+    "_run_screenshot",
+    "_scroll_js",
+    "_scroll_metrics",
+    "_scroll_metrics_js",
+    "_settle_js",
+    "_unwrap_eval_json",
+    "capture_matched_sections",
+    "crop_is_off_canvas",
+    "crop_unique_colors",
+    "derive_settle_seconds",
+    "desired_scroll_y",
+    "main",
+    "safe_section_name",
+    "should_pin_to_bottom",
+    "write_transparent_stub",
+]
 
 
 def _apply_reference_runtime_normalization(session: str) -> None:
@@ -178,251 +136,6 @@ def _apply_reference_runtime_normalization(session: str) -> None:
         )
 
 
-
-def _fixed_overlay_toggle_js(active: bool) -> str:
-    selectors = (
-        os.environ.get("SECTION_CAPTURE_FIXED_OVERLAY_SELECTORS")
-        or os.environ.get("SECTION_FIXED_OVERLAY_SELECTORS")
-        or ""
-    ).strip()
-    if not selectors:
-        return "undefined"
-    css = f"{selectors} {{ visibility: hidden !important; }}"
-    if not active:
-        return """
-(() => {
-  const old = document.getElementById("__section_compare_fixed_overlay_mask");
-  if (old) old.remove();
-})()
-"""
-    return f"""
-(() => {{
-  const old = document.getElementById("__section_compare_fixed_overlay_mask");
-  if (old) old.remove();
-  const style = document.createElement("style");
-  style.id = "__section_compare_fixed_overlay_mask";
-  style.textContent = {json.dumps(css)};
-  document.head.appendChild(style);
-}})()
-"""
-
-
-def _canvas_underlay_js() -> str:
-    """Replace canvas pixels with a deterministic layer without changing stacking.
-
-    The black background fills transparent canvas pixels; brightness(0) makes
-    opaque pixels black. Keeping the element in its original stacking context
-    preserves DOM foreground painted above it. This is enabled only by the
-    section comparator and is applied symmetrically to ref and impl.
-    """
-    if os.environ.get("SECTION_CAPTURE_CANVAS_UNDERLAY") != "1":
-        return "undefined"
-    return """
-(() => {
-  let style = document.getElementById("__sc-canvas-underlay__");
-  if (!style) {
-    style = document.createElement("style");
-    style.id = "__sc-canvas-underlay__";
-    style.textContent = "canvas { visibility: visible !important; background: #202020 !important; filter: brightness(0) !important; opacity: 1 !important; mix-blend-mode: normal !important; }";
-    document.head.appendChild(style);
-  }
-  return document.querySelectorAll("canvas").length;
-})()
-"""
-
-# Consent/privacy (CMP) overlay containers removed during the capture settle.
-#
-# A persistent CMP banner occludes content and inflates EVERY section's AE
-# uniformly. Removal is applied identically to the reference and to the
-# implementation, so it cannot favour a faithful or a broken clone.
-#
-# Every entry must be a vendor-namespaced container id/class. A substring match
-# on a generic word is banned: it deletes the page's own content and yields a
-# doctored reference. Two such entries were removed after being measured --
-#   [class*=cookieconsent]  Cookiebot's uc.js sets cookieconsent-optin-marketing
-#                           on consent-gated iframes and their containers, so
-#                           this stripped real embeds; meanwhile Osano/Insites
-#                           cookieconsent -- its intended target -- never puts
-#                           that string in a class, so it covered nothing.
-#                           Replaced by .cc-window.
-#   [id^=cky-]              On a CookieYes frontend the only cky- ids are
-#                           <style id="cky-style"> and cky-style-inline, so this
-#                           stripped the banner's stylesheet and left the banner
-#                           reflowing as unstyled block text. The containers are
-#                           classes. Replaced by the .cky-* trio.
-# Per-site needs belong in SECTION_FIXED_OVERLAY_SELECTORS, not here.
-CMP_OVERLAY_SELECTORS: tuple[str, ...] = (
-    # iubenda. The CMP core (cookie_solution/iubenda_cs core-<lang>.js) reaches
-    # for exactly three ids, so a [id^=iubenda-] prefix bought nothing and did
-    # catch the badge script's id="iubenda-embed" fallback. Its overlay roots are
-    # NOT all under -cs- (iubenda-alert-dialog, iubenda-iframe-popup,
-    # iubenda-floatable-*), so the class match stays broad; the two exclusions are
-    # the badge anchor the SITE renders in its own footer
-    # (class="iubenda-white iubenda-embed"), which is page content and must
-    # survive into the reference so the clone is held to reproducing it. Verified:
-    # those two classes appear 0 times in the CMP core.
-    "#iubenda-cs-banner",
-    "#iubenda-iframe-popup",
-    "#iubenda_cs_rejection_recovery_popup",
-    "[class*=iubenda]:not(.iubenda-embed):not(.iubenda-ibadge)",
-    # OneTrust
-    "[id^=onetrust-]",
-    "[class*=onetrust]",
-    # Osano
-    "[id^=osano-]",
-    "[class*=osano]",
-    # Osano / Insites cookieconsent
-    ".cc-window",
-    # CookieYes
-    ".cky-consent-container",
-    ".cky-overlay",
-    ".cky-modal",
-    # Cookiebot
-    "#CybotCookiebotDialog",
-    "#CybotCookiebotDialogBodyUnderlay",
-    "#CookiebotWidget",
-    # Usercentrics
-    "#usercentrics-root",
-    "#usercentrics-cmp-ui",
-    # Didomi
-    "#didomi-host",
-    # Quantcast Choice
-    ".qc-cmp2-container",
-    # Complianz
-    "#cmplz-cookiebanner-container",
-)
-
-
-def _pause_js() -> str:
-    css = (
-        "*, *::before, *::after { animation-play-state: paused !important; "
-        "transition-duration: 0s !important; }"
-        + os.environ.get("SECTION_CAPTURE_DYNAMIC_PAUSE_EXTRA", "")
-    )
-    css_literal = json.dumps(css)
-    cmp_literal = json.dumps(", ".join(CMP_OVERLAY_SELECTORS))
-    return (
-        "(() => {"
-        "const s = document.getElementById('__sc-pause__');"
-        "if (!s) {"
-        "const ns = document.createElement('style');"
-        "ns.id = '__sc-pause__';"
-        f"ns.textContent = {css_literal};"
-        "document.head.appendChild(ns);"
-        "}"
-        "document.querySelectorAll('video').forEach(v => { try { v.pause(); v.autoplay = false; if (v.readyState >= 1) v.currentTime = 0; } catch(e){} });"
-        # try/catch: querySelectorAll throws on a malformed list, which would
-        # abort the IIFE before `return 'paused'` and silently skip the pause.
-        f"try {{ document.querySelectorAll({cmp_literal}).forEach(el => el.remove()); }} catch (e) {{}}"
-        "return 'paused';"
-        "})()"
-    )
-
-
-def _finish_js() -> str:
-    """Fast-forward every animation engine to its end frame before a shot.
-
-    The trailing translate3d block snaps near-settled framer transforms to
-    identity. It must only NORMALIZE an opacity the element already declares
-    inline (0.9995 -> 1) — writing one where the element had none overrides the
-    stylesheet and force-shows scroll-gated reveals that are legitimately
-    hidden at the capture anchor (one observed site's pyramid `.food`: 63k AE of pure
-    capture artifact). See tests/test_section_capture_finish_opacity.py.
-    """
-    return r"""(() => { try { if (typeof document.getAnimations === "function") { document.getAnimations().forEach(a => { try { a.finish(); } catch(e){} }); } } catch(e){} try { var __ST = window.ScrollTrigger || window.__sc_st || (window.gsap && window.gsap.core && window.gsap.core.globals && window.gsap.core.globals().ScrollTrigger); if (__ST && typeof __ST.getAll === "function") { __ST.getAll().forEach(function(st){ try { if (st.animation && typeof st.animation.progress === "function") st.animation.progress(1, false); if (typeof st.disable === "function") st.disable(false, false); } catch(e){} }); } } catch(e){} try { var __gs = window.gsap || window.__sc_gsap; if (__gs && __gs.globalTimeline && typeof __gs.globalTimeline.getChildren === "function") { __gs.globalTimeline.getChildren(true, true, true).forEach(t => { try { if (typeof t.progress === "function") t.progress(1, false); } catch(e){} }); } } catch(e){} try { if (window.anime && Array.isArray(window.anime.running)) { window.anime.running.slice().forEach(a => { try { a.seek(a.duration); a.pause(); } catch(e){} }); } } catch(e){} try { if (window.lottie && typeof window.lottie.getRegisteredAnimations === "function") { window.lottie.getRegisteredAnimations().forEach(a => { try { const last = (typeof a.totalFrames === "number" ? a.totalFrames : 1) - 1; a.goToAndStop(Math.max(0, last), true); } catch(e){} }); } document.querySelectorAll("lottie-player, dotlottie-player").forEach(el => { try { if (typeof el.seek === "function") el.seek("100%"); if (typeof el.pause === "function") el.pause(); } catch(e){} }); } catch(e){} try { var snapped = 0; document.querySelectorAll("[style*=translate3d]").forEach(function(el){ try { var s = el.getAttribute("style") || ""; var re = /translate3d\(\s*(-?[0-9.]+)px\s*,\s*(-?[0-9.]+)px\s*,\s*0(?:px)?\s*\)/; var transformSource = (el.style.transform || "").trim(); if (!transformSource) { var tm = s.match(/(?:^|;)\s*transform\s*:\s*([^;]+)/i); transformSource = tm ? tm[1].trim() : ""; } var m = (transformSource || s).match(re); if (!m) return; var ax = Math.abs(parseFloat(m[1])); var ay = Math.abs(parseFloat(m[2])); if (ax >= 10 || ay >= 10) return; var rawOp = (el.style.opacity || "").trim(); var op = parseFloat(rawOp === "" ? "1" : rawOp); if (!Number.isFinite(op) || op < 0.95) return; el.style.transform = (transformSource || m[0]).replace(re, "translate3d(0px, 0px, 0px)"); if (rawOp !== "" && op > 0.999) el.style.opacity = "1"; snapped++; } catch(e){} }); } catch(e){} return "finished"; })()"""
-
-
-def _settle_js() -> str:
-    """Post-finish settle probe for engines _finish_js cannot fast-forward.
-
-    Framer Motion drives animations through a private rAF frameloop —
-    document.getAnimations() never sees them, so the WAAPI/GSAP/anime/Lottie
-    fast-forward leaves Framer (and IntersectionObserver-started) animations
-    mid-flight, and a deterministic capture of that frozen frame is
-    deterministically WRONG (specific regression: 60/76 reveals frozen). This probe
-    (1) best-effort enables MotionGlobalConfig.skipAnimations, (2) yields two
-    rAF ticks so pending IO callbacks run, then (3) polls an inline-style
-    fingerprint until two consecutive samples are identical (quiescent) or
-    the budget runs out — and reports the verdict so the capture carries a
-    machine-readable confidence instead of silently penalizing the impl.
-    """
-    return r"""(async () => {
-  try { if (window.MotionGlobalConfig) window.MotionGlobalConfig.skipAnimations = true; } catch(e){}
-  const raf = () => new Promise(r => requestAnimationFrame(() => r()));
-  const wait = (ms) => new Promise(r => setTimeout(r, ms));
-  await raf(); await raf();
-  const fp = () => {
-    let s = "";
-    try {
-      const els = document.querySelectorAll('[style*="transform"],[style*="opacity"]');
-      let n = 0;
-      for (const el of els) { s += (el.getAttribute("style") || "") + ";"; if (++n >= 200) break; }
-    } catch(e){}
-    let running = 0;
-    try { running = document.getAnimations().filter(a => a.playState === "running").length; } catch(e){}
-    return s + "|" + running;
-  };
-  let prev = fp(); let rounds = 0; let quiescent = false;
-  for (; rounds < 8; rounds++) {
-    await wait(120); await raf();
-    const cur = fp();
-    if (cur === prev) { quiescent = true; break; }
-    prev = cur;
-  }
-  let running = 0;
-  try { running = document.getAnimations().filter(a => a.playState === "running").length; } catch(e){}
-  return JSON.stringify({ quiescent: quiescent, rounds: rounds, runningAnimations: running });
-})()"""
-
-
-def _unwrap_eval_json(raw: str) -> dict[str, Any] | None:
-    """Unwrap agent-browser's double-JSON-encoded eval output to a dict."""
-    v: Any = raw.strip()
-    for _ in range(4):
-        if isinstance(v, str):
-            try:
-                v = json.loads(v)
-            except (json.JSONDecodeError, ValueError):
-                return None
-        elif isinstance(v, dict):
-            inner = v.get("data") if v.get("data") is not None else v.get("result")
-            if inner is None:
-                break
-            v = inner
-        else:
-            break
-    return v if isinstance(v, dict) else None
-
-
-def _run_agent_browser(args: list[str]) -> subprocess.CompletedProcess[str]:
-    """subprocess.run for an `agent-browser` CLI call, bounded so a wedged
-    browser session (dead host, hung page) cannot hang capture forever."""
-    try:
-        return subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_AGENT_BROWSER_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
-            exc.cmd,
-            returncode=124,
-            stdout=_as_text(exc.stdout),
-            stderr=_as_text(exc.stderr) + f"\n[section_capture] agent-browser timed out after {exc.timeout}s\n",
-        )
-
-
-def _run_agent_eval(session: str, js: str) -> None:
-    _run_agent_browser(["agent-browser", "--session", session, "eval", js])
-
-
-def _run_agent_eval_text(session: str, js: str) -> str:
-    result = _run_agent_browser(["agent-browser", "--session", session, "eval", js])
-    return (result.stdout or "").strip()
-
-
 def _run_screenshot(session: str, output_path: Path) -> None:
     last_error = ""
     for attempt in range(3):
@@ -442,264 +155,6 @@ def _run_screenshot(session: str, output_path: Path) -> None:
         )
         time.sleep(0.15)
     raise RuntimeError(f"section screenshot invalid after 3 attempts: {last_error}")
-
-
-def _duration_to_seconds(dur: object) -> float | None:
-    """Coerce a spec duration to seconds. Accepts a number (already seconds) or
-    a CSS duration string ('1200ms', '1s', '0.8s') or a bare numeric string
-    (seconds). Returns None when unparseable. transition-spec-extract emits
-    ms/s strings while transition-spec-rules.md documents bare seconds — both
-    must parse, or the derived settle silently falls back to the 0.5s floor and
-    reference sections get captured mid-transition (codex P2 / extract H1)."""
-    if isinstance(dur, bool):
-        return None
-    if _is_number(dur):
-        return float(dur)
-    if not isinstance(dur, str):
-        return None
-    s = dur.strip().lower()
-    if not s:
-        return None
-    try:
-        if s.endswith("ms"):
-            return float(s[:-2]) / 1000.0
-        if s.endswith("s"):
-            return float(s[:-1])
-        return float(s)  # bare numeric string -> seconds
-    except ValueError:
-        return None
-
-
-def derive_settle_seconds(spec_path: Path | str) -> float:
-    """H9 (loop-nvti-3/4): the fixed 0.5s settle captured choreography-alive
-    reference pages MID-TRANSITION — transient ref crops overturned two
-    eyeball observations before being identified. Derive the settle from the
-    spec itself: rest-reeval margin (0.4s) + the longest declared transition
-    duration, floor 0.5s, cap 4.0s. Absent/unparseable spec keeps the legacy
-    0.5s (no behavior change for non-choreography sites, per the fable
-    constraint that the value must be derived, never site-tuned)."""
-    margin, floor, cap = 0.4, 0.5, 4.0
-    try:
-        spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return floor
-    entries = spec.get("transitions") if isinstance(spec, dict) else None
-    if not isinstance(entries, list):
-        return floor
-    longest = 0.0
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        anim = e.get("animation")
-        dur = anim.get("duration") if isinstance(anim, dict) else None
-        if dur is None:
-            continue
-        secs = _duration_to_seconds(dur)
-        if secs is None:
-            continue
-        longest = max(longest, secs)
-    if longest <= 0.0:
-        return floor
-    return round(min(cap, max(floor, margin + longest)), 3)
-
-
-def _ensure_viewport(
-    session: str,
-    expect_w: int,
-    *,
-    evaluator: Any = None,
-    setter: Any = None,
-    settle: float = 0.8,
-) -> None:
-    """V-1 (loop-nvti-4): the agent-browser session viewport silently REVERTS
-    mid-session (specific regression confound; a 14-depth sweep ran at 1280x633 and had
-    to be discarded). Assert innerWidth in-page immediately before every
-    screenshot; on mismatch re-set the viewport ONCE and re-assert; a
-    persistent mismatch aborts the capture — a wrong-viewport crop poisons
-    every downstream verdict and must never be written silently."""
-    ev = evaluator or _run_agent_eval_text
-    def _width() -> int | None:
-        raw = ev(session, "(() => window.innerWidth)()").strip().strip('"')
-        # exact-match only: digit-harvesting would render an eval ERROR like
-        # "os error 35" as innerWidth=35 in the abort message (fable review).
-        return int(raw) if raw.isdigit() else None
-
-    got = _width()
-    if got == expect_w:
-        return
-    if setter is None:
-        def setter(sess: str, w: int) -> None:  # pragma: no cover - thin wrapper
-            _run_agent_browser(
-                ["agent-browser", "--session", sess, "set", "viewport",
-                 str(w), os.environ.get("SECTION_CAPTURE_VIEW_H") or "900"],
-            )
-    setter(session, expect_w)
-    time.sleep(settle)
-    got = _width()
-    if got != expect_w:
-        raise SystemExit(
-            f"section_capture: viewport assertion failed on session "
-            f"{session!r}: innerWidth={got} expected={expect_w} after one "
-            f"re-set — aborting (V-1: a wrong-viewport crop poisons every "
-            f"downstream verdict)"
-        )
-
-
-def should_pin_to_bottom(
-    *,
-    top: float,
-    height: float,
-    scroll_height: float,
-    viewport_h: float,
-    factor: float = 1.5,
-) -> bool:
-    """True when the section's bottom sits within `factor` viewports of the
-    page end.
-
-    Near-end sections must be captured with the page pinned to maxScroll:
-    (1) `window.scrollTo(top - 50)` silently clamps there anyway, so the
-    legacy fixed `clip_top = 50` assumption cropped the wrong band, and
-    (2) end-of-page reveal latches only mount content once the page is
-    actually scrolled to the end (observed: a footer whose content never
-    rendered inside the capture window, producing 2-color background-only
-    crops on both sides and an AE=0 vacuous pass).
-
-    A section whose own height already spans most of the document (a
-    coarse single-section match on an impl without ref's granular markup)
-    makes `top + height` land near `scroll_height` no matter where the
-    section actually starts, so the heuristic above misfires and pins a
-    whole-page section to maxScroll — scrolling past all real content into
-    blank territory. Real footers/near-bottom elements never approach half
-    the document height, so excluding that case only removes the
-    degenerate whole-page-as-one-section match, not a legitimate near-end
-    element. Tradeoff: on a short page (e.g. a 2-viewport landing page) a
-    genuinely final, full-viewport-height section can legitimately reach
-    this 50% threshold and lose pinning, cropping its last ~viewport_h/2 of
-    content instead of the true bottom. Symmetric across ref/impl (both
-    captured identically), so it doesn't corrupt the AE verdict — just a
-    known imprecision on short pages, not addressed here.
-    """
-    if viewport_h <= 0:
-        return False
-    if scroll_height > 0 and height >= scroll_height * 0.5:
-        return False
-    return top + height >= scroll_height - factor * viewport_h
-
-
-def desired_scroll_y(
-    *,
-    top: float,
-    height: float,
-    scroll_height: float,
-    viewport_h: float,
-    factor: float = 1.5,
-) -> float:
-    if should_pin_to_bottom(
-        top=top, height=height, scroll_height=scroll_height,
-        viewport_h=viewport_h, factor=factor,
-    ):
-        return max(0.0, scroll_height - viewport_h)
-    return max(0.0, top - 50.0)
-
-
-def _scroll_metrics_js(scroller_selector: str) -> str:
-    if scroller_selector == "__document__":
-        return (
-            "(() => JSON.stringify({y: window.scrollY, vh: window.innerHeight,"
-            " sh: document.documentElement.scrollHeight}))()"
-        )
-    selector_literal = json.dumps(scroller_selector)
-    return (
-        "(() => {"
-        f"const w = document.querySelector({selector_literal});"
-        "if (!w) return JSON.stringify({y: window.scrollY, vh: window.innerHeight,"
-        " sh: document.documentElement.scrollHeight});"
-        "return JSON.stringify({y: w.scrollTop, vh: w.clientHeight, sh: w.scrollHeight});"
-        "})()"
-    )
-
-
-def _scroll_metrics(session: str, scroller_selector: str) -> dict[str, float] | None:
-    raw = _run_agent_eval_text(session, _scroll_metrics_js(scroller_selector))
-    data = _unwrap_eval_json(raw)
-    if not isinstance(data, dict):
-        return None
-    out: dict[str, float] = {}
-    for key in ("y", "vh", "sh"):
-        try:
-            out[key] = float(data.get(key))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
-    return out
-
-
-def crop_unique_colors(image_path: Path) -> int | None:
-    proc = subprocess.run(
-        ["magick", "identify", "-format", "%k", str(image_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    try:
-        return int(proc.stdout.strip())
-    except ValueError:
-        return None
-
-
-def _crop_is_blank(image_path: Path, *, min_std: float = 0.05) -> bool:
-    """True when a crop carries no real content: an off-canvas 1x1 stub, or a
-    near-uniform band (std below min_std) — the blank-ref capture-failure class
-    a pinned tall section hits when maxScroll scrolls past its top content."""
-    proc = subprocess.run(
-        ["magick", "identify", "-format", "%w %h %[fx:standard_deviation]", str(image_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    try:
-        parts = proc.stdout.strip().split()
-        w, h, std = int(parts[0]), int(parts[1]), float(parts[2])
-    except (ValueError, IndexError):
-        return False
-    if w <= 2 and h <= 2:
-        return True
-    return std < min_std
-
-
-def crop_is_off_canvas(*, clip_top: float, crop_h: float, canvas_h: float) -> bool:
-    """True when the crop rect has zero intersection with the screenshot.
-
-    Off-canvas rects happen legitimately: a settled intro overlay parked at
-    page rect -900..0 (end-to-end run). ImageMagick's out-of-bounds crop output
-    then depends on the source PNG's alpha channel — transparent on the
-    alpha-bearing ref capture, a clamped edge pixel on a no-alpha impl
-    screenshot — which guarantees a saturating 1px AE diff that no impl
-    change can fix.
-    """
-    return clip_top + crop_h <= 0 or clip_top >= canvas_h
-
-
-def write_transparent_stub(image_path: Path) -> None:
-    """Deterministic 1x1 fully-transparent RGBA crop for off-canvas rects."""
-    subprocess.run(
-        ["magick", "-size", "1x1", "xc:none", f"PNG32:{image_path}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def _canvas_height(image_path: Path) -> float:
-    proc = subprocess.run(
-        ["magick", "identify", "-format", "%h", str(image_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    try:
-        return float(proc.stdout.strip())
-    except ValueError:
-        return 0.0
 
 
 def _run_crop(image_path: Path, rect: dict[str, object], clip_top: float) -> None:
@@ -731,218 +186,6 @@ def _run_crop(image_path: Path, rect: dict[str, object], clip_top: float) -> Non
         text=True,
         check=False,
     )
-
-
-def _live_section_rect_js(identity: dict[str, object], expected_top: float) -> str:
-    payload = json.dumps(
-        {
-            "id": identity.get("id") or identity.get("elementId"),
-            "tag": identity.get("tag") or identity.get("tagName"),
-            "className": identity.get("className") or identity.get("classes"),
-            "text": identity.get("text") or identity.get("fingerprint") or identity.get("name"),
-            "selector": identity.get("selector"),
-            "expectedTop": expected_top,
-        }
-    )
-    canvas_underlay = os.environ.get("SECTION_CAPTURE_CANVAS_UNDERLAY") == "1"
-    return f"""(() => {{
-  const identity = {payload};
-  const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-  const tag = norm(identity.tag).toLowerCase();
-  const id = norm(identity.id);
-  const classes = norm(identity.className).split(" ").filter(Boolean);
-  const needle = norm(identity.text).toLowerCase().slice(0, 160);
-  const selector = tag ? tag : "*";
-  const nodes = Array.from(document.querySelectorAll(selector));
-  let selectedNodes = [];
-  if (identity.selector) {{
-    try {{ selectedNodes = Array.from(document.querySelectorAll(identity.selector)); }} catch (_error) {{}}
-  }}
-  const uniqueSemanticTag = new Set(["main", "header", "footer", "nav", "article"]);
-  const uniqueSemanticMatch = uniqueSemanticTag.has(tag) && nodes.length === 1;
-  const candidates = [];
-  for (const node of nodes) {{
-    const rect = node.getBoundingClientRect();
-    if (!rect || rect.width <= 0 || rect.height <= 0) continue;
-    const nodeId = norm(node.id);
-    const classList = Array.from(node.classList || []);
-    const idMatch = !!id && nodeId === id;
-    const classMatch = classes.length > 0 && classes.every((cls) =>
-      classList.includes(cls) || (
-        cls.length >= 6 && classList.some((actual) => actual.startsWith(cls))
-      )
-    );
-    const textMatch = !!needle && norm(node.textContent).toLowerCase().includes(needle);
-    const selectorMatch = selectedNodes.includes(node);
-    if (!selectorMatch && !idMatch && !classMatch && !textMatch && !uniqueSemanticMatch) continue;
-    let score = 0;
-    if (selectorMatch) score += 200;
-    if (idMatch) score += 100;
-    if (classMatch) score += 50 + classes.length;
-    if (textMatch) score += 20;
-    if (tag && node.tagName.toLowerCase() === tag) score += 5;
-    if (uniqueSemanticMatch) score += 1;
-    const nodePosition = getComputedStyle(node).position;
-    let bottomSticky = false;
-    let stickyEndScrollY = null;
-    for (let owner = node; owner && owner !== document.documentElement; owner = owner.parentElement) {{
-      const ownerStyle = getComputedStyle(owner);
-      if (ownerStyle.position === "sticky" && ownerStyle.bottom !== "auto") {{
-        bottomSticky = true;
-        const ownerRect = owner.getBoundingClientRect();
-        const containingBlock = owner.parentElement;
-        const containingRect = containingBlock && containingBlock.getBoundingClientRect();
-        const stuckToViewportBottom = Math.abs(ownerRect.bottom - window.innerHeight) <= 1;
-        if (containingRect && stuckToViewportBottom) {{
-          const stickyEndDocumentTop = containingRect.bottom + window.scrollY - ownerRect.height;
-          const targetY = stickyEndDocumentTop - ownerRect.top;
-          if (targetY > window.scrollY + 1) stickyEndScrollY = targetY;
-        }}
-        break;
-      }}
-    }}
-    const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
-    const samplePoints = [0.1, 0.3, 0.5, 0.7, 0.9].map((ratio) => [
-      x,
-      Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height * ratio))
-    ]);
-    const hitVisibleSamples = samplePoints.filter(([sampleX, sampleY]) =>
-      document.elementsFromPoint(sampleX, sampleY).some(
-        (hit) => hit === node || node.contains(hit)
-      )
-    ).length;
-    const hitVisible = hitVisibleSamples === samplePoints.length;
-    const documentTop = rect.top + window.scrollY;
-    candidates.push({{
-      node,
-      top: rect.top,
-      left: rect.left,
-      width: rect.width,
-      height: rect.height,
-      documentTop,
-      bottomSticky,
-      stickyEndScrollY,
-      hitVisible,
-      hitVisibleSamples,
-      position: nodePosition,
-      score,
-      distance: Math.abs(documentTop - Number(identity.expectedTop || 0))
-    }});
-  }}
-  candidates.sort((a, b) => (b.score - a.score) || (a.distance - b.distance));
-  const best = candidates[0] || null;
-  if (best) {{
-    const bestNode = best.node;
-    delete best.node;
-    if ({str(canvas_underlay).lower()}) {{
-      const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-      const sectionRect = bestNode.getBoundingClientRect();
-      const canvases = Array.from(document.querySelectorAll("canvas")).filter((canvas) => {{
-        const style = getComputedStyle(canvas);
-        const rect = canvas.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0 && overlaps(rect, sectionRect);
-      }});
-      const foregroundRects = [];
-      const walker = document.createTreeWalker(bestNode, NodeFilter.SHOW_TEXT);
-      for (let textNode = walker.nextNode(); textNode; textNode = walker.nextNode()) {{
-        if (!norm(textNode.nodeValue)) continue;
-        const owner = textNode.parentElement;
-        if (!owner || owner.closest("canvas, video, iframe")) continue;
-        const style = getComputedStyle(owner);
-        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) <= 0) continue;
-        const range = document.createRange();
-        range.selectNodeContents(textNode);
-        for (const rect of range.getClientRects()) {{
-          if (rect.width <= 1 || rect.height <= 1 || !overlaps(rect, sectionRect)) continue;
-          const left = Math.max(0, rect.left, sectionRect.left);
-          const top = Math.max(0, rect.top, sectionRect.top);
-          const right = Math.min(window.innerWidth, rect.right, sectionRect.right);
-          const bottom = Math.min(window.innerHeight, rect.bottom, sectionRect.bottom);
-          if (right <= left || bottom <= top) continue;
-          const x = (left + right) / 2;
-          const y = (top + bottom) / 2;
-          const hit = document.elementFromPoint(x, y);
-          const foregroundHit = !!hit && (owner === hit || owner.contains(hit) || hit.contains(owner));
-          const canvasBehind = canvases.some((canvas) => {{
-            const canvasRect = canvas.getBoundingClientRect();
-            return x >= canvasRect.left && x <= canvasRect.right && y >= canvasRect.top && y <= canvasRect.bottom;
-          }});
-          if (foregroundHit && canvasBehind) foregroundRects.push({{left, top, right, bottom}});
-        }}
-      }}
-      if (foregroundRects.length) {{
-        const pad = 8;
-        const left = Math.max(0, sectionRect.left, Math.min(...foregroundRects.map(r => r.left)) - pad);
-        const top = Math.max(0, sectionRect.top, Math.min(...foregroundRects.map(r => r.top)) - pad);
-        const right = Math.min(window.innerWidth, sectionRect.right, Math.max(...foregroundRects.map(r => r.right)) + pad);
-        const bottom = Math.min(window.innerHeight, sectionRect.bottom, Math.max(...foregroundRects.map(r => r.bottom)) + pad);
-        if (right > left && bottom > top) {{
-          best.foregroundRoi = {{left, top, width: right - left, height: bottom - top}};
-          best.foregroundRectCount = foregroundRects.length;
-          best.underlayCanvasCount = canvases.length;
-        }}
-      }}
-    }}
-  }}
-  return JSON.stringify(best);
-}})()"""
-
-
-def _rect_from_capture(raw: object) -> dict[str, float] | None:
-    if not isinstance(raw, dict):
-        return None
-    rect = {
-        "top": _as_float(raw.get("top")),
-        "left": _as_float(raw.get("left")),
-        "width": _as_float(raw.get("width")),
-        "height": _as_float(raw.get("height")),
-    }
-    if rect["width"] <= 0 or rect["height"] <= 0:
-        return None
-    return rect
-
-
-def _resolve_live_section_rect(
-    session: str,
-    identity: dict[str, object] | None,
-    expected_top: float,
-) -> dict[str, object] | None:
-    if not identity:
-        return None
-    data = _unwrap_eval_json(
-        _run_agent_eval_text(session, _live_section_rect_js(identity, expected_top))
-    )
-    if not isinstance(data, dict):
-        return None
-    width = _as_float(data.get("width"))
-    height = _as_float(data.get("height"))
-    if width <= 0 or height <= 0:
-        return None
-    result: dict[str, object] = {
-        "top": _as_float(data.get("top")),
-        "left": _as_float(data.get("left")),
-        "width": width,
-        "height": height,
-        "documentTop": _as_float(data.get("documentTop")),
-    }
-    for key in ("bottomSticky", "hitVisible"):
-        if isinstance(data.get(key), bool):
-            result[key] = data[key]
-    if isinstance(data.get("position"), str):
-        result["position"] = data["position"]
-    foreground_roi = data.get("foregroundRoi")
-    if isinstance(foreground_roi, dict):
-        roi = _rect_from_capture(foreground_roi)
-        if roi is not None:
-            result["foregroundRoi"] = roi
-    for key in ("foregroundRectCount", "underlayCanvasCount"):
-        if _is_number(data.get(key)):
-            result[key] = int(_as_float(data[key]))
-    if _is_number(data.get("hitVisibleSamples")):
-        result["hitVisibleSamples"] = int(data["hitVisibleSamples"])
-    if _is_number(data.get("stickyEndScrollY")):
-        result["stickyEndScrollY"] = _as_float(data["stickyEndScrollY"])
-    return result
 
 
 def _capture_one(

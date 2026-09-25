@@ -105,7 +105,8 @@ def test_section_compare_masks_fixed_overlays_only_after_scroll() -> None:
 
 
 def test_section_capture_sets_scrolled_attribute_for_fixed_overlay_masks() -> None:
-    source = (ROOT / "ui_clone" / "section_capture.py").read_text(encoding="utf-8")
+    # _scroll_js lives in section_capture_js (re-exported by section_capture).
+    source = (ROOT / "ui_clone" / "section_capture_js.py").read_text(encoding="utf-8")
 
     assert "data-section-compare-scrolled" in source
     assert "({y} > 0 ? '1' : '0')" in source
