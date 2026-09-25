@@ -34,9 +34,10 @@ TARGET_SELECTOR='<css-selector-from-dom-evidence>'
 bash "$PLUGIN_ROOT/scripts/extract/element-evidence.sh" "$SESSION" "$URL" "$TARGET_SELECTOR" "$OUT_DIR/element-target.json"
 ```
 
-This is an element probe, not proof that a requested section-only clone stayed
-within scope. Full clone fidelity still needs the relevant page-level bundle,
-transition, state, and verification evidence.
+This is an element probe that identifies a scoped clone's target; by itself it is
+not proof that a section-only clone stayed within scope. Scoped fidelity still
+needs the target's bundle, transition, state, and element-scope verification
+evidence.
 
 ## Scroll state machine and mutations
 

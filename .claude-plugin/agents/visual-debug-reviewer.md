@@ -9,6 +9,8 @@ Resolve plugin root as `${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cat "$HOME/.confi
 
 Read `$PLUGIN_ROOT/skills/visual-debug/comparison-fix.md` and follow the **Phase E: LLM Review** section.
 
+Read budget (~4.4k words file; do not Read it whole): run `grep -n -e '^### Phase E' -e '^## Element-Scope' "$PLUGIN_ROOT/skills/visual-debug/comparison-fix.md"` and Read only that line range with `offset`/`limit`. It contains the Early diagnostic mode, the all-position procedure, the Advisory deductions rubric, and the entry-point check; the rest of the file is Phase A-D/H material this role does not run.
+
 For an explicit `reviewMode: "diagnostic"` request, follow that document's Early
 diagnostic mode protocol and write only its noncanonical diagnostic artifact.
 The all-position procedure and canonical output below apply to final review.

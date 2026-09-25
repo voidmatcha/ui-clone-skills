@@ -141,3 +141,102 @@ def test_headless_driver_is_unaffected(
 
     assert captured.out.strip() == ""
     assert captured.err.strip() == "driver advisory"
+
+
+# --- Repeat-signature path: full text once, one-line reminder on repeats ------
+
+_REPEAT_REASON = (
+    "⛔ UI-RE Gate: post-implement BLOCKED\n\n"
+    "Incomplete items (2):\n  - required: runtime-env\n  - required: blank-viewport\n\n"
+    "Run:\n  python -m ui_clone.gate tmp/ref/comp post-implement\n\n"
+    "Goal Card: comp\n" + "Next action: long goal card text. " * 40
+)
+
+
+def _emit(
+    capsys: pytest.CaptureFixture[str], ref_dir: Path, prefix: str = ""
+) -> dict[str, object]:
+    section_gate._emit_block(
+        _REPEAT_REASON, ref_dir, section_gate._block_signature(_REPEAT_REASON), prefix
+    )
+    data = json.loads(capsys.readouterr().out.strip())
+    assert isinstance(data, dict)
+    return data
+
+
+@pytest.fixture
+def ledger(project: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.delenv("UI_RE_HEADLESS_DRIVER", raising=False)
+    monkeypatch.delenv("UI_RE_STOP_RETRY_CAP", raising=False)
+    monkeypatch.setattr(section_gate, "_ADVISORY_ONLY", False)
+    monkeypatch.setattr(section_gate, "_BLOCK_LEDGER", (project, "sid-repeat"))
+    ref_dir = project / "tmp" / "ref" / "comp"
+    ref_dir.mkdir()
+    return ref_dir
+
+
+def test_repeat_signature_emits_short_reminder_that_still_blocks(
+    ledger: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = _emit(capsys, ledger)
+    assert first == {"decision": "block", "reason": _REPEAT_REASON}
+
+    second = _emit(capsys, ledger)
+    assert second["decision"] == "block", "a repeat must still block"
+    reason = str(second["reason"])
+    assert "\n" not in reason, "repeat reminder must be one line"
+    assert "post-implement BLOCKED" in reason
+    assert f"python -m ui_clone.goal {ledger}" in reason
+    # Size ceiling so the reminder cannot regrow into the full card.
+    assert len(reason.split()) <= section_gate._REPEAT_REASON_MAX_WORDS
+    assert len(reason.split()) < len(_REPEAT_REASON.split()) // 4
+
+
+def test_repeat_reminder_keeps_retry_cap_semantics(
+    ledger: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Short text never changes the verdict: cap blocks, then the full handback."""
+    cap = section_gate._stop_retry_cap()
+    for _ in range(cap):
+        assert _emit(capsys, ledger)["decision"] == "block"
+    final = _emit(capsys, ledger)
+    assert "decision" not in final
+    message = str(final["systemMessage"])
+    assert "UNFINISHED" in message
+    assert "runtime-env" in message, "handback must carry the full failure list"
+
+
+def test_changed_signature_emits_full_text_again(
+    ledger: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _emit(capsys, ledger)
+    _emit(capsys, ledger)
+    changed = _REPEAT_REASON.replace("  - required: blank-viewport\n", "")
+    section_gate._emit_block(changed, ledger, section_gate._block_signature(changed))
+    data = json.loads(capsys.readouterr().out)
+    assert data == {"decision": "block", "reason": changed}
+
+
+def test_forget_session_after_compact_restores_full_text(
+    project: Path, ledger: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PostCompact drops the earlier full text from context, so show it again."""
+    from ui_clone.hooks import _stop_repeat
+
+    _emit(capsys, ledger)
+    assert "\n" not in str(_emit(capsys, ledger)["reason"])
+    _stop_repeat.forget_session(project, "sid-repeat")
+    again = _emit(capsys, ledger)
+    assert again == {"decision": "block", "reason": _REPEAT_REASON}
+    # Forgetting shown-state must not reset the retry budget.
+    assert 3 in section_gate._read_stop_attempts(project).values()
+
+
+def test_repeat_reminder_keeps_continuation_prefix(
+    ledger: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prefix = "⛔ UI-RE continuation one-shot is arming\n\nCall CronCreate exactly once.\n\n"
+    _emit(capsys, ledger, prefix)
+    second = str(_emit(capsys, ledger, prefix)["reason"])
+    assert second.startswith(prefix)
+    assert "post-implement BLOCKED" in second

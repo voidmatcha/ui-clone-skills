@@ -19,8 +19,8 @@ bash "$SCRIPTS_DIR/batch-scroll.sh" <orig> <impl> <session> <dir>
 bash "$SCRIPTS_DIR/batch-compare.sh" <dir>
 bash "$SCRIPTS_DIR/dssim-compare.sh" <dir>
 
-# Routed section and transition verification
-bash "$SCRIPTS_DIR/section-compare.sh" <orig> <impl> <session> "$(pwd)/tmp/ref/<component>"
+# Routed section and transition verification (quiet: progress -> sections/section-compare.log)
+SECTION_COMPARE_QUIET=1 bash "$SCRIPTS_DIR/section-compare.sh" <orig> <impl> <session> "$(pwd)/tmp/ref/<component>"
 bash "$SCRIPTS_DIR/transition-compare.sh" <orig> <impl> <session> "$(pwd)/tmp/ref/<component>"
 ```
 
@@ -33,7 +33,7 @@ Freeze a completed dynamic reference with `RECATCH_REF=0` during repair. Re-capt
 `ONLY_IF_CHANGED=1` is allowed only on the second or later section comparison when the reference remains pinned, implementation source is unchanged, and the prior `sections/result.txt` is a complete measured pass:
 
 ```bash
-RECATCH_REF=0 ONLY_IF_CHANGED=1 IMPL_SRC_DIR=<impl-src-root> \
+RECATCH_REF=0 ONLY_IF_CHANGED=1 IMPL_SRC_DIR=<impl-src-root> SECTION_COMPARE_QUIET=1 \
   bash "$SCRIPTS_DIR/section-compare.sh" <orig> <impl> <session> "$(pwd)/tmp/ref/<component>"
 ```
 
@@ -56,12 +56,42 @@ Use `tree-diff.sh`, `layout-tree-diff.sh`, `hover-tree-diff.sh`, and `keyframes-
 
 The executable gate catalog is `$SCRIPTS_DIR/verification-plan.sh` (`skills/visual-debug/scripts/verification-plan.sh`). Prefer its tier and dispatch rules over manually recreating a broad list: `quick` for static inner-loop signals, `standard` for one-shot browser checks, and `comprehensive` for final frame-by-frame verification.
 
+## Checker catalog
+
+Scripts are the source of truth for thresholds; values below mirror the code.
+
+| Script | Catches | Fails when |
+|---|---|---|
+| `layout-diff.sh` / `layout-health-check.sh` | Section box or total-height drift | Structural drift before pixel diff |
+| `stray-absolute-check.sh` | "Footer disappeared" (`diagnosis.md` H) | `position:absolute` with no positioned ancestor |
+| `tailwind-transform-conflict-check.sh` | Double transform (`diagnosis.md` I) | Non-identity `transform` plus non-`none` `translate`/`rotate`/`scale` |
+| `breakpoint-collision-check.sh` | Broken at exact breakpoint (`diagnosis.md` J) | min/max media both match, isolated overflow, or root font jitter at boundary ±1 |
+| `font-parity-check.sh` / `paid-features-detect.sh` | Silent font substitution | Mismatch not declared in `asset-substitution.json`; paid entry without `decision` |
+| `reveal-trigger-check.sh` | Reveal wired but never fires | Initially hidden element never advances after scroll-in |
+| `hidden-children-check.sh` | Ref screenshot painted while DOM stays hidden | Section area >20000 with ≥2 non-trivial children, all hidden (`display:none`, `visibility:hidden`, opacity ≤0.01, rect <2x2) |
+| `blank-viewport-check.sh` | DOM exists but page blank | `html`/`body`/root stays hidden or all text invisible |
+| `runtime-dom-parity-check.sh` | Screenshot overlay or single-canvas paint | Node ratio outside 0.70–1.30, visible text nodes < max(10, sections×2), one media element >90% viewport, or Lottie missing |
+| `ref-screenshot-asset-check.sh` | Ref captures reused as impl assets | Capture-dir path substring or sha256-identical copy in impl |
+| `entry-coherence-check.sh` | Mixed stacks or pasted markup | Coexisting entries, mixed Vite+Next deps, or entry HTML with ≥5 content tags (or ≥3 plus ≥800 body chars) |
+| `scaffold-residue-check.sh` | Orphan scaffold components | ≥3 orphans, or ≥1 orphan with ratio ≥40% |
+| `scaffold-warn-check.sh` | Unresolved scaffold placeholders | Any `data-scaffold-warn` in impl |
+| `html-paste-check.sh` | Ref HTML/JS pasted into entry | Tag-multiset similarity ≥70% (≥90% for component files; skipped under 20 tags), ref bundle `<script src>`, or inline style quick_ratio ≥70% |
+| `css-mirror-check.sh` | Ref CSS mirrored | `@import` of a ref bundle host/file, byte-identical copy, or quick_ratio ≥70% (snippets under `impl/src/styles/from-ref/` allowed) |
+| `monolithic-impl-check.sh` | Whole UI in one entry file | Entry ≥8000 bytes and components < max(3, sections // 3) |
+| `required-media-coverage-check.sh` | Missing video/Lottie | `required-media.json` absent, media not in `impl/public/` and source, or Lottie runtime missing |
+| `svg-dom-parity-check.sh` | Dropped CSS/inline SVG icons | Ref SVG total ≥2 and impl <50%, empty `<svg>` stubs, or per-section loss |
+| `motion-coverage-check.sh` | Ref motion library, impl static | Ref score ≥3 with impl 0, or ref ≥5 with impl <2 |
+| `scroll-engine-parity-check.sh` | Wrong motion engine class | Ref class (pin, scrub, Lenis, ScrollTrigger) lacks an impl equivalent |
+| `forced-state-class-check.sh` | Hardcoded final states | Forced active/visible classes or final-state patches when ref has state classes |
+| `invalidation-check.sh` | Retired known-bad run | `.invalidated` stamp present; post-implement blocks until removed and fixed |
+| `impl-url-guard.sh` | Stale dev server on port | Listener cwd differs from canonical impl root |
+
 ## Dynamic content masking
 
 Canvas and video clocks can make raw pixels nondeterministic. Mask only regions already identified as dynamic, on both sides, while preserving layout:
 
 ```bash
-EXCLUDE_DYNAMIC=1 bash "$SCRIPTS_DIR/section-compare.sh" \
+EXCLUDE_DYNAMIC=1 SECTION_COMPARE_QUIET=1 bash "$SCRIPTS_DIR/section-compare.sh" \
   <orig> <impl> <session> "$(pwd)/tmp/ref/<component>"
 ```
 

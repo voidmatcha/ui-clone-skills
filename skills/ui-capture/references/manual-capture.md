@@ -25,6 +25,18 @@ Keep the viewport at 1440x900 unless the active capture plan specifies another
 fixed viewport. Set it after opening the page, then calibrate readiness from the
 actual splash or delayed gate; do not use a large arbitrary wait.
 
+Splash calibration, once per project: read `html`/`body` classes at t=0 and after
+`wait 15000`. If t=0 has `is-loading|loading|preloading|locked` and the later read
+does not, wait = splash visible duration + 500ms (not framework init time). For
+splashes over 5s, also set `NEXT_PUBLIC_SPLASH_TEST=true` (or the impl's
+equivalent) so iterations skip the loader. Reuse the value as `WAIT_REF`/`WAIT_IMPL`
+for `section-compare.sh`; never bump to `wait 30000` "to be safe". Bare sites keep
+`wait 3000`.
+
+Scroll rules: take `scrollType`/`scrollSelector` from the `detection.md` eval.
+Screenshots use instant `scrollTo(0, Y)` on `window` or `scrollSelector`; videos
+use a native `scrollTo` loop, or `mouse wheel <deltaY>` for custom scrollers.
+
 For a section, scroll to its planned location, wait for the named state, read the
 actual clamped scroll position, save a viewport screenshot to an absolute path,
 and crop from that image. Use `section-compare.sh` or `section_capture.py` for

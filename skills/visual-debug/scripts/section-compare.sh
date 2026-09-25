@@ -154,6 +154,43 @@ if [[ "$DIR" != /* ]]; then
   DIR="$(pwd)/$DIR"
 fi
 
+# ── Quiet mode (opt-in; token control for agent callers) ────────────
+# SECTION_COMPARE_QUIET=1 re-runs this script with stdout+stderr captured to
+# <dir>/sections/section-compare.log, then prints only the result table
+# (sections/result.txt, when this run wrote it), the verdict lines
+# (✓ / ⚠ / ⛔), the exit code, and the result/log paths. The run itself,
+# its artifacts, and its exit code are unchanged. Default (unset/0) output
+# is byte-identical to before.
+# Per-viewport inner runs already log to their own file, so they stay verbose.
+if [ "${SECTION_COMPARE_QUIET:-0}" = "1" ] && [ "${_SECTION_COMPARE_QUIET_CHILD:-0}" != "1" ] \
+  && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
+  mkdir -p "$DIR/sections"
+  _quiet_log="$DIR/sections/section-compare.log"
+  _quiet_result="$DIR/sections/result.txt"
+  _quiet_stamp="$(mktemp "$DIR/sections/.quiet-stamp.XXXXXX")"
+  set +e
+  _SECTION_COMPARE_QUIET_CHILD=1 bash "$0" "$@" > "$_quiet_log" 2>&1
+  _quiet_code=$?
+  set -e
+  if [ -f "$_quiet_result" ] && [ "$_quiet_result" -nt "$_quiet_stamp" ]; then
+    cat "$_quiet_result"
+  else
+    echo "section-compare: result.txt not rewritten by this run (reused or failed early); last log lines:"
+    tail -n 20 "$_quiet_log"
+    if [ -f "$_quiet_result" ]; then
+      echo ""
+      echo "Prior result.txt (NOT from this run):"
+      cat "$_quiet_result"
+    fi
+  fi
+  rm -f "$_quiet_stamp"
+  grep -E '^[[:space:]]*(✓|⚠|⛔)' "$_quiet_log" | tail -n 12 || true
+  echo "section-compare exit: $_quiet_code"
+  echo "  Result: $_quiet_result"
+  echo "  Log:    $_quiet_log (diff crops: $DIR/sections/diff/<section>.png)"
+  exit "$_quiet_code"
+fi
+
 # Direct per-viewport reruns commonly point DIR at
 # <ref>/sections/viewports/<WxH> without going through the fan-out wrapper that
 # exports REF_ROOT_DIR. Infer that canonical ref root so transition-spec,

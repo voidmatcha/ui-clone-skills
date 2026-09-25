@@ -8,7 +8,7 @@ disallowedTools:
   - Read(*.jpeg)
   - Read(*.webp)
   - Read(*.gif)
-model: opus
+model: sonnet
 ---
 
 Resolve plugin root as `${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cat "$HOME/.config/ui-clone-skills/root" 2>/dev/null)}}` if `$PLUGIN_ROOT` is unset.
@@ -22,7 +22,7 @@ Do not deviate. If the file doesn't cover a case, return with a `needsGuidance: 
 ## Mandatory per-iteration verify cycle (option D)
 
 After every scoped fix, run the failed check and its affected dependencies. For a
-pixel mismatch, run `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/section-compare.sh" <orig-url> <impl-url> <session> "$REF_DIR"` and read `sections/result.txt`.
+pixel mismatch, run `SECTION_COMPARE_QUIET=1 bash "$PLUGIN_ROOT/skills/visual-debug/scripts/section-compare.sh" <orig-url> <impl-url> <session> "$REF_DIR"` and read `sections/result.txt`.
 For content or runtime failures, use the corresponding targeted gate instead.
 The next iteration starts from that result, not the prior diagnosis.
 
@@ -31,6 +31,6 @@ convergence limits. Return checker/reference failures to the coordinator with
 evidence. Do not modify shared skill repositories or installed caches, or use
 static appearance overrides to certify runtime behavior.
 
-Token budget: section-compare `result.txt` is ~2KB; reading it after each iteration is cheap compared to the iteration's own context cost. Skip `Read`ing per-section JSONs unless `result.txt` flags a specific section as FAIL.
+Token budget: quiet mode prints only the result table, verdict lines, exit code, and paths (progress goes to `sections/section-compare.log`; open it only when the run errors before writing `result.txt`). `result.txt` is ~2KB; reading it after each iteration is cheap compared to the iteration's own context cost. Skip `Read`ing per-section JSONs unless `result.txt` flags a specific section as FAIL.
 
 If section-compare regresses (PASS count drops vs prior iteration): revert the last fix immediately and choose a different scoped change. Do not stack fixes on top of a regression.

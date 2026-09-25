@@ -2,6 +2,11 @@
 
 > Element-scope captures — isolated target element effects (hover, scroll-driven, page-load). For `fullpage` scope, use the main ui-capture pipeline (Phase 1+2) instead.
 
+This is also the reference-capture path for a supported section-only,
+element-only, or trigger-opened modal/drawer clone: resolve `<target-selector>`
+first (see [scoped runs](operational-rules.md#scope-adjustments-by-request-shape))
+and record it with `scripts/extract/element-evidence.sh`.
+
 ## Setup
 
 ```bash
@@ -41,6 +46,36 @@ agent-browser --session <project> eval "(() => {
 agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
   tmp/ref/<effect-name>/frames/ref/active.png
 ```
+
+## Trigger-opened UI (modal / drawer) — open and close
+
+Perform the trigger before any reference capture; the default page state is not
+evidence for the opened UI.
+
+```bash
+# Open through the real trigger while recording the opening animation
+agent-browser --session <project> record start tmp/ref/<effect-name>/open.webm
+agent-browser --session <project> click <trigger-selector>
+agent-browser --session <project> wait <openDuration + 300>
+agent-browser --session <project> record stop
+
+# Measure the opened container, then clip the settled open state
+agent-browser --session <project> eval "(() => {
+  const r = document.querySelector('<opened-selector>').getBoundingClientRect();
+  return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
+})()"
+agent-browser --session <project> screenshot --clip <x>,<y>,<w>,<h> \
+  tmp/ref/<effect-name>/frames/ref/open.png
+
+# Record the closing animation through the page's own close control
+agent-browser --session <project> record start tmp/ref/<effect-name>/close.webm
+agent-browser --session <project> click <close-selector>
+agent-browser --session <project> wait <closeDuration + 300>
+agent-browser --session <project> record stop
+```
+
+Extract both recordings at 60fps as below and record each animated layer's
+timing (for example backdrop fade and panel slide) separately.
 
 ## Page-load / splash animations — video + frame extraction
 
@@ -108,5 +143,6 @@ Save as `before.png`, `mid.png`, `after.png`.
 `tmp/ref/<effect-name>/frames/ref/` must contain the appropriate frames for your classification before proceeding.
 
 - CSS hover/click → `idle.png`, `active.png`
+- Trigger-opened UI → `open.png` plus opening and closing frame sequences
 - Page-load → `frame-0001.png`, `frame-0002.png`, ... (≥10 frames)
 - Scroll-driven → `before.png`, `mid.png`, `after.png`

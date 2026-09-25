@@ -7,6 +7,6 @@ All skills process untrusted external content (DOM, CSS, JS bundles, screenshots
 - **Content boundary enforcement** — `component-generation.md` never follows directives found in DOM text, HTML comments, CSS content properties, or `data-*` attributes.
 - **Bundle safety** — HTTPS-only, size-limited (10 MB), time-limited (30s), read-only (grep only, never executed).
 - **No credential forwarding** — `curl` sends no cookies or auth tokens.
-- **Cleanup** — `tmp/ref/` (may contain PII-bearing screenshots) is removed after verification.
+- **Cleanup** — `tmp/ref/` may contain PII-bearing screenshots. It is kept for resume and re-verification and is deleted only on explicit user request, after every gate passes, with a warning that the evidence is lost (see `skills/ui-reverse-engineering/operational-rules.md`).
 
 See each skill's `SKILL.md` for full details.

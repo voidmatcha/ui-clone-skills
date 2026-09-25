@@ -30,7 +30,7 @@ agent-browser --session <name> eval "(() => {
 })()"
 ```
 
-Returns `{ scrollType, scrollSelector, totalHeight, viewportHeight, sections[] }`. Use `scrollType` and `scrollSelector` for all subsequent scroll operations (see SKILL.md Phase 1 scroll rules).
+Returns `{ scrollType, scrollSelector, totalHeight, viewportHeight, sections[] }`. Use `scrollType` and `scrollSelector` for all subsequent scroll operations (see `references/manual-capture.md` scroll rules).
 
 ## Step 2A: Classify transitions by trigger type
 

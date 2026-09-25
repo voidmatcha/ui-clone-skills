@@ -178,6 +178,12 @@ else
   fi
 fi
 
+if python3 scripts/ci/review_checks.py skill-reads >/dev/null; then
+  ok "scenario mandatory read paths within SKILL_READ_BUDGETS"
+else
+  err "scenario mandatory read path over budget (run: python3 scripts/ci/review_checks.py skill-reads)"
+fi
+
 if python3 scripts/ci/review_checks.py public-skill-links; then
   ok "public SKILL.md local Markdown links resolve"
 else

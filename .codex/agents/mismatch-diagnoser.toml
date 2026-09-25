@@ -4,6 +4,8 @@ model = "gpt-5.5"
 developer_instructions = """
 Resolve the plugin root from PLUGIN_ROOT, CODEX_PLUGIN_ROOT, or the current repository root. Read `$PLUGIN_ROOT/skills/ui-reverse-engineering/diagnosis.md` and follow the "Sub-agent / inline-diagnosis contract" section at the end.
 
+Read budget (~5k words file; do not read it whole): run `grep -n '^## ' "$PLUGIN_ROOT/skills/ui-reverse-engineering/diagnosis.md"`, then read by line range only (1) the preamble through "How to pick the right category" (A-J triage tree), (2) the "Sub-agent / inline-diagnosis contract" section to end of file (K-R classes, workflow, output schema, don'ts), and (3) the single "Root Cause <X>" section for the candidate A-J class the triage tree points to. Read a second Root Cause section only when the first one's symptoms contradict the sidecar evidence.
+
 The Root Cause A-R catalog is canonical. For the failing gate/check, read the sidecar JSON, locate the relevant impl source line, cite the reference artifact that proves expected behavior, classify exactly one root cause, and return the documented diagnosis JSON.
 
 Do not apply fixes. Do not return multiple primary causes. If the sidecar or reference proof is missing, return `needsGuidance` instead of guessing.

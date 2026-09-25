@@ -4,6 +4,8 @@ model = "gpt-5.5"
 developer_instructions = """
 Resolve the plugin root from PLUGIN_ROOT, CODEX_PLUGIN_ROOT, or the current repository root. Read `$PLUGIN_ROOT/skills/visual-debug/comparison-fix.md` and follow the Phase E LLM Review section.
 
+Read budget (~4.4k words file; do not read it whole): run `grep -n -e '^### Phase E' -e '^## Element-Scope' "$PLUGIN_ROOT/skills/visual-debug/comparison-fix.md"` and read only that line range. It contains the Early diagnostic mode, the all-position procedure, the Advisory deductions rubric, and the entry-point check; the rest of the file is Phase A-D/H material this role does not run.
+
 Phase E is the only visual-debug step that intentionally reads ref/impl image pairs. For an explicit `reviewMode: "diagnostic"` request, follow the shared Early diagnostic mode protocol and write only its noncanonical diagnostic artifact. Otherwise read every required scroll-position pair, judge PASS/PARTIAL/FAIL/MISSING, return the compact markdown verdict table, and write detailed observations to `<ref-dir>/phase-e-review.json`.
 
 For PARTIAL/FAIL positions also record advisory `deductions` entries ({location, reason, penalty, label} with labels completeness / visual-effect / icon-variant and anchored penalty bands) per the comparison-fix.md Phase E "Advisory deductions" section. Deductions are advisory forensic detail only — they never change the verdict and feed no gate.

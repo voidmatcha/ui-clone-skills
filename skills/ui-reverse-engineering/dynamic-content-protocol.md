@@ -8,8 +8,8 @@ changes between frames.
 This protocol handles these sites so AE comparison remains meaningful.
 
 > **See also:** for section-compare specifically, the lighter-weight
-> `EXCLUDE_DYNAMIC=1` mask path (`../visual-debug/SKILL.md` → "Dynamic content
-> (canvas/video)") hides RAF-driven regions on both ref and impl via
+> `EXCLUDE_DYNAMIC=1` mask path (`../visual-debug/tool-routing.md` → "Dynamic content
+> masking") hides RAF-driven regions on both ref and impl via
 > `visibility: hidden !important`. Spec-driven: mark each entry in
 > `transition-spec.json` with `"dynamic": true` (see
 > `transition-spec-rules.md`) and `section-compare.sh` auto-augments the mask

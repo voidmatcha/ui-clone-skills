@@ -34,8 +34,9 @@ clone done from capture success, HTTP success, or artifact presence.
 
 A CSS selector can focus an element probe or crop, but the current baseline
 driver still captures the page-level corpus. A request to clone only one section
-belongs to `ui-reverse-engineering`; do not silently expand it to a full-page
-clone or claim that a page-level capture enforced a section-only boundary.
+belongs to `ui-reverse-engineering` (supported as a scoped clone); do not silently
+expand it to a full-page clone or claim that a page-level capture enforced a
+section-only boundary.
 
 ## Required invariants
 

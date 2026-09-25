@@ -2,7 +2,7 @@
 
 > Part of the `visual-debug` skill. Can be invoked standalone or as Step 8+9 of `ui-reverse-engineering`.
 >
-> **Quick comparison?** Use `batch-scroll.sh` + `batch-compare.sh` from the parent SKILL.md instead. This document is the **full multi-phase verification procedure** with capture, comparison, self-healing, and completion gate.
+> **Quick comparison?** Use `batch-scroll.sh` + `batch-compare.sh` per `tool-routing.md` instead. This document is the **full multi-phase verification procedure** with capture, comparison, self-healing, and completion gate.
 
 > **Evidence handling:** Screenshots and DOM snapshots may contain sensitive page data. Keep them local and preserve `tmp/ref/<component>` for verification and handoff. Remove evidence only when cleanup is explicitly requested and its scope is clear.
 
@@ -111,7 +111,7 @@ agent-browser --session <s> eval "(() => {
 
 ## Anti-pattern: "looks close enough" (HARD RULE)
 
-> **See "No Judgment — Data Only" in `ui-reverse-engineering/SKILL.md` for the full table of judgment traps.**
+> **See `ui-reverse-engineering/no-judgment.md` for the full table of judgment traps.**
 
 **Never declare a section "done" or "almost matching" based on your own visual judgment.** Your judgment is unreliable — you consistently overestimate similarity. Instead:
 
@@ -200,7 +200,7 @@ ffmpeg -i tmp/ref/<component>/ref-scroll.webm -vf fps=60 tmp/ref/<component>/fra
 
 ### A-C3: Transition/interaction captures (deferred to Step 5b)
 
-> **This step requires `interactions-detected.json` from Step 5.** Execute A-C3 after Step 5 in Phase 2 (referenced as Step 5b in SKILL.md), not during the initial Phase A pass.
+> **This step requires `interactions-detected.json` from Step 5.** Execute A-C3 after Step 5 in Phase 2 (Step 5b in `ui-reverse-engineering/pipeline-execution.md`), not during the initial Phase A pass.
 
 **Capture method depends on `triggerType`:**
 
@@ -270,7 +270,7 @@ ffmpeg -i tmp/ref/<component>/ref-transition-carousel.webm -vf fps=60 tmp/ref/<c
 
 ### A-R: Responsive screenshots
 
-**Handled by `responsive-detection.md` Steps 4-D and A-R.** If Step 4 was already executed in Phase 2, ref screenshots already exist — do not re-capture. If Phase 1 runs before Phase 2 (as in the SKILL.md flow), defer A-R until Step 4 is complete.
+**Handled by `responsive-detection.md` Steps 4-D and A-R.** If Step 4 was already executed in Phase 2, ref screenshots already exist — do not re-capture. If Phase 1 runs before Phase 2 (as in the `ui-reverse-engineering/pipeline-execution.md` flow), defer A-R until Step 4 is complete.
 
 ### Phase A Gate
 

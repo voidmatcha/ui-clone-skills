@@ -159,7 +159,7 @@ first pass is ref-derived JSX plus local CSS with preserved CSS-module tokens.
 
 ## Screenshot-first rule (diagnosis improvement C + E)
 
-**Before writing code for any section, you MUST view the reference screenshot for that section.** JSON values like `fontSize: 42` are meaningless without the rendered context; generating without the screenshot produces "data-correct but visually wrong" output.
+**Before writing code for any section, capture a content-anchored reference screenshot for it.** The AE/SSIM section gate compares the first impl render against it, catching "data-correct but visually wrong" output.
 
 ```bash
 # Take a content-anchored screenshot of each section BEFORE coding it
@@ -169,7 +169,7 @@ agent-browser --session <s> eval "
 " && agent-browser --session <s> screenshot tmp/ref/<c>/sections/ref-<section-name>.png
 ```
 
-**Rule:** For each section in `component-map.json`, Read the corresponding ref screenshot BEFORE writing any JSX for that section.
+**Rule:** For each section in `component-map.json`, the ref screenshot must exist BEFORE writing its JSX. Do not Read it into the main context; visual judgment belongs to the AE/SSIM gates and the Phase E `visual-debug-reviewer`. Exception: a section whose extracted JSON has no structural signal (canvas/WebGL, lone image/SVG, empty `children`) — Read that screenshot once.
 
 ### Guessed implementations — mandatory verification
 
@@ -193,7 +193,7 @@ agent-browser --session cake-impl screenshot tmp/ref/<c>/verify-impl-scroll200.p
 
 ## Core rules
 
-> **See "No Judgment — Data Only" in SKILL.md.** Every decision below must be backed by extracted data, not reasoning. If you catch yourself thinking "probably", "should be", or "close enough" — stop and measure.
+> **See `no-judgment.md` ("No Judgment — Data Only").** Every decision below must be backed by extracted data, not reasoning. If you catch yourself thinking "probably", "should be", or "close enough" — stop and measure.
 
 1. **Never write a value that isn't in extracted data.** If you are, stop and go extract it.
 2. **Never invent interactions or effects.** If extracted data shows no hover transform, don't add one. Only implement what was observed.
@@ -322,14 +322,26 @@ If `component-map.json` has 4+ sections and forensic preservation is not
 required, read [generation-modes.md](generation-modes.md#parallel-section-generation-for-pages-with-4-sections)
 for the foundation / builders / assembly phases and the complexity budget rule.
 
-## Before writing ANY section — READ section HTML + ref screenshot (HARD RULE)
+## Before writing ANY section — load the extracted section spec (HARD RULE)
 
-1. Read `tmp/ref/<component>/html/<section>.json` — EXACT HTML structure, element hierarchy, computed CSS
-2. Read the reference screenshot — how it LOOKS
-3. Only then write component code
-4. Screenshot impl immediately after + compare
+Generation stays grounded in extracted data, loaded compactly: never `cat`/Read a whole pretty-printed `html/<section>.json` (media `src` can be a multi-KB `data:` URI), and do not Read ref screenshots here (see Screenshot-first rule).
 
-`display: grid` vs `display: flex` look identical in a screenshot but need different code; the section HTML is the primary spec, the screenshot is confirmation. **Video backgrounds:** if `html/<section>.json` shows `<video autoplay muted loop>`, implement `<video autoPlay muted loop playsInline>` — NOT a static `<img>`. Download the source URL to `public/videos/`.
+1. Read `tmp/ref/<component>/html/_summary.json` once (~2KB): section order, `rect`, `childCount`, `mediaCount`.
+2. Per section, load the compact spec — every field and full text kept, initial-value styles dropped, `data:` URIs truncated:
+   ```bash
+   jq -c 'def lean: {backdropFilter:"none", backgroundImage:"none", transform:"none",
+       gridTemplateColumns:"none", gap:"normal", alignItems:"normal", justifyContent:"normal",
+       borderRadius:"0px", margin:"0px", padding:"0px", backgroundColor:"rgba(0, 0, 0, 0)"} as $init
+       | with_entries(select($init[.key] != .value));
+     .section.styles |= lean | .children[]?.styles |= lean
+     | .media[]?.src |= (if type == "string" and startswith("data:") then .[:40] + "...(\(length) chars)" else . end)' \
+     tmp/ref/<component>/html/<section>.json
+   ```
+   A missing style key means that property's CSS initial value from the `$init` map; every other key (e.g. `display: none`, `top: 0px`) is always kept. For a full `data:` URI, redirect `jq -r '.media[<i>].src'` to a file.
+3. Only then write component code.
+4. Screenshot impl immediately after and compare with the AE/SSIM section gate (`section-compare.sh`), not by reading PNGs.
+
+`display: grid` vs `display: flex` look identical in a screenshot but need different code; the section JSON is the primary spec. **Video backgrounds:** if `html/<section>.json` shows `<video autoplay muted loop>`, implement `<video autoPlay muted loop playsInline>` — NOT a static `<img>`. Download the source URL to `public/videos/`.
 
 ## Content-anchored comparison (HARD RULE)
 

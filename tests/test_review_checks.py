@@ -236,6 +236,17 @@ def test_universality_flags_bare_date_stamps_in_code(tmp_path: Path) -> None:
     assert dated_code not in _labels(_scan(tmp_path, "docs/design.md", "Reviewed 2026-05-22.\n"))
     for relative in ("CHANGELOG.md", "internal/x/a.py", "benchmark/a.sh", "tests/test_a.py"):
         assert not _labels(_scan(tmp_path, relative, "# measured 2026-05-22\n")), relative
+    # Data dates in eval / fixture / manifest data are not lab notes.
+    data = '{"id": 1, "captured": "2026-09-24", "since": "2026-09"}\n'
+    for relative in (
+        "skills/x/evals/evals.json",
+        "skills/x/evals/fixtures/run.json",
+        ".claude-plugin/plugin.json",
+        "ui_clone/data/fixture.json",
+    ):
+        assert dated_code not in _labels(_scan(tmp_path, relative, data)), relative
+    for relative in ("pyproject.toml", ".github/workflows/ci.yml"):
+        assert dated_code not in _labels(_scan(tmp_path, relative, "date = 2026-09-24\n"))
 
 
 def test_universality_codex_state_allows_host_config_paths_only(tmp_path: Path) -> None:

@@ -8,6 +8,14 @@ lint extracts those tokens from ``expected_output`` and ``expectations`` and
 looks them up in a word index built from the skill docs, ``docs/``, ``scripts/``,
 ``ui_clone/``, hook manifests, and agent definitions.
 
+Artifact files (``.json``/``.png``/``.webm``/``.html`` ...) are stricter: a prose
+mention does not ground them. They must appear in executable text — code under
+``scripts/``, ``ui_clone/``, ``hooks/``, ``bin/``, ``skills/*/scripts/``, or a
+fenced command block of a skill doc — either literally or through a constructed
+name (``"${SIDE}-styles.json"``, ``f"{name}.png"``), match a ``*`` glob written in
+a non-history doc, or be listed in ``DOC_CONTRACT_ARTIFACTS`` with the doc that
+tells the agent to write it.
+
 Blocking tokens (exit 1 when ungrounded): file names with a known extension,
 ``--flags``, ``UI_CLONE_*``-style env vars, ``ui_clone.<module>`` CLI paths,
 gate names, and backticked single identifiers. Everything else (Step/Phase
@@ -58,6 +66,36 @@ CORPUS_SUFFIXES = {
     ".txt",
 }
 SKIP_DIR_NAMES = {"evals", "node_modules", "__pycache__", "tmp", ".git"}
+
+# Artifact files (run outputs) must be produced by executable code, not merely
+# mentioned in prose. Source/doc names (.md, .sh, .py, .css, ...) keep the
+# word-index rule because they are files that exist in the repo.
+ARTIFACT_EXTENSIONS = ("json", "png", "jpg", "webm", "mp4", "txt", "log", "csv", "html", "svg")
+CODE_DIRS = ("scripts", "ui_clone", "hooks", "bin")
+CODE_SUFFIXES = {".py", ".sh", ".js", ".mjs", ".cjs", ".ts", ""}
+# History/design-log docs describe past behavior; they never ground an artifact glob.
+HISTORY_DOC = re.compile(r"(?:^|/)(?:[^/]*history[^/]*|CHANGELOG)\.md$", re.I)
+# Inputs the pipeline consumes rather than produces (project manifests, the
+# generated app's own files). They exist in every clone target, not in this repo.
+INPUT_ARTIFACTS = {"package.json", "tsconfig.json", "index.html"}
+# Artifacts written by the agent itself following a doc contract, with no
+# script producer. Each entry names the producing doc; the doc must still
+# contain the literal name or the entry is stale and the token blocks again.
+DOC_CONTRACT_ARTIFACTS = {
+    # comparison-fix.md Phase D step 3: "Produce tmp/ref/<component>/pixel-perfect-diff.json".
+    "pixel-perfect-diff.json": "skills/visual-debug/comparison-fix.md",
+    # verification.md A-C3: "Save the measurements to .../ref-styles.json and .../impl-styles.json".
+    "ref-styles.json": "skills/visual-debug/verification.md",
+    "impl-styles.json": "skills/visual-debug/verification.md",
+    # comparison-page.md: "Generate `$OUT_DIR/compare.html`" (agent-written review page).
+    "compare.html": "skills/ui-capture/comparison-page.md",
+    # Not an artifact: the forbidden `> image.png` redirect quoted from SKILL.md.
+    "image.png": "skills/ui-reverse-engineering/SKILL.md",
+}
+TEMPLATE_TOKEN = re.compile(
+    r"[\w${}<>*()./-]*[${*<][\w${}<>*()./-]*\.(?:" + "|".join(ARTIFACT_EXTENSIONS) + r")\b"
+)
+FENCED_BLOCK = re.compile(r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", re.S | re.M)
 
 FILE_EXTENSIONS = (
     "json",
@@ -115,6 +153,30 @@ class Corpus:
     paths: set[str] = field(default_factory=set)
     path_words: tuple[str, ...] = ()
     text: str = field(default="", repr=False)
+    # Artifact names written as literals in executable code.
+    code_words: set[str] = field(default_factory=set)
+    # Basename regexes from constructed names in code ("${X}-styles.json",
+    # f"{name}.png") and from glob patterns in non-history docs ("frames/*.png").
+    templates: tuple[re.Pattern[str], ...] = ()
+    root: pathlib.Path | None = None
+
+    def has_artifact(self, token: str) -> bool:
+        base = token.rsplit("/", 1)[-1]
+        if base in INPUT_ARTIFACTS or base in self.code_words:
+            return True
+        doc = DOC_CONTRACT_ARTIFACTS.get(base)
+        if doc and self.root is not None:
+            try:
+                if base in (self.root / doc).read_text(encoding="utf-8"):
+                    return True
+            except OSError:
+                pass
+        if "<" in base:
+            pattern = re.compile(_placeholder_regex(base))
+            if any(pattern.fullmatch(word) for word in self.code_words):
+                return True
+        sample = PLACEHOLDER.sub("X", base)
+        return any(template.fullmatch(sample) for template in self.templates)
 
     def has_word(self, token: str) -> bool:
         return token in self.words
@@ -157,6 +219,46 @@ def _iter_corpus_paths(root: pathlib.Path) -> list[pathlib.Path]:
     return paths
 
 
+def _placeholder_regex(base: str) -> str:
+    """Regex for an eval token whose ``<placeholder>`` parts match any text."""
+    return ".+".join(re.escape(part) for part in PLACEHOLDER.split(base))
+
+
+WILDCARD = re.compile(r"\$\{[^}]*\}|\{[^}]*\}|\$\(?[A-Za-z_]\w*\)?|<[^>]+>|\*")
+
+
+def _template_regex(raw: str) -> re.Pattern[str] | None:
+    """Compile a constructed artifact name (``${X}-styles.json``) to a basename regex.
+
+    Templates with little literal text (``*.json``, ``ref-*.json``) would ground
+    unrelated artifacts, so a wildcard template needs 5+ literal letters/digits.
+    """
+    base = raw.rstrip("\"'`),;").rsplit("/", 1)[-1]
+    literal = WILDCARD.sub("", base).rsplit(".", 1)[0]
+    if WILDCARD.search(base) and len(re.findall(r"[A-Za-z0-9]", literal)) < 5:
+        return None
+    if not re.search(r"[A-Za-z]", literal):
+        return None
+    pieces = WILDCARD.split(base)
+    return re.compile("[^/]*".join(re.escape(piece) for piece in pieces))
+
+
+def _add_template(raw: str, templates: dict[str, re.Pattern[str]]) -> None:
+    template = _template_regex(raw)
+    if template is not None:
+        templates.setdefault(template.pattern, template)
+
+
+def _is_code_path(relative: str, suffix: str) -> bool:
+    # This lint names allowlisted artifacts; it must never ground them itself.
+    if suffix not in CODE_SUFFIXES or relative == "scripts/ci/eval_grounding.py":
+        return False
+    parts = relative.split("/")
+    if parts[0] in CODE_DIRS:
+        return True
+    return len(parts) > 3 and parts[0] == "skills" and parts[2] == "scripts"
+
+
 def _expand_words(raw: str, words: set[str]) -> None:
     token = raw.strip("./-")
     if not token:
@@ -175,6 +277,8 @@ def build_corpus(root: pathlib.Path = ROOT) -> Corpus:
     gates: set[str] = set()
     paths: set[str] = set()
     chunks: list[str] = []
+    code_words: set[str] = set()
+    templates: dict[str, re.Pattern[str]] = {}
     for path in _iter_corpus_paths(root):
         basenames.add(path.name)
         relative = path.relative_to(root).as_posix()
@@ -193,6 +297,22 @@ def build_corpus(root: pathlib.Path = ROOT) -> Corpus:
         chunks.append(text)
         for raw in WORD.findall(text):
             _expand_words(raw, words)
+        is_doc = path.suffix == ".md" and not HISTORY_DOC.search(relative)
+        # Executable text: code files, plus fenced blocks of skill docs (the
+        # commands an agent runs, e.g. `echo "$R" > .../sweep-coarse.json`).
+        executable = ""
+        if _is_code_path(relative, path.suffix):
+            executable = text
+        elif is_doc and relative.startswith("skills/"):
+            executable = "\n".join(FENCED_BLOCK.findall(text))
+        for raw in re.findall(r"[\w.-]+", executable):
+            code_words.add(raw.strip("."))
+        for raw in TEMPLATE_TOKEN.findall(executable):
+            _add_template(raw, templates)
+        if is_doc:
+            for raw in TEMPLATE_TOKEN.findall(text):
+                if "*" in raw:  # prose grounds only explicit globs, not placeholders
+                    _add_template(raw, templates)
         if path.name == "state.py" and path.parent.name == "ui_clone":
             match = GATE_ORDER_BLOCK.search(text)
             if match:
@@ -204,6 +324,9 @@ def build_corpus(root: pathlib.Path = ROOT) -> Corpus:
         paths=paths,
         path_words=tuple(word for word in words if "/" in word),
         text="\n".join(chunks),
+        code_words=code_words,
+        templates=tuple(templates.values()),
+        root=root,
     )
 
 
@@ -217,8 +340,18 @@ def _normalize(token: str) -> str:
     return token
 
 
+def is_artifact(token: str) -> bool:
+    return token.rsplit(".", 1)[-1].lower() in ARTIFACT_EXTENSIONS
+
+
 def _file_grounded(token: str, corpus: Corpus) -> bool:
     token = _normalize(token)
+    if is_artifact(token):
+        # "a.json/b.json" lists alternatives; each must have a producer.
+        parts = token.split("/")
+        if len(parts) > 1 and all(FILE_TOKEN.fullmatch(part) for part in parts):
+            return all(corpus.has_artifact(part) for part in parts)
+        return corpus.has_artifact(token)
     if "/" in token and "<" not in token and "$" not in token:
         # A concrete relative path (e.g. visual-debug/comparison-fix.md) must resolve
         # under skills/, a skill dir, or the repo root; the basename fallback would

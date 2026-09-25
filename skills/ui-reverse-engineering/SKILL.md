@@ -34,9 +34,10 @@ Require a live URL; infer the component slug and browser session from the reques
 when unambiguous. If URL is missing, request it before extraction. The component
 names `tmp/ref/<component>/`; it does not select a DOM subtree.
 
-**Section/element-only requests:** read the [scope limitation](operational-rules.md#scope-adjustments-by-request-shape)
-before capture. End-to-end selector scope is unsupported; do not start a full-page
-run, trim inventories, or bypass gates to fulfill a partial request.
+**Section/element-only requests** (including a trigger-opened modal or drawer)
+are supported as scoped clones: read the [scoped-run rules](operational-rules.md#scope-adjustments-by-request-shape)
+before capture. Resolve the target selector first, scope capture and verification
+to it, and report the result as scoped, not as a page-level verified clone.
 
 A restriction on consulting the original repository does not prohibit public
 live-site DOM, CSS, JS bundles, fonts, images, SVGs, or motion measurements.
@@ -86,8 +87,9 @@ Do not rerun completed phases simply because a session restarted.
 - Use `agent-browser` through the shell, always with `--session <name>`; do not mix
   Puppeteer/Playwright MCP browsers. Reuse one session per role. Open, set viewport,
   then wait. Close only sessions you opened; never `close --all`.
-- Use IIFE evals and save large DOM/style/frame output to files. Search headings
-  and IDs before reading large files; do not paste complete artifacts into context.
+- Use IIFE evals and save large DOM/style/frame output to files. Grep before
+  reading any file >10KB; do not paste complete artifacts into context. After 10+
+  consecutive Bash calls, stop and analyze results before the next batch.
 - Save screenshots through the command's output-path argument, never `> image.png`.
   Do not use `screenshot --full`, `-f`, or resize to document/section height: sticky
   and scroll-driven geometry changes. Whole-page evidence uses real scrolling at
@@ -183,7 +185,10 @@ raw bundles, large CSS/HTML, or full DOM dumps, dispatch source-forensics and re
 Preserve responsive CSS and structure from the start. Default verification is
 `--scope=desktop`; it limits detailed measurements, not implementation. Use `all`
 when already requested. Desktop completion must say **desktop-only verified**;
-other layout bands remain unverified. See [iteration discipline](iteration-discipline.md)
+other layout bands remain unverified. Transition applicability comes from reference
+evidence at the selected viewport: a hidden or missing implementation target never
+proves out-of-scope, and desktop checks must not silently retry at mobile widths.
+See [iteration discipline](iteration-discipline.md)
 for the content/structure checkpoint, matched-state measurements, reuse, and budgets.
 
 Classify reference, implementation, checker, or infrastructure failure before editing.

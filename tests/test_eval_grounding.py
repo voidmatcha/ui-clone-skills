@@ -52,7 +52,9 @@ def mini_repo(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (tmp_path / "skills" / "demo" / "scripts").mkdir()
-    (tmp_path / "skills" / "demo" / "scripts" / "section-compare.sh").write_text("#!/bin/sh\n")
+    (tmp_path / "skills" / "demo" / "scripts" / "section-compare.sh").write_text(
+        '#!/bin/sh\necho "{}" > "$REF_DIR/hover-deltas.json"\n'
+    )
     (tmp_path / "ui_clone").mkdir()
     (tmp_path / "ui_clone" / "state.py").write_text(
         'GATE_ORDER: list[str] = [\n    "reference",\n    "pre-generate",\n]\n', encoding="utf-8"
@@ -139,6 +141,62 @@ def test_gate_like_hyphen_ids_block_only_when_unknown(mini_repo: Path) -> None:
     assert findings == {"hydration-check": True, "re-compare": False}
 
 
+def test_artifacts_need_an_executable_producer_not_a_prose_mention(
+    mini_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = mini_repo / "skills" / "demo"
+    (demo / "prose.md").write_text(
+        "Save the result to `tmp/ref/<c>/prose-only.json`. Produce `contract-only.json`.\n"
+        "```bash\necho ok > tmp/ref/<c>/fenced-output.json\n"
+        "record start transitions/ref/mousemove-<name>.webm\n```\n"
+        "Frames land in `frames/ref/frame-*.png`; never glob `*.json` or `ref-*.json`.\n",
+        encoding="utf-8",
+    )
+    (mini_repo / "docs").mkdir()
+    (mini_repo / "docs" / "gate-hardening-history.md").write_text(
+        "Old runs wrote `history-*.json` and `history-only.json`.\n", encoding="utf-8"
+    )
+    (mini_repo / "ui_clone" / "writer.py").write_text(
+        'side = "ref"\npath = ref_dir / f"{side}-styles-audit.json"\n'
+        'OTHER = ref_dir / "code-literal.png"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        eval_grounding, "DOC_CONTRACT_ARTIFACTS", {"contract-only.json": "skills/demo/prose.md"}
+    )
+    corpus = eval_grounding.build_corpus(mini_repo)
+    path = _write_eval(
+        mini_repo,
+        "demo",
+        [
+            "prose-only.json exists",  # prose mention only -> blocks
+            "fenced-output.json exists",  # fenced agent command
+            "transitions/ref/mousemove-<name>.webm saved",  # fenced placeholder path
+            "frame-001.png captured",  # documented glob
+            "impl-styles-audit.json written",  # constructed f-string name in code
+            "code-literal.png written",  # literal in code
+            "contract-only.json written",  # doc-contract allowlist
+            "history-only.json exists",  # history docs never ground
+            "history-abc.json exists",
+            "ref-hover.json exists",  # "ref-*.json" is too loose to be a template
+        ],
+    )
+    blocking = {f.token for f in eval_grounding.lint_evals(corpus, [path]) if f.blocking}
+    assert blocking == {
+        "prose-only.json",
+        "history-only.json",
+        "history-abc.json",
+        "ref-hover.json",
+    }
+
+    # A doc-contract entry goes stale (blocks again) once its doc drops the name.
+    (demo / "prose.md").write_text("nothing here\n", encoding="utf-8")
+    corpus = eval_grounding.build_corpus(mini_repo)
+    path = _write_eval(mini_repo, "demo", ["contract-only.json written"])
+    blocking = {f.token for f in eval_grounding.lint_evals(corpus, [path]) if f.blocking}
+    assert blocking == {"contract-only.json"}
+
+
 def test_repo_evals_have_no_ungrounded_artifacts() -> None:
     started = time.perf_counter()
     corpus = eval_grounding.build_corpus(ROOT)
@@ -150,7 +208,9 @@ def test_repo_evals_have_no_ungrounded_artifacts() -> None:
         if f.blocking
     ]
     assert not blocking, "\n".join(blocking)
-    assert elapsed < 2.0, f"eval grounding lint took {elapsed:.2f}s (budget 2s)"
+    # ~0.6s standalone; the generous bound only catches pathological slowdowns
+    # without flaking under a loaded xdist run.
+    assert elapsed < 15.0, f"eval grounding lint took {elapsed:.2f}s (budget 15s)"
 
 
 def test_corpus_excludes_eval_fixtures_and_tests(mini_repo: Path) -> None:

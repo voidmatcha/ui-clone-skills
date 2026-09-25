@@ -248,7 +248,7 @@ for s in rows:
 After fixing all defects in the current batch:
 
 1. Re-capture implementation screenshots (Phase B)
-2. Re-run `section-compare.sh <orig-url> <impl-url> <session> "$(pwd)/tmp/ref/<component>"` for fresh `sections/result.txt`
+2. Re-run `SECTION_COMPARE_QUIET=1 section-compare.sh <orig-url> <impl-url> <session> "$(pwd)/tmp/ref/<component>"` for fresh `sections/result.txt`
 3. Re-run Phase D (Visual Gate + Numerical Diagnosis)
 
 **Outcomes:**
@@ -409,7 +409,7 @@ Missing this is a silent failure: styles exist but have no effect.
 
 ## Element-Scope Verification (transition extraction)
 
-> For single-element animation verification. Runs after ui-reverse-engineering Step T3 (implement). Frames live in `tmp/ref/<effect-name>/frames/{ref,impl}/`.
+> For single-element animation verification and for scoped (section-only, element-only, or trigger-opened modal/drawer) clones. Runs after ui-reverse-engineering Step T3 (implement). Frames live in `tmp/ref/<effect-name>/frames/{ref,impl}/`; trigger-opened UI compares both the opening and closing sequences.
 
 ### Frame Comparison — element scope (AE)
 

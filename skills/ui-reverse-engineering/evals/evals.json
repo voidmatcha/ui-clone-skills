@@ -22,15 +22,15 @@
     {
       "id": 2,
       "prompt": "I want to replicate the hero section from https://stripe.com/payments — it has hover effects on the cards and some scroll-triggered animations. Get everything including the interactions, not just the static layout.",
-      "expected_output": "The agent explains before capture that a hero-section-only clone is not supported end-to-end, records the requested URL and the hero's interaction focus (card hover, scroll-triggered animations) in the report, and reports a scope-support blocker instead of scoping extraction to the hero or starting a full-page run on its own.",
+      "expected_output": "A scoped clone of the hero section: the agent resolves the hero's selector from DOM evidence, captures its card hover and scroll-triggered animations at the hero's real scroll position, implements them with measured timings, and verifies them with element-scope evidence, reporting the result as scoped rather than page-level verified.",
       "files": [],
       "expectations": [
-        "Explains the section/element-only scope limitation before any capture, extraction, or scheduling",
-        "Does not silently start a full-page run of https://stripe.com/payments to satisfy the hero-only request",
-        "Does not trim section-map.json or inventories to the hero, fabricate a hero component, or bypass gates",
-        "Preserves the requested URL and the user's interaction focus (card hover, scroll-triggered animations) in the report",
-        "Does not guess hover or scroll transition timings; any later measurement must come from the documented whole-page path",
-        "Reports a scope-support blocker and asks how the user wants to proceed"
+        "Resolves the hero's CSS selector from live DOM evidence (element-evidence.sh / element-target.json) before capture",
+        "Card hover is captured as idle and active clip screenshots per element-capture.md",
+        "Scroll-triggered animations are captured as before, mid, and after clips at the hero's real scroll positions",
+        "Hover and scroll transition timings come from measured computed styles or bundle evidence, not guesses",
+        "Element-scope verification compares ref and impl frames with AE and writes pixel-perfect-diff.json",
+        "Reports the result as a scoped hero clone, not as a page-level verified clone"
       ]
     },
     {
@@ -274,43 +274,45 @@
     {
       "id": 20,
       "prompt": "Copy just the hero section from https://example.com — the part above the fold with the headline, subtitle, CTA buttons, and background gradient. I don't need the rest of the page.",
-      "expected_output": "The agent explains before capture that a hero-only clone is not supported end-to-end (the component name names artifacts, not a DOM subtree), preserves the requested URL and the above-the-fold target in the report, and reports a scope-support blocker instead of scoping extraction to the hero or trimming verification to its viewport range.",
+      "expected_output": "A React + Tailwind component of the hero section only: the agent resolves the hero's selector, keeps artifacts under a target-named directory, captures and verifies only the hero's viewport range with element-scope evidence, and reports the result as scoped.",
       "files": [],
       "expectations": [
-        "Explains the section/element-only scope limitation before starting capture or scheduling work",
-        "Does not scope DOM extraction, styles.json, or C1/C2 capture to the hero's root selector or scroll range",
-        "Does not silently start a full-page run to satisfy the hero-only request",
-        "Does not trim section-map.json, fabricate a hero component, or bypass gates to make a partial clone pass",
-        "Preserves the requested URL, the above-the-fold hero target, and any existing evidence in the report",
-        "Reports a scope-support blocker and asks how the user wants to proceed"
+        "Resolves the hero's root selector from DOM evidence or a section-map.json entry instead of treating the component name as a selector",
+        "Artifact directory is named after the target (e.g., tmp/ref/hero/, not tmp/ref/example-com/)",
+        "Reference clips cover the hero's above-the-fold range, not the whole page",
+        "Computed styles and transitions are extracted for the hero's elements through the transition sub-pipeline",
+        "Verification uses element-scope AE and pixel-perfect-diff.json limited to the hero",
+        "Does not trim section-map.json of a page-level run or bypass gates to produce the hero",
+        "Reports the result as scoped, not as a page-level verified clone"
       ]
     },
     {
       "id": 21,
       "prompt": "Clone the signup modal from https://example.com — you need to click the 'Sign Up' button in the nav to open it. It has a backdrop fade and a slide-up animation.",
-      "expected_output": "The agent explains before capture that a modal is not cloned as a standalone component — trigger-opened UI is handled as an interaction state within a whole-page clone — preserves the requested URL, the 'Sign Up' nav trigger, and the modal target in the report, and reports a scope-support blocker rather than extracting only the modal or silently expanding to a full-page run.",
+      "expected_output": "A React component of the signup modal cloned standalone: the agent clicks the 'Sign Up' nav trigger before reference capture, captures the open state and both the opening and closing animations, extracts backdrop fade and slide-up timing, and verifies open and close on the implementation, reporting the result as scoped.",
       "files": [],
       "expectations": [
-        "Explains before any capture that modals, drawers, and other trigger-opened state UI are cloned only as interaction states of a whole-page clone",
-        "Does not run a full DOM/style extraction or C1/C2 capture to satisfy the modal-only request",
-        "Does not silently clone only the modal by scoping capture to its open state or trimming section-map.json to the modal region",
-        "Preserves the requested URL, the 'Sign Up' nav trigger, and the modal target (backdrop fade, slide-up) in the report",
-        "States that trigger click, open-state frames, and open/close animation evidence are captured only within a whole-page run",
-        "Reports a scope-support blocker and asks whether the user wants a whole-page clone that includes the modal as an interaction state"
+        "Resolves both the 'Sign Up' trigger selector and the opened modal container selector",
+        "Performs the trigger click before reference capture",
+        "Reference open.png shows the modal in its open state, not the underlying page",
+        "Both opening and closing animations are recorded and extracted at 60fps",
+        "Backdrop fade and slide-up timings are extracted separately",
+        "Verifies both open and close behavior on the implementation with element-scope frame comparison",
+        "Reports the result as a scoped modal clone, not as a page-level verified clone"
       ]
     },
     {
       "id": 22,
       "prompt": "I need both the nav bar and the footer from https://example.com — just those two sections, not the rest of the page. Generate them as separate components.",
-      "expected_output": "The agent explains before capture that nav-only and footer-only clones are not supported end-to-end, does not split the run into per-section artifact directories or components, preserves the requested URL and both section targets in the report, and reports a scope-support blocker instead of trimming the page to two sections.",
+      "expected_output": "Two separate React + Tailwind components (Nav and Footer), each a scoped clone with its own target selector, artifact directory, element-scope capture, and verification; middle page content is not cloned and the result is reported as scoped.",
       "files": [],
       "expectations": [
-        "Explains the section/element-only scope limitation before starting capture or scheduling work",
-        "Does not create per-section artifact directories such as tmp/ref/nav/ or tmp/ref/footer/ with independently scoped extraction",
-        "Does not generate separate Nav and Footer components by trimming section-map.json or skipping middle-page sections",
-        "Does not silently start a full-page run to satisfy the two-section request",
-        "Preserves the requested URL, both section targets (nav bar and footer), and any existing evidence in the report",
-        "Reports a scope-support blocker and asks how the user wants to proceed"
+        "Resolves a separate selector for the nav bar and for the footer from DOM evidence",
+        "Uses one target-named artifact directory per section (tmp/ref/nav/ and tmp/ref/footer/)",
+        "Generates two separate .tsx components, not one combined component",
+        "Each section is captured and verified independently with element-scope evidence",
+        "Middle page content is not extracted or included in either component",
+        "Reports both results as scoped, not as a page-level verified clone"
       ]
     },
     {
@@ -949,14 +951,15 @@
     {
       "id": 68,
       "prompt": "Clone only the `.pricing-table` element from https://example.com/pricing — skip the header, hero, and footer entirely.",
-      "expected_output": "The agent explains that end-to-end selector-scoped cloning is unsupported before capture, preserves the requested URL and selector in the report, and reports a scope-support blocker instead of trimming section-map.json or bypassing gates.",
+      "expected_output": "The agent treats the requested pricing-table selector as the target, confirms it resolves to exactly one element on the live page (asking the user if it matches none or several), keeps the scroll context the table depends on, and never presents page-level pipeline verify output as proof that the scoped clone stayed inside the selector.",
       "files": [],
       "expectations": [
-        "Explains the section/element-only scope limitation before starting capture or scheduling work",
-        "Does not silently start a full-page run to satisfy the partial request",
-        "Does not trim section-map.json, fabricate components, or bypass gates to make a partial clone pass",
-        "Preserves the requested URL, selector, and any existing evidence in the report",
-        "Reports a scope-support blocker and asks how the user wants to proceed"
+        "Checks that the requested selector resolves to exactly one element via element-evidence.sh before capture and asks the user when it matches none or several",
+        "Captures the table at its real scroll position with any sticky ancestors or scroll triggers it depends on",
+        "Does not substitute the component name for the selector",
+        "Does not run the page-level pipeline and trim section-map.json to the table to make its gates pass",
+        "Does not cite python -m ui_clone.pipeline verify as proof that the clone stayed inside the requested selector",
+        "Reports scoped completion with the element-scope evidence it collected"
       ]
     }
   ]

@@ -408,7 +408,7 @@ Save a summary to `tmp/ref/<component>/interactions-detected.json` with all inte
 
 > **Capture is delegated to `ui-capture` Phase 2C (Claude slash command: `/ui-capture`).** Do not capture here — interaction-detection only detects. After saving `interactions-detected.json`, Step 5b triggers `ui-capture` Phase 2B–2E, which captures idle+active pairs for every detected interaction.
 >
-> **Re-capture trigger (SKILL.md Step 5b):** Re-run `ui-capture` Phase 2B–2E if `interactions-detected.json` contains hover, click, or scroll-triggered elements not already in `regions.json` from the initial Phase 1 run. If `interactions-detected.json` is `{ "interactions": [] }`, skip Step 5b entirely.
+> **Re-capture trigger (`pipeline-execution.md` Step 5b):** Re-run `ui-capture` Phase 2B–2E if `interactions-detected.json` contains hover, click, or scroll-triggered elements not already in `regions.json` from the initial Phase 1 run. If `interactions-detected.json` is `{ "interactions": [] }`, skip Step 5b entirely.
 
 **Gate:** `python -m ui_clone.gate <ref-dir> pre-generate` checks idle+active pairs exist (produced by ui-capture).
 

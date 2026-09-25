@@ -55,13 +55,16 @@ review `/hooks` if prompted and start a fresh session.
 
 ## Pipeline status
 
-### Section selection limitation
+### Section selection
 
-The pipeline currently has no end-to-end section-selector option. Its component
-argument names the run; it does not restrict extraction or coverage to a DOM
-subtree. Verification scope (`desktop` / `all`) concerns responsive layouts,
-not section selection. Do not route a section-only request into the automatic
-full-page pipeline or remove captured sections to make its gates pass.
+Section-only and element-only clones are supported through the scoped path in
+`skills/ui-reverse-engineering/operational-rules.md` (Scope adjustments by
+request shape), not through this CLI. The pipeline has no section-selector
+option: its component argument names the run and does not restrict extraction
+or coverage to a DOM subtree, and verification scope (`desktop` / `all`)
+concerns responsive layouts. Do not route a section-only request into the
+automatic full-page pipeline or remove captured sections to make its gates pass;
+a `verify` result here is page-level evidence, not scoped completion.
 
 ```bash
 node bin/ui-clone pipeline <url> <component-or-run-dir> <session> status --json

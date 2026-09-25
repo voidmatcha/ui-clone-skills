@@ -1339,3 +1339,7 @@ def test_enforcement_state_deny_message_names_sanctioned_reads() -> None:
     assert "status --json" in low or "status" in low, msg
     # Still frames it as a read-vs-write clarification.
     assert "read" in low, msg
+    # Sanctioned reads come first, and the message stays short (it used to be
+    # ~160 words and cost a retry to parse).
+    assert low.index("jq") < low.index("never"), msg
+    assert len(msg.split()) <= 75, len(msg.split())

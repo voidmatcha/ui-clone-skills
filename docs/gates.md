@@ -82,6 +82,11 @@ conservative; partial iteration receipts cannot satisfy either closeout path.
 Canonical completion binds the selected scope and representative viewports.
 Desktop completion covers the representative viewport plus mandatory live boundary
 probes, and must be reported as desktop-only. Scope expansion requires verification.
+A section-only, element-only, or trigger-opened modal/drawer clone uses the
+element-scope evidence (`frames/ref/` populated, element-scope AE, and
+`pixel-perfect-diff.json`) described in `skills/visual-debug/comparison-fix.md`;
+the gates above are page-level and do not certify a subtree boundary, so a
+scoped result is reported as scoped, not as page-level canonical completion.
 
 `scroll-completion.json` records an `endpoint` measurement per viewport. The
 probe traverses delayed scroll gates before sampling and requires a stable

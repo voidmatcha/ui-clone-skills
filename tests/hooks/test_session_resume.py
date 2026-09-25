@@ -164,3 +164,67 @@ class TestSessionResume:
         # (intersection text only present in the conditional block)
         assert "intersection/fade-up entries detected" not in ctx
 
+    def test_subdoc_pointers_name_headings_that_exist(self) -> None:
+        """Every targeted pointer must resolve to a real heading, or the agent is
+        sent to grep for a section that no longer exists."""
+        from ui_clone.hooks.session_resume import SUBDOC_DIR, SUBDOC_POINTERS
+
+        repo = Path(__file__).resolve().parents[2]
+        assert SUBDOC_POINTERS
+        for pointer in SUBDOC_POINTERS:
+            doc = repo / SUBDOC_DIR / pointer.doc
+            headings = {
+                line.lstrip("#").strip()
+                for line in doc.read_text(encoding="utf-8").splitlines()
+                if line.startswith("#")
+            }
+            assert pointer.heading in headings, (
+                f"{pointer.doc} lost heading {pointer.heading!r}; update SUBDOC_POINTERS"
+            )
+
+    def test_context_points_to_sections_not_whole_docs(self, tmp_path: Path) -> None:
+        """Token budget: sub-docs are referenced by section with a grep+offset
+        recipe, and the text around the goal card stays small."""
+        from ui_clone.goal import build_goal_card
+
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="375studio")
+        set_active_marker(ref_dir)
+        (ref_dir / "transition-spec.json").write_text(
+            json.dumps({"transitions": [{"trigger": "intersection"}, {"trigger": "hover"}]})
+        )
+        result = run_hook(
+            self.MODULE, stdin_data="{}", env={"CLAUDE_PROJECT_DIR": str(tmp_path)}
+        )
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Required sub-docs to read BEFORE editing" not in ctx
+        assert "grep -n '^#'" in ctx and "offset/limit" in ctx
+        assert "hover/idle diffs only" in ctx  # behavioral warning kept
+        wrapper = ctx.replace(build_goal_card(ref_dir), "")
+        assert len(wrapper.split()) <= 260, len(wrapper.split())
+
+    def test_postcompact_forgets_shown_stop_text_for_session(self, tmp_path: Path) -> None:
+        """After a compact the next Stop must show its full block again: the
+        resume hook drops this session's shown-state (never the retry ledger)."""
+        from ui_clone.hooks import _stop_repeat
+
+        search_root = make_search_root(tmp_path)
+        ref_dir = make_ref_dir(search_root, name="375studio")
+        set_active_marker(ref_dir)
+        _stop_repeat.mark_shown(tmp_path, _stop_repeat.entry_key("sid-a", ref_dir), "sig")
+        _stop_repeat.mark_shown(tmp_path, _stop_repeat.entry_key("sid-b", ref_dir), "sig")
+        attempts = tmp_path / "tmp" / "ref" / ".ui-re-stop-attempts.json"
+        attempts.write_text(json.dumps({f"block|sid-a|{ref_dir}|sig": 2}))
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps({"trigger": "auto", "session_id": "sid-a"}),
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        key_a = _stop_repeat.entry_key("sid-a", ref_dir)
+        key_b = _stop_repeat.entry_key("sid-b", ref_dir)
+        assert not _stop_repeat.was_shown(tmp_path, key_a, "sig")
+        assert _stop_repeat.was_shown(tmp_path, key_b, "sig")
+        assert json.loads(attempts.read_text()) == {f"block|sid-a|{ref_dir}|sig": 2}
+

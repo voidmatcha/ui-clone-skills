@@ -20,6 +20,14 @@ not the sibling module that defines them: patching
 ``_capture_one`` here. ``tests/test_facade_patch_targets.py`` fails when a
 name tests patch stops being defined in, or looked up from, this module.
 
+The reverse also holds: re-exported browser helpers (``_ensure_viewport``,
+``_scroll_metrics``, ``_resolve_live_section_rect``, ``_run_agent_eval``,
+``_run_agent_eval_text``) call ``_run_agent_eval_text`` / ``_run_agent_browser``
+through ``section_capture_browser``, so patching those two names here does not
+reach inside the helpers. Patch the helper itself on this module (or pass
+``_ensure_viewport``'s ``evaluator=``/``setter=``). The guard test lists these
+sibling call sites in ``KNOWN_SIBLING_LOOKUPS`` and fails on new ones.
+
 Pairing rule
 ------------
 When the reference capture of a section fails (``capture-failures.json``

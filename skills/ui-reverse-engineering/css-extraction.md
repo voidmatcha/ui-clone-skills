@@ -6,7 +6,7 @@
 
 > All `agent-browser eval` calls must use IIFE: `(() => { ... })()` — no top-level return.
 
-> **CRITICAL: Before extracting individual properties, run the multi-point measurement pass (Step -1 in SKILL.md → `measurement.md`).** The 11-point measurement reveals multi-phase timing and property-specific phase boundaries that start/end extraction alone will miss.
+> **CRITICAL: Before extracting individual properties, run the multi-point measurement pass (`pipeline-execution.md` Step T-1 → `measurement.md`).** The 11-point measurement reveals multi-phase timing and property-specific phase boundaries that start/end extraction alone will miss.
 
 ## Static state extraction
 

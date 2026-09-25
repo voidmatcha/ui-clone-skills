@@ -2,7 +2,7 @@
 name: generation-planner
 description: Enrich generation-plan.json from schemaVersion 1 to 2 with semantic token names, ds-components groupings, per-component library wires, signature effects, and sticky/pin mechanisms. Invoked at Phase 6 7-pre after scripts/extract/generation-plan.sh has produced the deterministic base. Reads the operational contract from skills/ui-reverse-engineering/enrichment.md. Never standalone — always after the deterministic plan exists.
 tools: Read, Grep, Glob, Bash, Edit, Write
-model: opus
+model: sonnet
 ---
 
 Resolve plugin root as `${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(cat "$HOME/.config/ui-clone-skills/root" 2>/dev/null)}}` if `$PLUGIN_ROOT` is unset.

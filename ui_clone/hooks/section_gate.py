@@ -26,6 +26,7 @@ from typing import cast
 
 from ui_clone import claude_continuation as _continuation
 from ui_clone.goal import build_goal_card
+from ui_clone.hooks import _stop_repeat
 from ui_clone.hooks._common import deferred_checks_blocker as _deferred_checks_blocker
 from ui_clone.hooks._common import find_project_root as _find_project_root
 from ui_clone.hooks._common import gate_skip_blocker as _gate_skip_blocker
@@ -694,6 +695,9 @@ _ADVISORY_ONLY = False
 # current_gate=post-implement, with the UNFINISHED banner never surfaced once.
 _BLOCK_LEDGER: tuple[Path, str] | None = None
 _BLOCKED_THIS_RUN = False
+# Length of the identical-signature streak recorded by the last _note_block
+# (0 = ledger unavailable). Only decides full vs. repeat TEXT, never the verdict.
+_LAST_STREAK = 0
 _BLOCK_KEY_PREFIX = "block|"
 _BLOCK_BULLET_RE = re.compile(r"^\s+[-•]\s+(.*\S)\s*$")
 # Measurements that jitter between two runs of the SAME failure: decimals
@@ -803,8 +807,9 @@ def _note_block(ref_dir: Path | None = None, signature: str = "") -> bool:
     Returns False (keep blocking) when the ledger is unavailable, so a failure
     to persist the counter can never release a gate.
     """
-    global _BLOCKED_THIS_RUN
+    global _BLOCKED_THIS_RUN, _LAST_STREAK
     _BLOCKED_THIS_RUN = True
+    _LAST_STREAK = 0
     if _BLOCK_LEDGER is None:
         return False
     project_root, key = _BLOCK_LEDGER
@@ -820,6 +825,7 @@ def _note_block(ref_dir: Path | None = None, signature: str = "") -> bool:
     used = int(attempts.get(scoped, 0)) + 1
     attempts[scoped] = used
     _write_stop_attempts(project_root, attempts)
+    _LAST_STREAK = used
     return used > _stop_retry_cap()
 
 
@@ -1002,25 +1008,67 @@ def _fresh_active_dirs(active_dirs: list[Path]) -> list[Path]:
     return [ref_dir for ref_dir, _, _ in fresh_dirs if ref_dir in keep]
 
 
-def _emit_block(reason: str, ref_dir: Path | None = None, signature: str = "") -> None:
+_REPEAT_REASON_MAX_WORDS = 60
+
+
+def _repeat_block_reason(reason: str, ref_dir: Path | None) -> str:
+    """One-line reminder for a block whose full text this session already saw.
+
+    Still a block (the caller emits the same decision); it only stops paying
+    for the unchanged failure list + goal card on every turn end.
+    """
+    head = next((ln.strip() for ln in reason.splitlines() if ln.strip()), "")
+    head = head.removeprefix("⛔").strip()
+    if len(head) > 160:
+        head = head[:157] + "…"
+    where = (
+        f"full card: python -m ui_clone.goal {ref_dir}"
+        if ref_dir is not None
+        else "full text: the previous Stop message"
+    )
+    return (
+        f"⛔ UI-RE Stop still BLOCKED, same failure as the last stop ({head}). "
+        f"Fix it rather than stopping again; {where}"
+    )
+
+
+def _emit_block(
+    reason: str,
+    ref_dir: Path | None = None,
+    signature: str = "",
+    prefix: str = "",
+) -> None:
     # Headless driver (benchmark_harness): a Stop block ends the turn with no
     # printed answer, so the iteration is spent and the reason only lands on
     # the next one. The driver re-runs the same Python gates between
     # iterations, so the block adds no enforcement it does not already have —
     # demote to an advisory that still reaches the driver log via stderr.
+    full = f"{prefix}{reason}"
     if os.environ.get("UI_RE_HEADLESS_DRIVER") == "1":
-        print(reason, file=sys.stderr)
+        print(full, file=sys.stderr)
         return
     # The signature is taken from the gate's own text, before any continuation
     # prefix main() prepends, so the same failure hashes the same every turn.
-    budget_spent = _note_block(ref_dir, signature or _block_signature(reason))
+    signature = signature or _block_signature(reason)
+    budget_spent = _note_block(ref_dir, signature)
     if _ADVISORY_ONLY or budget_spent:
         # Retry budget spent. Stopping is allowed, but never in silence: this is
         # the last thing the user sees, and without it an unfinished clone is
         # indistinguishable from a finished one.
-        _emit_handback(reason, ref_dir)
+        _emit_handback(full, ref_dir)
         return
-    print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
+    text = full
+    if _BLOCK_LEDGER is not None:
+        project_root, key = _BLOCK_LEDGER
+        shown_key = _stop_repeat.entry_key(key, ref_dir)
+        if _LAST_STREAK > 1 and _stop_repeat.was_shown(project_root, shown_key, signature):
+            # Same failure, full text already in this session's context (a
+            # compact clears the shown-state via session_resume). The
+            # continuation prefix is an instruction, so it is kept verbatim.
+            text = f"{prefix}{_repeat_block_reason(reason, ref_dir)}"
+        else:
+            _stop_repeat.mark_shown(project_root, shown_key, signature)
+    print(json.dumps({"decision": "block", "reason": text}, ensure_ascii=False))
 
 
 def _block_reason_for_gate(gate_name: str, ref_dir: Path, gate_result: dict[str, object]) -> str:
@@ -2020,6 +2068,7 @@ def main() -> None:
         block_reason = _enforce_ref_dir(ref_dir)
         if block_reason:
             block_signature = _block_signature(block_reason)
+            prefix: str | None = None
             if is_claude_hook:
                 try:
                     prefix = _continuation_stop_prefix(
@@ -2033,9 +2082,7 @@ def main() -> None:
                     # is still outstanding, then let the turn end.
                     print(f"{release}{block_reason}", file=sys.stderr)
                     continue
-                if prefix:
-                    block_reason = f"{prefix}{block_reason}"
-            _emit_block(block_reason, ref_dir, block_signature)
+            _emit_block(block_reason, ref_dir, block_signature, prefix or "")
             sys.exit(0)
         if is_claude_hook:
             _refresh_continuation_final(

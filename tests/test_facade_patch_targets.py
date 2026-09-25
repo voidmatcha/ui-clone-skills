@@ -9,15 +9,24 @@ when:
 * a name listed in a facade's ``__all__`` is no longer importable from it, or
 * a name that tests monkeypatch on a facade is no longer defined in the facade
   module, nor looked up by name from a function body in the facade module —
-  the point at which the patch would silently stop intercepting anything.
+  the point at which the patch would silently stop intercepting anything, or
+* a function reachable from the facade, but defined in a sibling module, looks
+  up a facade-patched name through its own module globals and that call site
+  is not in ``KNOWN_SIBLING_LOOKUPS``. Patching the facade name does not
+  intercept such a call; the known sites are safe only because no test relies
+  on it (tests patch the enclosing composite, inject ``evaluator``/``setter``,
+  or keep the env guard off).
 """
 
 from __future__ import annotations
 
 import ast
+import inspect
 import re
+import sys
+import textwrap
 from pathlib import Path
-from types import ModuleType
+from types import FunctionType, ModuleType
 
 import ui_clone.section_capture as section_capture
 import ui_clone.section_compare_sections as section_compare_sections
@@ -29,6 +38,20 @@ FACADES: dict[str, ModuleType] = {
     "section_compare_sections": section_compare_sections,
 }
 _STRING_TARGET = re.compile(r"^ui_clone\.(section_capture|section_compare_sections)\.(\w+)$")
+
+# (defining module, function, looked-up name): sibling-module call sites that a
+# facade patch of ``name`` does NOT intercept. Tests that drive these composites
+# patch the composite itself on the facade (``_ensure_viewport``,
+# ``_scroll_metrics``, ``_resolve_live_section_rect``, ``_run_agent_eval``) or
+# pass ``evaluator=``/``setter=``. Adding an entry requires the same guarantee.
+KNOWN_SIBLING_LOOKUPS: set[tuple[str, str, str]] = {
+    ("ui_clone.section_capture_browser", "_ensure_viewport", "_run_agent_browser"),
+    ("ui_clone.section_capture_browser", "_ensure_viewport", "_run_agent_eval_text"),
+    ("ui_clone.section_capture_browser", "_resolve_live_section_rect", "_run_agent_eval_text"),
+    ("ui_clone.section_capture_browser", "_run_agent_eval", "_run_agent_browser"),
+    ("ui_clone.section_capture_browser", "_run_agent_eval_text", "_run_agent_browser"),
+    ("ui_clone.section_capture_browser", "_scroll_metrics", "_run_agent_eval_text"),
+}
 
 
 def _import_aliases(tree: ast.Module) -> dict[str, str]:
@@ -93,6 +116,43 @@ def _names_looked_up_in_function_bodies(module: ModuleType) -> set[str]:
     return names
 
 
+def _body_loads(func: FunctionType) -> set[str]:
+    try:
+        source = textwrap.dedent(inspect.getsource(func))
+    except (OSError, TypeError):
+        return set()
+    return {
+        node.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+
+
+def _sibling_lookups(facade: ModuleType, names: set[str]) -> set[tuple[str, str, str]]:
+    """Call sites reachable from the facade that resolve a patched name elsewhere.
+
+    Entry points are every function reachable as a facade attribute (tests call
+    re-exported helpers through the facade too). Callees are followed through
+    the globals of the module that defines each function.
+    """
+    queue = [obj for obj in vars(facade).values() if isinstance(obj, FunctionType)]
+    seen: set[FunctionType] = set()
+    sites: set[tuple[str, str, str]] = set()
+    while queue:
+        func = queue.pop()
+        if func in seen or not func.__module__.startswith("ui_clone."):
+            continue
+        seen.add(func)
+        owner = sys.modules[func.__module__]
+        for name in _body_loads(func):
+            if name in names and owner is not facade:
+                sites.add((func.__module__, func.__name__, name))
+            callee = vars(owner).get(name)
+            if isinstance(callee, FunctionType):
+                queue.append(callee)
+    return sites
+
+
 def _defined_in_module(module: ModuleType, name: str) -> bool:
     obj = getattr(module, name, None)
     return getattr(obj, "__module__", None) == module.__name__
@@ -126,3 +186,22 @@ def test_patched_facade_names_are_still_intercepted_by_the_facade() -> None:
             "Move the call site back into the facade or patch the module that "
             "performs the lookup."
         )
+
+
+def test_sibling_call_sites_of_patched_names_are_known() -> None:
+    """Patching a facade name cannot reach a lookup made inside a sibling module."""
+    patched = _patched_names()
+    sites: set[tuple[str, str, str]] = set()
+    for short, names in patched.items():
+        sites |= _sibling_lookups(FACADES[short], names)
+    # Sanity: the walker must see the known sites, or it stopped guarding.
+    assert sites & KNOWN_SIBLING_LOOKUPS, "sibling-lookup walker found nothing"
+    new_sites = sorted(sites - KNOWN_SIBLING_LOOKUPS)
+    assert not new_sites, (
+        f"these sibling functions look up facade-patched names through their own "
+        f"module, so monkeypatching the facade does not intercept them: {new_sites}. "
+        "Keep the call site in the facade, or add it to KNOWN_SIBLING_LOOKUPS only "
+        "after confirming every test that reaches it patches the enclosing function."
+    )
+    stale = sorted(KNOWN_SIBLING_LOOKUPS - sites)
+    assert not stale, f"KNOWN_SIBLING_LOOKUPS lists call sites that no longer exist: {stale}"

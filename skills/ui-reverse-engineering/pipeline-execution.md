@@ -105,6 +105,10 @@ The `UV_PROJECT_ENVIRONMENT` export points at the same shared venv `hooks/shim.s
 ## Transition Extraction
 
 When animation detection (Step 5/6) identifies transitions, use this sub-pipeline.
+A scoped clone (section-only, element-only, or trigger-opened modal/drawer; see
+[operational-rules.md](operational-rules.md#scope-adjustments-by-request-shape))
+runs this sub-pipeline against its target selector instead of the page-level
+steps above.
 
 ```
 Step T-1: Multi-point measurement  — measurement.md → measurements.json (11 points). ⛔ Gate.

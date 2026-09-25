@@ -2,7 +2,7 @@
 name: source-forensics
 description: Inspect large raw reference HTML/CSS/JS sources in an isolated context when compact artifacts cannot explain persistent section, sticky, transition, or forensic-preservation failures. Writes source-forensics.json for the main clone loop.
 tools: Read, Grep, Glob, Bash, Write
-model: opus
+model: sonnet
 ---
 
 Read `$PLUGIN_ROOT/skills/ui-reverse-engineering/source-forensics.md`.

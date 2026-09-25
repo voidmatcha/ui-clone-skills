@@ -50,6 +50,16 @@ builds or serves HTTP is `INCOMPLETE`. Whole-document HTML mirrors and direct
 reference-runtime loading are invalid implementations. See repository
 `docs/gates.md` for the canonical gate and artifact contract.
 
+**Scoped clones** (section-only, element-only, or a trigger-opened modal/drawer,
+per [operational-rules.md](operational-rules.md#scope-adjustments-by-request-shape))
+cannot pass these page-level commands, which have no subtree selector. Report
+them as scoped with the element-scope evidence from
+[comparison-fix.md](../visual-debug/comparison-fix.md#element-scope-verification-transition-extraction):
+populated `frames/ref/` and `frames/impl/`, zero-AE element frames,
+`pixel-perfect-diff.json` with every element passing, and open and close
+verification for trigger-opened UI. Never describe a scoped result as a
+page-level verified clone.
+
 ## Agent-driven loop
 
 This skill is auto-loaded into Claude Code (with `--plugin-dir`) and Codex sessions, so prompts can be terse. The agent drives the loop inside a single session, iterating against `python -m ui_clone.goal <ref-dir> --check-done` until it exits 0. `ui_clone/hooks/section_gate.py` (Stop hook) emits gate-specific failure diagnostics on every exit attempt so the agent sees what is still blocking.

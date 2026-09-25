@@ -526,7 +526,7 @@ This produces per-section files in `tmp/ref/<component>/html/`:
 
 **What it captures per section:** element hierarchy (tag, id, class, text content, nesting depth — the exact HTML to write); computed CSS for EVERY element (display, position, width, height, fontSize, fontWeight, fontFamily, color, backgroundColor, padding, margin, borderRadius, backdropFilter, flexDirection, justifyContent, alignItems, gap, gridTemplateColumns, transform, backgroundImage — the exact Tailwind classes or inline styles to use); media elements (`<video>` src/autoplay/muted/loop/playsInline/poster, `<source>` src/type, `<img>` src/alt/width/height — so a video background becomes `<video autoPlay muted loop>`, not `<img>`).
 
-**HARD RULE: Before writing ANY component code, Read the corresponding `html/<section>.json` file.** Do not guess layout from screenshots alone.
+**HARD RULE: Before writing ANY component code, load the corresponding `html/<section>.json` spec** — via `_summary.json` plus the compact `jq` projection in [component-generation.md](component-generation.md#before-writing-any-section--load-the-extracted-section-spec-hard-rule), never a whole-file Read. Do not guess layout from screenshots alone.
 
 **Gate:**
 ```

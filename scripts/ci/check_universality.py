@@ -63,6 +63,16 @@ class Rule:
     # unrelated hit earlier on the line. Prefer adding an entry here (with a
     # reason in the Rule comment) over weakening `pattern`.
     allow: tuple[Pattern[str], ...] = ()
+    # Suffixes that are scanned only under `data_dirs` (top-level). Used for
+    # data formats where a match is legitimate data everywhere except in
+    # manifests that carry prose (hook status messages).
+    data_suffixes: frozenset[str] = frozenset()
+    data_dirs: tuple[str, ...] = ()
+
+    def applies_to(self, suffix: str, top_dir: str) -> bool:
+        if suffix not in self.suffixes or (self.dirs and top_dir not in self.dirs):
+            return False
+        return suffix not in self.data_suffixes or top_dir in self.data_dirs
 
 
 # Codex host-config paths that any user has; only paths BELOW these are personal.
@@ -145,11 +155,16 @@ RULES = (
         # the rule or finding, never the day it was written. Markdown keeps
         # the narrower rule above (docs may legitimately date a design
         # record); CHANGELOG / benchmark / internal / tests are excluded trees.
+        # Data files (eval fixtures, manifests, config) may carry real dates
+        # such as `"captured": "2026-09-24"`, so JSON is scanned only under
+        # hooks/, whose manifests hold prose status messages; TOML/YAML never.
         "Bare date stamps in code (YYYY-MM-DD / YYYY-MM / YYYY-0X-XX)",
         re.compile(
             r"(?<![\w.-])20[0-9]{2}-(?:[01][0-9]|[0-9X]X)(?:-(?:[0-3][0-9]|[0-9X]X))?(?![\w-])"
         ),
-        frozenset({".py", ".sh", ".json", ".toml", ".yml", ".yaml"}),
+        frozenset({".py", ".sh", ".json"}),
+        data_suffixes=frozenset({".json"}),
+        data_dirs=("hooks",),
     ),
     Rule(
         "Codex iteration labels (codex-1N / Codex LN QN / Round N)",
@@ -246,11 +261,7 @@ def find_hits(root: Path) -> dict[str, list[str]]:
                 continue
             relative = path.relative_to(root)
             top_dir = relative.parts[0] if len(relative.parts) > 1 else ""
-            rules = [
-                rule
-                for rule in RULES
-                if path.suffix in rule.suffixes and (not rule.dirs or top_dir in rule.dirs)
-            ]
+            rules = [rule for rule in RULES if rule.applies_to(path.suffix, top_dir)]
             if not rules:
                 continue
             try:

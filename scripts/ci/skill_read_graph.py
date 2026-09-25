@@ -28,6 +28,11 @@ Link classes:
   never by the coordinator; counted as reachable, not mandatory.
 * ``index``       — rows of a file index table (``reference-index.md``).
   Reachable, not mandatory.
+
+Links are markdown links, backticked ``x.md`` names, and bare ``x.md`` /
+``../skill/x.md`` tokens that resolve to an existing skill doc. Execution verbs
+("run", "execute") count as read orders; rows of signal/symptom decision tables
+are conditional; a doc cited in parentheses or after "see"/"per" is a pointer.
 """
 
 from __future__ import annotations
@@ -46,12 +51,20 @@ PUBLIC_SKILLS = ("ui-reverse-engineering", "ui-capture", "visual-debug")
 
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(\s*(<[^>]+>|[^\s)]+)\s*\)")
 BACKTICK_DOC_RE = re.compile(r"`([A-Za-z0-9_./-]+\.md)(?:#[^`]*)?`")
+# Bare doc names in prose or step rows ("Step T-1: ... — measurement.md"). The
+# lookbehind rejects the middle of URLs/paths and link targets already matched by
+# LINK_RE; a token only becomes a link when it resolves to an existing skill doc.
+BARE_DOC_RE = re.compile(
+    r"(?<![\w/.`\[(<-])((?:\.\./)*(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.md)(?![\w/])"
+)
 CONDITIONAL_RE = re.compile(
     r"\b(if|when|whenever|only|unless|optional(?:ly)?|otherwise|"
     r"on (?:pass|fail(?:ure)?|error)|in case)\b",
     re.I,
 )
-READ_RE = re.compile(r"\b(read|consult|follow|open|resolve|route[sd]?)\b", re.I)
+# Unconditional execution verbs ("Run the classifier eval from X.md", "execute
+# the steps in X.md") load the doc just like "read" does.
+READ_RE = re.compile(r"\b(read|consult|follow|open|resolve|route[sd]?|run|execute)\b", re.I)
 POINTER_RE = re.compile(
     r"^(?:[\s>*→\-]|\*\*)*(?:see|cross-ref|split from|pointer in from|per|from|"
     r"defined in|runs? after|produced by|writes|consults|is a reference for|"
@@ -61,6 +74,37 @@ POINTER_RE = re.compile(
 STEP_TABLE_HEADERS = ("phase", "step", "current work")
 ROLE_TABLE_HEADERS = ("role",)
 INDEX_TABLE_HEADERS = ("file", "doc", "document", "sub-doc", "sub-document")
+# Decision tables whose first column is a detected condition ("| Signal | Next
+# step |"): every row fires only when its signal is observed.
+CONDITION_TABLE_HEADERS = (
+    "signal",
+    "symptom",
+    "result",
+    "condition",
+    "outcome",
+    "case",
+    "trigger",
+    "trigger type",
+    "triggertype",
+    "pattern",
+    "bundle pattern",
+    "gsap pattern",
+    "minified pattern",
+    "library",
+    "animation type",
+    "effect type",
+    "content type",
+    "state found",
+    "problem",
+    "mistake",
+    "temptation",
+    "conflict",
+    "engine",
+)
+# Mid-sentence citation right before the link: "... — see `x.md`", "(per x.md".
+CITATION_PREFIX_RE = re.compile(
+    r"\b(?:see|cf\.?|per|as in|details in|as described in|defined in)\s*$", re.I
+)
 STEP_LINE_RE = re.compile(r"^\s*Step\s+T-?\d", re.I)
 WORD_RE = re.compile(r"\S+")
 
@@ -188,14 +232,42 @@ def _table_header(lines: list[tuple[str, bool]], index: int) -> str | None:
     return cells[0] if cells else None
 
 
-def _classify(context: str, table_header: str | None, line: str) -> str:
+def _parenthetical(line: str, position: int) -> str | None:
+    """Return the text of the innermost ``( ... )`` group enclosing ``position``."""
+    depth = 0
+    start = -1
+    for index in range(position - 1, -1, -1):
+        char = line[index]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            if depth == 0:
+                start = index
+                break
+            depth -= 1
+    if start < 0:
+        return None
+    end = line.find(")", position)
+    return line[start + 1 : end if end >= 0 else len(line)]
+
+
+def _is_citation(line: str, position: int) -> bool:
+    """True when the doc is cited as a source rather than given as a read order."""
+    prefix = line[:position].rstrip("`[ ")
+    if CITATION_PREFIX_RE.search(prefix[-40:]):
+        return True
+    group = _parenthetical(line, position)
+    return group is not None and not READ_RE.search(group)
+
+
+def _classify(context: str, table_header: str | None, line: str, citation: bool = False) -> str:
     if table_header in ROLE_TABLE_HEADERS:
         return "role"
     if table_header in INDEX_TABLE_HEADERS:
         return "index"
-    if CONDITIONAL_RE.search(context):
+    if table_header in CONDITION_TABLE_HEADERS or CONDITIONAL_RE.search(context):
         return "conditional"
-    if POINTER_RE.match(context):
+    if citation or POINTER_RE.match(context):
         return "pointer"
     if table_header in STEP_TABLE_HEADERS or STEP_LINE_RE.match(line):
         return "step"
@@ -210,9 +282,13 @@ def _resolve(source: pathlib.Path, target: str) -> str | None:
         return None
     if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I):
         return None
+    cwd = pathlib.Path.cwd().resolve()
     resolved = (source.parent / target).resolve()
+    if not resolved.is_file() and target.startswith("skills/"):
+        # Repo-root relative spelling (``skills/visual-debug/x.md``).
+        resolved = (cwd / target).resolve()
     try:
-        rel = resolved.relative_to(pathlib.Path.cwd().resolve())
+        rel = resolved.relative_to(cwd)
     except ValueError:
         return None
     if not rel.is_file() or "evals" in rel.parts or not rel.parts or rel.parts[0] != "skills":
@@ -232,12 +308,17 @@ def extract_links(path: pathlib.Path) -> list[Link]:
         if in_code and not STEP_LINE_RE.match(line):
             continue
         header = _table_header(lines, index)
-        for match in (*LINK_RE.finditer(line), *BACKTICK_DOC_RE.finditer(line)):
+        matches = (
+            *LINK_RE.finditer(line),
+            *BACKTICK_DOC_RE.finditer(line),
+            *BARE_DOC_RE.finditer(line),
+        )
+        for match in matches:
             target = _resolve(path, match.group(1))
             if target is None or target == path.as_posix():
                 continue
             context = _sentence_for(line, match.start())
-            klass = _classify(context, header, line)
+            klass = _classify(context, header, line, _is_citation(line, match.start()))
             key = (target, klass)
             if key in seen:
                 continue

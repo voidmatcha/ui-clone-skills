@@ -37,11 +37,61 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from ui_clone.goal import build_goal_card
 from ui_clone.hooks._common import find_project_root, load_json_safe
+from ui_clone.hooks._stop_repeat import forget_session
 from ui_clone.state import PipelineState
+
+SUBDOC_DIR = "skills/ui-reverse-engineering"
+
+
+@dataclass(frozen=True)
+class SubdocPointer:
+    """One targeted section pointer; tests assert `heading` exists in `doc`."""
+
+    doc: str
+    heading: str
+    when: str
+    intersection_only: bool = False
+
+
+SUBDOC_POINTERS: tuple[SubdocPointer, ...] = (
+    SubdocPointer(
+        "transition-implementation.md",
+        "IntersectionObserver placement for masked reveals",
+        "IO+overflow:hidden bug class — most likely failure for intersection entries",
+        intersection_only=True,
+    ),
+    SubdocPointer(
+        "diagnosis.md",
+        "Stuck-reveal triage flow (3 steps, in order)",
+        "Root Cause E — reveal stuck or never fires",
+        intersection_only=True,
+    ),
+    SubdocPointer(
+        "diagnosis.md",
+        "How to pick the right category",
+        "gate or section-compare failure → root-cause class",
+    ),
+    SubdocPointer(
+        "generation-pitfalls.md",
+        "CSS-to-React translation — 3 categories",
+        "HTML→JSX conversion failures",
+    ),
+    SubdocPointer(
+        "generation-pitfalls.md",
+        "Failure-based diagnosis",
+        "large symptom table — grep -n your symptom, never read it whole",
+    ),
+    SubdocPointer(
+        "patterns.md",
+        "Troubleshooting",
+        "failure-table cross-ref",
+    ),
+)
 
 
 def _find_active_refs(search_root: Path) -> list[Path]:
@@ -110,24 +160,23 @@ def _build_message(ref_dir: Path, event_name: str) -> str:
     has_hover = any(t in triggers for t in ("hover", "css-hover", "mouseenter"))
 
     lines: list[str] = []
-    lines.append(f"⚑ UI-RE WIP detected on {event_name}: tmp/ref/{component}/")
-    lines.append("")
-    lines.append("Host-neutral goal card for this delegated worker:")
-    lines.append(f"Run: python -m ui_clone.goal tmp/ref/{component}")
-    lines.append(build_goal_card(ref_dir))
-    lines.append("")
     lines.append(
-        "Empirical pattern (from JSONL analysis of prior sessions): post-compact and "
-        "session-resume are the dominant skip-failure trigger — 73% of past "
-        "verification-skip incidents happened within 20 min of a compact_boundary. "
-        "Once a session segment passes a compact without re-reading the sub-docs, "
-        "the skip pattern persists for the rest of the segment. This reminder is "
-        "your re-anchor."
+        f"⚑ UI-RE WIP detected on {event_name}: tmp/ref/{component}/ — re-anchor now "
+        "(post-compact/resume is when past runs skipped verification)."
     )
+    lines.append(
+        "Goal card for this delegated worker "
+        f"(refresh: python -m ui_clone.goal tmp/ref/{component}):"
+    )
+    lines.append(build_goal_card(ref_dir))
     lines.append("")
 
     # Verification gates — list ALL required gates, mark which are spec-relevant
-    lines.append("Before claiming this clone is 'done' / 'matched' / 'verified':")
+    lines.append(
+        "Before claiming 'done' / 'matched' / 'verified' ($SCRIPTS_DIR = "
+        "skills/visual-debug/scripts under VISUAL_DEBUG_SCRIPTS_DIR / PLUGIN_ROOT / "
+        "CODEX_PLUGIN_ROOT / CLAUDE_PLUGIN_ROOT):"
+    )
     lines.append(f"  1. python -m ui_clone.gate tmp/ref/{component} post-implement")
     lines.append(
         f"  2. bash $SCRIPTS_DIR/section-compare.sh <orig-url> <impl-url> <session> tmp/ref/{component}"
@@ -145,36 +194,28 @@ def _build_message(ref_dir: Path, event_name: str) -> str:
         )
     if has_hover or not triggers:
         lines.append("  5. bash $SCRIPTS_DIR/transition-compare.sh <orig> <impl> <session>")
-    lines.append("")
     lines.append(
-        "$SCRIPTS_DIR resolves from VISUAL_DEBUG_SCRIPTS_DIR, PLUGIN_ROOT, "
-        "CODEX_PLUGIN_ROOT, or CLAUDE_PLUGIN_ROOT. If none is set, export "
-        "SCRIPTS_DIR=/path/to/ui-clone-skills/skills/visual-debug/scripts."
+        "transition-compare.sh verifies hover/idle diffs only — never evidence "
+        "that intersection or scroll-driven entries are 'matched'."
     )
     lines.append("")
 
-    # Sub-doc reading reminder
-    lines.append("Required sub-docs to read BEFORE editing component source under apps/*/src/projects/:")
-    if has_intersection:
-        lines.append(
-            "  • transition-implementation.md → 'IntersectionObserver placement for masked reveals' "
-            "(IO+overflow:hidden bug class — most likely failure mode for intersection entries)"
-        )
-        lines.append("  • diagnosis.md → Root Cause E + Stuck-reveal triage flow")
-    lines.append("  • patterns.md (failure-table cross-ref)")
-    lines.append("  • generation-pitfalls.md (HTML→JSX conversion failures)")
+    # Targeted section pointers instead of whole-doc reads: the four sub-docs
+    # total ~16k words, and re-reading them after every compact dominated the
+    # context. What is ENFORCED lives in the goal card and the gates above.
+    lines.append(
+        f"Before editing component source, read only the matching section of "
+        f"{SUBDOC_DIR}/<doc> (`grep -n '^#' <doc>`, then Read with offset/limit):"
+    )
+    for pointer in SUBDOC_POINTERS:
+        if pointer.intersection_only and not has_intersection:
+            continue
+        lines.append(f"  • {pointer.doc} → '{pointer.heading}' ({pointer.when})")
     if not triggers:
         lines.append(
-            "  (transition-spec.json absent or empty — read these only if transitions are in scope)"
+            "  (transition-spec.json absent or empty — transition sections only "
+            "if transitions are in scope)"
         )
-    lines.append("")
-
-    lines.append(
-        "Do NOT declare a transition category 'matched' after running only "
-        "transition-compare.sh — that script verifies hover/idle diffs only. "
-        "Intersection-fade-up and scroll-driven entries pass through it as "
-        "noise and are NOT verified."
-    )
 
     return "\n".join(lines)
 
@@ -213,12 +254,27 @@ def _detect_event_name(stdin_text: str) -> str:
     return "SessionStart"
 
 
+def _session_id(stdin_text: str) -> str:
+    try:
+        data = json.loads(stdin_text) if stdin_text.strip() else {}
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    sid = data.get("session_id") or data.get("sessionId")
+    return sid.strip() if isinstance(sid, str) else ""
+
+
 def main() -> None:
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     event_name = _detect_event_name(raw)
 
     project_root = find_project_root()
     search_root = project_root / "tmp" / "ref"
+
+    # The compact dropped any full Stop-block text from context; make the next
+    # Stop show it in full again. Never touches the retry-budget ledger.
+    forget_session(project_root, _session_id(raw))
 
     active_refs = _find_active_refs(search_root)
     if not active_refs:

@@ -2,7 +2,7 @@
 name: bundle-analyzer
 description: Parse downloaded JavaScript bundles for animation-library construction sites and concrete parameters. Invoked at Phase 5d when bundle-map.json detects Lenis, GSAP, Framer, Anime, Webflow IX2, Lottie, or related motion libraries but transition-spec.json is empty or under-populated. Writes bundle-extraction.json for downstream generation-plan enrichment.
 tools: Read, Grep, Glob, Bash, Write
-model: opus
+model: sonnet
 ---
 
 Read `$PLUGIN_ROOT/skills/ui-reverse-engineering/js-animation-extraction.md` plus `tmp/ref/<component>/bundle-map.json` and the downloaded `tmp/ref/<component>/bundles/*.js` files.

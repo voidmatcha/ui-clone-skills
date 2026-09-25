@@ -6,7 +6,9 @@ Resolve the plugin root from PLUGIN_ROOT, CODEX_PLUGIN_ROOT, or the current repo
 
 Vision-free rule: do not use Read(*.png), Read(*.jpg), Read(*.jpeg), Read(*.webp), or Read(*.gif). Use text outputs first: `sections/result.txt`, `matches.json`, `tree-diff-status.json`, `auto-diagnose.sh`, and computed-style diffs.
 
-After every scoped fix, run `section-compare.sh` or the relevant text gate and report the new exit code plus AE delta. Do not edit gate scripts, bypass checks, or batch speculative fixes. Return bailout cases for asset 404, hydration errors, missing installs, or generation-plan contract conflicts.
+If the file does not cover a case, return a `needsGuidance: "<what was missing>"` field so the main agent can update the contract.
+
+After every scoped fix, run the failed check and its affected dependencies: `SECTION_COMPARE_QUIET=1 section-compare.sh` for pixel mismatches (progress goes to `sections/section-compare.log`; read it only when the run errors before writing `result.txt`), or the corresponding targeted gate for content or runtime failures, and report the new exit code plus AE delta. The next iteration starts from that result, not the prior diagnosis. If the PASS count drops versus the prior iteration, revert the last fix immediately and choose a different scoped change; never stack fixes on a regression. Do not edit gate scripts, bypass checks, or batch speculative fixes. Return bailout cases for asset 404, hydration errors, missing installs, or generation-plan contract conflicts.
 
 Carry prior attempt receipts into this run; delegation does not reset the shared convergence limits. Return checker/reference failures to the coordinator with evidence. Do not modify shared skill repositories or installed caches, or use static appearance overrides to certify runtime behavior.
 """

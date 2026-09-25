@@ -328,22 +328,13 @@ def _guard_enforcement_state_rm(cmd: str) -> str | None:
     if target is None:
         return None
     return (
-        f"⛔ UI-RE enforcement-state write blocked: '{target}' is gate state "
-        "(the fail-LOUD .gate-skip-log ledger or an off-pipeline activation "
-        "crumb). Destroying, truncating, overwriting, or editing it in place by "
-        "any means (rm/mv/cp/tee/ln/dd/truncate/install/rsync/sed/perl/ex, python "
-        "file APIs, or shell redirect — among others) silently disables a gate "
-        "that would otherwise block closeout. Do not destroy it.\n\n"
-        "If you are genuinely resetting a run, remove the whole ref dir "
-        "(`rm -rf tmp/ref/<component>`), which re-runs every gate from clean — "
-        "do not single out the enforcement file. To re-enforce a skipped gate, "
-        "re-run it on a host with the ui-clone-skills env (which clears the "
-        "ledger entry), or record `gateSkipAck` in verification-plan.json.\n\n"
-        "Only READING it? This guard also over-blocks a read (a python "
-        "`open(...)` is blocked in any mode because distinguishing read from "
-        "write reopens truncate-bypasses). Use a sanctioned read instead — it "
-        "is not blocked: `cat <file>`, `jq . <file>`, `grep <pat> <file>`, or "
-        "`python -m ui_clone.pipeline <ref> status --json` for pipeline state."
+        f"⛔ UI-RE enforcement-state access blocked: '{target}'. To READ it, use "
+        "`jq . <file>`, `cat <file>`, `grep <pat> <file>`, or `python -m "
+        "ui_clone.pipeline <url> <ref> <session> status --json` (python "
+        "`open(...)` is blocked in any mode). Writing, moving, or deleting gate "
+        "state disables a gate: never do it. To re-enforce a skipped gate, "
+        "re-run that gate. To reset a run, ask the user before deleting "
+        "tmp/ref/<component>; deletion loses resume/re-verification evidence."
     )
 
 
@@ -379,14 +370,16 @@ def _guard_adhoc_redirect(cmd: str) -> str | None:
             f"(e.g. `bash $PLUGIN_ROOT/skills/visual-debug/scripts/"
             f"dom-scaffold.sh <ref-dir>` for section-map.json). "
             f"Do NOT dump JSON into tmp/ref/<c>/ via cat/echo/tee/"
-            f"agent-browser eval redirects. See SKILL.md Pipeline section."
+            f"agent-browser eval redirects. See "
+            f"skills/ui-reverse-engineering/pipeline-execution.md."
         )
     return (
         f"⛔ UI-RE: Bash redirect to ad-hoc ref artifact "
         f"'{basename}' blocked. Run a canonical extraction "
         f"script (skills/visual-debug/scripts/*.sh) instead of "
-        f"hand-dumping JSON into tmp/ref/<c>/. See SKILL.md "
-        f"Pipeline section for the step → artifact mapping."
+        f"hand-dumping JSON into tmp/ref/<c>/. See "
+        f"skills/ui-reverse-engineering/pipeline-execution.md for the "
+        f"step → artifact mapping."
     )
 
 

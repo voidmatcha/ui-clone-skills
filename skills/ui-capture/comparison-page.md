@@ -219,7 +219,7 @@ cp -r "$OUT_DIR" public/ui-capture-compare
 npx serve "$OUT_DIR" -p 3002
 ```
 
-Present URL to user and wait for feedback (interactive mode) or check pixel-perfect-diff.json (autonomous mode). See SKILL.md Phase 5.
+Present URL to user and wait for feedback (interactive mode) or check pixel-perfect-diff.json (autonomous mode). Then return to the caller per `references/manual-capture.md` → Transition and comparison contract.
 
 ---
 

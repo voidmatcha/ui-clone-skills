@@ -15,10 +15,13 @@ PUBLIC_SKILLS = ("ui-capture", "ui-reverse-engineering", "visual-debug")
 PUBLIC_SKILL_WORD_ADVISORY = 5_000
 INTERNAL_SKILLS = {"benchmark"}
 # Mandatory-path word budgets per scenario, measured by scripts/ci/skill_read_graph.py.
-# Set slightly above the optimized numbers so the default read path cannot silently
-# regrow; raise a budget only together with a documented reason.
+# Set slightly above the measured numbers so the default read path cannot silently
+# regrow; raise a budget only together with a documented reason. The full-clone
+# budget rose from 52_500 when the graph started counting bare doc names in the
+# Step T-1..T4 transition sub-pipeline rows and "Run ... from X.md" orders
+# (measured 66_933 words / 31 docs).
 SKILL_READ_BUDGETS = {
-    "reverse-engineering-full-clone": 52_500,
+    "reverse-engineering-full-clone": 68_500,
     "capture-baseline-only": 1_400,
     "visual-debug-single-mismatch": 1_100,
 }

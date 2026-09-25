@@ -90,6 +90,52 @@ def test_classifies_links_by_sentence_and_table(
     }
 
 
+def test_bare_doc_names_and_run_verbs_are_detected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = ("measure", "capture", "classify", "branch", "cited", "aside", "other")
+    for name in names:
+        _write(tmp_path, f"skills/demo/{name}.md", f"# {name}\n\nbody\n")
+    _write(tmp_path, "skills/peer/remote.md", "# remote\n\nbody\n")
+    _write(
+        tmp_path,
+        "skills/demo/SKILL.md",
+        "\n".join(
+            [
+                "# Demo",
+                "",
+                "```",
+                "Step T-1: Multi-point measurement  — measurement.md and measure.md. ⛔ Gate.",
+                "Step T0:  Capture frames — capture.md or ../peer/remote.md",
+                "```",
+                "",
+                "Run the classifier eval from `classify.md` Step T1 to detect type.",
+                "",
+                "| Signal | Next step |",
+                "|---|---|",
+                "| `canvases > 0` | **Run the extraction pipeline** → branch.md |",
+                "",
+                "On lazy pages run a warmup first (`cited.md` triage row D).",
+                "Warm up the cache — see aside.md for background.",
+                "Mentions https://example.com/other.md and not-a-doc.md only.",
+            ]
+        )
+        + "\n",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    classes = _link_classes(tmp_path, "skills/demo/SKILL.md")
+    assert classes == {
+        "measure.md": "step",  # bare name in a Step T-* row (measurement.md does not exist)
+        "capture.md": "step",
+        "remote.md": "step",  # bare relative path into a sibling skill
+        "classify.md": "always",  # "Run ... from X" is an unconditional read order
+        "branch.md": "conditional",  # decision-table row keyed on a detected signal
+        "cited.md": "pointer",  # parenthetical citation, not a read order
+        "aside.md": "pointer",  # "— see X" mid-sentence
+    }
+
+
 def test_scenario_measure_counts_mandatory_and_reachable_words(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

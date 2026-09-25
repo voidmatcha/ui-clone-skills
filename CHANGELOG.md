@@ -8,26 +8,52 @@
   `ui_clone/section_capture.py` (1566 lines) are split into cohesive sibling
   modules (`section_compare_{common,synthesis,merge,scoring,pairing,coverage,drift}.py`,
   `section_capture_{primitives,js,browser}.py`) by a pure move; both original
-  modules stay as facades that re-export every symbol, and the functions tests
-  monkeypatch remain defined in `section_capture.py`.
+  modules stay as facades that re-export every symbol. The orchestration
+  functions (`_capture_one`, `capture_matched_sections`, `_run_screenshot`,
+  `_run_crop`, `_apply_reference_runtime_normalization`) stay defined in
+  `section_capture.py`; helpers such as `_run_agent_browser` are re-exported and
+  still patchable where facade functions look them up, but calls made from
+  inside the moved `section_capture_browser.py` helpers resolve in that module.
 - The skill documentation read path is measured by
   `scripts/ci/skill_read_graph.py` and budgeted by
   `review_checks.py skill-reads`. Rarely needed detail moved behind
   conditional links (`generation-modes.md`, `generation-audits.md`,
   `post-gen-state-loops.md`, `transition-patterns.md`,
-  `boundary-collision-sweep.md`): the full-clone mandatory path drops from
-  about 94.8k to 52.2k words, capture-only to about 1.2k, and single-mismatch
-  visual debugging to about 0.9k.
-- `operational-rules.md` states that trigger-opened UI (modal, drawer) is only
-  cloned as an interaction state inside a whole-page run, and adds
-  "Cleaning up tmp/ref/": cleanup only on explicit request, after all gates,
-  with a warning that resume and re-verification become impossible.
-- Outcome evals grow by 27 cases across the three public skills; stale evals
-  (2, 4, 14, 20, 21, 22, 25) now match the current scope contract.
+  `boundary-collision-sweep.md`). Measured with the same tool against 0.8.13,
+  the full-clone mandatory path drops from about 96.1k to 67.3k words,
+  capture-only from about 5.1k to 1.2k, and single-mismatch visual debugging
+  from about 15.2k to 0.9k. The graph counts bare `*.md` names and
+  run/execute instructions as reads, and `review.sh` fails when a scenario
+  exceeds its budget.
+- Section-only, element-only, and trigger-opened (modal, drawer) requests are
+  supported as scoped clones: resolve one target selector, keep the capture,
+  extraction, and verification scoped to it, capture modal open/close evidence
+  after the trigger, and report the result as scoped rather than page-verified.
+  The automated pipeline has no selector option, so scoped runs follow the
+  element-capture path.
+- `operational-rules.md` adds "Cleaning up tmp/ref/": cleanup only on explicit
+  request, after all gates, with a warning that resume and re-verification
+  become impossible; `README_detail/security.md` and the pre-bash reset advice
+  now say the same.
+- Outcome evals grow by 27 cases across the three public skills; evals 2, 4,
+  14, 20, 21, 22, 25, 54, and 68 are aligned with the current contract.
   `tests/test_skill_evals.py` validates eval schemas, and
   `scripts/ci/eval_grounding.py` (`review_checks.py eval-grounding`, wired into
-  `review.sh`) fails when an eval references a file, script, or gate that does
-  not exist.
+  `review.sh`) fails when an eval names an artifact that no code or documented
+  command produces.
+- Runtime token cuts: SessionStart/PostCompact points at the relevant sections
+  instead of four whole sub-docs (about 16k words per compact); the Stop hook
+  repeats a one-line block for an unchanged failure signature (still blocking,
+  same retry cap); component generation loads each section through a compact
+  `jq` spec instead of reading the whole JSON and screenshot; mismatch-diagnoser
+  and visual-debug-reviewer read only their contract sections;
+  `SECTION_COMPARE_QUIET=1` prints only the verdict. bundle-analyzer,
+  generation-planner, mismatch-diagnoser, source-forensics, and
+  visual-debug-iterator run on sonnet; visual-debug-reviewer stays on opus.
+- Restored rules lost in earlier trimming: a hidden or missing implementation
+  target never proves a transition out of scope, desktop checks never retry at
+  mobile widths, the visual-debug checker catalog with code-verified
+  thresholds, and the splash calibration numbers.
 - The `spec.py` capture-verification warning points at the section that
   actually exists (`transition-spec-rules.md`, Step 5e).
 - `internal/` is fully gitignored again; the maintainer-only showcase loop
@@ -50,6 +76,14 @@
   justifications or dropped dead assignments, with no redirect behavior change.
 
 ### Known follow-up
+
+- Scoped clones (section, element, modal) complete on documented element-scope
+  evidence, not on a gate: `pipeline verify`, `completion-report.sh --check`,
+  and `goal --check-done` have no selector and the Stop hook does not engage.
+  Next step: a small checker that requires populated `frames/ref/` and
+  `frames/impl/`, a passing `pixel-perfect-diff.json`, and open/close evidence
+  for trigger-opened UI, then a selector contract shared by capture,
+  section-compare, and completion checks.
 
 - Mobile-responsive clones still couple the inline-bake and un-bake passes:
   `scaffold-to-jsx.sh` bakes desktop-resolved computed styles inline, so

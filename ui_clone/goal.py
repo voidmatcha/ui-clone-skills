@@ -348,7 +348,14 @@ def _visual_judge_next_action(ref_dir: Path) -> str | None:
         )
     if not examples:
         return None
-    commands = " && ".join(examples)
+    # One runnable command, not an &&-chain of every row: the chain repeated
+    # three long path sets on every goal-card render (Stop hook, resume hook).
+    commands = examples[0]
+    if len(examples) > 1:
+        commands += (
+            ", then the same command for each other Worst-AE row below "
+            "(its sections/ref + sections/impl PNG pair, --label, and --out)"
+        )
     worst_list = ", ".join(f"{name}(AE/Mpx={ae})" for name, ae in failing)
 
     # D dispatcher cache-only read: if a prior escape-hatch run cached

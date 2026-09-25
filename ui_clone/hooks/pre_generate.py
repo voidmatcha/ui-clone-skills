@@ -301,8 +301,8 @@ def main() -> None:
                     f"UI Reverse Engineering: '{basename}' is not a canonical "
                     f"ref-dir artifact. Run the canonical extraction scripts "
                     f"under skills/visual-debug/scripts/ instead of hand-writing "
-                    f"ref artifacts. See SKILL.md Pipeline section for the "
-                    f"step → artifact mapping."
+                    f"ref artifacts. See skills/ui-reverse-engineering/"
+                    f"pipeline-execution.md for the step → artifact mapping."
                 )
             _emit_block(reason)
             sys.exit(0)

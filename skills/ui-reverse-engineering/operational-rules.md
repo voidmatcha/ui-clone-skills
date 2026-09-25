@@ -33,17 +33,41 @@ Niche execution rules and per-request scope adjustments. Read when your situatio
 
 ## Scope adjustments by request shape
 
-Section/element-only cloning is not supported end-to-end. The component name
-names artifacts, not a DOM subtree; `--scope=desktop|all` selects responsive
-layouts, not sections. Modals, drawers, and other trigger-opened state UI are
-not cloned standalone either — they are interaction states inside a whole-page
-clone, and verifying them there needs explicit open/close evidence.
+Section-only and element-only requests are supported, including a
+trigger-opened modal or drawer requested on its own. Run them as a scoped clone,
+not by trimming a whole-page run.
 
-Explain this limitation before capture or scheduling. Preserve the requested URL,
-selector, and existing evidence; report a scope-support blocker. Do not start a
-full-page run, trim `section-map.json`, fabricate components, or bypass gates to
-make a partial clone pass. Support requires one persisted selection contract
-shared by capture, generation, and verification, retaining source scroll context.
+- **Identify the target first.** Resolve one CSS selector per target from DOM
+  evidence, a `section-map.json` entry name, or, for trigger-opened UI, the
+  trigger selector plus the opened container's selector. The component name
+  alone names `tmp/ref/<component>/`; it does not select a DOM subtree, so
+  derive the selector from live DOM evidence or ask for it when several
+  candidates match. `--scope=desktop|all` selects responsive layouts, not
+  sections. Name artifact directories after the target (for example
+  `tmp/ref/hero/`); multiple requested targets get one directory and one
+  component each.
+- **Scope capture, extraction, and verification to the target.** Record the
+  target with `scripts/extract/element-evidence.sh` (→ `element-target.json`),
+  capture reference frames with [element-capture.md](element-capture.md) clip
+  screenshots at the target's real scroll position, extract its computed styles
+  and transitions through the transition sub-pipeline in
+  [pipeline-execution.md](pipeline-execution.md#transition-extraction), and
+  verify with the element-scope AE and Phase D static-state diffs in
+  [comparison-fix.md](../visual-debug/comparison-fix.md#element-scope-verification-transition-extraction).
+  Keep the surrounding scroll context (sticky ancestors, scroll triggers) that
+  the target's behavior depends on.
+- **Trigger-opened UI.** Perform the trigger interaction before reference
+  capture; reference frames must show the open state, not the default page.
+  Capture both opening and closing: idle → open-state clip, an open/close
+  recording, and the timing of each animated layer (for example backdrop fade
+  and panel slide). Verify open and close on the implementation the same way.
+- **Report scoped completion honestly.** `python -m ui_clone.pipeline ... run`
+  and `verify` are page-level; they have no subtree selector and cannot
+  certify that a scoped clone stayed inside its boundary. Report a scoped clone
+  as scoped with its element-scope evidence, never as a page-level verified
+  clone. Do not trim `section-map.json`, fabricate components, or bypass gates
+  to make a page-level run pass; a silent expansion to a full-page run is also
+  out of scope unless the user asks for it.
 
 ## Cleaning up `tmp/ref/`
 

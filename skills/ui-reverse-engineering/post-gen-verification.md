@@ -198,8 +198,10 @@ whose wiring pattern you need.
 Section-level cropping replaces noisy full-page scroll screenshots (scroll drift fails every position even when sections are correct). This is pipeline Step 8b; resolve `SCRIPTS_DIR` once per session as in `../visual-debug/SKILL.md`, then:
 
 ```bash
-bash "$SCRIPTS_DIR/section-compare.sh" <original-url> <impl-url> <session> tmp/ref/<component>
+SECTION_COMPARE_QUIET=1 bash "$SCRIPTS_DIR/section-compare.sh" <original-url> <impl-url> <session> "$(pwd)/tmp/ref/<component>"
 ```
+
+Quiet mode sends progress to `sections/section-compare.log` and prints only the result table, verdicts, exit code, and paths; open the log only when `result.txt` was not written.
 
 It enumerates `<section>`, `<header>`, `<footer>`, `<main>` on both sites, matches sections by text fingerprint, crops per-section screenshots, runs AE per section, and flags `SVG_TEXT_MISSING` (ref SVG text paths vs impl HTML text), `LAYOUT_MISMATCH` (grid vs flex), `HEIGHT_MISMATCH` (height ratio >30% off), and `CHILD_COUNT_MISMATCH`.
 
