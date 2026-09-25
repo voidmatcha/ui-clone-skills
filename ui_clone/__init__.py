@@ -1,3 +1,3 @@
 """ui-clone-skills — Python package for website-to-React pipeline."""
 
-__version__ = "0.8.18"
+__version__ = "0.8.14"

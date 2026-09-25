@@ -1186,7 +1186,7 @@ def test_extra_impl_contained_in_matched_section_not_flagged() -> None:
 
 
 def test_section_compare_reloads_after_step1_enumeration_not_before() -> None:
-    """The one-way-scroll-latch reload (see CHANGELOG 0.8.15) must run AFTER
+    """The one-way-scroll-latch reload (see CHANGELOG 0.8.14) must run AFTER
     Step 1's enumerate-sections calls, not before them. Reloading before
     enumeration would discard the lazy-mounted content the preceding
     pre-scroll round trip exists to force in, reintroducing MATCH_COUNT=0 on

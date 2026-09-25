@@ -723,7 +723,7 @@ wheels = [
 
 [[package]]
 name = "ui-clone-skills"
-version = "0.8.18"
+version = "0.8.14"
 source = { virtual = "." }
 dependencies = [
     { name = "numpy" },

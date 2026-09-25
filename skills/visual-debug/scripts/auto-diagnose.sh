@@ -146,7 +146,7 @@ agent-browser --session "$SESSION_ORIG" eval "$DISMISS_PRELOADER_JS" >/dev/null 
 #   sections/diff/<section-name>.png → scroll that section into view
 #   static/diff/<N>pct.png or static/scroll/diff/<N>pct.png → scroll to N% of page
 # batch-scroll.sh moved its own captures from static/{ref,impl,diff} into
-# static/scroll/{ref,impl,diff} (0.8.15) so it stops clobbering capture.sh's
+# static/scroll/{ref,impl,diff} (0.8.14) so it stops clobbering capture.sh's
 # static/ref/section-*.png baseline — PARENT_DIR for that layout is "scroll",
 # not "static".
 DIFF_BASENAME=$(basename "$DIFF_IMG" .png)

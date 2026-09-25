@@ -79,7 +79,7 @@ def test_vertical_only_mismatch_stays_valid(tmp_path: Path) -> None:
 
 @_skip
 def test_static_scroll_layout_wins_over_legacy_static(tmp_path: Path) -> None:
-    """batch-scroll.sh (0.8.15) moved its own captures to
+    """batch-scroll.sh (0.8.14) moved its own captures to
     static/scroll/{ref,impl} so it stops clobbering capture.sh's
     static/ref/section-*.png baseline; dssim-compare.sh must prefer that
     layout when both exist rather than silently falling back to whatever

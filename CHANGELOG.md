@@ -1,6 +1,8 @@
 # Changelog
 
-## [0.8.18] - 2026-09-24
+## [Unreleased]
+
+## [0.8.14] - 2026-09-25
 
 ### Changed
 
@@ -53,8 +55,8 @@
   the Stop hook's pass line, and closeout.md's scoped report requirement now
   surface the resolved selector, match count, and bbox so the user can confirm
   the intended element.
-- Scoped clones now prove implementation provenance, closing the first
-  0.8.18 follow-up. `element-state-capture.sh` inventories the resources the
+- Scoped clones now prove implementation provenance, closing the earlier
+  provenance follow-up. `element-state-capture.sh` inventories the resources the
   page has loaded (Performance resource entries plus script/link/iframe/img/
   media element URLs) and refuses an `impl` capture whose page is on the
   reference origin or loaded anything from the reference host or its
@@ -286,6 +288,109 @@
   Stop retry ledger are protected from hand writes, the Codex SessionStart
   matcher includes `compact`, and the repeated Stop line names the failing items.
 
+
+- Maintainer-neutral repository surface. `scripts/ci/check_universality.py`
+  gains rules for personal home folders, Codex state outside host-config
+  paths, terminal-multiplexer/workspace ids, personal project names, lab batch
+  labels, the repository owner used as hook behavior, brand names
+  (`navercorp`), benchmark corpus labels (`ebay-playbook`), and dated lab
+  notes (`<N>-site loop`, `review YYYY-MM-DD`, `fable-YYYYMMDD` session
+  labels); the scan now covers `.claude-plugin/`, `.codex-plugin/`, `.codex/`,
+  and `docs/`. Workspace ids require a digit and an uppercase letter
+  (`ws-client` / `ws-server` pass) and run labels `e2e-N` no longer match
+  path segments, long ids, or file names. Allowlists are span-scoped: an
+  allowed token appended as a comment no longer launders the rest of the line.
+  Lab-note comments across `ui_clone/`, `scripts/`, `skills/`, `install.sh`,
+  and `docs/` were reworded generically (no logic, regex, fixture, or test-id
+  changes); the hover-coverage gate message now says "across observed sites".
+- `scripts/loop/launch-stage.sh` takes the multiplexer CLI, workspace id,
+  agent command, model, permission mode, and shell-prompt answer from
+  `UI_CLONE_LOOP_*` environment variables instead of baked-in values, quotes
+  every env value with `printf %q` in the printed commands, and keeps step
+  numbering contiguous when the optional prompt-dismissal step is omitted.
+- The maintainer-only OnPixel showcase loop moved from `ui_clone/` and
+  `tests/` to `internal/onpixel/` (tracked via a `.gitignore` exception, not
+  shipped); `scripts/ci/ci-local.sh` runs pytest, mypy, and ruff over it
+  explicitly.
+- `scripts/hooks/post-push-refresh.sh` derives the install.sh source from
+  `UI_CLONE_INSTALL_SH_URL`, `UI_CLONE_REPO`, or the `origin` remote
+  (`https://`, `ssh://git@github.com/`, and `git@github.com:` forms) before
+  falling back to the canonical upstream, and prints a one-line stderr notice
+  when a non-GitHub remote forces that fallback. Both push hooks read the
+  installed-plugin key's marketplace suffix from
+  `.claude-plugin/marketplace.json` (`name`) instead of a hard-coded owner.
+- `scripts/verify/verify-loop.sh` honors `UI_CLONE_TRANSCRIPT` on any host;
+  an unreadable value warns on stderr and skips the process criteria instead
+  of silently falling back to the Claude Code transcript path.
+- `.claude/settings.json` is no longer tracked (machine-local settings).
+- Removed completed plans, superseded design notes, and stale run notes from
+  `docs/` (`docs/superpowers/` plans and specs, scrub-wiring, unbake-v2 evaluation,
+  claude-fidelity analysis, mobile-responsive unbaking design and patch).
+- `tests/test_review_bash_compat.py` asserts `0 warnings` from `review.sh`
+  again.
+
+### Fixed
+
+- Resolve direct dispatcher imports from the owning checkout and invalidate
+  hover-check reuse when its reference absence evidence changes.
+- Bound repair loops across worker handoffs, reuse running check jobs, and require
+  comparable before/after evidence instead of repeated full verification sweeps.
+- Separate checker repair from clone work and keep behavior-changing static
+  diagnostics out of runtime parity claims. Align both hosts on targeted checks.
+- Section capture pairs the live implementation crop with the reference's
+  recovered scroll position in the non-frozen pass too (the implementation is
+  always force-scrolled once the reference position is known, so bottom-anchor,
+  flat-retry, and signal-recovery run only on the reference side).
+- One failed section screenshot no longer aborts the whole section capture; the
+  section is reported as UNMEASURED (capture failed) from
+  `sections/capture-failures.json`. Dynamic-mask coverage now follows class-alias
+  section ids instead of reporting 0.0 for them.
+
+
+- Bind required-check dispatch to the active plugin package and load section
+  capture policies without import failures.
+- Preserve enclosing CSS at-rule conditions when recognizing source-authored
+  state rules; keep background and mask replacements observable on animated nodes.
+- Share bounded pre-navigation transport recovery across main, splash-state,
+  and scroll capture; preserve navigation failure diagnostics without replaying
+  the navigation or treating missing files as transient connection failures.
+- Keep resolved hover-candidate receipts out of capture and hover-region
+  inventories. Suppress absent descendant re-derivation only with fresh measured
+  evidence; preserve activation checks and explicit positive obligations.
+- Bring eligible offscreen video-only motion surfaces into view before frame
+  sampling while retaining failure for non-advancing playback.
+- Drive declared click selectors independently of the measured transition target;
+  preserve action failures through the verdict even if unrelated motion occurs.
+- Separate splash lifecycle settlement from periodic media and offscreen DOM
+  churn; retain ancestor-opacity reveals and material visual replacements as
+  absence-invalidating evidence, with conservative handling of older captures.
+- Preserve the distinction between upstream-repository restrictions and public
+  live-page extraction. Run-based skill audits keep clone workspaces read-only
+  unless implementation work is separately requested.
+
+
+- Capture changing scroll ranges through bounded browser continuations, preserve
+  forward snapshot order, and reject incomplete or stale capture evidence.
+- Require measured document endpoints in scroll completion and motion rollups,
+  including delayed height changes and clipped semantic page content.
+- Capture small CSS images, masks, posters, and generated pseudo-element assets;
+  retain initially transparent assets and assign sections using DOM ownership.
+- Distinguish failed, interrupted, and setup-failed full verification runs from
+  partial iterations, with per-run receipt ownership and actionable recovery.
+- Bound derived browser session names, preserve setup diagnostics, retry transient
+  pre-navigation connection failures, and clear stale errors after capture success.
+- Reach gated transition targets with bounded real scroll input, and retain
+  measured absent automatic hover candidates only while their capture inputs match.
+
+
+- Stop installing the three public Codex skills as additional direct copies
+  under `~/.agents/skills`. Codex already discovers them from the installed
+  plugin cache, so the direct copies produced duplicate unnamespaced entries;
+  older `~/.codex/skills` symlinks could make each skill appear three times.
+  Codex-targeted upgrades now remove only legacy direct copies and symlinks
+  whose ownership can be proven, while preserving user-modified or unrelated
+  skill directories.
+
 ### Known follow-up
 
 - Scoped clones complete on `python -m ui_clone.scoped_check`, but the page
@@ -365,121 +470,6 @@
   `scaffold-to-jsx` fixture asserting the desktop-rendered computed styles
   are unchanged before/after un-baking (the regression that blocked the
   earlier attempt) and that a mobile viewport picks up the `@media` values.
-
-## [0.8.17] - 2026-09-23
-
-### Changed
-
-- Maintainer-neutral repository surface. `scripts/ci/check_universality.py`
-  gains rules for personal home folders, Codex state outside host-config
-  paths, terminal-multiplexer/workspace ids, personal project names, lab batch
-  labels, the repository owner used as hook behavior, brand names
-  (`navercorp`), benchmark corpus labels (`ebay-playbook`), and dated lab
-  notes (`<N>-site loop`, `review YYYY-MM-DD`, `fable-YYYYMMDD` session
-  labels); the scan now covers `.claude-plugin/`, `.codex-plugin/`, `.codex/`,
-  and `docs/`. Workspace ids require a digit and an uppercase letter
-  (`ws-client` / `ws-server` pass) and run labels `e2e-N` no longer match
-  path segments, long ids, or file names. Allowlists are span-scoped: an
-  allowed token appended as a comment no longer launders the rest of the line.
-  Lab-note comments across `ui_clone/`, `scripts/`, `skills/`, `install.sh`,
-  and `docs/` were reworded generically (no logic, regex, fixture, or test-id
-  changes); the hover-coverage gate message now says "across observed sites".
-- `scripts/loop/launch-stage.sh` takes the multiplexer CLI, workspace id,
-  agent command, model, permission mode, and shell-prompt answer from
-  `UI_CLONE_LOOP_*` environment variables instead of baked-in values, quotes
-  every env value with `printf %q` in the printed commands, and keeps step
-  numbering contiguous when the optional prompt-dismissal step is omitted.
-- The maintainer-only OnPixel showcase loop moved from `ui_clone/` and
-  `tests/` to `internal/onpixel/` (tracked via a `.gitignore` exception, not
-  shipped); `scripts/ci/ci-local.sh` runs pytest, mypy, and ruff over it
-  explicitly.
-- `scripts/hooks/post-push-refresh.sh` derives the install.sh source from
-  `UI_CLONE_INSTALL_SH_URL`, `UI_CLONE_REPO`, or the `origin` remote
-  (`https://`, `ssh://git@github.com/`, and `git@github.com:` forms) before
-  falling back to the canonical upstream, and prints a one-line stderr notice
-  when a non-GitHub remote forces that fallback. Both push hooks read the
-  installed-plugin key's marketplace suffix from
-  `.claude-plugin/marketplace.json` (`name`) instead of a hard-coded owner.
-- `scripts/verify/verify-loop.sh` honors `UI_CLONE_TRANSCRIPT` on any host;
-  an unreadable value warns on stderr and skips the process criteria instead
-  of silently falling back to the Claude Code transcript path.
-- `.claude/settings.json` is no longer tracked (machine-local settings).
-- Removed completed plans, superseded design notes, and stale run notes from
-  `docs/` (`docs/superpowers/` plans and specs, scrub-wiring, unbake-v2 evaluation,
-  claude-fidelity analysis, mobile-responsive unbaking design and patch).
-- `tests/test_review_bash_compat.py` asserts `0 warnings` from `review.sh`
-  again.
-
-### Fixed
-
-- Resolve direct dispatcher imports from the owning checkout and invalidate
-  hover-check reuse when its reference absence evidence changes.
-- Bound repair loops across worker handoffs, reuse running check jobs, and require
-  comparable before/after evidence instead of repeated full verification sweeps.
-- Separate checker repair from clone work and keep behavior-changing static
-  diagnostics out of runtime parity claims. Align both hosts on targeted checks.
-- Section capture pairs the live implementation crop with the reference's
-  recovered scroll position in the non-frozen pass too (the implementation is
-  always force-scrolled once the reference position is known, so bottom-anchor,
-  flat-retry, and signal-recovery run only on the reference side).
-- One failed section screenshot no longer aborts the whole section capture; the
-  section is reported as UNMEASURED (capture failed) from
-  `sections/capture-failures.json`. Dynamic-mask coverage now follows class-alias
-  section ids instead of reporting 0.0 for them.
-
-## [0.8.16] - 2026-09-23
-
-### Fixed
-
-- Bind required-check dispatch to the active plugin package and load section
-  capture policies without import failures.
-- Preserve enclosing CSS at-rule conditions when recognizing source-authored
-  state rules; keep background and mask replacements observable on animated nodes.
-- Share bounded pre-navigation transport recovery across main, splash-state,
-  and scroll capture; preserve navigation failure diagnostics without replaying
-  the navigation or treating missing files as transient connection failures.
-- Keep resolved hover-candidate receipts out of capture and hover-region
-  inventories. Suppress absent descendant re-derivation only with fresh measured
-  evidence; preserve activation checks and explicit positive obligations.
-- Bring eligible offscreen video-only motion surfaces into view before frame
-  sampling while retaining failure for non-advancing playback.
-- Drive declared click selectors independently of the measured transition target;
-  preserve action failures through the verdict even if unrelated motion occurs.
-- Separate splash lifecycle settlement from periodic media and offscreen DOM
-  churn; retain ancestor-opacity reveals and material visual replacements as
-  absence-invalidating evidence, with conservative handling of older captures.
-- Preserve the distinction between upstream-repository restrictions and public
-  live-page extraction. Run-based skill audits keep clone workspaces read-only
-  unless implementation work is separately requested.
-
-## [0.8.15] - 2026-09-22
-
-### Fixed
-
-- Capture changing scroll ranges through bounded browser continuations, preserve
-  forward snapshot order, and reject incomplete or stale capture evidence.
-- Require measured document endpoints in scroll completion and motion rollups,
-  including delayed height changes and clipped semantic page content.
-- Capture small CSS images, masks, posters, and generated pseudo-element assets;
-  retain initially transparent assets and assign sections using DOM ownership.
-- Distinguish failed, interrupted, and setup-failed full verification runs from
-  partial iterations, with per-run receipt ownership and actionable recovery.
-- Bound derived browser session names, preserve setup diagnostics, retry transient
-  pre-navigation connection failures, and clear stale errors after capture success.
-- Reach gated transition targets with bounded real scroll input, and retain
-  measured absent automatic hover candidates only while their capture inputs match.
-
-## [0.8.14] - 2026-09-22
-
-### Fixed
-
-- Stop installing the three public Codex skills as additional direct copies
-  under `~/.agents/skills`. Codex already discovers them from the installed
-  plugin cache, so the direct copies produced duplicate unnamespaced entries;
-  older `~/.codex/skills` symlinks could make each skill appear three times.
-  Codex-targeted upgrades now remove only legacy direct copies and symlinks
-  whose ownership can be proven, while preserving user-modified or unrelated
-  skill directories.
 
 ## [0.8.13] - 2026-09-20
 
