@@ -29,7 +29,7 @@
         "Card hover is captured as idle and active clip screenshots per element-capture.md",
         "Scroll-triggered animations are captured as before, mid, and after clips at the hero's real scroll positions",
         "Hover and scroll transition timings come from measured computed styles or bundle evidence, not guesses",
-        "Element-scope verification compares ref and impl frames with AE and writes pixel-perfect-diff.json",
+        "Element-scope verification compares ref and impl frames with AE and produces pixel-perfect-diff.json with python -m ui_clone.scoped_diff (never hand-written), completed by python -m ui_clone.scoped_check",
         "Reports the result as a scoped hero clone, not as a page-level verified clone"
       ]
     },
@@ -281,7 +281,7 @@
         "Artifact directory is named after the target (e.g., tmp/ref/hero/, not tmp/ref/example-com/)",
         "Reference clips cover the hero's above-the-fold range, not the whole page",
         "Computed styles and transitions are extracted for the hero's elements through the transition sub-pipeline",
-        "Verification uses element-scope AE and pixel-perfect-diff.json limited to the hero",
+        "Verification uses element-scope AE and a pixel-perfect-diff.json produced by python -m ui_clone.scoped_diff limited to the hero, completed by python -m ui_clone.scoped_check",
         "Does not trim section-map.json of a page-level run or bypass gates to produce the hero",
         "Reports the result as scoped, not as a page-level verified clone"
       ]
@@ -360,22 +360,22 @@
     {
       "id": 26,
       "prompt": "Clone https://example.com — the screenshot comparison looks right but I want to make sure the font sizes and spacing are numerically exact, not just visually similar. Run a pixel-perfect numerical diff.",
-      "expected_output": "Phase D executed: ref-styles.json and impl-styles.json saved, diff table produced, all mismatches fixed, pixel-perfect-diff.json with result: pass and mismatches: 0.",
+      "expected_output": "Phase D executed at page level: D1 clip diffs per element and state, D2 computed-diff.sh per selector against both sites, every mismatch row fixed, computed-diff.sh exits 0 on the re-run.",
       "files": [],
       "expectations": [
         "visual-debug/verification.md Phase D (D1 Visual Gate + D2 Numerical Diagnosis) was executed",
-        "ref-styles.json exists with getComputedStyle measurements for all key elements",
-        "impl-styles.json exists with matching element measurements from localhost",
+        "computed-diff.sh is run for all key selectors against the reference and localhost (no hand-written style JSON under tmp/ref)",
+        "Each state of a stateful element is activated on both sides before its computed-diff.sh run",
         "Diff table produced covering typography, spacing, sizing, layout, visual, and position properties",
         "Any mismatch rows (❌) were fixed before declaring pass — not skipped",
-        "pixel-perfect-diff.json exists with result: pass and mismatches: 0",
+        "computed-diff.sh exits 0 (no mismatch rows) for every selector after the fixes; no page-level pixel-perfect-diff.json is written",
         "getComputedStyle was used (not offsetWidth or getBoundingClientRect alone)"
       ]
     },
     {
       "id": 27,
       "prompt": "Clone https://example.com — Phase D pixel-perfect diff finds that the hero heading font-size is 48px on ref but 40px on impl, and the nav link font-weight is 600 on ref but 400 on impl. Fix both.",
-      "expected_output": "Both mismatches fixed with targeted CSS edits. Re-measurement confirms exact match. pixel-perfect-diff.json updated to result: pass, mismatches: 0.",
+      "expected_output": "Both mismatches fixed with targeted CSS edits. Re-measurement with computed-diff.sh confirms exact match (exit 0 for the affected selectors).",
       "files": [],
       "expectations": [
         "Mismatch diff table shows ❌ for font-size (48px vs 40px) and font-weight (600 vs 400)",
@@ -383,7 +383,7 @@
         "Targeted fix applied — only affected CSS rules changed, not full component rewrite",
         "P3 re-measurement run for the two affected elements after fix",
         "Diff table updated: both rows now ✅",
-        "pixel-perfect-diff.json saved with result: pass and mismatches: 0",
+        "computed-diff.sh re-run exits 0 for the hero heading and nav link selectors",
         "No other properties changed as side effect of the fix"
       ]
     },
@@ -764,28 +764,28 @@
     {
       "id": 54,
       "prompt": "Extract the hover card animation from https://example.com — after implementing, run the pixel-perfect diff for both the resting state (before hover) and the settled state (after hover completes). The frame comparison passes but verify numerically too.",
-      "expected_output": "visual-debug/verification.md Phase D (D1+D2) run for both before-hover and after-hover resting states. pixel-perfect-diff.json with result: pass and mismatches: 0 for each state.",
+      "expected_output": "visual-debug/comparison-fix.md element-scope Phase D run for both the before-hover (idle) and after-hover (active) resting states: both captured with element-state-capture.sh clip, pixel-perfect-diff.json produced by python -m ui_clone.scoped_diff with result: pass and mismatches: 0.",
       "files": [],
       "expectations": [
         "visual-debug/comparison-fix.md (Element-Scope section) Phase D executed for the before-hover resting state",
         "visual-debug/comparison-fix.md (Element-Scope section) Phase D executed for the after-hover settled state",
-        "ref-styles.json and impl-styles.json saved for both states",
-        "Diff table produced for both states — all mismatch rows fixed before declaring pass",
-        "pixel-perfect-diff.json exists for both states with result: pass and mismatches: 0",
+        "Both states are captured on both sides with element-state-capture.sh clip (idle and active clips plus their .computed.json records)",
+        "python -m ui_clone.scoped_diff rows for both states are read and every mismatch row is fixed and re-captured before declaring pass",
+        "pixel-perfect-diff.json produced by python -m ui_clone.scoped_diff has passing rows for both states (result: pass, mismatches: 0) and python -m ui_clone.scoped_check exits 0",
         "Frame comparison (visual-debug/comparison-fix.md (Element-Scope section)) AND pixel-perfect diff both pass before done"
       ]
     },
     {
       "id": 55,
       "prompt": "Extract the scroll animation from https://example.com — the frame comparison shows a height mismatch: the element is 810px on ref but 900px on impl. The screenshot looks 'close enough' but it is not. Fix the exact pixel value.",
-      "expected_output": "Mismatch caught by pixel-perfect diff (not eyeballed from screenshot). Root cause identified, targeted CSS fix applied, re-measurement confirms exact match.",
+      "expected_output": "Mismatch caught by the scoped pixel-perfect diff (python -m ui_clone.scoped_diff), not eyeballed from a screenshot. Root cause identified, targeted CSS fix applied, re-capture and re-run confirm exact match.",
       "files": [],
       "expectations": [
         "Height mismatch (810px vs 900px) flagged as ❌ in diff table — not dismissed as close enough",
         "Root cause identified: which CSS rule sets the height in the implementation",
         "Targeted fix applied (height value corrected to 810px)",
         "P3 re-measurement confirms impl height is now 810px",
-        "pixel-perfect-diff.json updated to result: pass and mismatches: 0",
+        "After the fix and impl re-capture, python -m ui_clone.scoped_diff is re-run and reports result: pass and mismatches: 0 (the file is never edited by hand)",
         "No comment like 'approximately matches' or 'visually correct' used as justification"
       ]
     },

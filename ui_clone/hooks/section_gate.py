@@ -30,10 +30,12 @@ from ui_clone.hooks import _stop_repeat
 from ui_clone.hooks._common import deferred_checks_blocker as _deferred_checks_blocker
 from ui_clone.hooks._common import find_project_root as _find_project_root
 from ui_clone.hooks._common import gate_skip_blocker as _gate_skip_blocker
-from ui_clone.hooks._common import has_clone_writes, has_external_browse
+from ui_clone.hooks._common import has_clone_writes, has_external_browse, owned_scoped_ref_dirs
+from ui_clone.hooks._common import is_scoped_ref_dir as _is_scoped_ref_dir
 from ui_clone.hooks._common import load_json_safe as _load_json_safe
 from ui_clone.hooks._common import quick_tier_blocker as _quick_tier_blocker
 from ui_clone.hooks._common import run_gate as _run_gate
+from ui_clone.hooks._common import scoped_refs_to_enforce as _scoped_refs_to_enforce
 from ui_clone.hooks._common import session_id_from_payload as _session_id_from_payload
 from ui_clone.hooks._common import should_enforce_ref_for_session as _should_enforce_ref_for_session
 from ui_clone.state import (
@@ -743,11 +745,13 @@ def _consecutive_block_exit_advice(ref_dir: Path | None) -> str:
     deleting the whole ref dir — which throws away every captured artifact.
     Name the narrow option too, and say what happens if they do nothing.
     """
-    target = (
-        f"{ref_dir}/.ui-re-active"
-        if ref_dir is not None
-        else "tmp/ref/<component>/.ui-re-active"
-    )
+    if ref_dir is None:
+        target = "tmp/ref/<component>/.ui-re-active"
+    elif _is_scoped_ref_dir(ref_dir):
+        # A scoped run is activated by its element-target.json record.
+        target = f"{ref_dir}/element-target.json"
+    else:
+        target = f"{ref_dir}/.ui-re-active"
     stale_days = int(_get_stale_seconds() // 86400)
     return (
         "\nThis gate has now blocked several turns in a row without the run "
@@ -1021,15 +1025,48 @@ def _repeat_block_reason(reason: str, ref_dir: Path | None) -> str:
     head = head.removeprefix("⛔").strip()
     if len(head) > 160:
         head = head[:157] + "…"
-    where = (
-        f"full card: python -m ui_clone.goal {ref_dir}"
-        if ref_dir is not None
-        else "full text: the previous Stop message"
-    )
-    return (
-        f"⛔ UI-RE Stop still BLOCKED, same failure as the last stop ({head}). "
-        f"Fix it rather than stopping again; {where}"
-    )
+    if ref_dir is None:
+        where = "full text: the previous Stop message"
+    elif _is_scoped_ref_dir(ref_dir):
+        where = f"full list: python -m ui_clone.scoped_check {ref_dir}"
+    else:
+        where = f"full card: python -m ui_clone.goal {ref_dir}"
+    failing = _repeat_failing_items(reason)
+
+    def _render(items: list[str]) -> str:
+        listed = f" Failing: {'; '.join(items)}." if items else ""
+        return (
+            f"⛔ UI-RE Stop still BLOCKED, same failure as the last stop ({head}).{listed} "
+            f"Fix it rather than stopping again; {where}"
+        )
+
+    # Name what still fails so the agent need not re-run gates to see it, but
+    # never past the word cap: drop trailing items until the line fits.
+    while failing and len(_render(failing).split()) > _REPEAT_REASON_MAX_WORDS:
+        failing = failing[:-1]
+    return _render(failing)
+
+
+_REPEAT_MISSING_GATES_RE = re.compile(r"missing required gate evidence:\s*([^.\n]+)")
+_REPEAT_MAX_ITEMS = 3
+
+
+def _repeat_failing_items(reason: str) -> list[str]:
+    """Short list of failing gates/items from a full block reason: its bullet
+    items (gate failure labels) and any verify-stamp missing-gate list."""
+    items: list[str] = []
+    match = _REPEAT_MISSING_GATES_RE.search(reason)
+    if match and match.group(1).strip() != "none":
+        items.extend(g.strip() for g in match.group(1).split(",") if g.strip())
+    for line in reason.splitlines():
+        bullet = _BLOCK_BULLET_RE.match(line)
+        if bullet:
+            items.append(bullet.group(1))
+    total = len(items)
+    shown = [item if len(item) <= 48 else item[:47] + "…" for item in items[:_REPEAT_MAX_ITEMS]]
+    if total > len(shown):
+        shown.append(f"+{total - len(shown)} more")
+    return shown
 
 
 def _emit_block(
@@ -1699,6 +1736,39 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     return stamp_enforcer(ref_dir)
 
 
+def _enforce_scoped_refs(
+    search_root: Path, project_root: Path, session_id: str, include_clone_writes: bool
+) -> bool:
+    """Block the stop on the first enforced scoped run whose scoped_check fails.
+
+    Uses _emit_block, so the retry cap, hand-back, and repeat-message behavior
+    are the page-level ones. True when a block (or hand-back) was emitted.
+    """
+    from ui_clone import scoped_check
+
+    for ref_dir in _scoped_refs_to_enforce(
+        search_root, project_root, session_id, include_clone_writes=include_clone_writes
+    ):
+        result = scoped_check.check(ref_dir)
+        if result["status"] == "passed":
+            print(
+                f"ui-clone-skills: scoped clone {ref_dir.name}: scoped_check passed "
+                f"({scoped_check.format_target(result.get('target'))}). Report it as scoped, "
+                "not as a page-level verified clone, and name that target so the user can "
+                "confirm it is the intended element.",
+                file=sys.stderr,
+            )
+            continue
+        reason = scoped_check.block_reason(
+            result,
+            f"⛔ UI-RE scoped completion gate: {ref_dir.name} is a scoped clone and "
+            "scoped_check is BLOCKED",
+        )
+        _emit_block(reason, ref_dir, _block_signature(reason))
+        return True
+    return False
+
+
 def _coerce_stop_hook_active(value: object) -> bool:
     """Codex LOW: the Stop payload may carry stop_hook_active as a real bool OR
     a JSON string. `bool("false")` is truthy, which would wrongly release the
@@ -2022,7 +2092,25 @@ def main() -> None:
             # use that bound ref as the single fail-closed fallback while still
             # applying the ordinary freshness policy.
             active_dirs = _fresh_active_dirs([bound_ref])
+    scoped_sid = stop_scope_session_id or session_id_from_payload
     if not active_dirs:
+        # A sanctioned scoped clone (valid element-target.json, no page-level
+        # marker) is not off-pipeline and has no page-level completion to
+        # demand; its completion command is `python -m ui_clone.scoped_check`.
+        scoped_refs = owned_scoped_ref_dirs(search_root, stop_scope_session_id)
+        if scoped_refs:
+            _enforce_scoped_refs(search_root, project_root, scoped_sid, True)
+            names = ", ".join(p.name for p in scoped_refs[:3])
+            print(
+                f"ui-clone-skills: scoped clone run(s) ({names}): page-level Stop "
+                "gates do not apply. Completion requires `python -m "
+                "ui_clone.scoped_check <ref-dir>` to exit 0; report the result as "
+                "scoped, not as a page-level verified clone.",
+                file=sys.stderr,
+            )
+            if not _BLOCKED_THIS_RUN:
+                _clear_block_ledger()
+            sys.exit(0)
         # Off-pipeline scratch-clone closure (omx postmortem): block only on
         # the CORRELATED PAIR — (A) this session browsed an EXTERNAL site
         # (browse crumb from pre_bash) AND (B) this session wrote
@@ -2090,6 +2178,12 @@ def main() -> None:
                 stop_scope_session_id,
                 ref_dir,
             )
+
+    # Scoped runs this session wrote components for are held to scoped_check
+    # even beside a passing page-level run. A session that never touched one
+    # gets an empty list, so page-level behavior is unchanged.
+    if _enforce_scoped_refs(search_root, project_root, scoped_sid, False):
+        sys.exit(0)
 
     if not _BLOCKED_THIS_RUN:
         # The turn ended clean, so the streak is over.

@@ -187,6 +187,9 @@ def test_repeat_signature_emits_short_reminder_that_still_blocks(
     assert "\n" not in reason, "repeat reminder must be one line"
     assert "post-implement BLOCKED" in reason
     assert f"python -m ui_clone.goal {ledger}" in reason
+    # The failing items ride along so the agent need not re-run the gate.
+    assert "required: runtime-env" in reason
+    assert "required: blank-viewport" in reason
     # Size ceiling so the reminder cannot regrow into the full card.
     assert len(reason.split()) <= section_gate._REPEAT_REASON_MAX_WORDS
     assert len(reason.split()) < len(_REPEAT_REASON.split()) // 4
@@ -240,3 +243,22 @@ def test_repeat_reminder_keeps_continuation_prefix(
     second = str(_emit(capsys, ledger, prefix)["reason"])
     assert second.startswith(prefix)
     assert "post-implement BLOCKED" in second
+
+
+def test_repeat_reminder_lists_failing_gates_within_word_cap() -> None:
+    long_items = "".join(
+        f"  - required: some-very-long-failing-check-label-number-{i} with words\n"
+        for i in range(12)
+    )
+    reason = f"⛔ UI-RE Gate: post-implement BLOCKED\n\nIncomplete items (12):\n{long_items}"
+    line = section_gate._repeat_block_reason(reason, Path("tmp/ref/comp"))
+    assert "\n" not in line
+    assert "Failing: required: some-very-long-failing" in line
+    assert len(line.split()) <= section_gate._REPEAT_REASON_MAX_WORDS
+
+    stamp = (
+        "⛔ UI-RE Verify-stamp gate: non-canonical stamp for tmp/ref/comp\n\n"
+        "missing required gate evidence: boundary, font-parity.\n"
+    )
+    stamp_line = section_gate._repeat_block_reason(stamp, Path("tmp/ref/comp"))
+    assert "Failing: boundary; font-parity." in stamp_line

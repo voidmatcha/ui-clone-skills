@@ -222,7 +222,14 @@ def test_universality_flags_bare_date_stamps_in_code(tmp_path: Path) -> None:
         "# ROOT CAUSE (2026-07, empirical): QuantumRange inflation\n",
         '    """2026-05-22 user request: state machine extends beyond <header>.\n',
     ):
-        for relative in ("ui_clone/a.py", "scripts/a.sh", "skills/x/scripts/a.sh", "hooks/a.json"):
+        for relative in (
+            "ui_clone/a.py",
+            "scripts/a.sh",
+            "skills/x/scripts/a.sh",
+            "hooks/a.json",
+            ".claude-plugin/plugin.json",
+            ".codex-plugin/plugin.json",
+        ):
             assert dated_code in _labels(_scan(tmp_path, relative, text)), (relative, text)
     for ok in (
         "# version 7.1.2-27 returns AE as count * 65535\n",
@@ -236,12 +243,12 @@ def test_universality_flags_bare_date_stamps_in_code(tmp_path: Path) -> None:
     assert dated_code not in _labels(_scan(tmp_path, "docs/design.md", "Reviewed 2026-05-22.\n"))
     for relative in ("CHANGELOG.md", "internal/x/a.py", "benchmark/a.sh", "tests/test_a.py"):
         assert not _labels(_scan(tmp_path, relative, "# measured 2026-05-22\n")), relative
-    # Data dates in eval / fixture / manifest data are not lab notes.
+    # Data dates in eval / fixture data are not lab notes; plugin manifests
+    # carry prose (descriptions, default prompts) and are scanned above.
     data = '{"id": 1, "captured": "2026-09-24", "since": "2026-09"}\n'
     for relative in (
         "skills/x/evals/evals.json",
         "skills/x/evals/fixtures/run.json",
-        ".claude-plugin/plugin.json",
         "ui_clone/data/fixture.json",
     ):
         assert dated_code not in _labels(_scan(tmp_path, relative, data)), relative
@@ -302,6 +309,13 @@ def test_universality_scans_host_manifest_dirs_and_docs(tmp_path: Path) -> None:
         assert excluded in check_universality.EXCLUDED_DIRS
     for scanned in (".claude-plugin", ".codex", ".codex-plugin", "docs"):
         assert scanned not in check_universality.EXCLUDED_DIRS
+
+
+def test_scoped_producers_check_is_wired_and_passes(capsys: pytest.CaptureFixture[str]) -> None:
+    assert "scoped-producers" in review_checks.COMMANDS
+    assert review_checks.check_scoped_producers() == 0, capsys.readouterr().err
+    review_sh = (ROOT / "scripts" / "ci" / "review.sh").read_text(encoding="utf-8")
+    assert "review_checks.py scoped-producers" in review_sh
 
 
 def test_universality_repo_passes_current_rules() -> None:

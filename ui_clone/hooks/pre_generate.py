@@ -29,6 +29,7 @@ from ui_clone.hooks._common import is_component_file as _is_component_file
 from ui_clone.hooks._common import mark_clone_write
 from ui_clone.hooks._common import mark_ref_session as _mark_ref_session
 from ui_clone.hooks._common import run_gate as _run_gate_common
+from ui_clone.hooks._common import select_scoped_ref_dir as _select_scoped_ref_dir
 from ui_clone.hooks._common import session_id_from_payload as _session_id_from_payload
 from ui_clone.state import PipelineState, is_authoritative_terminal_state
 
@@ -78,9 +79,7 @@ def _is_clone_shaped_write(path: str) -> bool:
 # Bash (governed by pre_bash, not this hook), so they are unaffected.
 _VERIFY_STAMP_NAME = "verify-stamp.json"
 _PIPELINE_STATE_NAME = "pipeline-state.json"
-_CLOSEOUT_PROVENANCE_RE = re.compile(
-    r"terminalState|terminal_state|writtenBy|written_by"
-)
+_CLOSEOUT_PROVENANCE_RE = re.compile(r"terminalState|terminal_state|writtenBy|written_by")
 # sections/result.txt(+.json) is the sha256-stamped section verdict the
 # post-implement gate trusts. It is written by section-compare (Bash, path built
 # from the ref-dir arg) and never hand-edited — a tool write is an attempt to
@@ -106,11 +105,79 @@ _VERIFICATION_PLAN_ACK_RE = re.compile(r"gateSkipAck|deferredAck")
 # check-converged.sh / check-canvas-replay.sh / register-driver-session.sh. An
 # agent hand-writing one forces convergence/closeout or forges a driver identity,
 # so any tool write is denied (mirrors verify-stamp.json). Case-folded basenames.
-_NO_HANDEDIT_CLOSEOUT_NAMES = frozenset({
-    "structural-convergence-stamp.json",
-    "canvas-replay-stamp.json",
-    ".driver-session.id",
-})
+_NO_HANDEDIT_CLOSEOUT_NAMES = frozenset(
+    {
+        "structural-convergence-stamp.json",
+        "canvas-replay-stamp.json",
+        ".driver-session.id",
+    }
+)
+# Scoped-clone target record. Its valid presence exempts component writes from
+# the page-level pre-generate gate (see _common.select_scoped_ref_dir), so it is
+# only produced by scripts/extract/element-evidence.sh against a live session.
+_ELEMENT_TARGET_NAME = "element-target.json"
+# Scoped-clone completion evidence with script producers only. scoped_check
+# re-validates their provenance (hashes, origins), so a hand write can only
+# produce a rejected artifact — deny it up front with the producer command.
+_SCOPED_EVIDENCE_PRODUCERS = {
+    "capture-manifest.json": (
+        "frames/<side>/capture-manifest.json is the capture provenance of the "
+        "element-scope frames (page origin, session, sha256 per frame). It is "
+        "written only by `bash $PLUGIN_ROOT/scripts/extract/element-state-capture.sh "
+        "clip|video ...` (element-capture.md)"
+    ),
+    "pixel-perfect-diff.json": (
+        "pixel-perfect-diff.json is the scoped Phase D verdict with input and "
+        "source fingerprints that scoped_check re-validates. It is produced only "
+        "by `python -m ui_clone.scoped_diff <ref-dir>` from the captured "
+        "<state>.png / <state>.computed.json records"
+    ),
+    ".scoped-check-cache.json": (
+        ".scoped-check-cache.json is the scoped_check motion-sequence verdict "
+        "cache, keyed by frame content hashes and written only by "
+        "`python -m ui_clone.scoped_check <ref-dir>`"
+    ),
+    ".scoped-evidence-ledger.json": (
+        ".scoped-evidence-ledger.json is the PostToolUse hook's ledger of the "
+        "evidence hashes the canonical producer commands wrote; scoped_check "
+        "accepts only evidence recorded there"
+    ),
+    ".scoped-ledger-pending.json": (
+        ".scoped-ledger-pending.json holds the start time the PreToolUse Bash "
+        "hook stamped for each producer command; only the hooks write it"
+    ),
+}
+
+
+def _scoped_producer_forge_reason(
+    file_paths: list[str], payload: dict[str, object] | None
+) -> str | None:
+    """Deny writing a program that imports a scoped evidence producer
+    (`ui_clone.element_capture` / `scoped_diff` / `scoped_frames`) into a clone
+    project. The Bash guard denies the same import inline; a script file is
+    the next natural place to put it. Writes inside a checkout of this plugin
+    (its `ui_clone/scoped_diff.py` is an ancestor sibling of the file) are
+    maintainer work and stay allowed."""
+    from ui_clone.hooks.pre_bash_rules.bash_write import _SCOPED_PRODUCER_IMPORT_RE
+
+    text = _tool_write_text(payload)
+    if not text:
+        return None
+    match = _SCOPED_PRODUCER_IMPORT_RE.search(text)
+    if match is None:
+        return None
+    for raw in file_paths:
+        path = Path(raw)
+        for parent in (path.resolve().parent, *path.resolve().parents):
+            if (parent / "ui_clone" / "scoped_diff.py").is_file():
+                return None
+    return (
+        f"UI Reverse Engineering: this write imports a scoped evidence producer "
+        f"(`{match.group(0).strip()}`). The producers run only through their CLIs — "
+        "`bash $PLUGIN_ROOT/scripts/extract/element-state-capture.sh clip|video ...` "
+        "and `python -m ui_clone.scoped_diff <ref-dir>` — which stamp the producer "
+        "record scoped_check requires; evidence written by an importing script is rejected."
+    )
 
 
 def _tool_write_text(payload: dict[str, object] | None) -> str:
@@ -207,6 +274,20 @@ def _closeout_provenance_block_reason(
                 "check-canvas-replay.sh / register-driver-session.sh) and has no "
                 "hand-edit path — a tool write forges convergence/closeout or a "
                 f"driver identity. {cli_hint}"
+            )
+        if name == _ELEMENT_TARGET_NAME:
+            return (
+                "UI Reverse Engineering: element-target.json is the scoped-clone "
+                "target record that unlocks component writes without the "
+                "page-level gates. It is produced only by "
+                "`bash $PLUGIN_ROOT/scripts/extract/element-evidence.sh <session> "
+                "<url> <selector> tmp/ref/<target>/element-target.json` against "
+                "the live page; do not hand-write it."
+            )
+        if name in _SCOPED_EVIDENCE_PRODUCERS:
+            return (
+                f"UI Reverse Engineering: {_SCOPED_EVIDENCE_PRODUCERS[name]}; "
+                "do not hand-write it (scoped_check rejects it without that provenance)."
             )
         if name == _VERIFICATION_PLAN_NAME:
             text = _tool_write_text(payload)
@@ -317,6 +398,10 @@ def main() -> None:
     if provenance_reason is not None:
         _emit_block(provenance_reason)
         sys.exit(0)
+    forge_reason = _scoped_producer_forge_reason(file_paths, payload)
+    if forge_reason is not None:
+        _emit_block(forge_reason)
+        sys.exit(0)
 
     # Off-pipeline widened guard (omx postmortem follow-up): a scratch clone
     # writes plain index.html + styles.css — NOT component paths — so the
@@ -330,9 +415,7 @@ def main() -> None:
         if clone_shaped:
             wide_root = _find_project_root()
             ref_root = wide_root / "tmp" / "ref"
-            has_pipeline_ref = ref_root.is_dir() and any(
-                d.is_dir() for d in ref_root.iterdir()
-            )
+            has_pipeline_ref = ref_root.is_dir() and any(d.is_dir() for d in ref_root.iterdir())
             if not has_pipeline_ref:
                 # Record the write evidence UNCONDITIONALLY (cheap, per
                 # session): the Stop gate and the declaration cascade key on
@@ -340,10 +423,7 @@ def main() -> None:
                 # writes may precede the browse — gating the marker on the
                 # browse crumb would miss the write-first ordering.
                 mark_clone_write(wide_root, session_id, clone_shaped)
-            if (
-                not has_pipeline_ref
-                and _has_external_browse(wide_root, session_id)
-            ):
+            if not has_pipeline_ref and _has_external_browse(wide_root, session_id):
                 if _os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1":
                     _emit_block(
                         "UI Reverse Engineering: this session opened an external "
@@ -385,6 +465,16 @@ def main() -> None:
     search_root = project_root / "tmp" / "ref"
     ref_dir = _find_ref_dir(search_root)
 
+    # Scoped clone (section/element/trigger-opened UI): a ref dir holding a
+    # valid element-evidence.sh record and no page-level marker is a
+    # sanctioned run. Page-level pre-generate gates do not apply to it and it
+    # never activates the page-level Stop chain (.ui-re-active); its
+    # verification is element-scope AE + pixel-perfect-diff, reported as scoped.
+    scoped_ref = _select_scoped_ref_dir(search_root, file_path, ref_dir)
+    if scoped_ref is not None:
+        _mark_ref_session(scoped_ref, session_id, source="pre_generate_scoped")
+        sys.exit(0)
+
     # No ref dir → either (a) not a ui-re project (legitimate exit
     # silently) or (b) the entry-bypass: agent writes directly to
     # impl/src/ without ever running extraction, so no tmp/ref/<c>
@@ -399,6 +489,7 @@ def main() -> None:
         # omx run was on a machine where the SKILL.md co-location check never
         # matched), and offers an explicit escape hatch for false positives.
         import os as _os
+
         if (
             session_id
             and _os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1"
@@ -416,16 +507,8 @@ def main() -> None:
             )
             sys.exit(0)
         fp_str = str(Path(file_path).resolve()) if file_path else ""
-        ui_re_skill = (
-            project_root
-            / "skills"
-            / "ui-reverse-engineering"
-            / "SKILL.md"
-        )
-        is_ui_re_impl = (
-            ui_re_skill.is_file()
-            and ("/impl/src/" in fp_str or "/impl/app/" in fp_str)
-        )
+        ui_re_skill = project_root / "skills" / "ui-reverse-engineering" / "SKILL.md"
+        is_ui_re_impl = ui_re_skill.is_file() and ("/impl/src/" in fp_str or "/impl/app/" in fp_str)
         if is_ui_re_impl:
             _emit_block(
                 "UI Reverse Engineering: impl-side write detected but "
@@ -456,6 +539,7 @@ def main() -> None:
     # unverified edits riding under a closed run (the omx run did exactly
     # this: old refs terminal, new clone hand-built, zero gates).
     import os as _os
+
     if (
         is_authoritative_terminal_state(state.terminal_state)
         and session_id

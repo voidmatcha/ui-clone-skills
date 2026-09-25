@@ -7,6 +7,7 @@ import ast
 import json
 import pathlib
 import re
+import subprocess
 import sys
 from collections.abc import Callable
 from urllib.parse import unquote
@@ -19,7 +20,7 @@ INTERNAL_SKILLS = {"benchmark"}
 # regrow; raise a budget only together with a documented reason. The full-clone
 # budget rose from 52_500 when the graph started counting bare doc names in the
 # Step T-1..T4 transition sub-pipeline rows and "Run ... from X.md" orders
-# (measured 66_933 words / 31 docs).
+# (measured 67_273 words / 31 docs).
 SKILL_READ_BUDGETS = {
     "reverse-engineering-full-clone": 68_500,
     "capture-baseline-only": 1_400,
@@ -361,9 +362,30 @@ def count_subprocess_without_timeout() -> int:
     return 0
 
 
+def check_scoped_producers() -> int:
+    """The scoped-evidence producers must hash as the shipped release manifest
+    (`ui_clone/scoped_producers.sha256.json`); a producer edit without
+    `python -m ui_clone.scoped_producers --write` fails here."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "ui_clone.scoped_producers", "--check"],
+        capture_output=True,
+        text=True,
+        cwd=pathlib.Path(__file__).resolve().parents[2],
+        timeout=120,
+        check=False,
+    )
+    errors = [line for line in proc.stderr.splitlines() if line.strip()]
+    if proc.returncode != 0 and not errors:
+        errors = [f"scoped_producers --check exited {proc.returncode}"]
+    if errors:
+        errors.append("regenerate with: python -m ui_clone.scoped_producers --write")
+    return _report_errors(errors)
+
+
 COMMANDS: dict[str, Callable[[], int]] = {
     "count-subprocess-without-timeout": count_subprocess_without_timeout,
     "eval-grounding": check_eval_grounding,
+    "scoped-producers": check_scoped_producers,
     "public-skill-links": check_public_skill_links,
     "public-skills": check_public_skills,
     "skill-context": report_public_skill_sizes,

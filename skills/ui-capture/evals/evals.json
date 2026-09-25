@@ -68,13 +68,13 @@
     {
       "id": 6,
       "prompt": "compare https://example.com vs http://localhost:3000 — generate comparison page",
-      "expected_output": "Phase 4A pixel-perfect diff completed (mismatches: 0) before compare.html generated. compare.html includes pixel-perfect diff table at top, followed by side-by-side paired videos with synchronized playback. URL presented to user.",
+      "expected_output": "Phase 4A Phase D (D1 clip diffs + D2 computed-diff.sh) completed with no mismatch before compare.html generated. compare.html includes the Phase D table at top, followed by side-by-side paired videos with synchronized playback. URL presented to user.",
       "files": [],
       "expectations": [
         "Captures impl with identical parameters as ref",
         "Phase 4A: visual-debug/verification.md Phase D (D1+D2) executed for each major section before generating compare.html",
-        "pixel-perfect-diff.json exists with result: pass and mismatches: 0",
-        "compare.html includes pixel-perfect diff table embedded at top (before video sections)",
+        "Every D1 clip pair passes and computed-diff.sh exits 0 for every selector; no page-level pixel-perfect-diff.json is written",
+        "compare.html includes the Phase D table (clip AE/SSIM rows and computed-diff.sh rows) embedded at top (before video sections)",
         "Diff table shows element, property, ref value, impl value, status columns",
         "Generates compare.html with side-by-side layout",
         "Includes paired video sync (play one, other follows)",
@@ -195,8 +195,8 @@
       "files": [],
       "expectations": [
         "Key elements defined for header and hero (P1)",
-        "ref-styles.json saved with getComputedStyle measurements from reference site",
-        "impl-styles.json saved with matching measurements from localhost",
+        "computed-diff.sh is run for the header and hero selectors against the reference site and localhost (getComputedStyle on both sides)",
+        "The printed computed-diff.sh table is kept as evidence; no hand-written style JSON is saved under tmp/ref",
         "Diff table covers typography, spacing, sizing, layout, visual, and position properties",
         "No implementation CSS edits are applied by ui-capture",
         "Mismatch/diff remediation is routed to visual-debug when differences remain",
@@ -210,7 +210,7 @@
       "files": [],
       "expectations": [
         "Diff table flags padding-top (120px vs 80px) and font-weight (700 vs 400)",
-        "ref-styles.json and impl-styles.json are saved as evidence",
+        "The computed-diff.sh table for the hero selectors is kept as evidence (no hand-written style JSON under tmp/ref)",
         "No targeted CSS edits are made by ui-capture",
         "The output clearly hands remediation to visual-debug",
         "compare.html or equivalent evidence page is generated only as a capture artifact, not as proof that fixes were applied"

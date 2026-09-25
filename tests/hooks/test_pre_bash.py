@@ -1205,6 +1205,23 @@ class TestEnforcementStateRmGuard:
             self._run("cp /tmp/forged.json tmp/ref/comp/structural-convergence-stamp.json", tmp_path)
         )
 
+    # .ui-re-stop-attempts.json is the Stop retry-cap ledger: removing or
+    # emptying it resets the cap. The shown-text ledger is not enforcement state.
+
+    def test_rm_stop_attempts_ledger_blocked(self, tmp_path: Path) -> None:
+        assert self._denied(self._run("rm tmp/ref/.ui-re-stop-attempts.json", tmp_path))
+
+    def test_redirect_over_stop_attempts_ledger_blocked(self, tmp_path: Path) -> None:
+        assert self._denied(
+            self._run("echo '{}' > tmp/ref/.ui-re-stop-attempts.json", tmp_path)
+        )
+
+    def test_read_stop_attempts_ledger_allowed(self, tmp_path: Path) -> None:
+        assert not self._denied(self._run("cat tmp/ref/.ui-re-stop-attempts.json", tmp_path))
+
+    def test_rm_stop_shown_ledger_allowed(self, tmp_path: Path) -> None:
+        assert not self._denied(self._run("rm tmp/ref/.ui-re-stop-shown.json", tmp_path))
+
     def test_python_write_driver_session_id_blocked(self, tmp_path: Path) -> None:
         assert self._denied(
             self._run(
@@ -1343,3 +1360,56 @@ def test_enforcement_state_deny_message_names_sanctioned_reads() -> None:
     # ~160 words and cost a retry to parse).
     assert low.index("jq") < low.index("never"), msg
     assert len(msg.split()) <= 75, len(msg.split())
+
+
+def test_enforcement_state_target_sees_through_quoting_and_interpreters() -> None:
+    """A write hidden behind shell escapes (`\\"` inside a double-quoted
+    program), an inline program of another interpreter, a stdin program, or a
+    nested `bash -c` / `eval` is denied like the plain single-quoted form."""
+    from ui_clone.hooks.pre_bash_rules.bash_write import _bash_enforcement_state_target
+
+    f = "tmp/ref/x/pixel-perfect-diff.json"
+    m = "tmp/ref/x/frames/impl/capture-manifest.json"
+    blocked = [
+        f'python3 -c "open(\\"{f}\\",\\"w\\").write(\'{{}}\')"',  # escaped double quotes
+        f'python3 -c "import json; json.dump({{}}, open(\\"{m}\\", \\"w\\"))"',
+        f"python3 - <<'EOF'\nimport json\njson.dump({{}}, open(\"{f}\", \"w\"))\nEOF",  # stdin heredoc
+        f"printf 'open(\"{f}\",\"w\")' | python3",  # stdin pipe
+        f"node -e \"require('fs').writeFileSync('{f}', '{{}}')\"",
+        f"node --eval 'require(\"fs\").writeFileSync(\"{m}\", \"{{}}\")'",
+        f"perl -e 'open(F, \">\", \"{f}\"); print F \"{{}}\"'",
+        f"ruby -e 'File.write(\"{f}\", \"{{}}\")'",
+        f"deno eval \"Deno.writeTextFileSync('{f}', '{{}}')\"",
+        f"uv run python -c \"open('{f}','w')\"",
+        f"echo '{{}}' | tee {f}",
+        f'echo \'{{}}\' | tee \\"{f}\\"',
+        f"cp /tmp/forged.json {f}",
+        f"install -m644 /tmp/forged.json {m}",
+        f"bash -c 'echo {{}} > {f}'",  # nested shell program
+        f'sh -c "python3 -c \\"open(\'{f}\',\'w\')\\""',
+        f'eval "echo x > {f}"',
+        f"bash -c \"bash -c 'echo x > {f}'\"",  # two levels
+        f"cat <<EOF > {f}\n{{}}\nEOF",
+        "rm tmp/ref/x/.scoped-evidence-ledger.json",
+        "python3 -c \"print(open('tmp/ref/x/.scoped-evidence-ledger.json').read())\"",
+    ]
+    for cmd in blocked:
+        assert _bash_enforcement_state_target(cmd) is not None, cmd
+    allowed = [
+        "bash scripts/extract/element-state-capture.sh clip s http://localhost:5173/ 'section.hero' tmp/ref/x impl idle",
+        "bash scripts/extract/element-state-capture.sh video s https://example.org/ tmp/ref/x ref tmp/ref/x/open.webm open",
+        "bash scripts/extract/element-evidence.sh s https://example.org/ 'section.hero' tmp/ref/x/element-target.json",
+        "python -m ui_clone.scoped_diff tmp/ref/x",
+        "python -m ui_clone.scoped_check tmp/ref/x --json",
+        "python -m ui_clone.pipeline https://example.org tmp/ref/x s status --json",
+        "node bin/ui-clone scoped-check tmp/ref/x",
+        f"jq .result {f}",
+        f"cat {f}",
+        f"grep -c mismatch {f}",
+        'git commit -m "python -c open(pixel-perfect-diff.json) is denied now"',
+        "python3 -c 'print(1)' > out.txt",
+        'node -e "console.log(1)" | tee log.txt',
+        "bash -c 'npm run build'",
+    ]
+    for cmd in allowed:
+        assert _bash_enforcement_state_target(cmd) is None, cmd

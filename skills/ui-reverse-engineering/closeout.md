@@ -52,13 +52,46 @@ reference-runtime loading are invalid implementations. See repository
 
 **Scoped clones** (section-only, element-only, or a trigger-opened modal/drawer,
 per [operational-rules.md](operational-rules.md#scope-adjustments-by-request-shape))
-cannot pass these page-level commands, which have no subtree selector. Report
-them as scoped with the element-scope evidence from
-[comparison-fix.md](../visual-debug/comparison-fix.md#element-scope-verification-transition-extraction):
-populated `frames/ref/` and `frames/impl/`, zero-AE element frames,
-`pixel-perfect-diff.json` with every element passing, and open and close
-verification for trigger-opened UI. Never describe a scoped result as a
-page-level verified clone.
+cannot pass these page-level commands, which have no subtree selector. Their
+completion command is:
+
+```bash
+node "$PLUGIN_ROOT/bin/ui-clone" scoped-check "$(pwd)/tmp/ref/<target>" [--json]
+```
+
+Its evidence comes only from the producers run as lone Bash commands in the
+documented forms (the PostToolUse hook ledgers nothing else):
+
+```bash
+bash "$PLUGIN_ROOT/scripts/extract/element-evidence.sh" <session> <page-url> \
+  "<target-selector>" "$(pwd)/tmp/ref/<target>/element-target.json"
+bash "$PLUGIN_ROOT/scripts/extract/element-state-capture.sh" clip <session> <page-url> \
+  "<target-selector>" "$(pwd)/tmp/ref/<target>" <ref|impl> <state>
+node "$PLUGIN_ROOT/bin/ui-clone" scoped-diff "$(pwd)/tmp/ref/<target>"
+```
+
+It exits 0 only when the element-scope evidence from
+[comparison-fix.md](../visual-debug/comparison-fix.md#element-scope-verification-transition-extraction)
+holds, all of it script-produced and recomputed: the installed producers hash
+as the shipped release manifest (`ui_clone/scoped_producers.sha256.json`);
+`element-target.json` (element-evidence.sh, schemaVersion 2: one visible match
+with a box of at least 8×8 px); `frames/ref/` and `frames/impl/` captured by
+`element-state-capture.sh` through its CLI (manifest hashes and producer
+records match the release manifest, clips still pass target sanity, impl
+frames come from the implementation origin and from a page that loaded
+neither non-media resources from the reference host nor any script/stylesheet
+the reference captures inventoried), resting clips at AE 0 and motion
+sequences within the page-level video criteria; a `pixel-perfect-diff.json`
+produced by the `ui-clone scoped-diff` CLI whose inputs, sources,
+and self checksum still hash the same, whose target-plus-subtree style rows
+re-diff empty, and whose implementation provenance (page-level
+`proxy-mirror-check` / `bundle-paste-check` plus the source scan for reference
+loads, document mirrors, raw HTML mounts, and proxies) is clean; and, for
+trigger-opened UI, open and close evidence on both sides. The Stop and
+commit/push guards block a scoped run you wrote until it passes. Report the
+result as scoped, never as a page-level verified clone, and include the
+`target:` line of the pass output (resolved selector, match count, bbox) so
+the user can confirm it is the intended element.
 
 ## Agent-driven loop
 

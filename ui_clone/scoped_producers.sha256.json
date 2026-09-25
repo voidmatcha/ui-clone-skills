@@ -1,0 +1,13 @@
+{
+  "files": {
+    "scripts/extract/element-evidence.sh": "6abe1c4ac4373ad80d14e285e09e5aeeadd24965b7a19befd0f9179743a1cd4c",
+    "scripts/extract/element-state-capture.sh": "d3923076c8b0eb58e8c78ed0fb7cdfa8ee4b6957f2fa17cefc67a43ed6fddab6",
+    "ui_clone/computed_style_diff.py": "38dfa3a92606acfc2c20dfcf8aba1da7a3a153298582ae310aa86255f7b3aec4",
+    "ui_clone/element_capture.py": "a9f42645d4199fb019c73fef217a2146a9400b28b6b48523434fd99f65dc29ea",
+    "ui_clone/scoped_diff.py": "495fdcf7b04dcd6b15be9b6112c11e385388b2210dbf252784ab5a386cd1c2f2",
+    "ui_clone/scoped_frames.py": "133752b8bb24722ecc2f6722528babfaef5665672e8682ed8fb051a3d61b6840",
+    "ui_clone/scoped_provenance.py": "7ca0ac481837c2e14993ee8aaf3268028e63205b15423ac651ae84aa27f6d020"
+  },
+  "note": "sha256 of the scoped-evidence producers; regenerate with `python -m ui_clone.scoped_producers --write` after editing any listed file",
+  "schemaVersion": 1
+}

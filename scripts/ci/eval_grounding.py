@@ -82,11 +82,6 @@ INPUT_ARTIFACTS = {"package.json", "tsconfig.json", "index.html"}
 # script producer. Each entry names the producing doc; the doc must still
 # contain the literal name or the entry is stale and the token blocks again.
 DOC_CONTRACT_ARTIFACTS = {
-    # comparison-fix.md Phase D step 3: "Produce tmp/ref/<component>/pixel-perfect-diff.json".
-    "pixel-perfect-diff.json": "skills/visual-debug/comparison-fix.md",
-    # verification.md A-C3: "Save the measurements to .../ref-styles.json and .../impl-styles.json".
-    "ref-styles.json": "skills/visual-debug/verification.md",
-    "impl-styles.json": "skills/visual-debug/verification.md",
     # comparison-page.md: "Generate `$OUT_DIR/compare.html`" (agent-written review page).
     "compare.html": "skills/ui-capture/comparison-page.md",
     # Not an artifact: the forbidden `> image.png` redirect quoted from SKILL.md.

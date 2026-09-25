@@ -50,10 +50,12 @@ EXPECTED_ROUTES: dict[str, list[str]] = {
     "PostCompact": ["session_resume"],
 }
 
-# The only lifecycle event Claude has that Codex legitimately lacks (Codex has
-# no PostCompact event). This is the AGENTS.md "unless a host lacks that
-# lifecycle event" carve-out — a policy ratchet, not a bug: if Codex ever gains
-# a PostCompact equivalent, drop it from here so the topology must include it.
+# The only lifecycle event the Claude manifest routes that the Codex manifest
+# does not. Codex reports compaction as SessionStart with source "compact"
+# (codex-cli 0.155 source vocabulary: startup|resume|clear|compact|fork), so
+# the Codex SessionStart matcher must include `compact` to re-run
+# session_resume (and forget the shown Stop text) after a compaction — see
+# test_codex_session_start_covers_compaction.
 CLAUDE_ONLY_EVENTS = {"PostCompact"}
 
 # Matcher-intent contract (H2). The topology map above pins event -> module
@@ -395,3 +397,17 @@ def test_plugin_manifest_version_triple_synchronized() -> None:
         f"plugin-version triple desync: claude-plugin={claude_v} "
         f"marketplace={market_v} codex-plugin={codex_v}"
     )
+
+
+def test_codex_session_start_covers_compaction() -> None:
+    """Codex has no PostCompact route in this manifest; compaction arrives as
+    SessionStart source=compact. Without it session_resume never forgets the
+    shown Stop text and the one-line repeat outlives the context it points to."""
+    entries = _load(CODEX)["hooks"]["SessionStart"]
+    matchers = {
+        token
+        for entry in entries
+        if any(_module_for(h.get("command", "")) == "session_resume" for h in entry.get("hooks", []))
+        for token in str(entry.get("matcher") or "").split("|")
+    }
+    assert {"startup", "resume", "compact"} <= matchers

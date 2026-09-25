@@ -7,7 +7,8 @@ the agent already has. The hook emits the full block once per
 block decision itself is unchanged.
 
 Context compaction drops that earlier full text from the agent's context, so
-the SessionStart/PostCompact hook calls `forget_session` and the next Stop
+the SessionStart/PostCompact hook (Codex: SessionStart source `compact`) calls
+`forget_session` and the next Stop
 shows the full block again. This ledger is separate from the retry-budget
 ledger (`.ui-re-stop-attempts.json`) on purpose: forgetting what was shown must
 never reset the retry cap.

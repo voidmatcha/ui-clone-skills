@@ -134,8 +134,91 @@ _ENFORCEMENT_STATE_RE = (
     # register-driver-session.sh — which name themselves, not the file, on the
     # command line), so filename-blocking only catches a direct agent forge.
     r"|structural-convergence-stamp\.json|canvas-replay-stamp\.json"
-    r"|\.driver-session\.id)"
+    r"|\.driver-session\.id"
+    # .ui-re-stop-attempts.json is the Stop retry-cap ledger; deleting or
+    # emptying it resets the cap. (.ui-re-stop-shown.json is deliberately NOT
+    # listed: losing it only re-shows the full Stop text, never releases one.)
+    r"|\.ui-re-stop-attempts\.json"
+    # element-target.json is the scoped-clone record that exempts component
+    # writes from page-level gates. Its producer, element-evidence.sh, takes the
+    # path as a plain argument (no verb/redirect), so only a forge is caught.
+    r"|(?<![^/\s'\"])element-target\.json(?![^\s|;&<>()'\"])"
+    # Scoped-clone completion evidence that scoped_check trusts only with
+    # producer provenance: frames/<side>/capture-manifest.json (written by
+    # element-state-capture.sh via ui_clone.element_capture), pixel-perfect-diff.json
+    # (written by `python -m ui_clone.scoped_diff <ref-dir>`), and the checker's
+    # own sequence-verdict cache. All three producers name the ref dir, never
+    # the file, on the command line, so only a direct forge is caught.
+    r"|(?<![^/\s'\"])capture-manifest\.json(?![^\s|;&<>()'\"])"
+    r"|(?<![^/\s'\"])pixel-perfect-diff\.json(?![^\s|;&<>()'\"])"
+    r"|\.scoped-check-cache\.json"
+    # .scoped-evidence-ledger.json is the PostToolUse hook's record of the
+    # evidence hashes the canonical producers wrote (ui_clone.scoped_ledger);
+    # scoped_check accepts no evidence file whose hash it does not carry.
+    r"|\.scoped-evidence-ledger\.json"
+    # .scoped-ledger-pending.json holds the PreToolUse start time of each
+    # producer command; the ledger only records files written after it.
+    r"|\.scoped-ledger-pending\.json)"
 )
+
+# `ui_clone.element_capture` is the recorder element-state-capture.sh drives
+# with a validated agent-browser envelope on stdin. Invoked directly, an agent
+# could feed it a hand-made envelope and stamp any bytes as an implementation
+# capture, so a Bash command naming the module is denied; the script names
+# only itself on the command line and is unaffected.
+_SCOPED_RECORDER_RE = re.compile(r"ui_clone[./\\]element_capture\b")
+# The scoped evidence producers may only run through their CLIs
+# (`python -m ui_clone.scoped_diff <ref-dir>`; the recorder via the script).
+# Importing them from an inline `python -c`, a `python - <<EOF` heredoc, or
+# running the module file lets an agent call build()/record_clip()/
+# _save_manifest() with hand-made inputs and write evidence that carries the
+# producer's name. Matched on the RAW command (the sanitized view strips the
+# quoted/heredoc program text where the import lives); the patterns need
+# import syntax, so a prose mention of a module name never trips them, and
+# read-only search verbs at command position are exempt. A custom script file
+# that imports them is not visible here (threat model: lazy/over-eager agent,
+# not a determined one; scoped_check's producer records are the second line).
+_SCOPED_PRODUCER_MODULES = r"(?:element_capture|scoped_diff|scoped_frames)"
+_SCOPED_PRODUCER_IMPORT_RE = re.compile(
+    rf"(?:\bfrom\s+ui_clone\s+import\b[^\n;]*\b{_SCOPED_PRODUCER_MODULES}\b"
+    rf"|\bfrom\s+ui_clone\.{_SCOPED_PRODUCER_MODULES}\s+import\b"
+    rf"|\bimport\s+ui_clone\.{_SCOPED_PRODUCER_MODULES}\b"
+    rf"|\b(?:import_module|run_module|run_path)\s*\(\s*['\"](?:ui_clone[./]){_SCOPED_PRODUCER_MODULES}\b"
+    rf"|(?<![\w-])ui_clone/{_SCOPED_PRODUCER_MODULES}\.py\b)"
+)
+_SEARCH_VERB_RE = re.compile(
+    CMD_POSITION_PREFIX + r"(?:grep|rg|ag|ack|git\s+(?:grep|log|commit))\b"
+)
+# `python -m ui_clone.scoped_producers --write` regenerates the release hash
+# manifest scoped_check compares evidence and installed producers against.
+# In a clone project that is the last step of a producer forge; only a
+# checkout of this plugin (maintainer work) may run it. `--check` stays free.
+_SCOPED_PRODUCERS_WRITE_RE = re.compile(r"ui_clone[./\\]scoped_producers\b[^|;&\n]*--write\b")
+
+
+def _bash_scoped_producers_write_target(cmd: str) -> str | None:
+    """Return the match when a Bash command regenerates the scoped producers
+    release manifest (search verbs at command position exempt)."""
+    if not cmd or _SEARCH_VERB_RE.match(cmd.lstrip()):
+        return None
+    m = _SCOPED_PRODUCERS_WRITE_RE.search(sanitize_command_for_deny(cmd))
+    return m.group(0).strip() if m else None
+
+
+def _bash_scoped_recorder_target(cmd: str) -> str | None:
+    """Return the matched producer reference when a Bash command drives
+    `ui_clone.element_capture` directly (outside element-state-capture.sh) or
+    imports a scoped evidence producer instead of running its CLI."""
+    if not cmd:
+        return None
+    m = _SCOPED_RECORDER_RE.search(sanitize_command_for_deny(cmd))
+    if m:
+        return m.group(0)
+    if _SEARCH_VERB_RE.match(cmd.lstrip()):
+        return None
+    m = _SCOPED_PRODUCER_IMPORT_RE.search(cmd)
+    return m.group(0).strip() if m else None
+
 
 # Command position + optional command wrappers an agent reaches for (`command rm`,
 # `\rm`, `sudo rm`, `builtin/exec/nice/time rm`). CMD_POSITION_PREFIX itself only
@@ -221,9 +304,7 @@ _ENFORCEMENT_PY_FIRSTARG_RE = re.compile(
 _ENFORCEMENT_PY_DEST_API_RE = re.compile(
     r"(?:shutil\.(?:copy|copyfile|copy2|move)|os\.replace)\s*\("
 )
-_ENFORCEMENT_PY_LITERAL_RE = re.compile(
-    rf"['\"]([^'\"]*{_ENFORCEMENT_STATE_RE}[^'\"]*)['\"]"
-)
+_ENFORCEMENT_PY_LITERAL_RE = re.compile(rf"['\"]([^'\"]*{_ENFORCEMENT_STATE_RE}[^'\"]*)['\"]")
 
 # ex(1) / perl -i in-place edits + `>`/`>>` redirect clobber, all matched on the
 # quote/heredoc-stripped view so an editor script's own `|`/`;` (dropped with its
@@ -246,15 +327,89 @@ _ENFORCEMENT_SANITIZED_PATTERNS = [
     _ENFORCEMENT_REDIRECT_RE,
 ]
 
+# Shell escapes an agent puts in front of a quote to nest a program inside a
+# double-quoted argument: `python3 -c "open(\"...pixel-perfect-diff.json\",\"w\")"`.
+# The literal-matching patterns above see `\"` where they expect a quote and
+# miss the form, while the single-quote form is denied. Every literal matcher
+# therefore runs on the raw text AND on this unescaped view (`\"` -> `"`,
+# `\'` -> `'`, `\\` -> `\`, `\$` -> `$`), which is what the inner program sees.
+_SHELL_ESCAPE_RE = re.compile(r"\\([\"'\\$`])")
+# Interpreters an agent hands an inline program to (`-c` / `-e` / `--eval` /
+# stdin). An inline program that mentions an enforcement file at all is denied,
+# whatever API or quoting it uses: no legitimate flow feeds these hook-managed
+# files to an inline program (the sanctioned reads are cat/jq/grep and the
+# status CLIs). Matched on the quote-stripped view so an interpreter name inside
+# a commit message or grep pattern is not an invocation.
+_INLINE_INTERPRETER_RE = re.compile(
+    _ENFORCEMENT_VERB_PREFIX
+    + r"(?:uv\s+run\s+(?:--\S+\s+)*)?"
+    + r"(?:python[0-9.]*|pypy[0-9]*|node|nodejs|deno|bun|perl|ruby|php)\b"
+)
+# `bash -c '<program>'` / `sh -c "<program>"` / `eval '<program>'`: the nested
+# program is a full command line the outer matchers only see as one quoted
+# argument; it is re-scanned as a command of its own (recursively).
+_NESTED_SHELL_RE = re.compile(_ENFORCEMENT_VERB_PREFIX + r"(?:(?:ba|z|da|k)?sh|eval)\b")
 
-def _bash_enforcement_state_target(cmd: str) -> str | None:
-    """Return the enforcement-state path a Bash command deletes/truncates/
-    overwrites/edits, else None. Catches disabling a guard by destroying its own
-    state file via rm/mv/cp/tee/ln/find/dd/truncate/install/rsync/sed -i/perl -i/ex,
-    python file APIs, or `>`/`>>`/heredoc redirect clobber (command-wrapper
-    prefixes like `command`/`sudo`/`\\` included)."""
-    if not cmd:
+
+_ENFORCEMENT_MENTION_RE = re.compile(rf"\S*{_ENFORCEMENT_STATE_RE}\S*")
+
+
+def _unescape_shell(cmd: str) -> str:
+    return _SHELL_ESCAPE_RE.sub(r"\1", cmd)
+
+
+def _shell_words(cmd: str) -> list[str]:
+    """POSIX shell words of `cmd` (escapes and quotes resolved), best effort:
+    an unterminated quote falls back to whitespace splitting of the
+    unescaped text so a malformed command is still inspected."""
+    import shlex
+
+    try:
+        return shlex.split(cmd, posix=True)
+    except ValueError:
+        return _unescape_shell(cmd).split()
+
+
+def _nested_shell_programs(cmd: str) -> list[str]:
+    """Programs handed to `bash|sh|zsh -c` / `eval` anywhere in `cmd`."""
+    if not _NESTED_SHELL_RE.search(sanitize_command_for_deny(cmd)):
+        return []
+    words = _shell_words(cmd)
+    out: list[str] = []
+    for i, word in enumerate(words):
+        base = word.rsplit("/", 1)[-1]
+        if base == "eval":
+            program = " ".join(words[i + 1 :])
+            if program:
+                out.append(program)
+            continue
+        if base in {"bash", "sh", "zsh", "dash", "ksh"}:
+            for j in range(i + 1, len(words)):
+                arg = words[j]
+                if arg == "-c" and j + 1 < len(words):
+                    out.append(words[j + 1])
+                    break
+                if not arg.startswith("-"):
+                    break
+    return out
+
+
+def _inline_program_mention(cmd: str) -> str | None:
+    """The enforcement file an inline interpreter program (`python -c`,
+    `node -e`, `perl -e`, `python - <<EOF`, `echo ... | python3`) mentions,
+    else None. The mention is looked up in the resolved shell words (escapes
+    and quotes gone) and in heredoc bodies, so no quoting style hides it."""
+    if not _INLINE_INTERPRETER_RE.search(sanitize_command_for_deny(cmd)):
         return None
+    views = _shell_words(cmd) + [_unescape_shell(cmd)]
+    for view in views:
+        m = _ENFORCEMENT_MENTION_RE.search(view)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _enforcement_state_target_in(cmd: str) -> str | None:
     for pat in _ENFORCEMENT_RM_PATTERNS:
         m = pat.search(cmd)
         if m:
@@ -283,6 +438,33 @@ def _bash_enforcement_state_target(cmd: str) -> str | None:
         if m:
             return m.group(1).strip("\"'")
     return None
+
+
+def _bash_enforcement_state_target(cmd: str, _depth: int = 0) -> str | None:
+    """Return the enforcement-state path a Bash command deletes/truncates/
+    overwrites/edits, else None. Catches disabling a guard by destroying its own
+    state file via rm/mv/cp/tee/ln/find/dd/truncate/install/rsync/sed -i/perl -i/ex,
+    python file APIs, or `>`/`>>`/heredoc redirect clobber (command-wrapper
+    prefixes like `command`/`sudo`/`\\` included). The literal matchers also run
+    on the shell-unescaped view (`\\"` -> `"`), an inline interpreter program
+    (`python -c` / `node -e` / `perl -e` / stdin) that mentions an enforcement
+    file is denied outright, and a `bash -c '<program>'` / `eval` argument is
+    re-scanned as a command."""
+    if not cmd:
+        return None
+    target = _enforcement_state_target_in(cmd)
+    if target is None:
+        unescaped = _unescape_shell(cmd)
+        if unescaped != cmd:
+            target = _enforcement_state_target_in(unescaped)
+    if target is None:
+        target = _inline_program_mention(cmd)
+    if target is None and _depth < 3:
+        for program in _nested_shell_programs(cmd):
+            target = _bash_enforcement_state_target(program, _depth + 1)
+            if target is not None:
+                break
+    return target
 
 
 # gateSkipAck/deferredAck in verification-plan.json release closeout blockers

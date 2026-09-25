@@ -27,16 +27,23 @@ from ui_clone.hooks._common import (
     has_external_browse,
     mark_external_browse,
     mark_ref_session,
+    owned_scoped_ref_dirs,
     run_gate,
+    scoped_refs_to_enforce,
+    select_scoped_ref_dir,
     session_id_from_payload,
     should_enforce_ref_for_session,
     target_ref_dir_for_ui_re_command,
 )
+from ui_clone.scoped_ledger import mark_started as _mark_producer_started
 from ui_clone.state import PipelineState
 
+from .agent_script import _agent_script_target
 from .bash_write import (
     _bash_adhoc_ref_target,
     _bash_enforcement_state_target,
+    _bash_scoped_producers_write_target,
+    _bash_scoped_recorder_target,
     _bash_scratch_nested_ref_target,
     _bash_verification_plan_ack_target,
     _bash_write_target,
@@ -338,6 +345,71 @@ def _guard_enforcement_state_rm(cmd: str) -> str | None:
     )
 
 
+def _guard_scoped_recorder(cmd: str) -> str | None:
+    """Deny driving `ui_clone.element_capture` directly or importing a scoped
+    evidence producer (`element_capture` / `scoped_diff` / `scoped_frames`)
+    from a shell command: they stamp the provenance scoped_check trusts, so
+    only element-state-capture.sh (which validates the browser origin first)
+    and the `python -m ui_clone.scoped_diff` CLI may drive them."""
+    target = _bash_scoped_recorder_target(cmd)
+    if target is None:
+        return None
+    return (
+        f"⛔ UI-RE: '{target}' drives a scoped evidence producer by hand. "
+        "ui_clone.element_capture is the recorder behind scripts/extract/"
+        "element-state-capture.sh (a hand-made envelope would stamp arbitrary "
+        "bytes as an implementation capture) and importing element_capture / "
+        "scoped_diff / scoped_frames from an inline program writes evidence "
+        "without the CLI's producer record, which scoped_check rejects. Capture "
+        "frames with `bash $PLUGIN_ROOT/scripts/extract/element-state-capture.sh "
+        "clip|video ...` (element-capture.md), then run "
+        "`python -m ui_clone.scoped_diff <ref-dir>` and `python -m ui_clone.scoped_check <ref-dir>`."
+    )
+
+
+def _guard_agent_script(cmd: str, project_root: Path, cwd: Path | None) -> str | None:
+    """Deny running a script outside the plugin whose content names an
+    enforcement-state / scoped-evidence file, imports a scoped evidence
+    producer, or drives the recorder: a file the text-level guards never see
+    is the remaining way to write evidence by hand, and the evidence ledger
+    rejects its output anyway."""
+    hit = _agent_script_target(cmd, project_root, cwd)
+    if hit is None:
+        return None
+    script, reference = hit
+    return (
+        f"⛔ UI-RE: '{script}' is a script outside the plugin that references "
+        f"'{reference}'. Enforcement state and scoped evidence are written only by "
+        "the shipped producers, each run as its own Bash command so the PostToolUse "
+        "ledger records what it wrote; a script the hooks cannot inspect on the "
+        "command line produces files scoped_check rejects (evidence-unledgered). Run "
+        "`bash $PLUGIN_ROOT/scripts/extract/element-evidence.sh ...`, "
+        "`bash $PLUGIN_ROOT/scripts/extract/element-state-capture.sh clip|video ...`, "
+        "`python -m ui_clone.scoped_diff <ref-dir>`, and `python -m ui_clone.scoped_check "
+        "<ref-dir>` directly; read evidence with `jq`/`cat`."
+    )
+
+
+def _guard_scoped_producers_write(cmd: str, project_root: Path) -> str | None:
+    """Deny regenerating the scoped producers release manifest
+    (`python -m ui_clone.scoped_producers --write`) outside a checkout of this
+    plugin: scoped_check compares evidence and installed producers against
+    that manifest, so regenerating it in a clone project would launder an
+    edited producer. Maintainer checkouts (ui_clone/scoped_producers.py under
+    the project root) stay allowed; `--check` is never affected."""
+    target = _bash_scoped_producers_write_target(cmd)
+    if target is None or (project_root / "ui_clone" / "scoped_producers.py").is_file():
+        return None
+    return (
+        f"⛔ UI-RE: '{target}' regenerates the scoped-evidence release hash manifest "
+        "(ui_clone/scoped_producers.sha256.json). scoped_check requires the producer "
+        "hashes in the evidence, the shipped manifest, and the installed producers to "
+        "agree; rewriting the manifest from a clone project would accept an edited "
+        "producer. Reinstall the plugin if `python -m ui_clone.scoped_producers --check` "
+        "fails; the manifest is regenerated only in a checkout of ui-clone-skills."
+    )
+
+
 def _guard_verification_plan_ack(cmd: str) -> str | None:
     """Block a Bash write that sets gateSkipAck/deferredAck in
     verification-plan.json — the ack keys release closeout blockers, and a
@@ -395,9 +467,7 @@ def _guard_static_mirror_download(cmd: str) -> str | None:
     )
 
 
-def _guard_static_server(
-    cmd: str, project_root: Path, payload_cwd: Path | None
-) -> str | None:
+def _guard_static_server(cmd: str, project_root: Path, payload_cwd: Path | None) -> str | None:
     if not _static_server_violation(cmd):
         return None
     ref_dir = _ref_dir_for_static_guard(project_root, payload_cwd, cmd)
@@ -442,20 +512,36 @@ def _guard_section_compare(cmd: str, project_root: Path) -> str | None:
 
 def _resolve_ref_dir_for_write(bash_write: str, project_root: Path) -> Path | None:
     """Walk up from the write target looking for the nearest tmp/ref/."""
+    return _resolve_write_refs(bash_write, project_root)[0]
+
+
+def _resolve_write_refs(bash_write: str, project_root: Path) -> tuple[Path | None, Path | None]:
+    """(page-level ref, scoped ref) owning a Bash component write.
+
+    Same selection as pre_generate: a scoped ref dir (valid element-target.json,
+    no page-level marker) that matches the target, or the newest one when no
+    active page-level run exists, takes the write out of the page-level gate.
+    """
     ref_dir: Path | None = None
+    search_root: Path | None = None
     try:
         fp = Path(bash_write).resolve()
         cur = fp.parent
         while cur != cur.parent:
             if (cur / "tmp" / "ref").is_dir():
-                ref_dir = find_ref_dir(cur / "tmp" / "ref")
+                search_root = cur / "tmp" / "ref"
+                ref_dir = find_ref_dir(search_root)
                 break
             cur = cur.parent
     except OSError:
         pass
     if ref_dir is None:
-        ref_dir = find_ref_dir(project_root / "tmp" / "ref")
-    return ref_dir
+        search_root = project_root / "tmp" / "ref"
+        ref_dir = find_ref_dir(search_root)
+    scoped = (
+        select_scoped_ref_dir(search_root, bash_write, ref_dir) if search_root is not None else None
+    )
+    return ref_dir, scoped
 
 
 def _guard_bash_write_component(
@@ -468,16 +554,17 @@ def _guard_bash_write_component(
       - halt: True when main() should `sys.exit(0)` immediately after, False
         when the caller should fall through to declaration checks.
     """
-    ref_dir = _resolve_ref_dir_for_write(bash_write, project_root)
+    ref_dir, scoped_ref = _resolve_write_refs(bash_write, project_root)
+    if scoped_ref is not None:
+        mark_ref_session(scoped_ref, session_id, source="pre_bash_scoped_write")
+        return None, False
     if ref_dir is None:
         return None, True
     gate_result = run_gate(ref_dir, "pre-generate")
     if gate_result.get("passed", True):
         mark_ref_session(ref_dir, session_id, source="pre_bash_component_write")
         return None, False
-    failures: list[dict[str, str]] = cast(
-        list[dict[str, str]], gate_result.get("failures", [])
-    )
+    failures: list[dict[str, str]] = cast(list[dict[str, str]], gate_result.get("failures", []))
     fail_count = cast(int, gate_result.get("fail_count", len(failures)))
     missing = ", ".join(f.get("label", "?") for f in failures[:6])
     return (
@@ -511,9 +598,7 @@ def _build_pipeline_incomplete_block(cmd: str, ref_dir: Path, remaining: str) ->
     )
 
 
-def _build_gate_failure_block(
-    cmd: str, ref_dir: Path, gate_name: str, gate_result: dict
-) -> str:
+def _build_gate_failure_block(cmd: str, ref_dir: Path, gate_name: str, gate_result: dict) -> str:
     failures = cast(list[dict[str, str]], gate_result.get("failures", []))
     fail_count = cast(int, gate_result.get("fail_count", len(failures)))
     parts = [
@@ -524,10 +609,40 @@ def _build_gate_failure_block(
         parts.append(f"  • {f.get('label', '?')}: {f.get('reason', '')}")
         if f.get("fix"):
             parts.append(f"    → {f['fix']}")
-    parts.append(
-        f"\nFix and re-run: python -m ui_clone.gate {ref_dir} {gate_name}\n"
-    )
+    parts.append(f"\nFix and re-run: python -m ui_clone.gate {ref_dir} {gate_name}\n")
     return "\n".join(parts)
+
+
+def _guard_scoped_declaration(
+    cmd: str, project_root: Path, session_id: str, *, include_clone_writes: bool
+) -> None:
+    """Deny a declaration command (commit/push/PR) while a scoped run this
+    session owns fails `python -m ui_clone.scoped_check`; returns otherwise.
+
+    Same deny shape as the page-level declaration blocks. Non-declaration Bash
+    writes that fall through to the cascade are never affected.
+    """
+    if not _is_declaration_command(cmd):
+        return
+    from ui_clone import scoped_check
+
+    for scoped in scoped_refs_to_enforce(
+        project_root / "tmp" / "ref",
+        project_root,
+        session_id,
+        include_clone_writes=include_clone_writes,
+    ):
+        result = scoped_check.check(scoped)
+        if result["status"] == "passed":
+            continue
+        _emit_block(
+            scoped_check.block_reason(
+                result,
+                f"⛔ UI-RE: cannot run '{cmd.split(chr(10))[0][:60]}' — scoped clone "
+                f"{scoped.name} has not passed scoped_check",
+            )
+        )
+        sys.exit(0)
 
 
 def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> None:
@@ -540,6 +655,7 @@ def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> N
     """
     ref_dir = _find_active_ref(project_root / "tmp" / "ref")
     if ref_dir is None:
+        _guard_scoped_declaration(cmd, project_root, session_id, include_clone_writes=True)
         # Off-pipeline completion closure (omx postmortem): the session
         # browsed an external site AND wrote clone-shaped files, but owns no
         # ref dir — a declaration command (commit/push/PR) here ships a
@@ -552,6 +668,9 @@ def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> N
             and _is_declaration_command(cmd)
             and has_external_browse(project_root, session_id)
             and has_clone_writes(project_root, session_id)
+            # A sanctioned scoped clone owns the work; its completion was
+            # checked by _guard_scoped_declaration above.
+            and not owned_scoped_ref_dirs(project_root / "tmp" / "ref", session_id)
         ):
             _emit_block(
                 "UI Reverse Engineering: completion command in a session that "
@@ -567,6 +686,9 @@ def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> N
             sys.exit(0)
         sys.exit(0)
     if not should_enforce_ref_for_session(ref_dir, session_id):
+        # Another session's page-level run; this session's own scoped run
+        # (if it wrote one) still has to pass scoped_check.
+        _guard_scoped_declaration(cmd, project_root, session_id, include_clone_writes=False)
         sys.exit(0)
 
     state = PipelineState.load(ref_dir)
@@ -639,6 +761,14 @@ def main() -> None:
         sys.exit(0)
 
     _mark_ui_re_session(cmd, project_root, session_id, payload_cwd)
+    # Scoped evidence ledger: stamp a canonical producer command's start so
+    # the PostToolUse hook ledgers only files that run wrote. A stamp left by
+    # a command a later guard denies is harmless: no PostToolUse follows it,
+    # and the next run of the same command re-stamps.
+    try:
+        _mark_producer_started(cmd, base=payload_cwd or project_root, project_root=project_root)
+    except Exception:  # noqa: BLE001 - the ledger must never break the Bash gate
+        pass
     # Off-pipeline clone detection: remember external agent-browser browsing
     # so pre_generate can recognize clone-shaped work without a ref dir.
     # Always anchored at project_root — pre_generate reads from project_root,
@@ -655,6 +785,7 @@ def main() -> None:
             _guard_static_html_mirror,
             _guard_scratch_nested_ref,
             _guard_enforcement_state_rm,
+            _guard_scoped_recorder,
             _guard_verification_plan_ack,
             _guard_adhoc_redirect,
         ):
@@ -674,6 +805,16 @@ def main() -> None:
         # onboarding nudge ("run the pipeline driver first") lives in the
         # SessionStart session_resume path. The _is_fresh_state /
         # _fresh_state_violation predicates stay (public API, unit-tested).
+
+        reason = _guard_scoped_producers_write(cmd, project_root)
+        if reason is not None:
+            _emit_block(reason)
+            sys.exit(0)
+
+        reason = _guard_agent_script(cmd, project_root, payload_cwd)
+        if reason is not None:
+            _emit_block(reason)
+            sys.exit(0)
 
         reason = _impl_scaffold_violation(cmd, project_root, cwd=payload_cwd)
         if reason is not None:

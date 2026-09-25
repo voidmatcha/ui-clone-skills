@@ -199,15 +199,21 @@ Phase D runs **in parallel with C1** (both use the static loaded page). Phase D1
 **For each major section of the component:**
 
 1. Follow `verification.md` Phase D1 — clip screenshot per element per state (idle / active / before / mid / after — by triggerType; for click-toggle: idle + active; for click-cycle: state-0, state-1, ..., state-N), AE/SSIM diff
-2. Follow `verification.md` Phase D2 — getComputedStyle all properties, build diff table
-3. Produce `tmp/ref/<component>/pixel-perfect-diff.json`
+2. Follow `verification.md` Phase D2 — `computed-diff.sh` per selector; its exit code is the numerical verdict
+3. Fix every mismatch row and re-run both phases until the commands report none
 
-Phase D gate:
+Phase D gate (page level):
 ```
-□ pixel-perfect-diff.json exists for this component
-□ all elements Visual Gate status = "pass" (idle / active / before / mid / after — by triggerType)
-□ mismatches = 0
+□ D1: every clip per element per state at AE 0 / SSIM >= 0.995 (the `compare` / ffmpeg output)
+□ D2: `computed-diff.sh` exits 0 for every selector (no mismatch rows)
 ```
+
+Page-level Phase D leaves no artifact of its own: `pixel-perfect-diff.json`
+is the scoped-clone artifact of `python -m ui_clone.scoped_diff` (element
+scope below) and is hook-denied as a hand write everywhere. The page-level
+gates that consume Phase D's ground are `section-compare`,
+`hover-state-compare`, and `click-state-compare` rows of the verification
+plan, plus the post-implement gate's no-cheat checks.
 
 ### Phase H: Self-Healing Loop
 
@@ -411,24 +417,31 @@ Missing this is a silent failure: styles exist but have no effect.
 
 > For single-element animation verification and for scoped (section-only, element-only, or trigger-opened modal/drawer) clones. Runs after ui-reverse-engineering Step T3 (implement). Frames live in `tmp/ref/<effect-name>/frames/{ref,impl}/`; trigger-opened UI compares both the opening and closing sequences.
 
-### Frame Comparison — element scope (AE)
+### Frame Comparison — element scope
 
-Cropped to element bounds. Compare using AE diff — do not read image pairs with the LLM.
+Both sides are captured by `"$PLUGIN_ROOT/scripts/extract/element-state-capture.sh"`
+(element-capture.md), which records capture provenance. Compare with the
+checker, never by reading image pairs with the LLM:
 
 ```bash
-FRAME_COUNT=$(ls tmp/ref/<effect-name>/frames/ref/frame-*.png | wc -l)
-for i in $(seq -f "%02g" 1 $FRAME_COUNT); do
-  AE=$(compare -metric AE \
-    tmp/ref/<effect-name>/frames/ref/frame-${i}.png \
-    tmp/ref/<effect-name>/frames/impl/frame-${i}.png \
-    tmp/ref/<effect-name>/frames/diff/frame-${i}.png 2>&1)
-  if [ "$AE" -gt 0 ]; then
-    echo "FAIL frame ${i}: AE=${AE}"
-  fi
-done
+node "$PLUGIN_ROOT/bin/ui-clone" scoped-check "$(pwd)/tmp/ref/<effect-name>"
 ```
 
-For each FAIL frame: read the diff image to identify which region differs → targeted fix → re-capture impl only → compare.
+Its pass output names the resolved target (selector, match count, bbox);
+quote that line in the report. Beyond provenance (release-manifest hashes,
+target sanity, no reference-runtime script/stylesheet on the impl page — media
+and font hotlinks are allowed) it applies two criteria, both recomputed from
+the frames:
+
+- resting-state clips (`idle`, `active`, `before`, `mid`, `after`, `open`):
+  pixel-identical, AE 0;
+- motion sequences (`frame-NNNN`, `open-NNNN`, `close-NNNN`): the page-level
+  video criteria of `scripts/verify/video-transition-compare.sh` — first-change
+  alignment, first-to-last-change arc within 18 frames, per-frame SSIM ≥ 0.90
+  with a ±1 frame jitter retry (`frame-align.sh`). Two recordings of the same
+  motion pass; a different easing, duration, or missing motion fails.
+
+For each failing clip or frame range: `compare ref impl diff.png` on that pair, read the diff image to identify which region differs → targeted fix → re-capture impl only (same script) → re-run the checker.
 
 ### Frame Comparison — fullpage scope (SSIM batch)
 
@@ -476,17 +489,41 @@ When a visual bug is reported (white flash, wrong timing, layout jump):
 
 Frame comparison verifies timing and motion but CANNOT verify numerical correctness of resting states (font-size, weight, color, spacing, border-radius).
 
-Run Phase D (above) for the element's resting states. States by triggerType:
+For the element's resting states, Phase D is produced by a script, not written by hand. States by triggerType:
 
 | triggerType | States |
 |---|---|
 | css-hover / js-class | `idle`, `active` |
 | intersection | `before`, `after` |
 | scroll-driven | `before` (trigger_y − 50), `mid` (mid_y), `after` (settled_y + 50) |
+| trigger-opened | `idle`, `open` |
 
-Save clips under `tmp/ref/<effect-name>/frames/{ref,impl}/<state>.png`.
+Capture each state on both sides with `element-state-capture.sh clip` (it also
+records `<state>.computed.json`: the target's computed styles for the
+`computed-diff.sh` property list plus its element subtree, up to 40
+descendants keyed by structural path), then produce the diff:
 
-Gate: `pixel-perfect-diff.json` exists with all elements `"status": "pass"` AND `mismatches = 0`.
+```bash
+node "$PLUGIN_ROOT/bin/ui-clone" scoped-diff "$(pwd)/tmp/ref/<effect-name>" [--impl-files src/components/Hero.tsx ...]
+```
+
+Run it exactly in this form, as its own Bash command: the PostToolUse hook
+ledgers `pixel-perfect-diff.json` only for a lone producer invocation
+(element-capture.md), and `scoped_check` rejects an unledgered diff. It writes `pixel-perfect-diff.json` with one row per state (clip AE and the
+computed-style mismatches for the target and every subtree node,
+`computed-diff.sh` rules; a node present on one side only is reported as a
+structural mismatch with its path, never skipped), `result`, `mismatches`,
+implementation provenance (`noCheat`: the page-level `proxy-mirror-check.sh`
+and `bundle-paste-check.sh` run on the implementation root, and a scan of the
+fingerprinted sources and app entry files for reference-host loads,
+`documentElement.outerHTML` mirrors, `?raw` HTML mounts, and upstream
+proxies), and provenance: producer record (CLI entry and argv), property-list
+fingerprint, sha256 of every input and implementation source, and a self
+checksum. Gate: `result: "pass"` and `mismatches: 0`, which requires AE 0, 0
+mismatches in every row, and no provenance finding. `scoped_check` re-hashes
+the inputs, re-runs the style diff and the source scan, and requires the CLI
+producer record, so an edited, hand-written, or import-built file is
+rejected; re-run `scoped_diff` after every re-capture or source change.
 
 ### Bundle-Based Verification (untriggerable animations)
 
@@ -504,7 +541,7 @@ Gate: `bundle-verification.json` all checks `"match": true`.
 - [ ] Implementation uses measured values (NOT guessed)
 - [ ] **Triggerable:** impl frames captured, comparison all ✅, no white flash/blank
 - [ ] **Untriggerable:** `transition-spec.json` + `bundle-verification.json` all match + resting screenshot OK
-- [ ] **`pixel-perfect-diff.json`** all pass AND mismatches = 0
+- [ ] **`pixel-perfect-diff.json`** (`ui-clone scoped-diff`) result pass AND mismatches = 0, provenance clean
 - [ ] Entry points verified (CSS imports loaded)
 - [ ] **Scroll transitions:** reverse direction verified
 - [ ] **Post-implementation full-page capture** (top → bottom → top, SSIM batch)

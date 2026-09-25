@@ -209,6 +209,219 @@ def find_ref_dir(search_root: Path) -> Path | None:
     return newest_dir
 
 
+# ── Scoped clone runs (section-only / element-only / trigger-opened UI) ──
+#
+# A scoped clone never runs the page-level pipeline (operational-rules.md
+# "Scope adjustments by request shape"): its ref dir holds the
+# scripts/extract/element-evidence.sh record `element-target.json` plus clip
+# frames, and no page-level marker. The hooks treat such a dir as a sanctioned
+# run: component writes are allowed without the page-level pre-generate gate,
+# and the off-pipeline Stop/declaration guards give way to the scoped
+# completion check (`python -m ui_clone.scoped_check`). The record must
+# carry the canonical script's successful-probe shape, and tool/Bash writes to
+# it are denied (pre_generate / bash_write), so touching an empty file does not
+# unlock anything.
+ELEMENT_TARGET_NAME = "element-target.json"
+# element-target.json schemaVersion: 2 adds target sanity (`matchCount`,
+# `visibility`, `visible`). Hooks recognize 1 and 2 as a scoped run so an
+# in-flight run keeps its exemptions; `scoped_check` requires 2 and tells the
+# agent to re-probe an older record.
+ELEMENT_TARGET_SCHEMA_VERSION = 2
+_LEGACY_TARGET_SCHEMA_VERSIONS = (1,)
+# Target sanity (element-evidence.sh, element-state-capture.sh clip,
+# scoped_check): the selector resolves to exactly one element, its box is at
+# least TARGET_MIN_SIZE x TARGET_MIN_SIZE CSS px, and it is visible in the
+# probed state (no display:none, visibility:hidden/collapse, or opacity 0 on
+# it or an ancestor). A trigger-opened container that is hidden while closed
+# is probed and captured in its open state, never while closed.
+TARGET_MIN_SIZE = 8
+_PAGE_LEVEL_MARKERS = (".ui-re-active", "extracted.json", "pipeline-state.json")
+_TARGET_KEY_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)  # noqa: UP038 - 3.9-safe
+
+
+def _is_bbox(bbox: object) -> bool:
+    return isinstance(bbox, dict) and all(_is_number(bbox.get(key)) for key in ("x", "y", "width", "height"))
+
+
+def target_sanity_problems(record: dict[str, Any]) -> list[str]:
+    """Why a probe record (`matchCount`, `bbox`, `visibility`, `visible`) does
+    not name a usable target, else []. Shared by the capture scripts (refuse
+    at capture time) and `scoped_check` (re-validate the record)."""
+    problems: list[str] = []
+    count = record.get("matchCount")
+    if not isinstance(count, int) or isinstance(count, bool):
+        problems.append("matchCount not recorded")
+    elif count != 1:
+        problems.append(f"selector matches {count} element(s), expected exactly 1")
+    bbox = record.get("bbox")
+    if not _is_bbox(bbox):
+        problems.append("bbox not recorded")
+    else:
+        assert isinstance(bbox, dict)
+        width, height = float(bbox["width"]), float(bbox["height"])
+        if width < TARGET_MIN_SIZE or height < TARGET_MIN_SIZE:
+            problems.append(
+                f"bbox {width:g}x{height:g} is degenerate (minimum {TARGET_MIN_SIZE}x{TARGET_MIN_SIZE} CSS px)"
+            )
+    visibility = record.get("visibility")
+    if record.get("visible") is not True or not isinstance(visibility, dict):
+        hidden = visibility.get("hiddenBy") if isinstance(visibility, dict) else None
+        detail = f" ({hidden})" if isinstance(hidden, str) and hidden else ""
+        problems.append(f"element is not visible in the probed state{detail}")
+    return problems
+
+
+def is_valid_element_target(path: Path) -> bool:
+    """True when `path` holds a successful element-evidence.sh probe record
+    (schemaVersion 1, or 2 with passing target sanity)."""
+    data = load_json_safe(path)
+    if data is None or data.get("ok") is not True:
+        return False
+    version = data.get("schemaVersion")
+    if version not in (*_LEGACY_TARGET_SCHEMA_VERSIONS, ELEMENT_TARGET_SCHEMA_VERSION):
+        return False
+    url = data.get("url")
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return False
+    annotation = data.get("annotation")
+    if not isinstance(annotation, dict) or annotation.get("id") != "element-probe":
+        return False
+    selector = annotation.get("selector")
+    if not isinstance(selector, str) or not selector.strip():
+        return False
+    if not _is_bbox(annotation.get("bbox")):
+        return False
+    return version != ELEMENT_TARGET_SCHEMA_VERSION or not target_sanity_problems(annotation)
+
+
+def element_target_summary(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """`{selector, match_count, bbox, url}` of a target record for reports."""
+    annotation = data.get("annotation") if isinstance(data, dict) else None
+    if not isinstance(annotation, dict):
+        return None
+    bbox = annotation.get("bbox")
+    return {
+        "selector": annotation.get("selector"),
+        "match_count": annotation.get("matchCount"),
+        "bbox": dict(bbox) if isinstance(bbox, dict) else None,
+        "url": data.get("url") if isinstance(data, dict) else None,
+    }
+
+
+def is_scoped_ref_dir(ref_dir: Path) -> bool:
+    """A ref dir with a valid element-target.json and no page-level marker."""
+    if any((ref_dir / name).exists() for name in _PAGE_LEVEL_MARKERS):
+        return False
+    return is_valid_element_target(ref_dir / ELEMENT_TARGET_NAME)
+
+
+def find_scoped_ref_dirs(search_root: Path) -> list[Path]:
+    """Fresh scoped ref dirs under `search_root`, newest element-target first.
+
+    Freshness uses the same stale window as `.ui-re-active` markers, so an
+    abandoned scoped capture does not keep exempting later work.
+    """
+    if not search_root.is_dir():
+        return []
+    cutoff = time.time() - stale_seconds()
+    found: list[tuple[float, Path]] = []
+    for d in sorted(search_root.iterdir()):
+        if not d.is_dir() or not is_scoped_ref_dir(d):
+            continue
+        try:
+            mtime = (d / ELEMENT_TARGET_NAME).stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            found.append((mtime, d))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [d for _, d in found]
+
+
+def owned_scoped_ref_dirs(search_root: Path, session_id: str) -> list[Path]:
+    """Fresh scoped ref dirs this session may claim: touched by it, or not yet
+    claimed by any session (the capture scripts leave no session crumb). A
+    scoped run owned only by other sessions does not release this session's
+    off-pipeline guards."""
+    sid = session_id.strip()
+    return [
+        d
+        for d in find_scoped_ref_dirs(search_root)
+        if not ref_has_session_markers(d) or (sid and ref_touched_by_session(d, sid))
+    ]
+
+
+def scoped_refs_to_enforce(
+    search_root: Path,
+    project_root: Path,
+    session_id: str,
+    *,
+    include_clone_writes: bool = True,
+) -> list[Path]:
+    """Owned scoped ref dirs whose completion this session must prove with
+    `python -m ui_clone.scoped_check`: ones it wrote components for (session
+    crumb), or, with `include_clone_writes`, any owned one when the session has
+    clone-shaped writes. A capture-only or unrelated session is not held to a
+    scoped completion it never started; without a session id nothing can be
+    attributed, so nothing is enforced."""
+    sid = session_id.strip()
+    if not sid:
+        return []
+    owned = owned_scoped_ref_dirs(search_root, sid)
+    if not owned:
+        return []
+    writes = include_clone_writes and has_clone_writes(project_root, sid)
+    return [d for d in owned if writes or ref_touched_by_session(d, sid)]
+
+
+def _target_key(name: str) -> str:
+    return _TARGET_KEY_RE.sub("", name.lower())
+
+
+def select_scoped_ref_dir(
+    search_root: Path, file_path: str, page_ref: Path | None
+) -> Path | None:
+    """Scoped ref dir that owns a component write, else None (page-level rules).
+
+    1. A scoped dir whose name matches the written file (stem or a parent
+       directory, case/punctuation-insensitive: `pricing-modal` matches
+       `PricingModal.tsx`) wins, even over a page-level ref.
+    2. Otherwise the newest scoped dir, but only when no page-level ref is
+       found or the found one is authoritatively terminal (a closed run; a new
+       scoped clone is exactly the "new evidence directory" it asks for).
+    An active page-level run keeps its gates for every non-matching write.
+    """
+    scoped = find_scoped_ref_dirs(search_root)
+    if not scoped:
+        return None
+    if file_path:
+        path = Path(file_path)
+        parents = list(path.parent.parts)
+        # Only directories inside the source tree name a target; the project
+        # checkout's own directory names must not match a scoped dir.
+        if "src" in parents:
+            parents = parents[len(parents) - parents[::-1].index("src") :]
+        else:
+            parents = parents[-2:]
+        keys = {_target_key(part) for part in parents}
+        keys.add(_target_key(path.stem))
+        keys.discard("")
+        for ref_dir in scoped:
+            if _target_key(ref_dir.name) in keys:
+                return ref_dir
+    if page_ref is None:
+        return scoped[0]
+    from ui_clone.state import PipelineState, is_authoritative_terminal_state
+
+    if is_authoritative_terminal_state(PipelineState.load(page_ref).terminal_state):
+        return scoped[0]
+    return None
+
+
 def load_json_safe(path: Path) -> dict[str, Any] | None:
     """Load a JSON file and return it as a dict. Returns None if missing, malformed, or not an object."""
     if not path.exists():
@@ -605,6 +818,14 @@ _DEFAULT_APP_PREFIX = "/src/app/"
 # are unrestricted — anything goes under them.
 CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
     {
+        # Scoped clone target record (scripts/extract/element-evidence.sh).
+        # Canonical so the ad-hoc guard does not shadow pre_generate's
+        # dedicated no-hand-write deny for it.
+        "element-target.json",
+        # Scoped completion evidence (python -m ui_clone.scoped_diff / scoped_check);
+        # canonical for the same reason: pre_generate carries the producer deny.
+        "pixel-perfect-diff.json",
+        ".scoped-check-cache.json",
         # Phase 0A / 2 — DOM and scaffold
         "canvas-webgl-detection.json",
         "structure.json",

@@ -4,6 +4,173 @@
 
 ### Changed
 
+- Scoped clones reject reference bundle hotlinks from any host while keeping
+  the asset URLs AGENTS.md "Source fidelity" requires. `element-state-capture.sh`
+  records the script/stylesheet URLs each side's page loaded (Performance
+  entries with `script`/`link`/`css` initiators plus `<script src>` /
+  `<link rel=stylesheet>`, classified by kind or `.js`/`.mjs`/`.cjs`/`.css`
+  extension) as manifest-level `codeResources`, normalized (query and
+  fragment stripped, content-hash file-name segments collapsed). An `impl`
+  capture is refused, and `scoped_check` fails (`impl-loads-reference-code`),
+  when the impl page loads a resource in the reference inventory or any code
+  from a non-first-party origin that served reference code (a Contentful /
+  CloudFront / jsDelivr host included); third-party code the reference never
+  loaded (analytics, a locally installed library) is unaffected. The
+  reference-host rule now refuses only non-media loads (scripts, stylesheets,
+  iframes, fetch/XHR, documents); image, video, and font hotlinks from the
+  reference host are allowed, and stylesheets from font services (Google
+  Fonts, Typekit, and similar) count as font assets rather than reference
+  code, while scripts from those hosts still count as code. `capture-manifest.json` is schemaVersion 2; a
+  schemaVersion 1 manifest is reported as `<side>-manifest-schema` with the
+  re-capture instruction instead of "missing", and an impl capture without a
+  current reference inventory is refused with the capture order.
+- The scoped-evidence producers ship with a release hash manifest,
+  `ui_clone/scoped_producers.sha256.json` (`ui_clone/computed_style_diff.py`,
+  `element_capture.py`, `scoped_diff.py`, `scoped_frames.py`,
+  `scoped_provenance.py`, `scripts/extract/element-evidence.sh`,
+  `element-state-capture.sh`; hashes of content, never paths, so version bumps
+  and plugin cache directories do not change them). `scoped_check` requires
+  the module/driver hashes recorded in every manifest entry and in
+  `pixel-perfect-diff.json` to equal the manifest AND the installed files
+  (`producers-modified`, `impl-frame-producer`, `diff-provenance`).
+  `python -m ui_clone.scoped_producers --check` is wired into
+  `scripts/ci/review.sh` (`review_checks.py scoped-producers`) and
+  `tests/test_scoped_producers.py`, so a producer edit cannot ship without
+  `python -m ui_clone.scoped_producers --write` (documented in
+  `docs/agent-cli.md`); the Bash hook denies `--write` outside a checkout of
+  this plugin.
+- Target sanity for `element-target.json`. `element-evidence.sh` (schemaVersion
+  2) records `matchCount`, `visibility` (`display`, `visibility`, `opacity`,
+  `hiddenBy` from the element and its ancestors), and `visible`, and writes
+  nothing when the selector matches 0 or 2+ elements, the box is under
+  `TARGET_MIN_SIZE` 8×8 CSS px, or the element is hidden; a trigger-opened
+  container is probed and captured in its open state. `element-state-capture.sh
+  clip` applies the same rule and records it per clip; `scoped_check`
+  re-validates the record (`element-target-sanity`, `element-target-schema`
+  for a schemaVersion 1 record) and every clip entry (`<side>-target-sanity`).
+  Hooks still recognize a schemaVersion 1 record as a scoped run so an
+  in-flight run keeps its exemptions. The pass output, the JSON `target` key,
+  the Stop hook's pass line, and closeout.md's scoped report requirement now
+  surface the resolved selector, match count, and bbox so the user can confirm
+  the intended element.
+- Scoped clones now prove implementation provenance, closing the first
+  0.8.18 follow-up. `element-state-capture.sh` inventories the resources the
+  page has loaded (Performance resource entries plus script/link/iframe/img/
+  media element URLs) and refuses an `impl` capture whose page is on the
+  reference origin or loaded anything from the reference host or its
+  subdomains; the origins are recorded per frame (`resourceOrigins`) and
+  re-checked by `scoped_check` (`impl-frame-loads-reference`). `python -m
+  ui_clone.scoped_diff` runs the page-level `proxy-mirror-check.sh` and
+  `bundle-paste-check.sh` against the implementation root (both judge sources
+  alone; `html-paste-check` / `css-mirror-check` need page-level artifacts and
+  are not run) and scans the fingerprinted sources plus the app entry files
+  (`ui_clone/scoped_provenance.py` `ENTRY_FILES`, now fingerprinted too) for
+  reference-host loads, `documentElement.outerHTML` mirrors, `?raw` HTML
+  mounts, and upstream proxies. The verdicts and findings are recorded under
+  `noCheat`, the check outputs are fingerprinted as inputs, and `scoped_check`
+  requires the recorded verdicts to pass and re-runs the scan
+  (`impl-provenance`).
+- The scoped computed-style diff covers the target's element subtree, not only
+  the target: the capture eval records descendants in document order up to
+  `SUBTREE_MAX_NODES` (40), each keyed by structural path `tag[i]/tag[j]`
+  (index among element siblings; text nodes never count), with the shared
+  `computed-diff.sh` property list. `computed_style_diff.diff_records` matches
+  nodes by path; a node present on one side only, a differing descendant
+  count, or a record without a subtree (an older capture) is a named row
+  (`path`, `-` / `descendantCount` / `subtree`), never a silent skip.
+  `<state>.computed.json` is schemaVersion 2 and `pixel-perfect-diff.json`
+  schemaVersion 3; rows carry `path` (`""` for the target). Page-level
+  `diff_styles` and `computed-diff.sh` are unchanged.
+- Forging scoped evidence through the producer modules is denied at the
+  natural tools and made tamper-evident. The Bash guard denies importing
+  `ui_clone.element_capture` / `scoped_diff` / `scoped_frames` from an inline
+  `python -c`, a `python - <<EOF` heredoc, `importlib` / `runpy`, or running the
+  module file (raw-command match on import syntax; search verbs and `git
+  commit` messages are exempt; `python -m ui_clone.scoped_diff|scoped_check`
+  and `from ui_clone import scoped_check` stay allowed); the Write/Edit guard
+  denies a script that imports them into a clone project (a checkout of this
+  plugin is exempt). Every manifest entry carries a `producer` record (CLI
+  entry, argv, module sha256, and the sha256 of the driving capture script,
+  exported as `UI_CLONE_CAPTURE_DRIVER`) and `pixel-perfect-diff.json` carries
+  `producerRecord` plus a `recordSha256` self checksum; `scoped_check` rejects
+  `entry: "api"` records, a driver hash that differs from the shipped script,
+  and an artifact edited after production. Threat model (documented in
+  `docs/agent-cli.md` and `ui_clone/scoped_provenance.py`): a lazy or
+  over-eager agent, not a determined one — a forge script the hooks never see
+  or a reproduced checksum scheme is out of scope, as for every other
+  hook-protected artifact.
+- Page-level Phase D is achievable again: `comparison-fix.md` no longer tells
+  the agent to write `pixel-perfect-diff.json` (hook-denied, consumed by no
+  page gate) and `verification.md` D2 no longer asks for hand-made
+  `ref-styles.json` / `impl-styles.json` (non-canonical, Write-denied). Both
+  point at the commands that exist — D1 clip diffs and `computed-diff.sh`,
+  whose exit code is the D2 verdict — and name `pixel-perfect-diff.json` as
+  the scoped producer's artifact only. `ui-capture/comparison-page.md` Phase
+  4A embeds the D2 table instead of a JSON file. Evals 26, 27 (ui-reverse-
+  engineering), 2, 12 (visual-debug), and 6 (ui-capture) assert those commands;
+  evals 2, 20, 54, 55 name `python -m ui_clone.scoped_diff` as the producer.
+  `eval_grounding.py` drops the `ref-styles.json` / `impl-styles.json` doc
+  contract.
+- The enforcement-state Bash guard sees through quoting and interpreters. An
+  escaped double-quote program (`python3 -c "open(\"...pixel-perfect-diff.json\",
+  \"w\")"`) passed while the single-quote form was denied; every literal
+  matcher now also runs on the shell-unescaped view, an inline program of any
+  interpreter (`python -c`, `python - <<EOF`, `echo ... | python3`, `node -e`,
+  `deno eval`, `perl -e`, `ruby -e`, `php -r`, `uv run python -c`) that mentions
+  an enforcement or scoped-evidence file at all is denied (resolved shell
+  words and heredoc bodies are searched; the sanctioned reads stay `cat`, `jq`,
+  `grep`, and the status CLIs), and a `bash|sh -c '<program>'` / `eval`
+  argument is re-scanned as a command (three levels). `tee`, `cp`, `mv`,
+  `install`, `dd of=`, `ln`, and heredoc redirects already matched quoted
+  targets; tests pin each form. The canonical producer commands are unchanged.
+- Scoped evidence is accepted only when the hooks saw its producer run.
+  `ui_clone/scoped_ledger.py` keeps `<ref-dir>/.scoped-evidence-ledger.json`
+  (hook-protected like the evidence): the PostToolUse Bash hook
+  (`post_verify`, Claude and Codex, same route) records the sha256 of the
+  evidence file a producer owns after a Bash command that is exactly one
+  canonical invocation — `element-evidence.sh`, `element-state-capture.sh
+  clip|video` (script sha256 equal to the release manifest), or `python -m
+  ui_clone.scoped_diff` (no `ui_clone/` shadow under cwd/project root) —
+  alone: no `;`/`&&`/`|`/redirect/subshell and no `PATH`/`PYTHONPATH`-style
+  override. `scoped_check` requires the current hash of `element-target.json`,
+  both `capture-manifest.json` files, and `pixel-perfect-diff.json` under
+  its producer (`evidence-unledgered`) and a ledger at all
+  (`evidence-ledger-missing`), so a file written by a script the hooks never
+  saw, a producer chained with a forge, or evidence made without the hooks
+  fails; `element-capture.md` says to run each producer as its own Bash
+  command. The Bash hook also reads a script file before running it (`bash
+  x.sh`, `node x.js`, `./x.py`, `uv run x.py`, anything outside the plugin
+  root, dependency trees excluded) and denies it when its content names an
+  enforcement/evidence file, imports a scoped producer, or drives the
+  recorder (`ui_clone/hooks/pre_bash_rules/agent_script.py`). Test fixtures
+  ledger what they produce, as the hook would.
+- The ledger records the producer commands a clone project actually runs.
+  Before splitting the text it expands `$PLUGIN_ROOT` / `$CLAUDE_PLUGIN_ROOT` /
+  `$CODEX_PLUGIN_ROOT` (and `${...}`) to the hook's own plugin root (refused
+  when the hook's environment gives that variable another root) and `$(pwd)` /
+  `$PWD` to the command's cwd; any other variable, `$(...)`, backtick, or
+  newline leaves the command unrecorded. `uv run` takes value-less flags,
+  `--directory`, and a `--project` naming the plugin root only (`--with`,
+  `--python`, `--env-file` refuse); `UV_*` / `UI_CLONE_HOOK_VENV` /
+  `VIRTUAL_ENV` prefixes are overrides. `bin/ui-clone` gains `scoped-diff`,
+  the clone-project diff form (`node "$PLUGIN_ROOT/bin/ui-clone" scoped-diff
+  "$(pwd)/tmp/ref/<target>"`; `python -m ui_clone.scoped_diff` cannot import
+  `ui_clone` outside the checkout). `element-capture.md`, `comparison-fix.md`,
+  `closeout.md`, `evidence-contracts.md`, and `docs/agent-cli.md` use the
+  `$PLUGIN_ROOT` / `$(pwd)` forms, and `tests/hooks/test_scoped_ledger_docs.py`
+  parses every documented producer command so docs and ledger cannot drift.
+- Fetch-only reference bundles are inventoried. The capture eval records
+  `PerformanceResourceTiming.contentType` (Chromium; empty elsewhere, no
+  extra request) per resource, and a `fetch`/`other` load with a JavaScript,
+  CSS, or wasm content type is code whatever its URL. Independently, an impl
+  page that loads anything but media (fetch/XHR, `other`, iframe, document)
+  from a non-first-party origin that served reference code is refused at
+  capture and by `scoped_check` (`impl-loads-reference-code`, from the
+  recorded `resourceOrigins`), so an extensionless chunk pulled from the
+  reference's CDN is caught even without a content type. Media and font
+  hotlinks are still allowed; the reference-host rule is unchanged.
+
+
 - `ui_clone/section_compare_sections.py` (2716 lines) and
   `ui_clone/section_capture.py` (1566 lines) are split into cohesive sibling
   modules (`section_compare_{common,synthesis,merge,scoring,pairing,coverage,drift}.py`,
@@ -31,6 +198,44 @@
   after the trigger, and report the result as scoped rather than page-verified.
   The automated pipeline has no selector option, so scoped runs follow the
   element-capture path.
+- Scoped clones now complete on a gate: `python -m ui_clone.scoped_check
+  <ref-dir> [--json]` (also `ui-clone scoped-check`) passes only on a valid
+  `element-target.json`, matching `frames/ref/` and `frames/impl/`, a passing
+  and fresh `pixel-perfect-diff.json`, and open and close evidence for
+  trigger-opened UI; the Stop hook and the commit/push guard block a scoped
+  run the session wrote until it passes.
+- Scoped completion evidence is script-produced and recomputed, never
+  agent-written. `scripts/extract/element-state-capture.sh clip|video` is the
+  capture step for both sides (element-capture.md): it validates the
+  agent-browser session origin, records the target's computed styles for the
+  `computed-diff.sh` property list (`frames/<side>/<state>.computed.json`,
+  list shared through `ui_clone/computed_style_diff.py`), crops the clip or
+  extracts 60fps frames, and stamps `frames/<side>/capture-manifest.json`
+  (page origin, session, timestamp, sha256 per frame). `python -m
+  ui_clone.scoped_diff <ref-dir>` produces `pixel-perfect-diff.json` from those
+  records (clip AE plus computed-style mismatches per resting state) with
+  producer, property-list, input, and source fingerprints. `scoped_check`
+  re-hashes every frame against its manifest, requires ref frames from the
+  reference origin and impl frames from a different origin (a reference frame
+  copied, linked, or captured from the reference site into `frames/impl/`
+  fails even when pixel-identical), re-validates the diff's provenance and
+  input/source hashes (freshness is content-based, not mtime-based), and
+  re-runs the computed-style diff per row. Hand writes to
+  `pixel-perfect-diff.json`, `capture-manifest.json`, and
+  `.scoped-check-cache.json` are denied by the Write/Edit and Bash guards
+  like `element-target.json`, and `ui_clone.element_capture` may not be
+  driven directly. Before this, a Write of `pixel-perfect-diff.json` was
+  already denied as a non-canonical ref artifact, so the documented
+  agent-written Phase D was not achievable through the tools.
+- Scoped motion sequences (`frame-NNNN`, `open-NNNN`, `close-NNNN`) are judged
+  with the page-level video criteria instead of AE 0 per frame, which two
+  independent recordings cannot reach: first-change alignment, arc timing
+  within 18 frames, and per-frame SSIM ≥ 0.90 with a ±1 frame jitter retry,
+  the values `scripts/verify/video-transition-compare.sh` and
+  `lib/frame-align.sh` use (pinned by test). Resting-state clips stay at AE 0.
+  Sequence verdicts are cached by frame content hash in
+  `.scoped-check-cache.json` (two 180-frame 400×300 sequences: about 2 s cold,
+  under 0.1 s cached), so the per-turn Stop hook recheck stays cheap.
 - `operational-rules.md` adds "Cleaning up tmp/ref/": cleanup only on explicit
   request, after all gates, with a warning that resume and re-verification
   become impossible; `README_detail/security.md` and the pre-bash reset advice
@@ -74,16 +279,65 @@
   dated lab notes in hooks, gates, and check scripts were reworded to timeless
   wording. Shellcheck SC2069/SC2034/SC2154 sites now carry explicit
   justifications or dropped dead assignments, with no redirect behavior change.
+- Hooks recognize a scoped run (a fresh `tmp/ref/<target>/` with a valid
+  `element-evidence.sh` record and no page-level marker): component writes for
+  the matching target skip the page-level pre-generate gate, and the
+  off-pipeline Stop and commit guards give way to the scoped completion check; `element-target.json` and the
+  Stop retry ledger are protected from hand writes, the Codex SessionStart
+  matcher includes `compact`, and the repeated Stop line names the failing items.
 
 ### Known follow-up
 
-- Scoped clones (section, element, modal) complete on documented element-scope
-  evidence, not on a gate: `pipeline verify`, `completion-report.sh --check`,
-  and `goal --check-done` have no selector and the Stop hook does not engage.
-  Next step: a small checker that requires populated `frames/ref/` and
-  `frames/impl/`, a passing `pixel-perfect-diff.json`, and open/close evidence
-  for trigger-opened UI, then a selector contract shared by capture,
-  section-compare, and completion checks.
+- Scoped clones complete on `python -m ui_clone.scoped_check`, but the page
+  pipeline still has no selector option: `pipeline verify`,
+  `completion-report.sh --check`, and `goal --check-done` stay page-level, so
+  the element-capture path (`element-state-capture.sh` + `scoped_diff` +
+  `scoped_check`) is the supported scoped route. A `--selector` on capture /
+  section-compare was evaluated and deferred: the capture and section-compare
+  producers, their gates, and the verification plan all assume a page, so a
+  minimal flag would either be cosmetic or fork the gate contract. Design
+  note for the follow-up (not started): (1) add a `selector` field to
+  `ui_clone/state.py` pipeline state and a `--selector` on `python -m
+  ui_clone.pipeline ... capture` that `scripts/extract/capture-*.sh` pass to
+  `element-evidence.sh` so `element-target.json` is produced inside the page
+  run; (2) make `skills/visual-debug/scripts/section-compare.sh` and
+  `ui_clone/section_compare_pairing.py` restrict the section set to the
+  sections whose bbox contains the target when the state carries a selector
+  (a new `scope` block in `sections/result.json` recording the selector and
+  the sections kept); (3) make `verification-plan.sh`, `completion-report.sh
+  --check`, and `goal --check-done` read that `scope` block and delegate the
+  element-level verdict to `python -m ui_clone.scoped_check` instead of the
+  page-level AE/SSIM sweep, while keeping the page gates (`hydration-check`,
+  `font-parity`, provenance) unchanged; (4) let `pre_generate` /
+  `select_scoped_ref_dir` treat a page run with a selector as scoped for the
+  component-write exemption. Tests: a `tests/hooks/test_pipeline_selector.py`
+  fixture that runs the state machine with and without `--selector` and
+  asserts the section subset, the `scope` block, the delegated verdict, and
+  that a run without a selector is byte-identical to today's artifacts;
+  `docs/gates.md` gets the new artifact rows.
+- Scoped provenance still trusts that the one visible element
+  `element-target.json` names is the one the user meant (the pass output
+  surfaces selector, match count, and bbox for confirmation) and that sources
+  outside the fingerprinted set (component files, files named after the
+  target, app entry files) do not proxy the site; `html-paste-check` /
+  `css-mirror-check` stay page-level. Reference code detection covers loads
+  by initiator kind, code extension, or reported content type, plus any
+  non-media load from a non-first-party origin that served reference code; a
+  bundle the reference fetched only through `fetch`/`other` from an origin
+  that served no other code, on a browser without
+  `PerformanceResourceTiming.contentType`, is still not inventoried, pages
+  past the resource-timing buffer rely on DOM `src` collection, and a
+  library CDN the reference also uses must be installed locally rather than
+  loaded from that origin. The forgery guards target an over-eager agent
+  using normal tools, now including inline programs in any quoting, nested
+  shells, and scripts the hook can read before they run; the evidence ledger
+  rejects files no producer command was seen to write. Out of scope: a
+  script the hooks never see that edits the ledger itself, an interpreter
+  shadowed on `PATH` by an earlier command, a path assembled from variables,
+  or a forged release manifest written outside the hook's view. Scoped
+  evidence captured before this schema (`element-target.json` schemaVersion
+  1, `capture-manifest.json` schemaVersion 1) or before the ledger existed is
+  named by `scoped_check` and must be re-probed / re-captured.
 
 - Mobile-responsive clones still couple the inline-bake and un-bake passes:
   `scaffold-to-jsx.sh` bakes desktop-resolved computed styles inline, so
@@ -92,7 +346,25 @@
   fidelity and was not landed; the remaining step is a real cascade resolver
   (specificity + inheritance + `@media`-off) that only un-bakes properties the
   reference CSS supplies. The unlanded design notes and their stale patch were
-  removed from `docs/`.
+  removed from `docs/`. Design note for the follow-up (not started): (1) a
+  new `ui_clone/cascade_resolver.py` that parses the extracted stylesheets
+  (`tmp/ref/<c>/bundles/*.css`, `extracted.json` rules) with a CSS parser
+  already in the lockfile or stdlib-only tokenizing, and for each scaffold
+  node computes the winning declaration per property at the desktop viewport
+  with `@media` blocks evaluated as off, honoring specificity, source order,
+  `!important`, and inheritance for the inherited properties; (2)
+  `scripts/extract/scaffold-to-jsx.sh` calls it and un-bakes only the
+  properties whose desktop value the resolver reproduces from reference CSS,
+  leaving every property the resolver cannot explain baked inline (so
+  desktop fidelity cannot regress by construction); (3) the emitted component
+  keeps the reference `@media` rules in a scoped stylesheet so mobile
+  viewports re-flow; (4) `scripts/verify/verify-responsive.sh` (or the
+  existing breakpoint sweep) gains a mobile AE/SSIM row. Tests:
+  `tests/test_cascade_resolver.py` with fixture stylesheets covering
+  specificity ties, `!important`, inheritance, and nested `@media`; a
+  `scaffold-to-jsx` fixture asserting the desktop-rendered computed styles
+  are unchanged before/after un-baking (the regression that blocked the
+  earlier attempt) and that a mobile viewport picks up the `@media` values.
 
 ## [0.8.17] - 2026-09-23
 

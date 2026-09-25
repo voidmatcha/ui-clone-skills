@@ -205,6 +205,15 @@ else
   err "skill evals reference repo artifacts that do not exist (run: python3 scripts/ci/review_checks.py eval-grounding)"
 fi
 
+# ── 4c. Scoped-evidence producer release manifest ──
+section "Scoped producer hashes"
+
+if python3 scripts/ci/review_checks.py scoped-producers; then
+  ok "scoped-evidence producers match ui_clone/scoped_producers.sha256.json"
+else
+  err "scoped producer changed without regenerating the manifest (run: python -m ui_clone.scoped_producers --write)"
+fi
+
 # ── 5. Gate-artifact timing ──
 section "Gate-artifact timing"
 

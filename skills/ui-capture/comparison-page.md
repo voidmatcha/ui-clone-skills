@@ -9,15 +9,17 @@ Generate `$OUT_DIR/compare.html` for side-by-side human review of original vs cl
 
 For each section in `regions.json` plus any static-only sections (header, footer, hero):
 1. Follow `visual-debug/verification.md` Phase D1 to capture clip screenshots and run pixel diff
-2. Produce `$OUT_DIR/pixel-perfect-diff.json` with `"result": "pass"`
+2. Run `visual-debug/verification.md` Phase D2 (`computed-diff.sh` per selector) and keep its printed table
 
-The diff JSON must be embedded in the compare.html output (see HTML structure below).
+The D2 table must be embedded in the compare.html output (see HTML structure
+below). There is no `pixel-perfect-diff.json` at page level — that file is the
+scoped-clone artifact of `python -m ui_clone.scoped_diff` and the hooks deny
+writing it by hand.
 
 Gate before generating compare.html:
 ```
-□ pixel-perfect-diff.json exists at $OUT_DIR/pixel-perfect-diff.json
-□ All elements status = "pass" (Visual Gate criterion)
-□ mismatches = 0 (Numerical Diagnosis criterion)
+□ Every D1 clip pair at AE 0 / SSIM >= 0.995 (Visual Gate criterion)
+□ `computed-diff.sh` exits 0 for every selector (Numerical Diagnosis criterion)
 ```
 
 Both must pass. If Visual Gate fails or mismatches > 0 → fix CSS → re-run Phase 1 + Phase 2 → THEN generate compare.html.
@@ -54,8 +56,9 @@ Both must pass. If Visual Gate fails or mismatches > 0 → fix CSS → re-run Ph
   <h1>Original vs Clone</h1>
 
   <h2>Pixel-Perfect Visual Gate</h2>
-  <!-- Embed pixel-perfect-diff.json results as table -->
-  <!-- Show: element, state (idle/active), ae, ssim, status -->
+  <!-- Embed the Phase D results as a table: D1 clip AE/SSIM per element and state, D2 computed-diff.sh rows -->
+  <!-- Show: element, state (idle/active), ae, ssim, status; then property, ref value, impl value, status -->
+  <!-- Source: the D1 compare output and the printed computed-diff.sh table (no page-level JSON artifact) -->
   <!-- Summary line: "N elements failed" in red if any, "All pass — pixel perfect" in green if none -->
 
   <button id="play-all">▶ Play All</button>
@@ -219,7 +222,7 @@ cp -r "$OUT_DIR" public/ui-capture-compare
 npx serve "$OUT_DIR" -p 3002
 ```
 
-Present URL to user and wait for feedback (interactive mode) or check pixel-perfect-diff.json (autonomous mode). Then return to the caller per `references/manual-capture.md` → Transition and comparison contract.
+Present URL to user and wait for feedback (interactive mode) or check the embedded Phase D table (autonomous mode: every D1 pair passes and `computed-diff.sh` exited 0). Then return to the caller per `references/manual-capture.md` → Transition and comparison contract.
 
 ---
 

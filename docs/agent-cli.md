@@ -163,6 +163,197 @@ node bin/ui-clone goal <ref-dir> [--json]
 
 Prints the goal card (target, progress, hard-cap state) for a run.
 
+## Scoped check
+
+```bash
+node bin/ui-clone scoped-check <ref-dir> [--impl-root <dir>] [--json]
+node "$PLUGIN_ROOT/bin/ui-clone" scoped-check "$(pwd)/tmp/ref/<target>" [--json]   # from a clone project
+python -m ui_clone.scoped_check <ref-dir> [--impl-root <dir>] [--json]
+```
+
+Completion command for a scoped clone (section-only, element-only, or a
+trigger-opened modal/drawer; a ref dir with a script-produced
+`element-target.json` and no page-level marker), which the page-level
+`verify` / `completion-report.sh --check` / `goal --check-done` cannot certify.
+Exit codes: 0=PASS, 1=BLOCKED, 2=usage error. It passes only when:
+
+- the installed producer files hash as the shipped release manifest
+  `ui_clone/scoped_producers.sha256.json` (`python -m ui_clone.scoped_producers
+  --check`; `producers-modified` otherwise);
+- `element-target.json` is a valid `element-evidence.sh` record (schemaVersion
+  2: `matchCount` 1, `bbox` at least 8×8 CSS px, `visible`; an older record
+  fails `element-target-schema` and must be re-probed) and the dir has no
+  `.ui-re-active`, `extracted.json`, or `pipeline-state.json`. The pass output
+  and JSON `target` carry the resolved selector, match count, and bbox;
+- `frames/ref/` and `frames/impl/` hold the same non-empty set of images, and
+  each side's `capture-manifest.json` (schemaVersion 2, written only by
+  `scripts/extract/element-state-capture.sh`; an older manifest fails
+  `<side>-manifest-schema` and must be re-captured) lists every frame with a
+  sha256 that still matches (recomputed), a `producer` record from the
+  recorder CLI whose driver and module sha256 equal the release manifest, the
+  `resourceOrigins` the page had loaded, per-clip target sanity, and the
+  side's `codeResources` (normalized script/stylesheet URLs: query and
+  fragment stripped, content-hash file-name segments collapsed). Ref entries
+  must carry the reference origin from `element-target.json`; impl entries
+  must carry a different origin (the local implementation), no non-media
+  resource from the reference host or its subdomains (images, video, and
+  fonts are the preserved asset URLs and stay allowed), and no code resource
+  in the reference inventory or from a non-first-party origin that served
+  reference code (`impl-loads-reference-code`; third-party code the reference
+  never loaded, such as analytics, is not affected), so a reference frame
+  copied, linked, or captured from the reference site — or from a local
+  proxy, iframe, or page running the reference bundles from any host — into
+  `frames/impl/` fails. Impl frames that predate `element-target.json` fail;
+- resting-state clips (`idle`, `active`, `before`, `mid`, `after`, `open`) have
+  AE 0 (recomputed; size mismatch fails). Motion sequences (`frame-NNNN`,
+  `open-NNNN`, `close-NNNN`) pass the page-level video criteria of
+  `scripts/verify/video-transition-compare.sh` / `lib/frame-align.sh`:
+  first-change alignment, arc within 18 frames, per-frame SSIM ≥ 0.90 with a
+  ±1 frame jitter retry. Sequence verdicts are cached by frame content hash in
+  `.scoped-check-cache.json` (about 2 s cold for two 180-frame 400×300
+  sequences, under 0.1 s cached), so the Stop hook stays cheap;
+- `pixel-perfect-diff.json` was produced by the `python -m ui_clone.scoped_diff
+  <ref-dir>` CLI (`schemaVersion` 3, `producer`, `producerRecord` with
+  `entry: "cli"` and the argv, property-list fingerprint of
+  `ui_clone.computed_style_diff`, the `computed-diff.sh` list, and a
+  `recordSha256` self checksum that an edit breaks). Every input it
+  fingerprints (`element-target.json`, both manifests, every clip and
+  `<state>.computed.json`, the no-cheat outputs) and every source (`implFiles`,
+  files named after the target, and the app entry files under `--impl-root`,
+  default the project root above `tmp/ref/`) must still hash the same, every
+  current clip must be covered, `result` must be `pass` with `mismatches: 0`,
+  and every resting-state row must pass with `ae` 0 and a computed-style diff
+  — the target plus its element subtree (up to 40 descendants matched by
+  structural path `tag[i]/tag[j]`, index among element siblings; a node on one
+  side only or a differing descendant count is a named structural mismatch) —
+  that re-runs empty here;
+- implementation provenance (`ui_clone.scoped_provenance`): the recorded
+  page-level `proxy-mirror-check` and `bundle-paste-check` verdicts are `pass`
+  (their outputs are fingerprinted), and the fingerprinted sources, re-scanned
+  here, carry no reference-host load (`src`/`href`/`url()`/`@import`/`fetch`/
+  `import` naming the reference host or a subdomain), no
+  `document.documentElement.outerHTML` mirror, no `?raw` HTML mount, and no
+  upstream proxy;
+- trigger-opened UI (`open.webm`/`close.webm`, `open*`/`close*` frames, or a
+  `dialog` role on the probed element) has both recordings, `open.png`,
+  `open-NNNN.png` and `close-NNNN.png` on both sides, and a passing `open` row.
+
+JSON keys: `status` (`passed` | `failed`), `failures[]` (`code`, `reason`),
+`target` (`selector`, `match_count`, `bbox`, `url`),
+`trigger_opened`, `frames_compared`, `sequences` (per prefix: `pass`,
+`aligned`, `ref_arc`, `impl_arc`, `min_ssim`), `impl_sources`, `impl_root`,
+`ref_dir`, `next_action`. The Stop hook and the commit/push/PR guard block a
+scoped run this session wrote components for (or any owned scoped run once it
+has clone-shaped writes) until this exits 0, with the page-level retry cap and
+repeat-message behavior. `pixel-perfect-diff.json`, `capture-manifest.json`,
+and `.scoped-check-cache.json` are hook-protected like `element-target.json`
+(no tool or shell writes, including Python file APIs in `-c` programs and
+heredocs, `node -e` / `perl -e` / `ruby -e` / stdin programs, escaped quotes,
+and nested `bash -c` / `eval` programs); `ui_clone.element_capture` may not be
+driven by hand, and `element_capture` / `scoped_diff` / `scoped_frames` may
+not be imported from a shell program or written into a script in a clone
+project (the Bash and Write/Edit hooks deny both; `ui-clone scoped-diff` /
+`python -m ui_clone.scoped_diff` and `scoped_check` stay allowed). Running a script
+outside the plugin whose content names one of these files or producers
+(`bash forge.sh`, `node x.js`, `./x.py`) is denied by the Bash hook, which
+reads the file before it runs.
+
+Evidence ledger (`ui_clone.scoped_ledger`, `.scoped-evidence-ledger.json`
+under the ref dir, hook-protected like the evidence): after every Bash
+command, the PostToolUse hook (`post_verify`, Claude and Codex) checks whether
+the command text is exactly one canonical producer invocation —
+`element-evidence.sh`, `element-state-capture.sh clip|video`,
+`node <plugin-root>/bin/ui-clone scoped-diff`, or `python -m
+ui_clone.scoped_diff` (optionally `uv run [--project <plugin-root>]`), alone:
+no `;`/`&&`/`|`/newline/redirect/subshell, no `PATH`/`PYTHONPATH`/`UV_*`-style
+override or root-variable prefix, the script's sha256 equal to the release
+manifest, no `ui_clone/` directory shadowing the installed package — and if
+so records the sha256 of the evidence file that producer owns. Before
+splitting the text the hook expands only `$PLUGIN_ROOT` / `$CLAUDE_PLUGIN_ROOT`
+/ `$CODEX_PLUGIN_ROOT` (and `${...}`), to the plugin root the hook runs from
+(a value the hook's own environment gives that variable must resolve there),
+and `$(pwd)` / `$PWD` / `${PWD}`, to the command's working directory; any
+other variable, `$(...)`, or backtick leaves the command unrecorded, as does a
+`uv run` option other than value-less flags, `--directory`, and a `--project`
+naming the plugin root. The documented clone-project forms, which
+`tests/hooks/test_scoped_ledger_docs.py` keeps in sync with the parser:
+
+```bash
+bash "$PLUGIN_ROOT/scripts/extract/element-evidence.sh" <session> <page-url> "<target-selector>" "$(pwd)/tmp/ref/<target>/element-target.json"
+bash "$PLUGIN_ROOT/scripts/extract/element-state-capture.sh" clip <session> <page-url> "<target-selector>" "$(pwd)/tmp/ref/<target>" <ref|impl> <state>
+bash "$PLUGIN_ROOT/scripts/extract/element-state-capture.sh" video <session> <page-url> "$(pwd)/tmp/ref/<target>" <ref|impl> tmp/ref/<target>/<clip>.webm <prefix>
+node "$PLUGIN_ROOT/bin/ui-clone" scoped-diff "$(pwd)/tmp/ref/<target>"
+```
+
+`scoped_check`
+requires the current hash of `element-target.json`, both
+`capture-manifest.json` files, and `pixel-perfect-diff.json` to appear under
+its producer (`evidence-unledgered`, `evidence-ledger-missing`). Evidence
+therefore has to be produced one command per Bash call with the hooks
+installed; a producer chained with other commands, run from a script, or run
+on a host without the hooks yields files the checker refuses.
+
+Threat model and limits: the records are tamper-evident, not
+cryptographic. They stop a lazy or over-eager agent using the natural tools
+(shell redirects, inline programs in any quoting, hand-edited JSON, a forge
+script run from the shell, a proxy or iframe of the reference, a re-used
+reference bundle, an edited producer module). Out of scope, as for every
+other hook-protected artifact: a script the hooks never see that edits the
+ledger itself (a plain file next to the evidence — the guards deny naming it
+on a command line or in a script the hook can read, not an unseen write), an
+interpreter or `bash` shadowed on `PATH` by an earlier command, an
+obfuscated path built from variables, or a reproduced checksum scheme plus a
+forged release manifest. Still trusted: that the one visible element
+`element-target.json` names is the one the user meant (the pass output
+surfaces it for confirmation), that a resource the reference fetched from an
+origin that served no code by kind, extension, or reported content type
+(`PerformanceResourceTiming.contentType`, empty on browsers without it) is
+not part of its runtime, and that sources outside the fingerprinted set
+(component files, files named after the target, the app entry files) do not
+proxy the site; `html-paste-check` and `css-mirror-check` do not run for
+scoped clones because they need page-level artifacts (`dom-scaffold.json`,
+`bundle-map.json`, `bundles/`).
+
+## Scoped producers manifest
+
+```bash
+python -m ui_clone.scoped_producers --check    # installed producers match the release manifest
+python -m ui_clone.scoped_producers --write    # maintainers only: regenerate after editing a producer
+```
+
+`ui_clone/scoped_producers.sha256.json` lists the sha256 of the scoped-evidence
+producers (`ui_clone/computed_style_diff.py`, `element_capture.py`,
+`scoped_diff.py`, `scoped_frames.py`, `scoped_provenance.py`,
+`scripts/extract/element-evidence.sh`, `element-state-capture.sh`). Hashes are
+of content, not paths, so a version bump or a plugin cache directory leaves
+them unchanged. `scoped_check` requires the hashes in the evidence, in the
+manifest, and of the installed files to agree; `scripts/ci/review.sh`
+(`review_checks.py scoped-producers`) and `tests/test_scoped_producers.py`
+fail when a producer changes without `--write`. The Bash hook denies `--write`
+outside a checkout of this plugin.
+
+## Scoped diff
+
+```bash
+node "$PLUGIN_ROOT/bin/ui-clone" scoped-diff "$(pwd)/tmp/ref/<target>" [--impl-root <dir>] [--impl-files <path> ...] [--json]
+python -m ui_clone.scoped_diff <ref-dir> [--impl-root <dir>] [--impl-files <path> ...] [--json]
+```
+
+The first form runs from a clone project (the wrapper puts the plugin root on
+`PYTHONPATH`; `[tool.uv] package = false` keeps `ui_clone` out of the venv);
+the second only from a checkout of this plugin. Producer of `pixel-perfect-diff.json` (comparison-fix.md Phase D, element
+scope). Needs no browser: it reads the clips and `<state>.computed.json`
+records captured by `element-state-capture.sh` on both sides, computes clip
+AE and the computed-style mismatches per resting state for the target and
+its recorded subtree (rows carry the node `path`, `""` for the target), runs
+the page-level `proxy-mirror-check.sh` and `bundle-paste-check.sh` against
+the implementation root and scans the fingerprinted sources for reference
+loads (`noCheat`), and writes the rows with provenance (producer record, input
+and source hashes, self checksum). Exit codes: 0 = pass, 1 = fail (artifact
+written so the rows can be read), 2 = usage / inputs missing. Only this CLI
+produces a record `scoped_check` accepts; `build()` called from an import
+records `entry: "api"` and is rejected.
+
 ## Bounded logs for agent hosts
 
 When `pipeline run` includes Phase 1, provisional or failed reference evidence

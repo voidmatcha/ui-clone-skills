@@ -83,10 +83,28 @@ Canonical completion binds the selected scope and representative viewports.
 Desktop completion covers the representative viewport plus mandatory live boundary
 probes, and must be reported as desktop-only. Scope expansion requires verification.
 A section-only, element-only, or trigger-opened modal/drawer clone uses the
-element-scope evidence (`frames/ref/` populated, element-scope AE, and
-`pixel-perfect-diff.json`) described in `skills/visual-debug/comparison-fix.md`;
+element-scope evidence described in `skills/visual-debug/comparison-fix.md`:
+`element-target.json` from `element-evidence.sh` (schemaVersion 2: exactly one
+match, box ≥ 8×8 px, visible; the pass output names selector, match count,
+and bbox), `frames/{ref,impl}/` captured by `scripts/extract/element-state-capture.sh`
+(per-side `capture-manifest.json` with page origin, loaded-resource origins,
+the script/stylesheet inventory `codeResources`, per-clip target sanity,
+producer record, and sha256 per frame; an impl page that loads non-media
+resources from the reference host, or any reference script/stylesheet from
+any host, is refused — media and font hotlinks are allowed), producer hashes
+equal to the shipped `ui_clone/scoped_producers.sha256.json` and the installed
+files, resting clips at AE 0, motion sequences under the
+`video-transition-compare.sh` criteria (first-change alignment, arc ≤ 18
+frames, SSIM ≥ 0.90 with ±1 frame jitter), and `pixel-perfect-diff.json`
+produced by the `python -m ui_clone.scoped_diff` CLI (target + subtree style
+rows, page-level `proxy-mirror-check` / `bundle-paste-check` verdicts, a
+reference-load source scan, producer record, self checksum).
+It completes on `python -m ui_clone.scoped_check <ref-dir>` (see
+`docs/agent-cli.md`), which recomputes every verdict from those artifacts;
 the gates above are page-level and do not certify a subtree boundary, so a
 scoped result is reported as scoped, not as page-level canonical completion.
+The page pipeline has no selector option, so the element-capture path is the
+supported scoped route.
 
 `scroll-completion.json` records an `endpoint` measurement per viewport. The
 probe traverses delayed scroll gates before sampling and requires a stable

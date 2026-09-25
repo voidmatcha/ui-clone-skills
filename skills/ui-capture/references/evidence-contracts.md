@@ -30,9 +30,14 @@ For a target named by the user, mismatch report, or DOM evidence, use any valid
 CSS selector; do not assume semantic classes:
 
 ```bash
-TARGET_SELECTOR='<css-selector-from-dom-evidence>'
-bash "$PLUGIN_ROOT/scripts/extract/element-evidence.sh" "$SESSION" "$URL" "$TARGET_SELECTOR" "$OUT_DIR/element-target.json"
+bash "$PLUGIN_ROOT/scripts/extract/element-evidence.sh" <session> <url> \
+  '<css-selector-from-dom-evidence>' "$(pwd)/tmp/ref/<target>/element-target.json"
 ```
+
+Write the values in literally and run it as its own Bash command: the hook
+ledgers `element-target.json` only for this lone form and expands no variable
+besides the plugin root and `$(pwd)` (see
+[element-capture.md](../../ui-reverse-engineering/element-capture.md)).
 
 This is an element probe that identifies a scoped clone's target; by itself it is
 not proof that a section-only clone stayed within scope. Scoped fidelity still

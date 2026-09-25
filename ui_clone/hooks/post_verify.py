@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from pathlib import Path
 
 from ui_clone.hooks._common import extract_tool_command as _extract_tool_command
 from ui_clone.hooks._common import find_project_root as _find_project_root
@@ -21,6 +22,7 @@ from ui_clone.hooks._common import session_id_from_payload as _session_id_from_p
 from ui_clone.hooks._common import (
     target_ref_dir_for_ui_re_command as _target_ref_dir_for_ui_re_command,
 )
+from ui_clone.scoped_ledger import record_command as _record_producer_command
 
 # Word-boundary patterns for English terms to avoid false positives like
 # "let's commit to this" or "commitment" triggering the hook.
@@ -38,31 +40,50 @@ def _is_completion_command(cmd: str) -> bool:
     return bool(_WORD_BOUNDARY_PATTERNS.search(cmd))
 
 
+def _payload_cwd(data: dict) -> Path | None:
+    raw = data.get("cwd", "")
+    if isinstance(raw, str) and raw and Path(raw).is_dir():
+        return Path(raw).resolve()
+    return None
+
+
 def main() -> None:
     raw_input = sys.stdin.read() if not sys.stdin.isatty() else ""
 
     project_root = _find_project_root()
     search_root = project_root / "tmp" / "ref"
-    ref_dir = _find_ref_dir(search_root)
-
-    if ref_dir is None:
-        sys.exit(0)
-
-    # Only run if inside an active ui-re session (WIP marker present)
-    if not (ref_dir / ".ui-re-active").is_file():
-        sys.exit(0)
 
     # Parse tool input to extract bash command
     bash_cmd = ""
     session_id = ""
+    payload_cwd: Path | None = None
     if raw_input.strip():
         try:
             data = json.loads(raw_input)
             if isinstance(data, dict):
                 bash_cmd = _extract_tool_command(data)
                 session_id = _session_id_from_payload(data)
+                payload_cwd = _payload_cwd(data)
         except json.JSONDecodeError:
             pass
+
+    # Scoped evidence ledger (ui_clone.scoped_ledger): a finished Bash command
+    # that IS one canonical producer invocation gets the hash of the evidence
+    # it wrote recorded; scoped_check accepts no evidence without that record.
+    # Runs before the page-level early exits: a scoped run has no .ui-re-active.
+    if bash_cmd:
+        try:
+            _record_producer_command(bash_cmd, base=payload_cwd or project_root, project_root=project_root)
+        except Exception:  # noqa: BLE001 - the ledger must never break the advisory hook
+            pass
+
+    ref_dir = _find_ref_dir(search_root)
+    if ref_dir is None:
+        sys.exit(0)
+
+    # Only run if inside an active ui-re session (WIP marker present)
+    if not (ref_dir / ".ui-re-active").is_file():
+        sys.exit(0)
 
     target_ref_dir = _target_ref_dir_for_ui_re_command(bash_cmd, project_root)
     if target_ref_dir is not None:

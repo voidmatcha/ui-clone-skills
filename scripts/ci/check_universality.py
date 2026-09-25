@@ -155,16 +155,17 @@ RULES = (
         # the rule or finding, never the day it was written. Markdown keeps
         # the narrower rule above (docs may legitimately date a design
         # record); CHANGELOG / benchmark / internal / tests are excluded trees.
-        # Data files (eval fixtures, manifests, config) may carry real dates
-        # such as `"captured": "2026-09-24"`, so JSON is scanned only under
-        # hooks/, whose manifests hold prose status messages; TOML/YAML never.
+        # Data files (eval fixtures, data JSON, config) may carry real dates
+        # such as `"captured": "2026-09-24"`, so JSON is scanned only in the
+        # prose-carrying manifests (hooks/, .claude-plugin/, .codex-plugin/:
+        # status messages, descriptions, default prompts); TOML/YAML never.
         "Bare date stamps in code (YYYY-MM-DD / YYYY-MM / YYYY-0X-XX)",
         re.compile(
             r"(?<![\w.-])20[0-9]{2}-(?:[01][0-9]|[0-9X]X)(?:-(?:[0-3][0-9]|[0-9X]X))?(?![\w-])"
         ),
         frozenset({".py", ".sh", ".json"}),
         data_suffixes=frozenset({".json"}),
-        data_dirs=("hooks",),
+        data_dirs=("hooks", ".claude-plugin", ".codex-plugin"),
     ),
     Rule(
         "Codex iteration labels (codex-1N / Codex LN QN / Round N)",

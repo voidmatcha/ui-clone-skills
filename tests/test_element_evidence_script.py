@@ -14,7 +14,10 @@ def test_element_evidence_script_is_extensionless_agent_browser_probe() -> None:
 
     assert "agent-browser --session \"$SESSION\" eval --json \"$EVAL_JS\"" in script
     assert "(() => {" in script
-    assert "document.querySelector(selector)" in script
+    assert "document.querySelectorAll(selector)" in script
+    assert "matchCount !== 1" in script
+    assert "visibilityOf(element)" in script
+    assert "target_sanity_problems" in script
     assert "selectorCandidatesFor(element)" in script
     assert ":nth-of-type(" in script
     assert "data-testid" in script
@@ -43,6 +46,73 @@ def test_element_evidence_embedded_eval_is_valid_javascript(tmp_path: Path) -> N
     result = subprocess.run(["node", "--check", str(js_path)], check=False, capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
+
+
+def _passing_probe(url: str, **overrides: object) -> dict[str, object]:
+    """A successful element-evidence.sh eval result (schemaVersion 2)."""
+    annotation: dict[str, object] = {
+        "id": "element-probe",
+        "selector": ".hero",
+        "selectorCandidates": [".hero"],
+        "text": "Hero",
+        "matchCount": 1,
+        "bbox": {"x": 0, "y": 0, "width": 1440, "height": 600},
+        "visibility": {"display": "block", "visibility": "visible", "opacity": "1", "hiddenBy": None},
+        "visible": True,
+        "attributes": {},
+        "computedStyle": {},
+        "timeline": [],
+        "animations": [],
+    }
+    annotation.update(overrides)
+    return {"schemaVersion": 2, "ok": True, "url": url, "annotation": annotation}
+
+
+def _run_element_evidence(tmp_path: Path, result: dict[str, object], *, url: str = "https://example.test") -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run element-evidence.sh against a fake agent-browser returning `result`."""
+    payload = json.dumps({"success": True, "data": {"origin": url, "result": result}}).replace("'", "'\\''")
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+    out = tmp_path / "evidence" / "element-target.json"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "LC_ALL": "C", "LANG": "C"}
+    script = Path(__file__).resolve().parents[1] / "scripts" / "extract" / "element-evidence.sh"
+    proc = subprocess.run([str(script), "sess1", url, ".hero", str(out)], capture_output=True, text=True, env=env, timeout=30)
+    return proc, out
+
+
+def test_element_evidence_writes_schema_2_record_with_target_sanity(tmp_path: Path) -> None:
+    proc, out = _run_element_evidence(tmp_path, _passing_probe("https://example.test/"))
+    assert proc.returncode == 0, proc.stderr
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert record["schemaVersion"] == 2
+    assert record["annotation"]["matchCount"] == 1 and record["annotation"]["visible"] is True
+
+
+@pytest.mark.parametrize(
+    "result, message",
+    [
+        ({"schemaVersion": 2, "ok": False, "url": "https://example.test/", "selector": ".hero", "matchCount": 0, "error": "selector not found"}, "probe failed (matches: 0): selector not found"),
+        ({"schemaVersion": 2, "ok": False, "url": "https://example.test/", "selector": ".hero", "matchCount": 3, "error": "selector matches 3 elements, expected exactly 1"}, "matches 3 elements"),
+        (_passing_probe("https://example.test/", bbox={"x": 0, "y": 0, "width": 1440, "height": 0}), "1440x0 is degenerate (minimum 8x8 CSS px)"),
+        (_passing_probe("https://example.test/", bbox={"x": 0, "y": 0, "width": 7, "height": 7}), "7x7 is degenerate"),
+        (
+            _passing_probe(
+                "https://example.test/",
+                visible=False,
+                visibility={"display": "block", "visibility": "visible", "opacity": "0", "hiddenBy": "ancestor <div> opacity:0"},
+            ),
+            "not visible in the probed state (ancestor <div> opacity:0)",
+        ),
+    ],
+)
+def test_element_evidence_refuses_unusable_targets(tmp_path: Path, result: dict[str, object], message: str) -> None:
+    """Zero or multiple matches, a degenerate box, or a hidden element never
+    become element-target.json; the reason and the open-state advice are printed."""
+    proc, out = _run_element_evidence(tmp_path, result)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert message in proc.stderr, proc.stderr
+    assert not out.exists()
+    if result.get("ok") is True:
+        assert "open a trigger-opened container" in proc.stderr
 
 
 def _make_fake_agent_browser(tmp_path: Path, eval_payload: str) -> Path:
@@ -136,10 +206,10 @@ def test_extractors_require_bound_navigation_receipt_for_redirects(
     requested = "http://example.test/"
     final_url = "https://www.example.test/"
     actual = "https://unrelated.test" if receipt_mode == "wrong-origin" else "https://www.example.test"
-    payload = json.dumps({"success": True, "data": {
-        "origin": actual,
-        "result": {"url": final_url, "scripts": [], "skipped": [], "selector": ".hero"},
-    }})
+    result: dict[str, object] = {"url": final_url, "scripts": [], "skipped": [], "selector": ".hero"}
+    if consumer != "inline":
+        result = _passing_probe(final_url)
+    payload = json.dumps({"success": True, "data": {"origin": actual, "result": result}})
     bin_dir = _make_fake_agent_browser(tmp_path, payload)
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "AGENT_BROWSER_NAMESPACE": "receipt-test"}
     receipt = tmp_path / ("custom-navigation.json" if consumer == "element-explicit" else "capture-navigation.json")

@@ -23,7 +23,7 @@
       "expectations": [
         "Phase A: reference and impl screenshots captured at matching scroll positions",
         "Phase C: AE, DSSIM, and computed-diff all executed",
-        "Phase D: pixel-perfect-diff.json produced with result: pass and mismatches: 0",
+        "Phase D: per-element clip diffs at AE 0 and computed-diff.sh exiting 0 for every selector (no page-level pixel-perfect-diff.json is written)",
         "Phase E: LLM review read ref+impl pairs for ALL positions and judged PASS/PARTIAL/FAIL",
         "Three-axis verification applied: pixel (AE) + perceptual (DSSIM) + semantic (LLM)",
         "A position only marked PASS when all three axes agree"
@@ -155,8 +155,8 @@
     },
     {
       "id": 12,
-      "prompt": "pixel-perfect-diff.json shows 2 mismatches: header padding-top (60px vs 40px) and footer font-size (14px vs 16px). Fix both.",
-      "expected_output": "Both mismatches fixed with targeted CSS edits. Re-measurement confirms exact match. pixel-perfect-diff.json updated to result: pass, mismatches: 0.",
+      "prompt": "computed-diff.sh shows 2 mismatches: header padding-top (60px vs 40px) and footer font-size (14px vs 16px). Fix both.",
+      "expected_output": "Both mismatches fixed with targeted CSS edits. Re-measurement with computed-diff.sh confirms exact match (exit 0 for header and footer).",
       "files": [],
       "expectations": [
         "Diff table shows ❌ for padding-top (60px vs 40px) and font-size (14px vs 16px)",
@@ -164,7 +164,7 @@
         "Targeted fix applied — only the affected properties changed",
         "Re-measurement ran for both affected elements after fix",
         "Both rows updated to ✅ in diff table",
-        "pixel-perfect-diff.json saved with result: pass and mismatches: 0"
+        "computed-diff.sh re-run exits 0 for the header and footer selectors"
       ]
     },
     {

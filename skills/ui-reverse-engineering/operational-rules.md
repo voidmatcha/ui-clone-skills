@@ -63,9 +63,9 @@ not by trimming a whole-page run.
   and panel slide). Verify open and close on the implementation the same way.
 - **Report scoped completion honestly.** `python -m ui_clone.pipeline ... run`
   and `verify` are page-level; they have no subtree selector and cannot
-  certify that a scoped clone stayed inside its boundary. Report a scoped clone
-  as scoped with its element-scope evidence, never as a page-level verified
-  clone. Do not trim `section-map.json`, fabricate components, or bypass gates
+  certify that a scoped clone stayed inside its boundary. Its completion
+  command is `python -m ui_clone.scoped_check <ref-dir>`; report it as scoped
+  with that evidence, never as a page-level verified clone. Do not trim `section-map.json`, fabricate components, or bypass gates
   to make a page-level run pass; a silent expansion to a full-page run is also
   out of scope unless the user asks for it.
 

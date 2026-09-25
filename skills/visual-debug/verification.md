@@ -413,11 +413,15 @@ Live services (streaming, news feeds, etc.) change thumbnail URLs frequently. Do
 
 > Always runs regardless of Phase D1 result — catches sub-pixel mismatches AE/SSIM misses.
 
-Measure `getComputedStyle` on both ref and impl for all Phase D1 elements:
+Measure `getComputedStyle` on both ref and impl for all Phase D1 elements with the shared script (one run per state, after activating the state on both sides):
 
-**Properties**: `fontSize`, `fontWeight`, `lineHeight`, `letterSpacing`, `fontFamily`, `color`, `backgroundColor`, `padding*`, `margin*`, `gap`, `width`, `height`, `display`, `flexDirection`, `alignItems`, `justifyContent`, `gridTemplateColumns`, `borderRadius`, `boxShadow`, `opacity`, `transform`
+```bash
+bash $PLUGIN_ROOT/skills/visual-debug/scripts/computed-diff.sh <session> <ref-url> <impl-url> '<selector1>' ['<selector2>' ...]
+```
 
-Save the measurements to `tmp/ref/<component>/ref-styles.json` and `tmp/ref/<component>/impl-styles.json` (one file per side; for stateful elements, one pair per state). Build diff table: any property mismatch > 2px = FAIL. Fix and re-run both phases.
+**Properties**: the script's fixed list (`display`, `position`, `width`, `height`, `padding`, `margin`, `fontSize`, `fontWeight`, `fontFamily`, `lineHeight`, `letterSpacing`, `color`, `backgroundColor`, `borderRadius`, `border`, `boxShadow`, `opacity`, `transform`, `zIndex`, `gap`, `flexDirection`, `alignItems`, `justifyContent`, `gridTemplateColumns`; `ui_clone.computed_style_diff` pins it).
+
+It prints the mismatch table and exits 0 only when no row mismatches; that exit code is the Phase D2 verdict. Do not save hand-made `ref-styles.json` / `impl-styles.json` under `tmp/ref/` — they are not canonical artifacts and the Write hook denies them. Fix and re-run both phases.
 
 ### Gate
 

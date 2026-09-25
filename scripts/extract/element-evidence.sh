@@ -96,16 +96,40 @@ read -r -d '' EVAL_JS <<JS || true
     "animationTimingFunction", "animationDelay", "animationIterationCount",
     "animationFillMode"
   ];
-  const element = document.querySelector(selector);
-  if (!element) {
+  // Target sanity: exactly one match, a real box, visible in this state.
+  let matches;
+  try {
+    matches = document.querySelectorAll(selector);
+  } catch (e) {
+    return { schemaVersion: 2, ok: false, url: location.href, selector, matchCount: 0, error: "invalid selector: " + e.message };
+  }
+  const matchCount = matches.length;
+  if (matchCount !== 1) {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       ok: false,
       url: location.href,
       selector,
-      error: "selector not found"
+      matchCount,
+      error: matchCount === 0 ? "selector not found" : "selector matches " + matchCount + " elements, expected exactly 1"
     };
   }
+  const element = matches[0];
+  const visibilityOf = (node) => {
+    const own = getComputedStyle(node);
+    const record = { display: own.display, visibility: own.visibility, opacity: own.opacity, hiddenBy: null };
+    let current = node;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      const style = current === node ? own : getComputedStyle(current);
+      const where = current === node ? "target" : "ancestor <" + current.tagName.toLowerCase() + ">";
+      if (style.display === "none") { record.hiddenBy = where + " display:none"; break; }
+      if (style.visibility === "hidden" || style.visibility === "collapse") { record.hiddenBy = where + " visibility:" + style.visibility; break; }
+      if (parseFloat(style.opacity) === 0) { record.hiddenBy = where + " opacity:0"; break; }
+      current = current.parentElement;
+    }
+    return record;
+  };
+  const visibility = visibilityOf(element);
   const rect = element.getBoundingClientRect();
   const computed = getComputedStyle(element);
   const computedStyle = {};
@@ -134,7 +158,7 @@ read -r -d '' EVAL_JS <<JS || true
       effectTiming: animation.effect && animation.effect.getTiming ? animation.effect.getTiming() : null
     }));
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ok: true,
     url: location.href,
     annotation: {
@@ -142,12 +166,15 @@ read -r -d '' EVAL_JS <<JS || true
       selector,
       selectorCandidates: selectorCandidatesFor(element),
       text: (element.innerText || element.textContent || "").trim().slice(0, 500),
+      matchCount,
       bbox: {
         x: Math.round(rect.x),
         y: Math.round(rect.y),
         width: Math.round(rect.width),
         height: Math.round(rect.height)
       },
+      visibility,
+      visible: visibility.hiddenBy === null,
       attributes,
       computedStyle,
       timeline: animations.length > 0 ? [{ phase: "idle", changed: true }] : [],
@@ -161,7 +188,9 @@ RAW_FILE="$(mktemp)"
 trap 'rm -f "$RAW_FILE"' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 if ! agent-browser --session "$SESSION" eval --json "$EVAL_JS" >"$RAW_FILE"; then
   echo "element-evidence: agent-browser eval failed (session=$SESSION)" >&2
@@ -197,6 +226,28 @@ if isinstance(payload, str):
 
 if not isinstance(payload, dict):
     raise SystemExit("element-evidence: browser result must be a JSON object")
+
+# Target sanity (ui_clone.hooks._common.target_sanity_problems): the record is
+# written only for a selector that resolves to exactly one visible element
+# with a box of at least TARGET_MIN_SIZE px on each side. A hidden or
+# zero-size trigger-opened container must be probed in its open state.
+from ui_clone.hooks._common import TARGET_MIN_SIZE, target_sanity_problems  # noqa: E402
+
+if payload.get("ok") is not True:
+    count = payload.get("matchCount")
+    shown = f" (matches: {count})" if isinstance(count, int) else ""
+    raise SystemExit(f"element-evidence: probe failed{shown}: {payload.get('error') or 'unknown error'}")
+annotation = payload.get("annotation")
+if not isinstance(annotation, dict):
+    raise SystemExit("element-evidence: probe carries no annotation")
+problems = target_sanity_problems(annotation)
+if problems:
+    raise SystemExit(
+        "element-evidence: target sanity failed for "
+        f"{annotation.get('selector')!r}: {'; '.join(problems)}. Resolve a selector that "
+        f"matches one visible element of at least {TARGET_MIN_SIZE}x{TARGET_MIN_SIZE} px; "
+        "open a trigger-opened container (modal/drawer) before probing it."
+    )
 
 out_path.parent.mkdir(parents=True, exist_ok=True)
 out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
