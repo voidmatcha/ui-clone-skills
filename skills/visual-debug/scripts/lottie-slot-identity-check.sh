@@ -6,7 +6,7 @@
 # Why it matters:
 #   transition-spec.json carries the complete slot->asset map (container id,
 #   path/mobilePath, loop, autoplay). The failure class this catches is the
-#   navercorp clone: 5 JSONs copied and "referenced so required-media-coverage
+#   one observed clone: 5 JSONs copied and "referenced so required-media-coverage
 #   passes", but only 2 slots actually mounted, with autoplay/loop inverted and
 #   one asset dropped into an invented container. required-media-coverage sees
 #   the string and passes; this gate parses the actual mount call sites and

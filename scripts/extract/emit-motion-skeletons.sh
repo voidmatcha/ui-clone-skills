@@ -8,7 +8,7 @@
 #   (initial/expanded/settled), and each carousel's EXACT Swiper config including
 #   responsive breakpoints and mobile freeMode/scrollbar. Left to the LLM this is
 #   re-authored or approximated: ebay's scrub was rewritten as scale(1->1.12) and
-#   its state machine dropped with no trace; navercorp collapsed 4 extracted
+#   its state machine dropped with no trace; one observed site collapsed 4 extracted
 #   swiper configs into one hardcoded config with matchMedia read once and zero
 #   resize listeners. This script emits impl/src/generated/motion-skeletons.ts —
 #   one `// spec:<id>`-tagged hook/init per entry with the parameters transcribed

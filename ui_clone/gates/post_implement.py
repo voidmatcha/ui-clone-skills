@@ -118,7 +118,7 @@ def _check_forensic_preservation_compliance(self: Gate) -> CheckResult | None:
     # reachable ceiling a faithful clone can preserve in JSX). Stylesheets define
     # far more classes (pseudo/state/unused variants) than land on rendered
     # elements, so basing the bar on classSignatureCount (which unions CSS-file
-    # definitions) makes the gate mathematically unreachable — realfood had 136
+    # definitions) makes the gate mathematically unreachable — one observed site had 136
     # DOM classes but 599 CSS-defined, so 25%*599=149 > 136 blocked every clone.
     # Prefer domClassSignatureCount; fall back to classSignatureCount for plans
     # written before that field existed.
@@ -764,7 +764,7 @@ def _check_visual_debug_stamp(self: Gate) -> CheckResult | None:
                 "<orig-url> <impl-url> <ref-dir>"
             ),
         )
-    # Provisional handling (Fix 1, review 2026-05-27): auto-verify
+    # Provisional handling (Fix 1): auto-verify
     # writes a provisional stamp at the start of its run so post-implement
     # gate can pass DURING that same run (chicken-and-egg). A crashed/
     # orphaned auto-verify leaves provisional=true behind, which without
@@ -874,8 +874,7 @@ def _check_html_paste_required(self: Gate) -> CheckResult | None:
     return None
 
 
-# Spec-bundle grounding — F from docs/claude-fidelity-analysis.md (Q-A
-# pair on improving ref-data utilization). Forces transition-spec.json
+# Spec-bundle grounding (ref-data utilization). Forces transition-spec.json
 # entries to reference real bundle/css/html artifacts so the spec cannot
 # be hand-waved without grounding in actual ref source.
 
@@ -1183,12 +1182,11 @@ def _check_bundle_grep_context_inject(self: Gate) -> CheckResult | None:
     )
 
 
-# Anti-cheat pattern detection — F1 from docs/claude-fidelity-analysis.md.
-# Patterns observed in the 26-site loop (2026-05-24/25): claude under
-# auto mode generates hidden stub elements (1px×1px, display:none, empty
-# containers with check-required attributes) to satisfy static gate
-# selectors without rendering the actual component. These pass the
-# selector check but fail the user's visual fidelity expectation.
+# Anti-cheat pattern detection. Patterns observed across a multi-site clone
+# sweep: an agent under auto mode generates hidden stub elements (1px×1px,
+# display:none, empty containers with check-required attributes) to satisfy
+# static gate selectors without rendering the actual component. These pass
+# the selector check but fail the user's visual fidelity expectation.
 
 # Pattern 1: className with -stub / -shim / -placeholder suffix on the
 # element carrying the check-required selector. High-signal: ui-clone-skills
@@ -1243,9 +1241,9 @@ def _check_anti_cheat_patterns(self: Gate) -> CheckResult | None:
     """Fail when impl source contains stub elements that satisfy a static
     check's selector requirement but render to zero visible area.
 
-    See docs/claude-fidelity-analysis.md for the 4-site evidence behind
-    these patterns. Skips silently when impl_root is unresolvable
-    (capture-phase runs) or impl/src is absent.
+    The patterns come from stub elements observed on several cloned sites
+    (see the pattern comments above). Skips silently when impl_root is
+    unresolvable (capture-phase runs) or impl/src is absent.
     """
     impl_root = self._find_impl_root()
     if impl_root is None or not impl_root.is_dir():
@@ -1299,8 +1297,9 @@ def _check_anti_cheat_patterns(self: Gate) -> CheckResult | None:
             "Replace stub/shim/placeholder elements with the actual rendered "
             "component from the ref. A static check satisfied by a hidden "
             "1px×1px element is not a real fix — the rendered UI must "
-            "contain the real component. "
-            "See docs/claude-fidelity-analysis.md for the patterns and rationale."
+            "contain the real component. Flagged patterns: -stub/-shim/"
+            "-placeholder class names, display:none or 1px-sized elements, and "
+            "empty containers that only carry a check-required attribute."
         ),
     )
 

@@ -627,7 +627,7 @@ def _spec_is_placeholder(spec: dict[str, Any] | None) -> bool:
     finalize_full_extraction_artifacts mints a gate-shaped spec BEFORE the
     agent reaches Step 5d. On a motion-rich site that placeholder must never
     satisfy this gate — it neutralized every downstream motion check on a
-    12-motion reference (live forensics, realfood-e2e-1)."""
+    12-motion reference (live forensics, end-to-end run)."""
     if not isinstance(spec, dict):
         return False
     return bool(spec.get("placeholder")) or spec.get("source") == "ui_clone.extraction_artifacts"

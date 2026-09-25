@@ -23,14 +23,23 @@ EXCLUDED_DIRS = {
     "research",
     ".mypy_cache",
     ".sisyphus",
-    ".claude",
-    ".codex",
-    ".codex-plugin",
-    ".claude-plugin",
+    ".claude",  # machine-local settings/handovers; plugin manifests live in .claude-plugin (scanned)
     ".omx",
     ".serena",
     ".tokensave",
+    # Maintainer-only automation that is deliberately kept out of the shipped
+    # package (see .gitignore). Personal project names are legitimate there.
+    "internal",
+    # Gitignored local-only handover / worktree state (never shipped).
+    "outbox",
+    ".worktrees",
+    ".ui-re-continuation",
+    # Gitignored root-level clone output (`/impl`); the generated site keeps
+    # its own name, and no shipped surface has an `impl/` directory.
+    "impl",
 }
+# Host-integration surfaces that ARE scanned (agent definitions and manifests
+# ship to users): .claude-plugin/, .codex-plugin/, .codex/, docs/.
 EXCLUDED_FILES = {
     "CHANGELOG.md",
     "handover",
@@ -46,7 +55,29 @@ class Rule:
     label: str
     pattern: Pattern[str]
     suffixes: frozenset[str] = frozenset(INCLUDED_SUFFIXES)
+    # Top-level directories the rule applies to; empty = every scanned path.
+    dirs: tuple[str, ...] = ()
+    # Explicit allowlist of regexes. A hit only stops counting when it lies
+    # INSIDE a span one of these regexes matches on the same line, so an
+    # allowed token appended as a trailing comment cannot launder an
+    # unrelated hit earlier on the line. Prefer adding an entry here (with a
+    # reason in the Rule comment) over weakening `pattern`.
+    allow: tuple[Pattern[str], ...] = ()
 
+
+# Codex host-config paths that any user has; only paths BELOW these are personal.
+CODEX_HOST_CONFIG_PATHS = (
+    "~/.codex/config.toml",
+    "~/.codex/hooks.json",
+    "~/.codex/plugins/",
+    "~/.codex/skills",
+)
+# The canonical upstream URL may appear only as the value of the documented
+# env default: `${UI_CLONE_REPO:-<url>}` or `UI_CLONE_REPO_DEFAULT="<url>"`.
+UI_CLONE_REPO_DEFAULT_FORMS = (
+    re.compile(r"\$\{UI_CLONE_REPO:-[^}]*\}"),
+    re.compile(r"\bUI_CLONE_REPO_DEFAULT=\"[^\"]*\""),
+)
 
 RULES = (
     Rule(
@@ -63,12 +94,48 @@ RULES = (
         ),
     ),
     Rule(
-        "Benchmark site names (realfood.gov / realfood-bench / tmp/ref/realfood)",
-        re.compile(r"realfood\.gov|realfood-bench|tmp/ref/realfood"),
+        # Any bare mention of the benchmark site (realfood.gov, realfood-v2,
+        # realfood-bench, tmp/ref/realfood, "realfood's card_bg", ...) is a
+        # lab note; comments should say "one observed site" / "a Lenis-driven
+        # site" instead. Test fixtures stay under tests/ (exempt).
+        "Benchmark site names (realfood in any form, ebay-playbook)",
+        re.compile(r"\brealfood\b|\bebay-playbook\b", re.IGNORECASE),
     ),
     Rule(
-        "Brand / company leakage (NAVER, dga_, kakao, coupang, nexon)",
-        re.compile(r"\bNAVER\b|\bNaver\b|naver\.com|\bdga_|\bkakao\b|\bcoupang\b|\bnexon\b"),
+        # `loop-e2e-<N>` names one maintainer end-to-end clone run; the
+        # evidence it cites is only readable from that run's scratch dir.
+        "Maintainer end-to-end run identifiers (loop-e2e-N)",
+        re.compile(r"\bloop-e2e-[0-9]+\b"),
+    ),
+    Rule(
+        # Bare `e2e-<N>` (and `<site>-e2e-<N>` corpus names) label the same
+        # runs without the `loop-` prefix. Run numbers are short (1-3
+        # digits) and stand alone as prose tokens, so a path segment
+        # (`tests/e2e-3/`), a longer id (`e2e-2024`), a hyphenated
+        # continuation (`e2e-3-runner`), or a file name (`e2e-3.config.ts`)
+        # is generic E2E vocabulary and passes. The `loop-` form is reported
+        # by the previous rule, not twice here.
+        "Maintainer end-to-end run labels (e2e-N)",
+        re.compile(r"(?<![\w/.-])(?:(?!loop-)[a-z]+-)?e2e-[0-9]{1,3}(?![\w/-])(?!\.\w)"),
+    ),
+    Rule(
+        "Brand / company leakage (NAVER, navercorp, dga_, kakao, coupang, nexon)",
+        re.compile(
+            r"\bNAVER\b|\bNaver\b|naver\.com|(?i:\bnavercorp\b)|\bdga_|\bkakao\b|\bcoupang\b|\bnexon\b"
+        ),
+    ),
+    Rule(
+        # Lab-notebook provenance: the size of a maintainer's site batch
+        # ("the 26-site loop"), a review/analysis/audit pinned to a calendar
+        # date, or an agent-session label (`fable-YYYYMMDD`). Comments should
+        # state the finding, not which run or day produced it.
+        "Dated lab notes and session labels (N-site loop, review YYYY-MM-DD, fable-YYYYMMDD)",
+        re.compile(
+            r"\b[0-9]+-site loop\b"
+            r"|\b(?:review|analysis|audit)\s+20[0-9]{2}-[0-9]{2}-[0-9]{2}\b"
+            r"|\bfable-[0-9]{8}\b",
+            re.IGNORECASE,
+        ),
     ),
     Rule(
         "Codex iteration labels (codex-1N / Codex LN QN / Round N)",
@@ -87,6 +154,46 @@ RULES = (
         HANGUL,
         frozenset({".py", ".sh"}),
     ),
+    Rule(
+        "Personal home folders (~/Documents/<personal-folder>/)",
+        re.compile(r"(~|\$HOME)/Documents/"),
+    ),
+    Rule(
+        "Personal Codex state (~/.codex/<...> other than host config paths)",
+        re.compile(r"~/\.codex/"),
+        allow=tuple(re.compile(re.escape(path)) for path in CODEX_HOST_CONFIG_PATHS),
+    ),
+    Rule(
+        # A workspace id is six alphanumerics mixing case and digits
+        # (`ws-AbC123`); ordinary hyphenated words (`ws-client`, `ws-server`,
+        # `ws-socket`) have neither an uppercase letter nor a digit.
+        "Terminal multiplexer / workspace leakage (purplemux, cmux, ws-XXXXXX)",
+        re.compile(
+            r"\b(purplemux|cmux)\b"
+            r"|\bws-(?=[A-Za-z0-9]{6}\b)(?=[A-Za-z0-9]*[0-9])(?=[A-Za-z0-9]*[A-Z])[A-Za-z0-9]{6}\b"
+        ),
+    ),
+    Rule(
+        # The only legitimate mention outside internal/ is the path reference
+        # that keeps its test suite collected (pyproject testpaths, ci-local).
+        "Personal project names (onpixel)",
+        re.compile(r"\bonpixel\b", re.IGNORECASE),
+        allow=(re.compile(r"internal/onpixel"),),
+    ),
+    Rule(
+        "Lab batch labels (batch-N item N, tools-batch-N)",
+        re.compile(r"\bbatch-[0-9]+ item\b|\btools-batch-[0-9]+\b"),
+    ),
+    Rule(
+        # Behavior surfaces must derive the repository from UI_CLONE_REPO /
+        # `git remote get-url origin`; the canonical upstream may appear only
+        # on the line that declares that env default. README / manifests /
+        # install docs are attribution, not behavior, and are out of scope.
+        "Repository owner used as behavior (hard-coded github.com/voidmatcha URL in hooks/scripts/ui_clone)",
+        re.compile(r"(raw\.githubusercontent\.com|github\.com)/voidmatcha/"),
+        dirs=("hooks", "scripts", "ui_clone"),
+        allow=UI_CLONE_REPO_DEFAULT_FORMS,
+    ),
 )
 
 
@@ -97,9 +204,17 @@ def _is_svg_path_label_false_positive(line: str, match: re.Match[str]) -> bool:
     return bool(re.match(r" [0-9]", line[match.end() :]))
 
 
+def _allowed_spans(rule: Rule, line: str) -> list[tuple[int, int]]:
+    return [m.span() for pattern in rule.allow for m in pattern.finditer(line)]
+
+
 def _line_matches(rule: Rule, line: str) -> bool:
+    allowed = _allowed_spans(rule, line)
     for match in rule.pattern.finditer(line):
         if _is_svg_path_label_false_positive(line, match):
+            continue
+        start, end = match.span()
+        if any(a <= start and end <= b for a, b in allowed):
             continue
         return True
     return False
@@ -117,13 +232,21 @@ def find_hits(root: Path) -> dict[str, list[str]]:
             if path.name in EXCLUDED_FILES:
                 continue
             relative = path.relative_to(root)
+            top_dir = relative.parts[0] if len(relative.parts) > 1 else ""
+            rules = [
+                rule
+                for rule in RULES
+                if path.suffix in rule.suffixes and (not rule.dirs or top_dir in rule.dirs)
+            ]
+            if not rules:
+                continue
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
             except UnicodeDecodeError:
                 continue
             for lineno, line in enumerate(lines, 1):
-                for rule in RULES:
-                    if path.suffix in rule.suffixes and _line_matches(rule, line):
+                for rule in rules:
+                    if _line_matches(rule, line):
                         hits[rule.label].append(f"{relative}:{lineno}: {line}")
     return hits
 

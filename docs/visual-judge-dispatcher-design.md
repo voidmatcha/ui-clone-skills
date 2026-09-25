@@ -1,12 +1,12 @@
-# Visual-judge dispatcher — design (D from claude-fidelity-analysis)
+# Visual-judge dispatcher — design
 
 > Status: **DESIGN**. Implementation pending. Codex review (2026-05-25) of 6 design decisions applied below.
 
 ## Why
 
-`docs/claude-fidelity-analysis.md` identified that claude's fix iterations stall on visual-fidelity sections because the existing `_visual_judge_next_action` in `goal.py` only emits text command suggestions — agents skip running `visual-judge.sh`. The previous codex review locked text-only emission as INTENTIONAL for the default path; an **explicit escape-hatch** dispatcher is the agreed compromise.
+A multi-site fidelity analysis identified that the agent's fix iterations stall on visual-fidelity sections because the existing `_visual_judge_next_action` in `goal.py` only emits text command suggestions — agents skip running `visual-judge.sh`. The previous codex review locked text-only emission as INTENTIONAL for the default path; an **explicit escape-hatch** dispatcher is the agreed compromise.
 
-`docs/claude-fidelity-analysis.md`의 E1 (commit `9eb7c3e`) was the cheap text-grep half. D is the multimodal-LLM-with-cache half — invoked only when the cheap fixes don't unstick the loop.
+The anti-cheat pattern detection in `post_implement.py` (commit `9eb7c3e`) was the cheap text-grep half. This dispatcher is the multimodal-LLM-with-cache half — invoked only when the cheap fixes don't unstick the loop.
 
 ## Non-goals
 

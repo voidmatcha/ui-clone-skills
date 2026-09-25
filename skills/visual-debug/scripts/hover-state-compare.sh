@@ -130,7 +130,7 @@ export VIDEO_COMPARE_DYNAMIC_SELECTORS
 # video-transition-compare.sh waits PRE_ACTION_WAIT (default 3s) before the
 # action. capture-states.sh MEASURED how long this reference takes to go quiet
 # and wrote it to states/splash/summary.json `durationMs`. On
-# navercorp.com/tech/innovation that is 6256ms, so a 3s wait records the first
+# one observed site that is 6256ms, so a 3s wait records the first
 # seconds of an unsettled ref against a settled impl: the per-frame SSIM climbs
 # monotonically 0.27 -> 0.899 across the run and the target is reported as
 # divergent even though the hover arc itself matches.
@@ -1471,8 +1471,8 @@ mkdir -p "$OUT_DIR"
 RESULT="$REF_DIR/transitions/hover-state-result.txt"
 
 # Scheduling-signal artifacts. verification-plan.sh adds this gate with
-# severity=block whenever .signals.hasHover=true, but the realfood/Lenis
-# regions.json producer emits a single full-page region with no triggerType,
+# severity=block whenever .signals.hasHover=true, but on a Lenis-driven site
+# the regions.json producer emits a single full-page region with no triggerType,
 # so the triggerType jq below finds nothing. Without a cross-check the gate
 # would self-certify PASS while the site ships hover motion completely
 # unverified. These artifacts independently prove hover exists and also carry
@@ -1744,7 +1744,7 @@ RESOLVED_POOL_EMPTY=0
 # is not a guess: the live-capture bridge measured it (or the author declared
 # it) and the implementation is obliged to reproduce it. Letting the cap drop
 # such an entry made this gate self-certify while a measured hover rule went
-# uncompared — on navercorp.com/tech/innovation the deduped activation order
+# uncompared — on one observed site the deduped activation order
 # put `.header .nav__link` at index 8 against a cap of 5, so the
 # `affectedTargetAbsent` handling in affected_selector_for_hover never ran and
 # `.header .nav__link:hover{font-weight:600}` was never compared; four of the
@@ -1875,7 +1875,7 @@ if [ ! -s "$TARGETS_FILE" ] || [ "$RESOLVED_POOL_EMPTY" = 1 ]; then
   exit 0
 fi
 
-# ── Documented overlay-gated skips (loop-e2e-5 / codex review) ──
+# ── Documented overlay-gated skips (observed on overlay-heavy sites; codex review) ──
 # A hover target that exists only after opening an overlay (lightbox controls,
 # mobile-nav menu items) reads "Element not found" on the REF side and
 # false-fails as divergence. transition-fires already honors these documented
@@ -2004,7 +2004,7 @@ for VP in "${VP_LIST[@]}"; do
     } >> "$RESULT"
   fi
 
-  # ── Both-absent / both-hidden parity pre-filter (loop-e2e-6) ──
+  # ── Both-absent / both-hidden parity pre-filter ──
   # A hover target whose selector matches NOTHING on ref AND impl at idle is
   # mount-gated UI shipped in the ref's CSS (overlay controls, third-party
   # autocomplete rows). Recording it false-fails as "Element not found" on

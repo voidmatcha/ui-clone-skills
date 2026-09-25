@@ -2,9 +2,9 @@
 
 > Status: **IMPLEMENTED** (Phase A: commit e2e5657, Phase B: 509a498,
 > Phase C: abc5328, state-coverage gate: this commit). Surfaces the
-> largest capture-side architectural gap revealed by the 26-site loop
-> (2026-05-24/25). User articulated the fix shape directly: "splash 끝날
-> 때까지 capture, splash 끝나면 scroll하면서 capture."
+> largest capture-side architectural gap revealed by the multi-site loop
+> (2026-05-24/25). The requested fix shape: capture until the splash ends,
+> then capture while scrolling.
 >
 > Each phase landed with codex parallel review (memory policy:
 > architectural decisions get a second opinion via codex:codex-rescue
@@ -52,7 +52,7 @@ User-articulated sequence:
 
 ### Phase A: splash transition snapshots (time-based)
 
-> **Revision (codex review 2026-05-25)**: original sketch used 50 shell-side
+> **Revision (codex review)**: original sketch used 50 shell-side
 > `agent-browser eval` calls @ 100ms each. Codex flagged this RISKY: CLI
 > round-trip overhead, no latency guarantee, and `splash-bypass.sh` already
 > uses a single in-page Promise loop pattern. Reworked below.
@@ -301,7 +301,7 @@ Few, isolated:
 Total shipped ≈ **2,300 lines** across 4 commits. Largest single feature
 since v0.6.0. Justified by:
 - Addresses the dominant unresolved fidelity gap (splash + scroll-driven
-  state visible across every motion-heavy site in the 26-site loop)
+  state visible across every motion-heavy site in the multi-site loop)
 - Backward-compat: existing artifacts unchanged, new gate skips silently
   when `states/` directory is absent (capture-phase v1 pipelines)
 

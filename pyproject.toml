@@ -90,7 +90,10 @@ build-backend = "hatchling.build"
 packages = ["ui_clone"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# internal/onpixel/tests covers maintainer-only automation that is kept out of
+# the ui_clone package (see .gitignore: internal/* is scratch, internal/onpixel/
+# is tracked).
+testpaths = ["tests", "internal/onpixel/tests"]
 # Safety net for subprocess.run calls that shell out to scripts touching
 # agent-browser: one un-timed call against a dead host would hang serial CI.
 # timeout_method=thread terminates the whole process on expiry, even when

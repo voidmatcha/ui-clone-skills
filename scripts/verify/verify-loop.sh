@@ -17,6 +17,15 @@
 #   - write verify-report.json to scratch/_snapshots/loop-N/
 #
 # Output dir: scratch/_snapshots/loop-N/
+#
+# Env:
+#   UI_CLONE_TRANSCRIPT=<file.jsonl>  agent-session transcript used for the
+#     process criteria. When set it is authoritative: an unreadable path
+#     prints a warning to stderr and skips the process criteria (it never
+#     falls back to the Claude Code path). Default (unset): the newest Claude
+#     Code transcript for this loop dir; when no transcript exists (other
+#     hosts) the process criteria are skipped silently and the fidelity
+#     criteria still run.
 
 set -euo pipefail
 
@@ -124,9 +133,29 @@ fi
 # 6. Criteria evaluation + report ------------------------------------------
 echo
 echo "[5/5] report"
+# Process criteria (P1/P2) are mined from the agent-session transcript. The
+# transcript is host-specific: Claude Code keeps one JSONL per session under
+# <config-dir>/projects/<project-key>/. Other hosts (Codex, plain shells) have
+# no equivalent, so:
+#   UI_CLONE_TRANSCRIPT (a .jsonl path)  explicit transcript override (any host);
+#                                         unreadable => warn on stderr and skip,
+#                                         never fall back to the Claude path
+#   (unset)                               derive the Claude Code path below
+# When the derived path yields no readable file the process criteria are
+# skipped silently (counts stay 0, the report still writes) — this is
+# expected on non-Claude hosts, not an error.
 CLAUDE_PROJECT_KEY="${LOOPDIR//[!a-zA-Z0-9]/-}"
 TS_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$CLAUDE_PROJECT_KEY"
-TRANSCRIPT="$(ls -t "$TS_DIR"/*.jsonl 2>/dev/null | head -1 || true)"
+if [ -n "${UI_CLONE_TRANSCRIPT:-}" ]; then
+  if [ -r "${UI_CLONE_TRANSCRIPT}" ]; then
+    TRANSCRIPT="$UI_CLONE_TRANSCRIPT"
+  else
+    echo "verify-loop: UI_CLONE_TRANSCRIPT=${UI_CLONE_TRANSCRIPT} is not readable — skipping process criteria" >&2
+    TRANSCRIPT=""
+  fi
+else
+  TRANSCRIPT="$(ls -t "$TS_DIR"/*.jsonl 2>/dev/null | head -1 || true)"
+fi
 
 python3 - "$N" "$REF_URL" "$IMPL_URL" "$SNAPDIR" "$SPLASH_JSON" \
   "${ae_desktop:-AE=NA}" "${ae_mobile:-AE=NA}" "$ts_cov" "${TRANSCRIPT:-}" \

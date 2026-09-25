@@ -15,7 +15,7 @@
 # Usage:
 #   bash scripts/verify/check-canvas-replay.sh <ref-dir> [--write-stamp]
 #
-# Attestation contract (review 2026-05-25 item [2]):
+# Attestation contract (review item [2]):
 #   <ref-dir>/canvas-replay-attestation.json must be operator-written before
 #   this script runs. Required fields:
 #     - license:           URL or text of source's license / owner permission

@@ -304,7 +304,7 @@ if [ -n "${VIEWPORTS:-}" ] && [ "${SECTION_COMPARE_INNER:-0}" != "1" ]; then
     # sections/viewports/<WxH>/, but ref-root-level inputs
     # (transition-spec.json, asset-substitution.json) only exist at $DIR —
     # without this the inner run silently resolved an empty spec and every
-    # dynamic:true mask dropped out (loop-e2e-9 viewport-fanout-mask-gap).
+    # dynamic:true mask dropped out (end-to-end run viewport-fanout-mask-gap).
     VIEW_W="$VP_W" VIEW_H="$VP_H" VIEWPORTS="" SECTION_COMPARE_INNER=1 \
       REF_ROOT_DIR="$DIR" \
       WAIT_SCROLL_SETTLE="$WAIT_SCROLL_SETTLE" \
@@ -543,7 +543,7 @@ if [ "$EXCLUDE_DYNAMIC" = "1" ]; then
   TSPEC_FILE="$DIR/transition-spec.json"
   # Viewport fan-out: inner runs get DIR=sections/viewports/<WxH>/ which never
   # holds the spec — resolve from the ref root the wrapper passed instead of
-  # silently masking nothing (loop-e2e-9 viewport-fanout-mask-gap).
+  # silently masking nothing (end-to-end run viewport-fanout-mask-gap).
   if [ ! -f "$TSPEC_FILE" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/transition-spec.json" ]; then
     TSPEC_FILE="${REF_ROOT_DIR}/transition-spec.json"
   fi
@@ -749,7 +749,7 @@ fi
 #   }
 SUBSTITUTION_FILE="$DIR/asset-substitution.json"
 # Same ref-root fallback as transition-spec.json above: per-viewport inner
-# runs must not lose STRUCTURAL_ONLY switching (loop-e2e-9).
+# runs must not lose STRUCTURAL_ONLY switching (end-to-end run).
 if [ ! -f "$SUBSTITUTION_FILE" ] && [ -n "${REF_ROOT_DIR:-}" ] && [ -f "${REF_ROOT_DIR}/asset-substitution.json" ]; then
   SUBSTITUTION_FILE="${REF_ROOT_DIR}/asset-substitution.json"
 fi
@@ -1046,7 +1046,7 @@ PAUSE_ANIMATIONS='(() => {
   // Stop Swiper autoplay AND pin to slide 0 — stopping alone freezes the
   // carousel at whichever slide it happened to reach, so ref and impl (and
   // ref across runs) freeze at DIFFERENT indices and AE diffs a moving
-  // target (navercorp postmortem: middle-banner carousel state diverged
+  // target (an observed postmortem: middle-banner carousel state diverged
   // every compare). Pinning makes the frozen state deterministic.
   if (window.Swiper) {
     document.querySelectorAll(".swiper").forEach(el => {
@@ -2825,7 +2825,7 @@ PY
     # Absolute-AE floor: a tiny crop (e.g. a ~0.06 Mpx header bar) inflates
     # AE/Mpx into the critical band on a near-zero ABSOLUTE pixel difference —
     # AE_PER_MPX = AE/area, so a sub-0.1 Mpx denominator turns a few-thousand-pixel
-    # diff into a "critical" score (the navercorp header: AE=3335 -> AE/Mpx 23160).
+    # diff into a "critical" score (one observed site header: AE=3335 -> AE/Mpx 23160).
     # Require DSSIM_SCORE to be non-empty: REF_HAS_VARIANCE is only MEASURED when
     # dssim ran (else it defaults open to 1), so this makes the blank/near-uniform
     # ref guard real evidence, not a default — without a measured ref-std the
@@ -2838,7 +2838,7 @@ PY
     # band (reproduced AE=4988 / dssim=0.199). Add (a) the same SECTION_DSSIM_DENSE_MAX
     # (0.12) global-dssim ceiling, and (b) an upper REF-area Mpx bound
     # (SECTION_AE_FLOOR_MAX_MPX, default 0.5) so the floor only rescues genuinely
-    # tiny-crop denominator artifacts — its stated navercorp-header purpose — not a
+    # tiny-crop denominator artifacts — its stated observed-header purpose — not a
     # full-size section that merely has few absolute diff pixels.
     STATUS="✅"
     SEV="pass-by-ae-floor"

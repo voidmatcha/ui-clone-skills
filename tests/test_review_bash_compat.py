@@ -32,7 +32,9 @@ def test_direct_review_completes_without_bash_compat() -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert re.search(r"Review: \d+ passed, \d+ warnings, 0 errors", result.stdout)
+    # Strict: the public-skill size report is advisory-only below its word
+    # budget, so a clean tree produces no warnings at all.
+    assert re.search(r"Review: \d+ passed, 0 warnings, 0 errors", result.stdout)
     assert re.search(r"public skill entrypoints — \d+ words, \d+ lines", result.stdout)
 
 

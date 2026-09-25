@@ -19,7 +19,7 @@ def _env_float(name, default):
         return default
 
 
-# Generality knobs — realfood-derived heuristic defaults, env-overridable
+# Generality knobs — site-derived heuristic defaults, env-overridable
 # per-site like the rest of the pipeline's thresholds (AE_THRESHOLD,
 # UI_CLONE_GEOM_*). Defaults unchanged.
 TRANSFORM_MIN_PX = _env_float("UI_CLONE_TRANSFORM_MIN_PX", 24.0)
@@ -340,7 +340,7 @@ try:
                     for _key in ("effectType", "name", "kind", "type")
                 ).lower()
                 # per-WORD and per-LINE splits own their structure exactly as a
-                # per-character split does: realfood's body copy is sized by
+                # per-character split does: one observed site's body copy is sized by
                 # `p{font-size:clamp(42px,12vw,96px)}`, which cannot apply once the
                 # collapse drops the <p> and its spans. Omitting the word/line
                 # vocabulary here silently flattened every declared word-reveal.
@@ -392,7 +392,7 @@ try:
             # emit_scroll_helpers.py validates each site (selector + non-empty
             # endState + numeric progress) and writes ScrollLatchDriver.tsx
             # only if at least one survives. Gating this on "sites is a
-            # non-empty list" imports a file that may never exist: realfood-v2
+            # non-empty list" imports a file that may never exist: one observed site
             # declares required/count 3 with three IntersectionObserver
             # descriptions carrying no endState or progress, so every site is
             # dropped and the emitted App.tsx fails to build. Mirror the
@@ -1015,7 +1015,7 @@ def _interleave_from_textfull(node, children):
     child's text against the live-rendered `textFull` string.
 
     extract-dom's directText joins the direct text nodes into one merged
-    `text` (the navercorp ticker's parens become "()") and render() used to
+    `text` (the observed site ticker's parens become "()") and render() used to
     hoist that merge before all children — emitting "()" as a prefix instead
     of wrapping .percent. textFull carries the true order; walking it
     left-to-right and slicing the residue between child matches recovers the
@@ -3134,11 +3134,11 @@ def _root_scope_class(node):
     root is class-less.
 
     Production stylesheets almost always namespace their rules under one
-    page-root wrapper class (navercorp ships `.navercorp .<x>{…}` for ~85% of
-    its rules: `.navercorp .main-contents{margin:0 auto}` centers the hero, etc).
+    page-root wrapper class (one observed site ships `.site .<x>{…}` for ~85% of
+    its rules: `.site .main-contents{margin:0 auto}` centers the hero, etc).
     That wrapper is a CHILD of the capture root (`body`), so `structure["class"]`
     is the empty body class and the App root `<div>` was emitted class-less. With
-    no `.navercorp` ancestor in the clone, EVERY `.navercorp `-scoped ref rule
+    no `.site` ancestor in the clone, EVERY `.site `-scoped ref rule
     fails to match and the imported CSS is silently nullified — the visible tip is
     the hero losing `margin:0 auto` and shifting ~80px left (getComputedStyle
     froze that auto margin to 0 at capture, so Fix 127 had no symmetric-px
@@ -3148,7 +3148,7 @@ def _root_scope_class(node):
     Descend the dominant-subtree chain from the root, skipping non-visual
     (script/style/link/meta/noscript/template) children, and adopt a class only
     when the ref CSS actually uses one of its tokens as a DESCENDANT-scoping
-    prefix (a `.<token> ` combinator, e.g. `.navercorp .main-contents{…}`). That
+    prefix (a `.<token> ` combinator, e.g. `.site .main-contents{…}`). That
     guard ties the fix to its sole purpose — making scoped ref CSS match — so it
     never fires for a lone content `<section>` whose class scopes nothing
     (`.s0{…}` has no `.s0 ` combinator), only for a genuine page-root wrapper.
@@ -3170,8 +3170,8 @@ def _root_scope_class(node):
 
     def _scopes_ref_css(cls):
         # A token is an ANCESTOR scope when `.<t>` is followed by a descendant
-        # (whitespace) or child (`>`) combinator: `.navercorp .x`, `.navercorp>.x`,
-        # `.navercorp >.x`, or newline-formatted CSS. A trailing `{`/`.`/`:`/`,`/`+`/
+        # (whitespace) or child (`>`) combinator: `.site .x`, `.site>.x`,
+        # `.site >.x`, or newline-formatted CSS. A trailing `{`/`.`/`:`/`,`/`+`/
         # `~` is a self, compound, or sibling selector — not an ancestor scope — so
         # it correctly does not match.
         for t in cls.split():
@@ -3206,7 +3206,7 @@ def _warn_unmatched_scope(root_cls):
     of its rules under one namespace class that the emitted root does NOT carry.
 
     That is the exact silent-failure signature Fix 130 targets: a page-root
-    namespace (`.navercorp `) scopes most rules, but if it never reaches an
+    namespace (`.site `) scopes most rules, but if it never reaches an
     emitted ancestor those rules match nothing and ~that share of the stylesheet
     is dead — invisibly. This check turns that from an eyeball-only find into a
     build-time warning. Advisory only (stderr); never changes output.
@@ -3214,7 +3214,7 @@ def _warn_unmatched_scope(root_cls):
     Fires when the single most common ancestor-scope token covers >= 40% of the
     ref CSS's rule-blocks yet is absent from root_cls. Stays quiet for
     CSS-modules sites (hashed per-component scopes → no single dominant token)
-    and for correctly-adopted roots (navercorp post-fix carries `.navercorp`)."""
+    and for correctly-adopted roots (one observed site post-fix carries `.site`)."""
     if not _REF_CSS_TEXT:
         _load_ref_css()
     if not _REF_CSS_TEXT:
@@ -3289,7 +3289,7 @@ def _is_disclosure_control(node):
     ref-CSS terminal value on viewport entry. That models an
     IntersectionObserver-owned reveal; a disclosure widget (accordion / dropdown
     / details) is toggled by the USER, and its ref CSS almost always declares
-    only the OPEN variant as a subject-matching rule (realfood's FAQ list:
+    only the OPEN variant as a subject-matching rule (one observed site's FAQ list:
     `.faqs button[data-open=true]{background:var(--highlight)}`). Deferring it
     resolved every captured-closed item to `data-open="true"`, so all 9 answers
     expanded on scroll and every pill painted the open-state lime. `aria-expanded`
@@ -3394,7 +3394,7 @@ def _swiper_config_from_classes(cls, autoplay_delay_ms=None, autoplay_signal=Fal
     agent-browser eval budget is ~25s across ALL probes), so emitting a delay it
     cannot observe would make a faithful-but-slow carousel report as dead. A rare
     >5s ref cycle is clamped here — a small, bounded pacing compromise — but the
-    common case (navercorp 4s) is reproduced exactly."""
+    common case (one observed site 4s) is reproduced exactly."""
     toks = set(_swiper_tokens(cls))
     cfg = {"loop": False}
     if autoplay_delay_ms and autoplay_delay_ms > 0:
@@ -3540,7 +3540,7 @@ def _swiper_progress_selector(node):
     #   second, non-progress `span.bar` in a different section of the same
     #   wrapper), it passes the clone test and the parent-scope querySelector
     #   could bind it. Not observed on real captures (fill classes like `.bar`
-    #   are pagination-local); tightening it further regressed the real navercorp
+    #   are pagination-local); tightening it further regressed a real observed site
     #   fill, which lives in per-bullet parents. Left as-is deliberately.
     carriers: dict = {}
 
@@ -3799,7 +3799,7 @@ def _build_parent_map(node, parent=None):
 def _height_should_unfreeze(node, styles):
     """Fix 20/21 — True when a frozen px height on `node` would clip/overlap its
     content because the impl reflows it taller than capture time (observed on
-    realfood hero titles: 56-68px overflow). Fires for any element that holds
+    one observed site's hero titles: 56-68px overflow). Fires for any element that holds
     growable content (direct text or child elements). Guards keep the height
     for: intentional clip/reveal masks (overflow:hidden, e.g. a collapsed FAQ),
     replaced/intrinsic-sized elements (img/video/svg — height is geometry), and
@@ -3815,7 +3815,7 @@ def _height_should_unfreeze(node, styles):
     # skip-nav ul, a height:0 clip container), not a growable frozen height.
     # Converting it to a min-height:0 floor is a no-op that lets the element's
     # empty line-boxes render at content height, pushing the whole page down
-    # (navercorp: a 0-height ul.skip rendered 54px tall, offsetting every section
+    # (one observed site: a 0-height ul.skip rendered 54px tall, offsetting every section
     # +54 and saturating section-compare AE). Keep the hard height:0 so the box
     # collapses exactly as the reference frame. extract-dom now preserves
     # height:0px (its default-drop set otherwise treats 0px as a UA default).
@@ -3832,14 +3832,14 @@ def _is_scroll_state_translation(tv):
     skew) with a non-trivial offset. Scroll-scrub / parallax / stagger reveals
     are driven by JS that writes such transforms inline (no CSS transition or
     animation-name marker to detect them by), and they were captured mid-motion
-    — freezing them displaces the clone (realfood pyramid categories were shoved
+    — freezing them displaces the clone (one observed site's pyramid categories were shoved
     -37 to -81px sideways). Percentage translations (translate(-50%,-50%)
     centering) and any rotate/scale/skew are treated as static design and kept."""
     if not tv or tv == "none" or "%" in tv:
         return False
     # Codex-review HIGH: a 4px floor over-stripped legitimate static layout
     # nudges (translateX(8px)) on other sites. Only LARGE marker-less px
-    # translations look like a mid-scroll/parallax capture (realfood's frozen
+    # translations look like a mid-scroll/parallax capture (one observed site's frozen
     # reveals were 37-81px); small offsets are kept as static design.
     _MIN_PX = TRANSFORM_MIN_PX
     m = re.match(r"matrix\(([^)]*)\)", tv)
@@ -4848,7 +4848,7 @@ def render(
     # extract-dom drops display:none from `styles` (its default-drop set treats
     # 'none' as a UA default), so style_to_jsx never re-emits it and the node
     # renders visible, stacking its whole subtree in flow and inflating the
-    # section. navercorp B2: an inactive `.tab-data` panel (+303px on main-partner)
+    # section. one observed site B2: an inactive `.tab-data` panel (+303px on main-partner)
     # and hidden-language `.en-data`/`.mo-data` footer & hero variants (51 hidden
     # nodes total) all rendered visible before this. Reproducing display:none is
     # faithful to the captured reference frame section-compare measures; the
@@ -4875,7 +4875,7 @@ def render(
     if _is_utility_iframe(node, styles):
         styles = dict(styles) if isinstance(styles, dict) else {}
         styles["display"] = "none"
-    # box-sizing fidelity (navercorp B1): a captured px `height` came from
+    # box-sizing fidelity (one observed site B1): a captured px `height` came from
     # getComputedStyle on a border-box element (padding INSIDE the height), so
     # re-emitting it under the content-box default would add padding on top and
     # inflate the element by padT+padB. extract-dom now captures box-sizing, so
@@ -4981,7 +4981,7 @@ def render(
             v = rewrite_srcset(v)
         attr_emit[jsx_key] = v
 
-    # F-family (realfood-v4 broken_system_image): older captures missed img
+    # F-family (one observed site's broken_system_image): older captures missed img
     # width/height attributes. Recover from computed ratio only when the capture
     # includes an independent markup-attr witness; otherwise CSS-authored
     # aspect-ratio:auto W/H would invent HTML attrs.
@@ -4991,7 +4991,7 @@ def render(
         attr_emit["height"] = _intrinsic[1]
 
     # B-family: generic data-* pass through verbatim (valid JSX as-is) —
-    # realfood word-reveal spans keyed on data-word-id lost their animation
+    # one observed site's word-reveal spans keyed on data-word-id lost their animation
     # hooks when only the programmatic stamps survived. The U1 lazy artifacts
     # stay dropped (their real URLs were promoted above).
     _state_reveals = []
@@ -5213,7 +5213,7 @@ def render(
             if _vp.get("loop"):
                 extra_attrs += " loop"
             # gen-H3: the JSX `muted` attribute races React SSR hydration (the
-            # realfood specific regression muted-attr bug), so a visible hero/background
+            # a site-specific regression muted-attr bug), so a visible hero/background
             # video can freeze at frame 0. Flag it so a VideoAutoplayKick
             # singleton imperatively sets muted+play() — the same kick the hidden
             # RequiredVideos bridge already does, but for on-page videos too.
@@ -5893,7 +5893,7 @@ def _is_band_owner_wrapper(anc):
     re-emitted to paint it natively, making the per-section Fix 88 bands redundant.
 
     Forensic className-only mode only: the whole point is that the mirrored ref
-    CSS repaints the region (realfood's `.dark{background-color:var(--off-black)}`),
+    CSS repaints the region (one observed site's `.dark{background-color:var(--off-black)}`),
     which is what lets the band divs be dropped. Dropping them is what restores the
     parent/child adjacency that `.wrapper > .child` rules need — with a band
     interposed, re-emitting the wrapper alone changes nothing."""
@@ -5949,7 +5949,7 @@ def _recover_auto_margin_centering(styles):
     into fixed px at the capture viewport.
 
     A `max-width` box centered with `margin:0 auto` resolves at capture time to
-    symmetric horizontal px (navercorp @1440: `.header__inner{max-width:1408px;
+    symmetric horizontal px (one observed site @1440: `.header__inner{max-width:1408px;
     margin:0 auto}` → `margin: 0px 80px`). Baked inline, that px OVERRIDES the
     imported ref CSS's own `margin:0 auto` and freezes the box off-center at
     every other width (the ~80px content shift). Recover `auto` when the element
@@ -6017,7 +6017,7 @@ def _header_scroll_candidate(name, subtree):
     return (round(idle, 2), round(compact, 2))
 
 
-# Root scroll-state classes the ref toggles on its `.navercorp`-style host to
+# Root scroll-state classes the ref toggles on its `.site`-style host to
 # signal "scrolled/compact". is-show is excluded on purpose: it is a
 # theme/overlap signal (thema-white/black + section overlap), not pure scroll,
 # so lifting is-show declarations would contaminate the clone with theme colors.
@@ -6203,10 +6203,10 @@ def _header_scroll_descendant_compact_css(subtree):
     synthetic .is-compact wrapper.
 
     The ref shrinks descendants (e.g. the logo 292->104) with rules gated on
-    scroll-state classes carried by the root `.navercorp` host — a host the
+    scroll-state classes carried by the root `.site` host — a host the
     transpiler drops, so those rules never match the impl, and the descendant
     stays frozen at its baked inline value. Restoring the host is unacceptable
-    (thousands of dormant `.navercorp`-scoped rules would activate under the
+    (thousands of dormant `.site`-scoped rules would activate under the
     inline styles). Instead we re-scope only the descendant-targeting compact
     declarations to `.ui-clone-header-scroll.is-compact <descendant>`; the
     appended !important beats the baked inline value with no host cascade.
@@ -6670,7 +6670,7 @@ def _index_doc_order(node, counter=[0]):
 
 def _inject_missing_images(struct, ref_dir):
     """P2 — images captured in visible-images.json but ABSENT from the DOM
-    scaffold (lazy / IntersectionObserver galleries, e.g. realfood's 34 pyramid
+    scaffold (lazy / IntersectionObserver galleries, e.g. one observed site's 34 pyramid
     food images) would never be emitted. Inject each as an <img> into the
     section whose class matches its /images/<category>/ path, so the transpiler
     renders them and asset-download (which already harvests visible-images)
@@ -6814,7 +6814,7 @@ seen_names = {}  # Fix 15 — dedup component names so page.tsx imports are uniq
 consumed = set()  # Fix 16b — id(node) of subtrees already assigned to a section.
 # Section-map landmark classes — section-compare enumerates impl sections by
 # tag=section and expects exactly the section-map entries. A claimed section's
-# subtree can contain NESTED <section> descendants (e.g. realfood's food-pyramid
+# subtree can contain NESTED <section> descendants (e.g. one observed site's food-pyramid
 # category cards: <section class=...sections_section> nested inside the erf
 # wrapper) that are NOT separate section-map entries — captured into
 # structure.json but absent from section-map.json (capture-state mismatch). Left
@@ -7111,7 +7111,7 @@ def _paints_something(node):
     """True when the node is visible on its own — a fill, an image, or a border.
 
     An unclaimed node with no text and no media is still ref content when it
-    PAINTS: realfood's card_bg is a childless div whose whole job is the 4580px
+    PAINTS: one observed site's card_bg is a childless div whose whole job is the 4580px
     cream band behind the ERF region, and stat-grid bars / card-parallax layers
     / footer column backers have the same shape. extract-dom.sh already applies
     this test when deciding what survives its depth cap; without the same test
@@ -7155,7 +7155,7 @@ def _restore_positioning_context(node):
     An uncovered fragment is emitted at App top level, so every ancestor is
     lost. For an in-flow node that is harmless, but an out-of-flow one resolves
     its offsets against whatever positioned ancestor survives — and the mirrored
-    ref CSS supplies those offsets. realfood's card_bg is
+    ref CSS supplies those offsets. one observed site's card_bg is
     `position:absolute;z-index:1;top:0;bottom:0`: with its relative erf_wrapper
     dropped, top/bottom resolve against the initial containing block and the
     4580px cream band paints from the page top over the hero instead of behind
@@ -7245,7 +7245,7 @@ UNCOVERED_GROUPS: dict = {}
 def _write_uncovered_component(cname, nodes):
     _placed = [_restore_positioning_context(_n) for _n in nodes]
     parts = [r for r in (render(node, indent=3) for node in _placed) if r]
-    # fable-20260910 follow-up review round 3 (LOW, latent): `cname` is
+    # Follow-up review round 3 (LOW, latent): `cname` is
     # unconditionally registered into `exports`/`group_comp` by the caller
     # BEFORE this function runs (every uncovered group gets a component name
     # reserved up front). Returning here without writing the file used to be
@@ -7346,7 +7346,7 @@ if _uncovered:
 #
 # The transpiler emits each section-map section as a FLAT component under a
 # position:static App root, dropping the ref's nested positioned-wrapper
-# ancestors. When such an ancestor (e.g. realfood's `erf_wrapper`,
+# ancestors. When such an ancestor (e.g. one observed site's `erf_wrapper`,
 # position:relative) is the CONTAINING BLOCK for a `position:absolute`
 # full-bleed backdrop child (e.g. `card_bg`, inset 0, no top/left), removing
 # the wrapper leaves the absolute backdrop with the static App root as its
@@ -7420,20 +7420,20 @@ def _css_child_scopes_direct_child(anc):
 
     Only meaningful in forensic className-only mode, where the baked box model is
     stripped and layout is delegated wholly to the mirrored ref CSS: dropping such
-    a wrapper deletes the rule outright, and realfood's `.container` collapsed from
+    a wrapper deletes the rule outright, and one observed site's `.container` collapsed from
     a ref 1011px to 38px — ~975px of document height that displaced every section
     below it. In BAKED mode the same drop costs ~0px because the padding is already
     inline, which is why the caller gates this branch on forensic mode.
 
     Deliberately narrower than `_scopes_ref_css` (Fix 130), which also accepts a
     DESCENDANT combinator. A descendant scope is typically a site-wide theme class
-    rather than a structural wrapper — on navercorp, `.navercorp` scopes 230 such
+    rather than a structural wrapper — on one observed site, `.site` scopes 230 such
     selectors and is already applied to the App root by Fix 130, so re-emitting it
     would both duplicate that class and wrap every section in a spurious
     positioned containing block. Requiring BOTH an explicit `>` and a matching
     direct child admits only genuine structural wrappers: measured across
-    realfood-v2 / ebay-playbook / navercorp-esg-sustainability it selects exactly
-    one ancestor (realfood's `.lineInTheSand`, 6 matching rules) and none on the
+    a Lenis-driven site / one observed site / a second observed site it selects exactly
+    one ancestor (one observed site's `.lineInTheSand`, 6 matching rules) and none on the
     other two refs.
     """
     if not _REF_CSS_TEXT:
@@ -7779,7 +7779,7 @@ def _dominant_descendant_bg(node):
 
 # R1b — when the captured root background-color EQUALS the root text color, the
 # body was captured in an unrevealed intro state (text painted invisibly on the
-# pre-animation dark backdrop, e.g. realfood's rgb(17,0,0) intro that transitions
+# pre-animation dark backdrop, e.g. one observed site's rgb(17,0,0) intro that transitions
 # to cream). That is never the resting page background, so propagating it (Fix
 # 56) paints the whole page dark. Substitute the dominant solid content
 # background-color (the real page bg, e.g. cream) for both the root div and the

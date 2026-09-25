@@ -1,11 +1,16 @@
-"""Codex-driven onpixel showcase loop automation.
+"""Codex-driven onpixel showcase loop automation (maintainer-only, not packaged).
 
 This is maintainer automation for running the ui-clone-skills pipeline against
-the local onpixel showcase catalogue. It deliberately separates clone work from
-plugin repair work:
+the local onpixel showcase catalogue. It lives under internal/ so it is never
+shipped in the ``ui_clone`` wheel or the npm package; it imports ``ui_clone``
+from the checkout. It deliberately separates clone work from plugin repair work:
 
 1. Clone pass writes only under tmp/onpixel-codex-loop/<slug>/.
 2. Skill-fix pass may edit this plugin repo, using the clone failure evidence.
+
+Run from the repo root:
+
+    uv run python internal/onpixel/onpixel_showcase_loop.py --showcase-root <path>
 """
 
 from __future__ import annotations
@@ -23,8 +28,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from ui_clone.clone_experiment_score import score_clone_attempt
-from ui_clone.local_source_reuse import detect_local_source_reuse
+# Repo root: internal/onpixel/<this file> -> parents[2]. This script runs from
+# outside the package, so put the checkout on sys.path before importing ui_clone.
+PLUGIN_ROOT = Path(__file__).resolve().parents[2]
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
+
+from ui_clone.clone_experiment_score import score_clone_attempt  # noqa: E402
+from ui_clone.local_source_reuse import detect_local_source_reuse  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -550,7 +561,7 @@ def prepare_site_workspace(
             encoding="utf-8",
         )
     write_handover(showcase_root, site)
-    write_impl_agents(site, Path(__file__).resolve().parents[1])
+    write_impl_agents(site, PLUGIN_ROOT)
     write_clone_research(site)
     return site
 
@@ -664,10 +675,9 @@ def invoke_codex(
     poll_count = 0
     with log_path.open("w", encoding="utf-8") as stdout_fh, stderr_path.open("w", encoding="utf-8") as stderr_fh:
         env = os.environ.copy()
-        plugin_root = Path(__file__).resolve().parents[1]
-        env.setdefault("PLUGIN_ROOT", str(plugin_root))
-        env.setdefault("CODEX_PLUGIN_ROOT", str(plugin_root))
-        env.setdefault("UI_CLONE_ROOT", str(plugin_root))
+        env.setdefault("PLUGIN_ROOT", str(PLUGIN_ROOT))
+        env.setdefault("CODEX_PLUGIN_ROOT", str(PLUGIN_ROOT))
+        env.setdefault("UI_CLONE_ROOT", str(PLUGIN_ROOT))
         proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -1035,7 +1045,7 @@ def _should_run_skill_fix(
 
 
 def run_loop(args: argparse.Namespace) -> str:
-    plugin_root = Path(__file__).resolve().parents[1]
+    plugin_root = PLUGIN_ROOT
     showcase_root = Path(args.showcase_root).expanduser().resolve()
     work_root = Path(args.work_root).expanduser().resolve()
     work_root.mkdir(parents=True, exist_ok=True)
@@ -1258,10 +1268,14 @@ def run_loop(args: argparse.Namespace) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m ui_clone.onpixel_showcase_loop",
+        prog="python internal/onpixel/onpixel_showcase_loop.py",
         description="Run Codex over onpixel showcase clones, then launch skill-fix passes from evidence.",
     )
-    parser.add_argument("--showcase-root", default="~/Documents/onpixel/apps/showcase")
+    parser.add_argument(
+        "--showcase-root",
+        required=True,
+        help="Path to the showcase app root (the directory holding src/app/ShowcaseClient.tsx)",
+    )
     parser.add_argument("--work-root", default="tmp/onpixel-codex-loop")
     parser.add_argument("--slugs", default=None, help="Comma-separated slug allowlist")
     parser.add_argument("--limit", type=int, default=None)

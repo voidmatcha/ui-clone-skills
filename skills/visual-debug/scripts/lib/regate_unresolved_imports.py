@@ -134,7 +134,7 @@ def _resolve(spec: str, from_file: Path, src_root: Path) -> bool:
 # A module that RESOLVES can still be missing the symbols an importer asks for.
 # A development compiler may emit the page with import warnings and still serve
 # HTTP 200, leaving the requested binding `undefined`; a production TypeScript
-# build catches it later. Observed on realfood-v4: MotionController imported ten
+# build catches it later. Observed on a generated clone: MotionController imported ten
 # scroll constants from `@/generated/motion-skeletons`, a file
 # emit-motion-skeletons.sh regenerates as `use*` HOOKS and has never exported a
 # constant. The first deref (`NAV_REVEAL_OUTPUT[0]`) threw inside the effect, and

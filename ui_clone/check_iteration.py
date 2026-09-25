@@ -115,7 +115,7 @@ def _finish_full_dispatch(
 def _read_artifact(path: Path) -> dict | None:
     """Read retry evidence, including the canonical visual comparison text formats.
 
-    F4 (fable-20260910): the dispatcher writes several other plain-text results
+    F4 (review): the dispatcher writes several other plain-text results
     into transitions/ (trajectory-result.txt, hover-state-result.txt,
     click-state-result.txt, video-motion-result.txt, temporal-result.txt,
     keyframes-diff-result.txt, ...), all sharing the same ✅/❌ line convention
@@ -292,7 +292,7 @@ def main(args: list[str]) -> int:
     try:
         inputs = compute_check_input_hash(impl, ref, cid)
     except InputFingerprintUnavailable:
-        # fable-20260910 follow-up review (LOW): a declared input side being
+        # Follow-up review (LOW): a declared input side being
         # literally unreadable (traversal error, unavailable root) used to
         # collapse to the SAME `inputs = None` -> fingerprint "" as an
         # UNREGISTERED check_id. should_pause's `bool(fingerprint and ...)`
@@ -313,7 +313,7 @@ def main(args: list[str]) -> int:
                     ref_url,
                     impl_url,
                     {
-                        # fable-20260910 follow-up review (MEDIUM): a fixed
+                        # Follow-up review (MEDIUM): a fixed
                         # two-key tuple missed the per-check timeout overrides
                         # (RUN_REQUIRED_HOVER_TIMEOUT_SEC,
                         # RUN_REQUIRED_MASKED_STATIC_TIMEOUT_SEC,

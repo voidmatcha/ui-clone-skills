@@ -326,7 +326,7 @@ def _finish_js() -> str:
     identity. It must only NORMALIZE an opacity the element already declares
     inline (0.9995 -> 1) — writing one where the element had none overrides the
     stylesheet and force-shows scroll-gated reveals that are legitimately
-    hidden at the capture anchor (realfood pyramid `.food`: 63k AE of pure
+    hidden at the capture anchor (one observed site's pyramid `.food`: 63k AE of pure
     capture artifact). See tests/test_section_capture_finish_opacity.py.
     """
     return r"""(() => { try { if (typeof document.getAnimations === "function") { document.getAnimations().forEach(a => { try { a.finish(); } catch(e){} }); } } catch(e){} try { var __ST = window.ScrollTrigger || window.__sc_st || (window.gsap && window.gsap.core && window.gsap.core.globals && window.gsap.core.globals().ScrollTrigger); if (__ST && typeof __ST.getAll === "function") { __ST.getAll().forEach(function(st){ try { if (st.animation && typeof st.animation.progress === "function") st.animation.progress(1, false); if (typeof st.disable === "function") st.disable(false, false); } catch(e){} }); } } catch(e){} try { var __gs = window.gsap || window.__sc_gsap; if (__gs && __gs.globalTimeline && typeof __gs.globalTimeline.getChildren === "function") { __gs.globalTimeline.getChildren(true, true, true).forEach(t => { try { if (typeof t.progress === "function") t.progress(1, false); } catch(e){} }); } } catch(e){} try { if (window.anime && Array.isArray(window.anime.running)) { window.anime.running.slice().forEach(a => { try { a.seek(a.duration); a.pause(); } catch(e){} }); } } catch(e){} try { if (window.lottie && typeof window.lottie.getRegisteredAnimations === "function") { window.lottie.getRegisteredAnimations().forEach(a => { try { const last = (typeof a.totalFrames === "number" ? a.totalFrames : 1) - 1; a.goToAndStop(Math.max(0, last), true); } catch(e){} }); } document.querySelectorAll("lottie-player, dotlottie-player").forEach(el => { try { if (typeof el.seek === "function") el.seek("100%"); if (typeof el.pause === "function") el.pause(); } catch(e){} }); } catch(e){} try { var snapped = 0; document.querySelectorAll("[style*=translate3d]").forEach(function(el){ try { var s = el.getAttribute("style") || ""; var re = /translate3d\(\s*(-?[0-9.]+)px\s*,\s*(-?[0-9.]+)px\s*,\s*0(?:px)?\s*\)/; var transformSource = (el.style.transform || "").trim(); if (!transformSource) { var tm = s.match(/(?:^|;)\s*transform\s*:\s*([^;]+)/i); transformSource = tm ? tm[1].trim() : ""; } var m = (transformSource || s).match(re); if (!m) return; var ax = Math.abs(parseFloat(m[1])); var ay = Math.abs(parseFloat(m[2])); if (ax >= 10 || ay >= 10) return; var rawOp = (el.style.opacity || "").trim(); var op = parseFloat(rawOp === "" ? "1" : rawOp); if (!Number.isFinite(op) || op < 0.95) return; el.style.transform = (transformSource || m[0]).replace(re, "translate3d(0px, 0px, 0px)"); if (rawOp !== "" && op > 0.999) el.style.opacity = "1"; snapped++; } catch(e){} }); } catch(e){} return "finished"; })()"""
@@ -670,7 +670,7 @@ def crop_is_off_canvas(*, clip_top: float, crop_h: float, canvas_h: float) -> bo
     """True when the crop rect has zero intersection with the screenshot.
 
     Off-canvas rects happen legitimately: a settled intro overlay parked at
-    page rect -900..0 (loop-e2e-4). ImageMagick's out-of-bounds crop output
+    page rect -900..0 (end-to-end run). ImageMagick's out-of-bounds crop output
     then depends on the source PNG's alpha channel — transparent on the
     alpha-bearing ref capture, a clamped edge pixel on a no-alpha impl
     screenshot — which guarantees a saturating 1px AE diff that no impl
@@ -714,7 +714,7 @@ def _run_crop(image_path: Path, rect: dict[str, object], clip_top: float) -> Non
         return
     # Partial-overlap clamp (batch-13 ITEM 1 sub-fix 2). A near-bottom section
     # pinned to maxScroll has its TOP scrolled above the viewport (clip_top < 0)
-    # while its content sits in the visible band below — the realfood "Eat Real
+    # while its content sits in the visible band below — the observed site's "Eat Real
     # Cheese" footer reveals only at maxScroll, so it can't be top-aligned, yet a
     # raw negative clip_top crops black padding that quantizes to a flat
     # "content never rendered" band. Clamp to the VISIBLE portion (drop the
@@ -980,7 +980,7 @@ def _capture_one(
         # the frozen-ref capture used so the impl lands on the SAME framer
         # scroll-scrub frame. The scrub is window.scrollY-driven; recomputing the
         # impl scroll_y independently lands a different phase and inflates AE on
-        # identical content (the realfood pyramid-zoom class: ref-vs-ref-calib
+        # identical content (the observed site's pyramid-zoom class: ref-vs-ref-calib
         # AE 0 but frozen-ref-vs-live-impl AE 166897). Detection is preserved: a
         # broken impl rendered at the SAME scroll still diverges and fails.
         scroll_y = forced_scroll_y

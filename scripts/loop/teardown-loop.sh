@@ -3,9 +3,9 @@
 #
 # Loops historically leaked: agent-browser sessions (hold Chrome + ports),
 # and impl dev servers (vite/next) whose cwd lives under scratch/loop-*/ —
-# loop-e2e-1's server outlived its tab and kept serving a stale impl on a
-# port later probes could hit. Run this between loops (after closing the
-# purplemux tab).
+# an observed loop's dev server outlived its terminal tab and kept serving a
+# stale impl on a port later probes could hit. Run this between loops (after
+# closing the multiplexer tab).
 #
 # Usage: teardown-loop.sh [<loop-dir-substring>]
 #   <loop-dir-substring>  only kill dev servers whose cwd matches this

@@ -90,11 +90,14 @@ This skill is auto-loaded into Claude Code (with `--plugin-dir`) and Codex sessi
   `0.0.0.0` when the dev server supports it. A preview bound only to
   `127.0.0.1` is local-only evidence and should not be presented as an
   externally reachable preview.
-- For a tailnet preview, use the installed `local-preview-server` workflow and
-  report its verified `LOCAL_URL` / `TAILNET_URL` receipts. Do not run
-  `tailscale serve` manually or reuse the application listener as an ad-hoc
-  Tailscale mapping; the preview workflow owns port selection, mapping identity,
-  and two-sided URL verification.
+- For a preview that must be reachable beyond the local machine, bind the
+  server to a reachable interface (or use whatever preview/tunnel workflow the
+  host environment provides) and report a receipt: the exact URL(s) you
+  verified, how each was verified (an HTTP status or rendered check from the
+  network the user will use), and the bound interface/port. A URL you did not
+  verify from the far side is not a receipt. Do not repurpose the application
+  listener as an ad-hoc tunnel or serve mapping; whatever workflow provides the
+  mapping owns port selection, mapping identity, and two-sided verification.
 - **Unattended no-choice contract:** in any non-interactive or pre-authorized
   automation context, do not ask the user to choose between approaches, approve
   a retry, or pick a blocker. The run has already granted permission for safe

@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# ref-vs-ref-selfpass.sh — the ACHIEVABILITY meta-check, full-pipeline edition
-# (tools-batch-11 ITEM 5, expanded in tools-batch-12 ITEM 6).
+# ref-vs-ref-selfpass.sh — the ACHIEVABILITY meta-check, full-pipeline edition.
 #
 # Runs every achievability-sensitive BLOCK-severity gate's CHECK SCRIPT with the
 # LIVE REFERENCE as the impl (impl-url := ref-url) against a frozen ref dir. The
 # reference trivially matches itself, so EVERY gate MUST PASS. Any gate that fails
 # here has an achievability bug (it consumes an artifact no pipeline step
-# produces, or computes an input from the wrong layer) — the exact class
-# loop-e2e-12 hit on masked-region-static / state-reveal / hover-fallback /
+# produces, or computes an input from the wrong layer) — the exact class an
+# observed run hit on masked-region-static / state-reveal / hover-fallback /
 # section-compare, which six bypass/false-positive adversarial rounds never caught
 # because they fed gate inputs directly instead of producing them through the real
 # pipeline.
@@ -23,7 +22,7 @@
 #   UI_CLONE_SELFPASS_ONLY="section-compare alignment-parity" UI_CLONE_REF_SELFPASS=1 \
 #     bash scripts/ci/ref-vs-ref-selfpass.sh <ref-dir> <ref-url>
 #
-# tools-batch-12 ITEM 6 closes two holes the batch-11 edition had:
+# The expanded edition closes two holes the first edition had:
 #   (a) a REQUIRED gate that produces NO artifact is now a FAILURE, not a silent
 #       SKIP — a gate that consumes/produces nothing through the pipeline is
 #       exactly the achievability class this meta-check exists to catch. (The
@@ -174,8 +173,8 @@ _gate() {
 # live ref capture and reintroduce the flake.
 # batch-13 ITEM 1 — frozen-ref THREE-pass with an IMPL-PATH calibration.
 #
-# A scroll-scrub / scroll-entrance section (realfood's 1992-pyramid scale, the
-# card-bg scaffold scale) renders a DIFFERENT sub-frame when captured through the
+# A scroll-scrub / scroll-entrance section (an observed scroll-scrubbed scale
+# animation, a scaffold-scale backdrop) renders a DIFFERENT sub-frame when captured through the
 # REF path (pass 1 frozen baseline) vs the IMPL path (the live measurement), even
 # at the identical forced scrollY — a deterministic ~13% cross-path scrub
 # variance. That variance is exactly what a faithful clone's impl capture also

@@ -81,7 +81,7 @@ COUNT_JS="(() => {
         const st = getComputedStyle(m);
         if (st.display === 'none' || st.visibility === 'hidden') continue;
         // Thin-by-design elements (hr/divider class, boxHeight<=2) can never
-        // satisfy a height floor — the e2e-9 live ref failed its OWN scaffold
+        // satisfy a height floor — the end-to-end run live ref failed its OWN scaffold
         // truth on 1px <hr> dividers (4 -> 0). For them, presence = visible
         // computed style + real width; hidden/zero-width stubs stay excluded.
         const boxOk = r.width > 2 && r.height > 2;

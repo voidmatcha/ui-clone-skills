@@ -387,7 +387,7 @@ def measure_video_motion(path: Path) -> tuple[bool, str]:
     # Fail: <RED>M</>") with no TTY guard, so on a multi-mode run the colored
     # splash tally is invisible to a \s*\d+ regex and a single re.search matched
     # only a later PLAIN tally — masking splash failures (proven on
-    # realfood-e2e-11: 126 failing splash frames rolled up as pass). Strip ANSI,
+    # one end-to-end run: 126 failing splash frames rolled up as pass). Strip ANSI,
     # trust the multi-mode summary line, then sum EVERY per-mode tally.
     plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
     if re.search(r"❌\s*\d+/\d+\s*mode\(s\)\s*diverged", plain):

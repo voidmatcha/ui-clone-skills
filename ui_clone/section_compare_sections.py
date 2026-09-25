@@ -219,7 +219,7 @@ def _copy_with_index(row: Section, index: int) -> Section:
 # IoU > 0.5 is the primary test; as a robustness backstop we also reject when
 # the candidate's vertical CENTER falls inside an existing row's [top, bottom]
 # and the two widths are within this ratio of each other — the verified
-# phantoms (realfood idx 12/13) are near-exact positional twins of the real
+# phantoms (one observed site's idx 12/13) are near-exact positional twins of the real
 # pyramid/faqs rows, so center-containment catches them even if a small height
 # difference dents the IoU.
 _OVERLAP_IOU_THRESHOLD = 0.5
@@ -1201,7 +1201,7 @@ def _rect_size_sim(a: Section, b: Section) -> float:
 
 
 def _identity_pair_score(r: Section, im: Section) -> float:
-    """Composite identity-pairing score (tools-batch-11 ITEM 4a).
+    """Composite identity-pairing score.
 
     A single shared id/class token (e.g. a generic "footer" id on two distinct
     sections) cannot disambiguate which impl a ref pairs to. Blend id-exact +
@@ -1258,7 +1258,7 @@ def _identity_pair_score(r: Section, im: Section) -> float:
 # id-exact alone contributes +1.0 and a full class-signature match +2.0, so the
 # floor (1.5) demands more than a single shared generic token (e.g. two sections
 # sharing only a "section" token score ~0.7 from a partial Jaccard and never
-# lock). Tuned against realfood: hero/stats/winning/end/cta/eatReal all clear it;
+# lock). Tuned against one observed site: hero/stats/winning/end/cta/eatReal all clear it;
 # the spurious faqs<->cta "section"-token overlap (score ~1.93 but Y-order
 # inconsistent) is rejected by the monotonic-chain selection, not this floor.
 _ANCHOR_SCORE_FLOOR = 1.5
@@ -1298,7 +1298,7 @@ def _lock_identity_anchors(
     floor, then select a subset that (1) is 1:1 and (2) is strictly increasing
     in BOTH ref document-top and impl document-top — i.e. an order-preserving
     assignment. This forbids an anchor that would cross a stronger one out of
-    Y-order (the realfood faqs<->cta "section"-token collision), so a locked
+    Y-order (the observed site's faqs<->cta "section"-token collision), so a locked
     anchor can never be stolen later nor violate the page's vertical order.
 
     Greedy-by-score selection with a Y-order feasibility check is deterministic
@@ -1399,7 +1399,7 @@ def _fill_between_anchors(
     last), the still-free ref sections and still-free impl sections are each in
     Y-order; pair them positionally band-by-band. When a band has more refs than
     free impls, the surplus refs stay unpaired (a genuine enumeration gap — the
-    impl rendered fewer sections in that region, e.g. realfood card_bg collapsed
+    impl rendered fewer sections in that region, e.g. one observed site's card_bg collapsed
     into its pyramid sibling). When it has more impls than refs, the surplus
     impls stay free for Phase C / EXTRA.
 
@@ -1492,7 +1492,7 @@ def _fill_between_anchors(
         # the monotonic subset of (ref, impl) pairs that MAXIMIZES pairs, breaking
         # ties by MINIMIZING total drift deviation from band_drift, so the
         # genuinely-unmatched section (the one the impl never rendered) falls out
-        # as the surplus — e.g. realfood card_bg, whose impl collapsed into its
+        # as the surplus — e.g. one observed site's card_bg, whose impl collapsed into its
         # pyramid sibling. A pair whose deviation exceeds the band tolerance is
         # forbidden (it is a cross-band mispair, not a real partner). Each pair is
         # rewarded so the DP prefers pairing; the deviation is a tie-break penalty
@@ -1767,7 +1767,7 @@ def pair_sections(ref: list[Section], impl: list[Section]) -> list[Section]:
 
     # ── Off-canvas pre-pass ──
     # A ref row whose stored rect lies entirely above the canvas is a settled
-    # splash/overlay the ref itself unmounted (loop-e2e-4 intro at -900..0).
+    # splash/overlay the ref itself unmounted (end-to-end run intro at -900..0).
     # The impl has no enumerable candidate, so normal pairing garbage-matches
     # it to an unrelated on-canvas section and the compare crops painted
     # content against the ref's transparent off-canvas stub. Pair it to a
@@ -1797,7 +1797,7 @@ def pair_sections(ref: list[Section], impl: list[Section]) -> list[Section]:
     # Within each Y-band carved out by the locked anchors, pair the still-free
     # ref/impl sections by document-top so a ref at a given Y maps to the impl at
     # the corresponding Y. Surplus refs in a band stay unpaired (enumeration gap,
-    # e.g. realfood card_bg collapsed into its pyramid sibling).
+    # e.g. one observed site's card_bg collapsed into its pyramid sibling).
     band_pairs = _fill_between_anchors(
         ref, impl, locked_pairs, used_impl, eligible_ref
     )
@@ -2129,7 +2129,7 @@ def find_large_extra_sections(
         # An extra living INSIDE the matched page span, overlapping no
         # sibling-level ref region, sits in a ref section-map COVERAGE GAP —
         # both pages have content there, the map just never enumerated it
-        # (loop-e2e-5: the hero-video block between hero and stats, orphaned
+        # (end-to-end run: the hero-video block between hero and stats, orphaned
         # when the off-canvas pre-pass stopped consuming it). That is
         # enumeration granularity, not a duplicated/misplaced block; docH +
         # geometry-sanity still catch genuinely inserted blocks because they

@@ -144,11 +144,11 @@ _add_vimeo_oembed_thumbnails()
 
 # Harvest image URLs from the captured DOM (structure.json / dom-scaffold.json).
 # visible-images.json only records images that were in-viewport at capture time;
-# lazy-loaded / off-screen images (e.g. realfood's intro/ section) appear in the
+# lazy-loaded / off-screen images (e.g. one observed site's intro/ section) appear in the
 # DOM but not there, so without this they never download and 404 in the clone.
 import re as _re
 # Match absolute (https://…) and root-relative (/cdn-cgi/…, /images/…) image
-# URLs. realfood stores DOM srcs as root-relative cdn-cgi paths; those are
+# URLs. The observed site stores DOM srcs as root-relative cdn-cgi paths; those are
 # resolved against the site origin in the download loop below.
 _ASSET_URL_RE = _re.compile(
     r"(?:https?://[^\"'\s)]+|/[^\"'\s)]+)\.(?:webp|png|jpe?g|avif|gif|svg|mp4|webm|mov|m4v|json|lottie)\b",

@@ -452,7 +452,7 @@ def amend_plan(base_path: str, fresh_path: str, out_path: str, plan_derived_raw:
 
     base["requiredChecks"] = base_req
     base["deferredChecks"] = base_def
-    # fable-20260910 follow-up review round 3 (unconfirmed item, now
+    # Follow-up review round 3 (unconfirmed item, now
     # verified and fixed): amend keeps every other top-level field from the
     # OLD base plan untouched, so a base plan minted before
     # ui_clone.verification_scope existed (no "verificationScope" key at

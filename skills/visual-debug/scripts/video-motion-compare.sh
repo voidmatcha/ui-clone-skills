@@ -325,7 +325,7 @@ run_mode() {
   } >> "$RESULT"
   local mode_log
   mode_log="$(mktemp "${TMPDIR:-/tmp}/video-motion-mode.XXXXXX")"
-  # Chunked-resume aggregation (batch-4 item 2): a scroll sweep captured under
+  # Chunked-resume aggregation: a scroll sweep captured under
   # UI_CLONE_VMC_SCROLL_CHUNK exits cleanly after one chunk with a
   # scroll-resume.json and no verdict. Re-invoke until the recorder produces a
   # verdict (resume.json gone). Each invocation captures one foreground-safe

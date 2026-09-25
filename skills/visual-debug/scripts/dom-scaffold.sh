@@ -263,7 +263,7 @@ def walk(node, styles_map, depth=0, max_depth=8):
         if text:
             item["text"] = text
             # textFull = live-rendered order for mid-text-span paragraphs
-            # (loop-e2e-9); text-fidelity keys on it. Never drop it.
+            # (end-to-end run); text-fidelity keys on it. Never drop it.
             if node.get("textFull"):
                 item["textFull"] = node["textFull"]
             # RANK-4 fix (ADDITIVE): the skill says "copy the measured px/weight

@@ -10,16 +10,43 @@
 #      `loop-<N>` style attribution.
 #   2. Per-loop finding labels — `L33`, `L62`, `Codex L24 Q5`, `codex-1<n>`,
 #      `Round 1`/`Round 2` referring to specific benchmark runs.
-#   3. Benchmark site names — `realfood.gov`, `realfood-bench`, `tmp/ref/realfood`,
-#      `tmp/ref/<benchmark-name>`, or any other concrete site name that ships
-#      as an example in a comment when a generic placeholder would do.
-#   4. Brand / company leakage — `NAVER`, `naver.com`, `dga_` (NAVER's
-#      CSS-module prefix), `kakao`, `coupang`, `nexon`. Site-specific
+#   3. Benchmark site names — `realfood` in any form (`realfood.gov`,
+#      `realfood-v2`, `tmp/ref/realfood`, "realfood's card_bg"), or any other
+#      concrete site name that ships as an example in a comment when a
+#      generic placeholder ("one observed site", "a Lenis-driven site") would do.
+#   3b. Maintainer end-to-end run identifiers — `loop-e2e-<N>` and bare
+#      `e2e-<N>` / `<site>-e2e-<N>` corpus labels. Say "an end-to-end run".
+#      Generic E2E vocabulary (`tests/e2e-3/`, `e2e-2024 runner`) passes.
+#   3c. Benchmark corpus labels — `ebay-playbook` (folded into rule 3).
+#   4. Brand / company leakage — `NAVER`, `navercorp`, `naver.com`, `dga_`
+#      (NAVER's CSS-module prefix), `kakao`, `coupang`, `nexon`. Site-specific
 #      class-prefix examples should use `prefix_*` or `opaque-hashed-class`.
+#   4b. Dated lab notes and session labels — `<N>-site loop`,
+#      `review|analysis|audit YYYY-MM-DD`, `fable-YYYYMMDD`. State the
+#      finding, not which run or day produced it.
 #   5. Personal paths — `/Users/<name>/`, `~/.claude/plans/<filename>.md`,
-#      `~/Documents/<personal-folder>/`.
+#      `~/Documents/<personal-folder>/`, `~/.codex/<anything but host config>`.
 #   6. Hangul (or any non-English natural language) in *production source*
 #      comments. Public docs / handover / CHANGELOG are exempt.
+#   7. Maintainer terminal setup — `purplemux`, `cmux`, workspace ids
+#      (`ws-XXXXXX`: six alphanumerics with at least one digit and one
+#      uppercase letter, so `ws-client` / `ws-server` pass). Launchers take
+#      these from UI_CLONE_LOOP_* env vars.
+#   8. Personal project names — `onpixel` (lives under internal/, never in
+#      the shipped package).
+#   9. Lab batch labels — `batch-N item N`, `tools-batch-N`.
+#  10. Repository owner used as behavior — a hard-coded
+#      `github.com/voidmatcha/...` fetch URL inside hooks/, scripts/, or
+#      ui_clone/. Derive it from UI_CLONE_REPO / `git remote get-url origin`;
+#      README, manifests, and install docs (attribution) are out of scope.
+#
+# Allowlists are explicit per rule in check_universality.py (`allow=`), never
+# a weakened pattern: Codex host-config paths (~/.codex/config.toml,
+# hooks.json, plugins/, skills), the `${UI_CLONE_REPO:-<url>}` /
+# `UI_CLONE_REPO_DEFAULT="<url>"` env-default forms, and the
+# `internal/onpixel` path reference that keeps its tests collected. An allow
+# only covers a hit that sits INSIDE the allowed span — appending an allowed
+# token as a trailing comment does not launder the rest of the line.
 #
 # Why a gate: the cleanup history shows these creep back in through hook
 # closure comments ("Loop-codex-N closure: agent did X") and finding labels
@@ -28,11 +55,14 @@
 # the maintainer's lab notebook, not a generic tool.
 #
 # Scope: this gate scans the same surface the rest of the public-facing
-# project ships. It explicitly skips:
+# project ships, INCLUDING host-integration surfaces that ship to users:
+# .claude-plugin/ (agent definitions, manifests), .codex-plugin/, .codex/agents/,
+# and docs/. It explicitly skips:
 #   - tests/         (test fixtures may use concrete sample data)
 #   - CHANGELOG.md / CHANGELOG_archive/ (historical record)
 #   - research/     (maintainer's research notes)
-#   - handover     (gitignored local-only)
+#   - handover, outbox/, .worktrees/, .ui-re-continuation/ (gitignored local-only)
+#   - internal/    (maintainer-only automation, not packaged)
 #   - tmp/, scratch/, benchmark/  (ephemeral)
 #   - .git/, .venv/, node_modules/, .mypy_cache/, .sisyphus/, .claude/
 #

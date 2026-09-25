@@ -778,7 +778,7 @@ if duplicate_drift:
         "files": duplicate_drift[:20],
         "note": "same total image count can still hide wrong carousel/proof duplicates",
     }
-    # Timer-carousel phase noise (loop-e2e-4): same filename vocabulary on both
+    # Timer-carousel phase noise (end-to-end run): same filename vocabulary on both
     # sides with per-file delta <= 1 is rotation phase, not a missing asset —
     # the pin hooks cannot reach custom setInterval carousels and the ref
     # rotates while off-screen. Anything beyond stays blocking.
@@ -834,7 +834,7 @@ for key in ("scrollHeight", "headerHeight", "brokenImgs"):
     if rv == iv:
         continue
     if key == "scrollHeight" and scrollheight_within_tolerance(rv, iv):
-        # Pages with scroll-activated content legally oscillate (realfood erf
+        # Pages with scroll-activated content legally oscillate (one observed site erf
         # +-180px); exact equality across two sessions is luck. Balloons are
         # still caught here (max(0.5%, 200px)) and by geometry-sanity (15%).
         advisory_findings.append(

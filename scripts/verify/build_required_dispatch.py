@@ -67,7 +67,7 @@ SIGNATURES = {
     "spec-implementation-coverage.sh": "{ref_dir} {impl_src}",
     "runtime-spec-coverage.sh": "{ref_dir} {impl_src}",
     "bundle-impl-coverage-check.sh": "{ref_dir} {impl_pkg}",
-    # 2026-05-22: add {impl_url} third arg so the runtime-proof block in
+    # Add {impl_url} third arg so the runtime-proof block in
     # lottie-runtime-check.sh fires (it opens impl_url, waits 1.5s, and
     # asserts at least one Lottie container painted svg/canvas). Without
     # impl_url the script falls back to the legacy static-only check
@@ -90,7 +90,7 @@ SIGNATURES = {
     # <session> <impl-url> <ref-dir>; writes <ref-dir>/transition-fires.json.
     "transition-fires-check.sh":
         "{session}-fires {impl_url} {ref_dir}",
-    # 2026-05-22: header-state-runtime gate fires unconditionally — proves
+    # Header-state-runtime gate fires unconditionally — proves
     # the impl header is a runtime state machine (mutates className on
     # scroll) when the ref's header is stateful. Args: session ref-url
     # impl-url ref-dir [w] [h]. self-skips when ref header is static.
@@ -102,18 +102,18 @@ SIGNATURES = {
     # back to ref geometry. Args: session ref-url impl-url ref-dir.
     "svg-provenance-check.sh":
         "{session}-svgp {ref_url} {impl_url} {ref_dir}",
-    # 2026-05-22: runtime-proof rollup is a file-IO aggregator —
+    # Runtime-proof rollup is a file-IO aggregator —
     # only ref-dir needed. Must run AFTER all source artifacts are
     # produced; dispatcher already orders rows by add_check insertion
     # order (this row is inserted near the end of standard tier so
     # source artifacts exist by the time it dispatches).
     "runtime-proof-rollup.sh":
         "{ref_dir}",
-    # 2026-05-22: transition-proof rollup — same file-IO contract as
+    # Transition-proof rollup — same file-IO contract as
     # runtime-proof; ref-dir only.
     "transition-proof-rollup.sh":
         "{ref_dir}",
-    # 2026-05-22: ref-js-loader gate — static scan of impl source for
+    # Ref-js-loader gate — static scan of impl source for
     # ref-host references, plus optional runtime probe when impl_url
     # is passed.
     "ref-js-loader-check.sh":
@@ -128,28 +128,28 @@ SIGNATURES = {
     # such as copied `body{opacity:0}` when DOM exists but the page is blank.
     "blank-viewport-check.sh":
         "{session}-blank {impl_url} {ref_dir}",
-    # 2026-05-22: video-play-proof — currentTime advancement check.
+    # Video-play-proof — currentTime advancement check.
     "video-play-proof-check.sh":
         "{session}-vpp {impl_url} {ref_dir}",
-    # 2026-05-22: impl-scope guard — diff git HEAD against baseline,
+    # Impl-scope guard — diff git HEAD against baseline,
     # fail if iteration touched plugin tooling.
     "impl-scope-check.sh":
         "{ref_dir} {impl_root}",
-    # 2026-05-22 grounding: color-token gate is pure file-scan;
+    # Grounding: color-token gate is pure file-scan;
     # ref-dir + impl-root only.
     "color-token-grounding-check.sh":
         "{ref_dir} {impl_root}",
-    # 2026-05-22: duration/easing grounding — scan impl for guessed
+    # Duration/easing grounding — scan impl for guessed
     # transition timings; static, no browser.
     "duration-easing-grounding-check.sh":
         "{ref_dir} {impl_root}",
-    # 2026-05-22: mobile viewport parity at 375x812.
+    # Mobile viewport parity at 375x812.
     "preview-runtime-health-check.sh":
         "{session}-prh {ref_url} {impl_url} {ref_dir}",
     "mobile-viewport-parity-check.sh":
         "{session}-mvp {ref_url} {impl_url} {ref_dir}",
     "mobile-responsive-coverage-check.sh": "{ref_dir} {impl_src}",
-    # 2026-05-22: stronger frame-delta proof (Lottie currentFrame +
+    # Stronger frame-delta proof (Lottie currentFrame +
     # canvas paint + WebGL drawbuffer).
     "runtime-frame-proof-check.sh":
         "{session}-rfp {impl_url} {ref_dir}",
@@ -186,7 +186,7 @@ SIGNATURES = {
         "{ref_dir} {impl_root} --out {ref_dir}/text-fidelity-check.json",
     "dom-mirror-check.sh":
         "{ref_dir} {impl_root} --out {ref_dir}/dom-mirror-check.json",
-    # 2026-05-22: hero-composite-check pairs with the dom-mirror advisory
+    # Hero-composite-check pairs with the dom-mirror advisory
     # downgrade — same {ref_dir} {impl_root} contract; default artifact path
     # is $REF_DIR/hero-composite.json (matches verification-plan row).
     "hero-composite-check.sh": "{ref_dir} {impl_root}",
@@ -345,11 +345,11 @@ foundations = render_prerequisites | content_prerequisites
 # (they have no unmet deps yet) while section-compare waits on its own
 # prerequisites — alignment consumers ran against STALE matches.json and the
 # post-implement gate then flagged them as stale-artifact failures on every
-# canonical run (fable-20260910 follow-up review round 3, MAJOR). Making the
+# canonical run (follow-up review round 3, MAJOR). Making the
 # data edge explicit as a real dependency lets the topo sort enforce it
 # correctly instead of relying on emission order.
 alignment_consumers = {"alignment-parity", "alignment-sweep"}
-# fable-20260910 follow-up review round 3 (MINOR): "batch-compare" and
+# Follow-up review round 3 (MINOR): "batch-compare" and
 # "scroll-anim-temporal-diff" are not real check ids (verification-plan.sh's
 # only add_check id for that script is "scroll-anim-temporal"; batch-compare
 # has no add_check row at all) — harmless via the `& present_ids` filter
@@ -410,7 +410,7 @@ for row in ordered_rows:
     # MANUAL", which no longer matches that check — the row was dispatched
     # for real with "MANUAL" as its only positional arg and always failed
     # (e.g. "Missing ref-url"), blocking auto-verify closeout under the
-    # default desktop scope (fable-20260910 follow-up review).
+    # default desktop scope (follow-up review).
     if (
         row[0] == "DISPATCH"
         and row[3] != "MANUAL"

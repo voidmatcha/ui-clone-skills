@@ -54,7 +54,7 @@ WAIT_REF="${WAIT_REF:-8000}"
 WAIT_IMPL="${WAIT_IMPL:-6000}"
 WAIT_SCROLL_SETTLE_MS="${WAIT_SCROLL_SETTLE_MS:-600}"
 TRAJECTORY_POINTS="${TRAJECTORY_POINTS:-0 25 50 75 100}"
-# Ceiling calibration (loop-e2e-6): a layout-aligned clone (DOM tops within
+# Ceiling calibration (end-to-end run): a layout-aligned clone (DOM tops within
 # 0.08px, Phase E "visually indistinguishable") measured a deterministic
 # 4011 AE/Mpx at one sample point — cumulative 1/32px font-metric rounding
 # rasterizes display-type glyphs one pixel apart. That is the documented
@@ -133,7 +133,7 @@ PY
 ab_open_at_viewport "$SESSION_REF"  "$ORIG_URL" "$VIEW_W" "$VIEW_H" "$((WAIT_REF / 1000))"
 ab_open_at_viewport "$SESSION_IMPL" "$IMPL_URL" "$VIEW_W" "$VIEW_H" "$((WAIT_IMPL / 1000))"
 
-# Dynamic-element masking (loop-e2e-5): trajectory compares FULL frames at
+# Dynamic-element masking (end-to-end run): trajectory compares FULL frames at
 # matched scroll fractions, so content whose state is TIME-coupled — video
 # frames, timer carousels, autoplaying media — diverges by phase on every
 # sample and buries the actual scroll-driven trajectory under noise (all 5

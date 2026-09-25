@@ -212,7 +212,7 @@ not to synthesize fake values or bypass the gate.
 
 `scaffold-to-jsx.sh` bakes the capture-time computed px of EVERY property into
 inline styles. That is correct for `px-fixed` sites and wrong everywhere else.
-Evidence class (realfood loops 128/145/e2e-8): baked full-page `height:` on the
+Evidence class (observed repeatedly on a Lenis-driven reference site): baked full-page `height:` on the
 App root, baked `marginBottom:"0px"` overriding negative margin shorthands,
 baked capture-time width on a scroll-scrubbed video track, baked `height:auto`
 imgs where the ref renders fixed square `object-fit:contain` boxes.

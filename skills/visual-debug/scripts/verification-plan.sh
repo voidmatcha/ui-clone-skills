@@ -944,7 +944,7 @@ if [ "$HAS_LOTTIE" = "true" ]; then
             "block" \
             "quick"
   # Static slot-identity gate: bundle-impl-coverage/required-media pass on the
-  # mere presence of the JSON string, but the navercorp clone mounted only 2 of
+  # mere presence of the JSON string, but the observed site clone mounted only 2 of
   # 5 slots with inverted loop/autoplay and one asset in an invented container.
   # This parses the actual loadAnimation()/mount call sites against the spec's
   # container->asset map. Self-describing argsRecipe -> no SIGNATURES entry (the
@@ -1668,7 +1668,7 @@ add_check "font-parity" \
           "runtime-env"
 
 # font-binaries-present — root-relative @font-face binaries must actually be
-# delivered to impl/public, not just referenced in mirrored CSS (navercorp
+# delivered to impl/public, not just referenced in mirrored CSS (one observed site
 # shipped 0 files in impl/public/font while asset-transfer reported 44/44).
 # Reads transfer-fonts.sh's font-transfer.json + verifies files on disk;
 # self-skips (pass) when the transfer report is absent. Unconditional because
@@ -1703,7 +1703,7 @@ fi
 # body-rule diff. font-parity only compares the primary font FAMILY; this
 # row catches the silent class where the family matches but the impl
 # dropped a global tracking rule (body letter-spacing -0.5px) or generated
-# headings at 400/600 where the ref uses 800/900 (omx navercorp evidence).
+# headings at 400/600 where the ref uses 800/900 (observed evidence).
 # Universal: every page renders text. Tier=standard (one ref+impl browser
 # pair, same cost class as font-parity); severity=block — a dropped global
 # rule or wrong weight is a generation defect, not a style choice.

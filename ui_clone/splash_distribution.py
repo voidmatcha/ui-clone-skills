@@ -1,4 +1,4 @@
-"""Phase-invariant distribution-level splash SSIM calibration (batch-4 item 1).
+"""Phase-invariant distribution-level splash SSIM calibration.
 
 The splash branch of video-motion-compare false-fails the reference site against
 ITSELF. Root cause: a splash whose effective content frame-rate is ~12fps with

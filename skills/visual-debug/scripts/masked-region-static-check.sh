@@ -38,7 +38,7 @@ set -euo pipefail
 SESSION="${1:?Usage: masked-region-static-check.sh <session> <impl-url> <ref-dir> [ref-url]}"
 IMPL_URL="${2:?Usage: masked-region-static-check.sh <session> <impl-url> <ref-dir> [ref-url]}"
 REF_DIR="${3:?Usage: masked-region-static-check.sh <session> <impl-url> <ref-dir> [ref-url]}"
-# tools-batch-11 ITEM 1: optional ref URL. When given, probe the LIVE REF with
+# Optional ref URL. When given, probe the LIVE REF with
 # the SAME probe at the SAME viewports to produce ref-viewport-visibility.json so
 # the verdict can excuse the ref's own responsive/scroll hiding (otherwise the
 # gate stays fail-closed and false-fails the reference against itself). Legacy
@@ -228,7 +228,7 @@ PY
       rm -f "$RAW1"
     done
 
-    # tools-batch-11 ITEM 1: ref-viewport-visibility.json producer. Probe the
+    # ref-viewport-visibility.json producer. Probe the
     # LIVE REF with the SAME probe at the SAME fan-out viewports, then derive the
     # per-selector hidden-viewport set via the gate's OWN visibility predicate
     # (ui_clone.gates.masked_region_static ref-visibility). This is what makes

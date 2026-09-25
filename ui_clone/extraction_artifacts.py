@@ -609,7 +609,7 @@ def _finalize_design_bundles(ref_dir: Path, structure: Any, actions: dict[str, s
 # so deliberately inclusive. The framer-motion row dropped the bare `motion\.`
 # and unanchored `useScroll` tokens: `motion\.` matched any minified `motion.x`
 # substring and `useScroll` matched custom flags like `useScrollAnimation`,
-# flipping framer-motion "detected" on sites that never ship it (navercorp).
+# flipping framer-motion "detected" on sites that never ship it (one observed site).
 # Remaining framer signals are package-literal + Framer-specific anchored APIs.
 _MOTION_LIB_PATTERNS: dict[str, str] = {
     "gsap": r"\bgsap\b|ScrollTrigger|ScrollSmoother",

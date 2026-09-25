@@ -76,7 +76,7 @@ LOCAL_CLI_BIN="$LOCAL_BIN_DIR/ui-clone"
 CODEX_PUBLIC_SKILLS="ui-reverse-engineering ui-capture visual-debug"
 AGENTS_SKILLS_DIR="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 PUBLIC_SKILLS_OWNERSHIP="$HOME/.config/ui-clone-skills/public-skills.json"
-# fable-20260910 (Codex dev-hook parity design): ".codex/agents" not the bare
+# Codex dev-hook parity design: ".codex/agents" not the bare
 # ".codex" — the only tracked/shipped content under .codex/ is .codex/agents/
 # (`git ls-files .codex`); the bare item projected/copied the WHOLE directory
 # into the Codex plugin symlink farm (line ~871), the Claude plugin staging
@@ -2036,7 +2036,7 @@ remove_plugin_projection() {
     return 0
   fi
 
-  # fable-20260910 (Codex dev-hook parity review, finding 6): a legacy
+  # Codex dev-hook parity review, finding 6: a legacy
   # install from before CODEX_PLUGIN_PROJECTION_ITEMS was narrowed from the
   # bare ".codex" to ".codex/agents" left $CODEX_PLUGIN_DIR/.codex ITSELF as
   # a symlink to $REPO_ROOT/.codex (a whole-directory link, not a per-item

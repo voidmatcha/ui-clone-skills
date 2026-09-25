@@ -31,7 +31,7 @@ CLAUDE.md          Thin Claude Code entrypoint that imports this file
 [] bash scripts/ci/pre-push-security.sh — 0 blockers (security + cross-ref + version sync + lockfile freshness)
 ```
 
-`scripts/ci/ci-local.sh` is the single source of truth for what CI runs. `scripts/hooks/pre-push-guard.sh` calls it automatically before `git push` when configured as an agent hook (bypass for emergencies: `UI_RE_SKIP_CI_LOCAL=1 git push`). If you change CI, update `ci-local.sh` to match — and vice versa. Run a single test module with `uv run python -m pytest tests/test_<module>.py`; validate gates with `python -m ui_clone.gate tmp/ref/<c> all`.
+`scripts/ci/ci-local.sh` is the single source of truth for what CI runs. `scripts/hooks/pre-push-guard.sh` calls it automatically before `git push` when configured as an agent hook — the hook entries are machine-local and documented in `README_detail/install.md` → "Maintainer push hooks" (bypass for emergencies: `UI_RE_SKIP_CI_LOCAL=1 git push`). If you change CI, update `ci-local.sh` to match — and vice versa. Run a single test module with `uv run python -m pytest tests/test_<module>.py`; validate gates with `python -m ui_clone.gate tmp/ref/<c> all`.
 
 ### Verification tier (cost control)
 

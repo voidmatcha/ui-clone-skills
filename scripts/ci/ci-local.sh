@@ -99,30 +99,34 @@ DEFAULT_PYTEST_WORKERS=$(python3 -c 'import os; print(min(os.cpu_count() or 1, 4
 PYTEST_WORKERS="${UI_CLONE_PYTEST_WORKERS:-$DEFAULT_PYTEST_WORKERS}"
 step "Tests"
 if [ "$QUIET" = "1" ]; then
-  run_quiet "tests" "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q \
+  # internal/onpixel/tests mirrors pyproject testpaths (GHA runs bare pytest).
+  run_quiet "tests" "${PYTEST_ENV[@]}" uv run python -m pytest tests/ internal/onpixel/tests -q \
     -n "$PYTEST_WORKERS" --dist loadfile
 else
-  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ -q \
+  "${PYTEST_ENV[@]}" uv run python -m pytest tests/ internal/onpixel/tests -q \
     -n "$PYTEST_WORKERS" --dist loadfile || fail "tests"
 fi
 
 # 2. Type check (mypy)
+# internal/onpixel/ is passed explicitly: .gitignore lists `internal/*` with a
+# `!internal/onpixel/` exception, and ruff's gitignore-aware discovery would
+# otherwise see nothing under a bare `internal/` argument.
 step "Type check"
 if [ "$QUIET" = "1" ]; then
-  run_quiet "mypy" uv run python -m mypy ui_clone/ tests/ \
+  run_quiet "mypy" uv run python -m mypy ui_clone/ tests/ internal/onpixel/ \
     skills/visual-debug/scripts/replay-track-compare.py
 else
-  uv run python -m mypy ui_clone/ tests/ \
+  uv run python -m mypy ui_clone/ tests/ internal/onpixel/ \
     skills/visual-debug/scripts/replay-track-compare.py || fail "mypy"
 fi
 
 # 3. Lint check (ruff)
 step "Lint check"
 if [ "$QUIET" = "1" ]; then
-  run_quiet "ruff" uv run python -m ruff check ui_clone/ tests/ \
+  run_quiet "ruff" uv run python -m ruff check ui_clone/ tests/ internal/onpixel/ \
     skills/visual-debug/scripts/replay-track-compare.py
 else
-  uv run python -m ruff check ui_clone/ tests/ \
+  uv run python -m ruff check ui_clone/ tests/ internal/onpixel/ \
     skills/visual-debug/scripts/replay-track-compare.py || fail "ruff"
 fi
 

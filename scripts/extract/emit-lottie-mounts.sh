@@ -5,7 +5,7 @@
 #   transition-spec.json already carries the complete slot->asset map for every
 #   Lottie mount the reference makes (container selector, path, mobilePath,
 #   loop, autoplay, trigger). Left to the LLM, that data is re-improvised: the
-#   navercorp clone mounted only 2 of 4 slots, inverted autoplay/loop flags, and
+#   one observed clone mounted only 2 of 4 slots, inverted autoplay/loop flags, and
 #   invented a splash overlay. Mounting is not a judgement call — it is
 #   mechanical codegen. This script emits impl/src/generated/lottie-mounts.ts
 #   with one loadAnimation() per spec entry using the EXACT flags/paths, so the

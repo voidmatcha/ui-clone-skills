@@ -45,7 +45,7 @@ input=$(cat)
 # expecting compact `"command":"..."` (no space after the colon) — Claude
 # Code's PreToolUse payload happens to serialize that way, but Codex's
 # PreToolUse/exec_command payload shape is not guaranteed to match byte-for-
-# byte (fable-20260910, Codex dev-hook parity design). Falls back to the
+# byte (Codex dev-hook parity design). Falls back to the
 # original compact-JSON grep if python3 or JSON parsing is unavailable, so
 # this never regresses the Claude-only path it replaces.
 hook_command=$(GUARD_INPUT="$input" python3 -c '
@@ -73,7 +73,7 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 #   git push --all / --mirror      → ALL (touches every branch incl main)
 # Unparseable / unexpected → fall back to current branch, then to "main"
 # (safe default: strict, never silently downgrade to loose).
-# fable-20260911 round 5 follow-up: also resolve which LOCAL ref is actually
+# Round 5 follow-up: also resolve which LOCAL ref is actually
 # being pushed (the refspec's SOURCE side), not just the remote target. A
 # bare `git push origin main` pushes the LOCAL branch named "main" — which
 # is NOT necessarily HEAD/the checked-out branch. Every check below used to
@@ -126,7 +126,7 @@ _push_remote=$(printf '%s\n' "$_push_parsed" | sed -n '3p')
 # configured remote NOR a direct URL/SCP-style destination (`git push
 # git@host:repo.git main`, `git push https://... main` are both legitimate
 # and common — a configured-remote-name check alone rejected them, a round-6
-# follow-up review regression: those pushes used to parse correctly and now
+# Follow-up review regression: those pushes used to parse correctly and now
 # silently fell through to the fallback below), the regex almost certainly
 # misread a flag-with-its-own-argument (e.g. `-o ci.skip origin main`) as the
 # remote/refspec pair one token early.
@@ -155,7 +155,7 @@ fi
 # differ from HEAD, and that case already set push_source above.
 [ -z "$push_source" ] && push_source="HEAD"
 
-# fable-20260911 round 6 follow-up ("also re-check the non-generic parts"):
+# Round 6 follow-up ("also re-check the non-generic parts"):
 # use the ACTUAL parsed remote name instead of hardcoding "origin" wherever
 # one is needed — this repo only ever pushes to "origin", but the parser
 # already knows better when it doesn't. Only a plain configured remote NAME
@@ -211,7 +211,7 @@ if [ "$is_release_target" != "1" ] || [ "${UI_RE_SKIP_RELEASE_CHECKS:-}" = "1" ]
   exit 0
 fi
 
-# fable-20260910/11 follow-up reviews: the comparison base for "what changed
+# Follow-up reviews: the comparison base for "what changed
 # on this release push" must be the REMOTE branch actually being pushed to
 # ($target_branch, resolved above from the refspec), not @{upstream} of
 # whatever branch happens to be checked out locally — and the comparison
@@ -225,7 +225,7 @@ fi
 # local SOURCE ref (the "new" state about to be pushed): prefer the real
 # remote-tracking ref for that branch name over its own @{upstream} —
 # @{upstream} can point anywhere (or nowhere) when the branch being pushed
-# isn't the one checked out (fable-20260911 round 4/5 follow-up reviews).
+# isn't the one checked out (round 4/5 follow-up reviews).
 # $1 = branch name (e.g. "main"), $2 = local source ref (e.g. "refs/heads/main").
 _resolve_base_for() {
   local branch="$1" source_ref="$2" source_for_upstream
@@ -316,7 +316,7 @@ print(m.group(1) if m else '')
   unique=$(printf '%s\n' "$plugin_v" "$market_v" "$codex_v" "$package_v" "$pyproj_v" "$init_v" | sort -u | grep -v '^$' | wc -l | tr -d ' ')
   if [ "$unique" != "1" ]; then
     if [ "$unique" = "0" ]; then
-      # fable-20260911 round 6 follow-up review: all six reads came back
+      # Round 6 follow-up review: all six reads came back
       # empty — the source commit doesn't have these files at all (e.g. a
       # push source predating them), not an actual bump mismatch. Say so
       # plainly instead of printing a confusing all-blank "Version mismatch"
@@ -342,7 +342,7 @@ print(m.group(1) if m else '')
   #   1. $_version_bump_base's CURRENT (pre-push) manifest version — the
   #      deterministic ground truth for "is this push actually a new
   #      release": no local machine state involved, so it can't go stale.
-  #      This is the PRIMARY check (fable-20260911 follow-up review, MAJOR:
+  #      This is the PRIMARY check (follow-up review, MAJOR:
   #      the local-only check below silently stopped enforcing anything on
   #      this very machine once installed_plugins.json fell behind — e.g.
   #      post-push-refresh.sh's wipe+reinstall is a no-op whenever
@@ -387,19 +387,30 @@ except Exception:
     _installed_plugins_json="${UI_CLONE_INSTALLED_PLUGINS_JSON:-$HOME/.claude/plugins/installed_plugins.json}"
     # Path passed as argv, not interpolated into the python source text — a
     # path containing a single quote would otherwise break out of a `'...'`
-    # string literal (fable-20260911 follow-up review).
+    # string literal (follow-up review).
+    # The installed-plugins key is `<plugin>@<marketplace>`; the marketplace
+    # suffix comes from this checkout's .claude-plugin/marketplace.json
+    # `name` (a fork registered under its own marketplace name), with the
+    # canonical upstream name as the fallback.
     deployed_version=$(python3 -c "
-import json, sys
+import json, os, sys
+marketplace = 'voidmatcha'
+try:
+    name = json.load(open(os.path.join(sys.argv[2], '.claude-plugin', 'marketplace.json'))).get('name')
+    if isinstance(name, str) and name.strip():
+        marketplace = name.strip()
+except Exception:
+    pass
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
-for entry in d.get('plugins', {}).get('ui-clone-skills@voidmatcha') or []:
+for entry in d.get('plugins', {}).get('ui-clone-skills@' + marketplace) or []:
     v = entry.get('version')
     if v:
         print(v)
         break
-" "$_installed_plugins_json" 2>/dev/null)
+" "$_installed_plugins_json" "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" 2>/dev/null)
     if [ -n "$deployed_version" ] && [ "$deployed_version" = "$current_version" ]; then
       _block_unbumped_version "$current_version is already installed on this machine"
     fi
@@ -440,8 +451,8 @@ for entry in d.get('plugins', {}).get('ui-clone-skills@voidmatcha') or []:
 if [ "$target_branch" = "ALL" ]; then
   # No single well-defined push target for --all/--mirror, but it always
   # includes local main/master when they exist — check EVERY branch name
-  # that has BOTH a local branch and a remote-tracking ref (fable-20260911
-  # round 6 follow-up: checking only the first match let a real, unbumped
+  # that has BOTH a local branch and a remote-tracking ref (round 6
+  # follow-up: checking only the first match let a real, unbumped
   # change on the SECOND one through unchecked), rather than guessing a
   # single one from whatever happens to be checked out.
   _all_checked=0

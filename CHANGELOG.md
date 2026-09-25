@@ -2,7 +2,60 @@
 
 ## [Unreleased]
 
+### Known follow-up
+
+- Mobile-responsive clones still couple the inline-bake and un-bake passes:
+  `scaffold-to-jsx.sh` bakes desktop-resolved computed styles inline, so
+  `@media` rules in the reference CSS cannot re-flow the clone at mobile
+  viewports. The investigated `@media`-aware forensic strip regressed desktop
+  fidelity and was not landed; the remaining step is a real cascade resolver
+  (specificity + inheritance + `@media`-off) that only un-bakes properties the
+  reference CSS supplies. The unlanded design notes and their stale patch were
+  removed from `docs/`.
+
 ## [0.8.17] - 2026-09-23
+
+### Changed
+
+- Maintainer-neutral repository surface. `scripts/ci/check_universality.py`
+  gains rules for personal home folders, Codex state outside host-config
+  paths, terminal-multiplexer/workspace ids, personal project names, lab batch
+  labels, the repository owner used as hook behavior, brand names
+  (`navercorp`), benchmark corpus labels (`ebay-playbook`), and dated lab
+  notes (`<N>-site loop`, `review YYYY-MM-DD`, `fable-YYYYMMDD` session
+  labels); the scan now covers `.claude-plugin/`, `.codex-plugin/`, `.codex/`,
+  and `docs/`. Workspace ids require a digit and an uppercase letter
+  (`ws-client` / `ws-server` pass) and run labels `e2e-N` no longer match
+  path segments, long ids, or file names. Allowlists are span-scoped: an
+  allowed token appended as a comment no longer launders the rest of the line.
+  Lab-note comments across `ui_clone/`, `scripts/`, `skills/`, `install.sh`,
+  and `docs/` were reworded generically (no logic, regex, fixture, or test-id
+  changes); the hover-coverage gate message now says "across observed sites".
+- `scripts/loop/launch-stage.sh` takes the multiplexer CLI, workspace id,
+  agent command, model, permission mode, and shell-prompt answer from
+  `UI_CLONE_LOOP_*` environment variables instead of baked-in values, quotes
+  every env value with `printf %q` in the printed commands, and keeps step
+  numbering contiguous when the optional prompt-dismissal step is omitted.
+- The maintainer-only OnPixel showcase loop moved from `ui_clone/` and
+  `tests/` to `internal/onpixel/` (tracked via a `.gitignore` exception, not
+  shipped); `scripts/ci/ci-local.sh` runs pytest, mypy, and ruff over it
+  explicitly.
+- `scripts/hooks/post-push-refresh.sh` derives the install.sh source from
+  `UI_CLONE_INSTALL_SH_URL`, `UI_CLONE_REPO`, or the `origin` remote
+  (`https://`, `ssh://git@github.com/`, and `git@github.com:` forms) before
+  falling back to the canonical upstream, and prints a one-line stderr notice
+  when a non-GitHub remote forces that fallback. Both push hooks read the
+  installed-plugin key's marketplace suffix from
+  `.claude-plugin/marketplace.json` (`name`) instead of a hard-coded owner.
+- `scripts/verify/verify-loop.sh` honors `UI_CLONE_TRANSCRIPT` on any host;
+  an unreadable value warns on stderr and skips the process criteria instead
+  of silently falling back to the Claude Code transcript path.
+- `.claude/settings.json` is no longer tracked (machine-local settings).
+- Removed completed plans, superseded design notes, and stale run notes from
+  `docs/` (`docs/superpowers/` plans and specs, scrub-wiring, unbake-v2 evaluation,
+  claude-fidelity analysis, mobile-responsive unbaking design and patch).
+- `tests/test_review_bash_compat.py` asserts `0 warnings` from `review.sh`
+  again.
 
 ### Fixed
 

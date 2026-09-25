@@ -693,7 +693,7 @@ def evaluate(
     return payload
 
 
-# ── ref-viewport-visibility producer (tools-batch-11 ITEM 1) ─────────────────
+# ── ref-viewport-visibility producer ─────────────────────────────────────────
 def build_ref_viewport_visibility(
     ref_records: list[dict[str, Any]],
     selectors: list[str],
@@ -707,7 +707,7 @@ def build_ref_viewport_visibility(
     legitimately responsive/scroll-hiding the masked selector (excused) versus a
     real "impl element absent" defect. Nothing in the pipeline produced it, so the
     gate stayed permanently fail-closed and false-failed the reference against its
-    own ground truth (loop-e2e-12: 24 "impl element absent" rows).
+    own ground truth (end-to-end run: 24 "impl element absent" rows).
 
     ``ref_records`` are rich visible-identity records collected from the LIVE REF
     by the SAME probe (scroll sweep + per-selector scrollIntoView + per-viewport
@@ -799,7 +799,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(build_plan(Path(args[1])), indent=2))
         return 0
     if len(args) >= 3 and args[0] == "ref-visibility":
-        # tools-batch-11 ITEM 1: turn a LIVE-REF probe (same shape as the impl
+        # ref-visibility mode: turn a LIVE-REF probe (same shape as the impl
         # probe) into ref-viewport-visibility.json so the verdict can excuse the
         # ref's own responsive/scroll hiding. Writing via Path.write_text keeps
         # this exempt from the ad-hoc-ref-write hook (same path the verdict uses

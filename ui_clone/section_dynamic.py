@@ -65,7 +65,7 @@ DYNAMIC_AE_CEILING_ABS_DEFAULT = 8000.0
 # ── Motion shift-search (Commit 2) ──────────────────────────────────────────
 # A faithful scroll-reveal section can be caught at a different scroll-reveal
 # sub-frame than the ref: IDENTICAL content, uniformly translated vertically by
-# tens-to-low-hundreds of px (e.g. realfood 'winning': AE/Mpx 104739, the same
+# tens-to-low-hundreds of px (e.g. one observed site's 'winning': AE/Mpx 104739, the same
 # text doubled at ~150px Y-offset). A wide NON-circular vertical shift-search
 # realigns it; a BROKEN impl (wrong/scrambled content) does not realign and is
 # rejected by the structure + localized-defect + collapse guards below.

@@ -497,8 +497,8 @@ def test_capture_artifact_inventory_reports_extra_declared_artifacts(tmp_path: P
     checker passed, the gate failed, and rerunning the checker never helped."""
     ref = tmp_path / "ref"
     (ref / "clip" / "ref").mkdir(parents=True)
-    for state in ("idle", "active", "video"):
-        _write_png(ref / "clip" / "ref" / f"{state}.png", seed=hash(state) % 200)
+    for seed, state in enumerate(("idle", "active", "video"), start=1):
+        _write_png(ref / "clip" / "ref" / f"{state}.png", seed=seed * 60)
     (ref / "regions.json").write_text(json.dumps({
         "regions": [
             {

@@ -87,7 +87,7 @@ compare_position_frames() {
 #   A live reference compared against a fresh capture of ITSELF measures the
 #   capture environment's noise (CDN re-encode variants, media-presentation
 #   state) — the only honest baseline when an impl deterministically lands a
-#   hair under the fixed threshold while live DOM parity is exact (e2e-8
+#   hair under the fixed threshold while live DOM parity is exact (end-to-end run
 #   pos-013: 0.89957 vs 0.90). Codex-reviewed bounds:
 #     - band: only scores within [threshold-band, threshold) are eligible
 #       (default band 0.02 -> 0.88..0.90 at the 0.90 threshold); anything

@@ -1379,7 +1379,7 @@ capture_action_onset() {
   printf '%s\n' "$raw" > "$out"
 }
 
-# ── Time-coupled media freeze (loop-e2e-6) ──
+# ── Time-coupled media freeze ──
 # Autoplaying <video> frames dominate frame-aligned SSIM: a hover target
 # overlaying the hero video read flat 0.84 across all 534 frames (backdrop
 # frame PHASE, not the hover arc) and scroll/splash modes compared different
@@ -1423,7 +1423,7 @@ freeze_videos() {
   printf '%s\n' "$_out" > "$OUT_DIR/media-freeze-${2}.json" 2>/dev/null || true
 }
 
-# ── Splash media mask (batch-4 item 1, distribution redesign fix a) ──
+# ── Splash media mask (distribution redesign fix a) ──
 # freeze_videos pins <video> at frame 0, but on some sites the hero <video>
 # re-kicks play() after the splash dismisses (autoplay remount defeats the
 # one-shot pause), so the post-splash tail is a playing video compared at
@@ -1589,7 +1589,7 @@ if [[ "$ACTION" == "scroll" ]]; then
   SCROLL_SAMPLES="${SCROLL_SAMPLES:-24}"
   SCROLL_SETTLE="${SCROLL_SETTLE:-0.45}"
 
-  # Stall-exposure reduction (batch-4 item 2): the position sweep is captured in
+  # Stall-exposure reduction: the position sweep is captured in
   # idempotent, manifest-checkpointed chunks. The manifest is persisted after
   # every position, so a lost background-shell completion wake-up (2 confirmed
   # incidents) re-runs and RESUMES from disk instead of restarting the whole
@@ -1612,7 +1612,7 @@ if [[ "$ACTION" == "scroll" ]]; then
   # are wiped and recaptured below.
   SCROLL_RUN_IDENTITY="$(printf '%s' "${ORIG_URL}|${IMPL_URL}|${VIEW_W}x${VIEW_H}|${ACTION}|${VIDEO_COMPARE_DYNAMIC_SELECTORS:-}|scrollv1" | python3 -c 'import sys,hashlib; print(hashlib.md5(sys.stdin.buffer.read()).hexdigest())' 2>/dev/null || echo "noid")"
 
-  # Anti-contamination, resume-aware (batch-4 item 2): the out-dir may hold
+  # Anti-contamination, resume-aware: the out-dir may hold
   # 60fps f-*.png frames from a prior time-indexed run. Always clear those and
   # stale diffs. The pos-*.png are this sweep's PERSISTED chunk artifacts — keep
   # them when resuming the SAME sample grid (so a re-invocation continues from
@@ -1658,7 +1658,7 @@ print("1" if isinstance(v, dict) and v.get("range") else "0")' 2>/dev/null || ec
     echo "  ↻ resuming scroll sweep from manifest ($SCROLL_CHUNK_MANIFEST)"
   fi
 
-  # Spec-declared dynamic-region masking (e2e-8 pos-001 class): transition-spec
+  # Spec-declared dynamic-region masking (observed poster-crossfade class): transition-spec
   # entries with dynamic:true name regions whose presentation state is
   # nondeterministic on the live ref (video/poster crossfades). section-compare
   # already masks them (EXCLUDE_DYNAMIC); the position compare gets the same
@@ -1669,7 +1669,7 @@ print("1" if isinstance(v, dict) and v.get("range") else "0")' 2>/dev/null || ec
   # masked-area cap (default 25% of the full scrolled PAGE area — the surface
   # the position sweep compares) above which the selector is NOT masked — an
   # overbroad selector must not blank the comparison. The denominator is the
-  # page, not one viewport: e2e-9 sidecars recorded areaPct 201/135/63 PERCENT
+  # page, not one viewport: observed sidecars recorded areaPct 201/135/63 PERCENT
   # of a single viewport on a 22-viewport page, so every full-bleed
   # spec-declared dynamic section (the eatReal timer carousel at 41.8%) was
   # silently unmaskable and pos-024 failed at every fan-out viewport.
@@ -1805,7 +1805,7 @@ PY
     done <<< "$MASK_MISSING"
   fi
 
-  # Ref-vs-ref noise-floor calibration (e2e-8 pos-013 class): when EVERY
+  # Ref-vs-ref noise-floor calibration (borderline-position class): when EVERY
   # failing position is borderline (within 0.02 below threshold), capture the
   # ref a second time at the same fractions and re-verdict each borderline
   # row against the ref's own noise (impl >= refref - 0.015, absolute floor
@@ -1815,7 +1815,7 @@ PY
   # Calibration now runs on ANY failing sweep, not only borderline ones. The
   # borderline gate was backwards: it skipped calibration precisely when the
   # reference was most unstable, and a large deviation was assumed to be a
-  # genuine defect. Measured on navercorp.com/tech/innovation, capturing the
+  # genuine defect. Measured on one observed site, capturing the
   # REFERENCE twice at the same scroll fractions gives ref-vs-ref SSIM 0.640 at
   # pos-010 while impl-vs-impl at the same position is 1.000000 — the impl
   # matched the ref (0.797) BETTER than the ref matched itself, and the failing
@@ -2088,7 +2088,7 @@ else
 echo -e "${BOLD}▸ Recording original...${NC}"
 
 if [[ "$ACTION" == "splash" ]]; then
-  # Splash symmetry (loop-e2e-6): this side used to record seconds 3..8
+  # Splash symmetry: this side used to record seconds 3..8
   # after navigation while the impl recorded 0..5 — frame-aligned SSIM then
   # compared a settled page against a mid-splash one by construction. Record
   # from navigation start on BOTH sides (blank page, viewport, record, open),
@@ -2144,7 +2144,7 @@ echo "  ✓ Original recorded"
 echo -e "${BOLD}▸ Recording implementation...${NC}"
 
 if [[ "$ACTION" == "splash" ]]; then
-  # Viewport parity (loop-e2e-6): record BEFORE opening the URL to catch the
+  # Viewport parity: record BEFORE opening the URL to catch the
   # splash from t=0, with the viewport pinned on a blank page first (the
   # impl side once recorded at the session default and every frame pair
   # size-mismatched). Duration-validated retry via _splash_record.
@@ -3037,7 +3037,7 @@ elif [[ "$TIMING_ONLY" == "true" ]]; then
 else
   echo -e "${BOLD}▸ Running SSIM comparison (threshold=$SSIM_THRESHOLD)...${NC}"
 
-  # First-change alignment (codex review, loop-e2e-6): the live-network ref
+  # First-change alignment (codex review): the live-network ref
   # reaches first paint later than localhost. Selector actions additionally
   # ignore ROI noise before their post-PRE_ACTION_WAIT action floor. Offset each
   # side by its first action-era visual change. Anti-bypass: a side with no
@@ -3076,7 +3076,7 @@ else
   fi
   # Timing defect detection is ARC-INTERNAL (first-to-last-change duration),
   # not absolute-offset based: the live-network ref's first paint jitters
-  # 18-108 frames run-to-run (e2e-8 brief), so an absolute offset delta
+  # 18-108 frames run-to-run (measured on a live reference), so an absolute offset delta
   # (the former MAX_ALIGN_DELTA=12 hard-fail) failed honest runs on network
   # latency alone. A wrong impl TIMELINE — too-long splash, missing
   # dismissal — shows up as a different arc length regardless of when paint
@@ -3101,14 +3101,14 @@ else
         && "${UI_CLONE_VMC_SKIP_RECORD:-0}" != "1" ]]; then
     SPLASH_CAL_ELIGIBLE=1
   fi
-  # Looping-video arc bound (e2e-9 splash residual): a bg <video loop> that
+  # Looping-video arc bound (observed splash residual): a bg <video loop> that
   # defeats the freeze stub (autoplay remount after the re-pause sweeps)
   # keeps whole-frame change detection alive to the END of each clip, so the
   # measured arc equals the RECORDING length and the verdict compares
   # recorder-stop jitter (ref 486 vs impl 390 frames -> arc delta 96 ==
   # recording-length delta 96). Bound each side's last-change to a COMMON
-  # per-side budget measured from ITS OWN first-change (symmetric clamp,
-  # batch-4 item 1): the prior absolute-cutoff clamp truncated the side with
+  # per-side budget measured from ITS OWN first-change (symmetric clamp):
+  # the prior absolute-cutoff clamp truncated the side with
   # the later first-change more, so equal real arcs with different load-latency
   # lead-ins false-failed. Gated ONLY on loop:true evidence from BOTH freeze
   # sidecars: a one-sided looping video (impl missing it) keeps the unbounded
@@ -3407,7 +3407,7 @@ with open(out, "w", encoding="utf-8") as handle:
     fi
   fi
 
-  # ── Splash distribution + arc calibration against a live refcal (batch-4 item 1) ──
+  # ── Splash distribution + arc calibration against a live refcal ──
   # The per-frame SSIM table AND the static arc-delta both false-fail phase-noisy
   # splashes (≈12fps continuous-motion intro) even ref-vs-ref: two independent
   # recordings land mid-flight frames at different phases (SSIM noise), and the

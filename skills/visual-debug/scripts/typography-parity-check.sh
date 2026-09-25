@@ -2,7 +2,7 @@
 # typography-parity-check.sh — per-element font-weight / letter-spacing /
 # global body-rule diff between ref and impl.
 #
-# Why it matters (omx navercorp evidence class):
+# Why it matters (observed evidence class):
 #   font-parity only compares the primary font FAMILY. An impl can load the
 #   right family and still render visibly different text because it dropped
 #   the ref's global `letter-spacing: -0.5px` body rule, or generated
@@ -123,7 +123,7 @@ if (ref.body.fontWeight !== impl.body.fontWeight)
   bodyMismatches.push({ prop: 'font-weight', ref: ref.body.fontWeight, impl: impl.body.fontWeight });
 if (!lsMatch(ref.body.letterSpacing, impl.body.letterSpacing))
   bodyMismatches.push({ prop: 'letter-spacing', ref: ref.body.letterSpacing, impl: impl.body.letterSpacing });
-// Duplicate sigs are real (e2e-9: four span|Real Food at fw 400/600/700/700);
+// Duplicate sigs are real (end-to-end run: four span|Real Food at fw 400/600/700/700);
 // a sig->element Map collapses them last-wins and the ref fails against
 // itself. Group impl elements per sig and zip the k-th ref instance with the
 // k-th impl instance instead.

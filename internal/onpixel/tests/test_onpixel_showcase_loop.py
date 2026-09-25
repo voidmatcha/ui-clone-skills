@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import pytest
 
-from ui_clone import onpixel_showcase_loop as loop
+# The loop module is maintainer automation outside the ui_clone package
+# (internal/onpixel/), so load it by path instead of importing a package.
+_MODULE_PATH = Path(__file__).resolve().parents[1] / "onpixel_showcase_loop.py"
+_SPEC = importlib.util.spec_from_file_location("onpixel_showcase_loop", _MODULE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+loop = importlib.util.module_from_spec(_SPEC)
+# Register before exec: dataclasses resolve string annotations via sys.modules.
+sys.modules[_SPEC.name] = loop
+_SPEC.loader.exec_module(loop)
 
 SHOWCASE_TSX = """
 const showcases: ShowcaseItem[] = [

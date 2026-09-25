@@ -131,7 +131,7 @@ def build_plan(ref_dir: Path) -> list[dict[str, Any]]:
         (extraction.get("extractions") or {}) if isinstance(extraction, dict) else {}
     )
     expansions = extractions.get("hoverSizeExpansions")
-    # De-dup state-driven springs out of the hover probe set (loop-e2e-12 false
+    # De-dup state-driven springs out of the hover probe set (end-to-end run false
     # positive). A width spring gated on a state flag — animate:{width:a?"auto":0}
     # — matches BOTH the extractor's hover regex and its active-state regex, so it
     # lands in hoverSizeExpansions AND activeStateExpansions. It is a STATE reveal

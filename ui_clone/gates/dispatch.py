@@ -119,8 +119,8 @@ def run(self: Gate, gate: str, json_output: bool = False) -> int:
         return 2
 
     # Composite "all" — recurse per sub-gate so each sub-gate's pass/fail is
-    # recorded individually via mark_passed/mark_failed. Review follow-up
-    # (2026-05-24): without per-gate recording the hard-cap auto-unclonable
+    # recorded individually via mark_passed/mark_failed. Review follow-up:
+    # without per-gate recording the hard-cap auto-unclonable
     # in state.mark_failed never fires under composite dispatch, so batch
     # callers silently lose the v0.6.0 saturation guard.
     if gate == "all":

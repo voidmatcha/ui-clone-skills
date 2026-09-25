@@ -19,13 +19,17 @@
 # Override:
 #   UI_CLONE_SKIP_POST_PUSH_REFRESH=1  — skip the wipe+reinstall entirely
 #   INSTALL_DIR=<path>                  — install elsewhere (e.g. for testing)
+#   UI_CLONE_REPO=<git-url>             — repo whose install.sh is fetched
+#                                         (default: origin remote, then upstream)
+#   UI_CLONE_REPO_BRANCH=<branch>       — branch of install.sh to fetch (default: main)
+#   UI_CLONE_INSTALL_SH_URL=<url>       — explicit raw install.sh URL (wins over the above)
 
 input=$(cat)
 # JSON-parsed extraction (falls back to the original compact-JSON grep if
 # python3/parsing is unavailable) rather than a raw-text grep that assumed
 # `"command":"..."` with no space after the colon — Claude Code's payload
 # happens to serialize that way, but Codex's PostToolUse/exec_command payload
-# shape isn't guaranteed to match byte-for-byte (fable-20260910, Codex
+# shape isn't guaranteed to match byte-for-byte (Codex
 # dev-hook parity design). The python step resolves a SINGLE-WORD verdict
 # (not the raw command) so a multi-line `command` value (e.g. "git commit ...
 # \ngit push ...") can never get mis-split by a line-oriented bash `sed`
@@ -73,7 +77,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-# fable-20260912 follow-up (a running Claude/Codex session loaded its hooks
+# Follow-up (a running Claude/Codex session loaded its hooks
 # at SESSION START from whatever plugin version was cached then; reinstalling
 # to a NEW version here does not retroactively refresh an already-running
 # session's loaded hook logic — install.sh's own printed guidance says
@@ -84,23 +88,68 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # visible reason why the fix "didn't take". Compare the installed version
 # before/after and print an unmissable, agent-addressed notice when it
 # actually changed.
+#
+# The installed-plugins key is `<plugin>@<marketplace>`; the marketplace
+# suffix is read from this checkout's .claude-plugin/marketplace.json `name`
+# so a fork registered under its own marketplace name is compared correctly,
+# with the canonical upstream name as the fallback. $1 = installed_plugins.json,
+# $2 = repo root.
 _read_installed_version() {
   python3 -c "
-import json, sys
+import json, os, sys
+marketplace = 'voidmatcha'
+try:
+    name = json.load(open(os.path.join(sys.argv[2], '.claude-plugin', 'marketplace.json'))).get('name')
+    if isinstance(name, str) and name.strip():
+        marketplace = name.strip()
+except Exception:
+    pass
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
-for entry in d.get('plugins', {}).get('ui-clone-skills@voidmatcha') or []:
+for entry in d.get('plugins', {}).get('ui-clone-skills@' + marketplace) or []:
     v = entry.get('version')
     if v:
         print(v)
         break
-" "$1" 2>/dev/null
+" "$1" "$2" 2>/dev/null
 }
 
+# repo-slug-helpers: begin
+# Install source. Resolution order keeps the repository owner out of hook
+# behavior so forks and mirrors dogfood THEIR install.sh:
+#   UI_CLONE_INSTALL_SH_URL  explicit raw URL of install.sh
+#   UI_CLONE_REPO            git URL (the same variable install.sh honors)
+#   origin remote            of the working repo
+#   canonical upstream       last resort (announced on stderr)
+UI_CLONE_REPO_DEFAULT="https://github.com/voidmatcha/ui-clone-skills.git"  # UI_CLONE_REPO overrides
+
+# Reduce a GitHub git URL to `owner/repo`. Accepts https://github.com/o/r(.git),
+# ssh://git@github.com/o/r(.git), and git@github.com:o/r(.git). Anything else
+# is echoed stripped of only the .git / trailing-slash suffix, which then fails
+# the strict slug validation in _resolve_repo_slug.
+_repo_slug_from_url() {
+  printf '%s' "$1" \
+    | sed -E 's#^(ssh://)?git@github\.com[:/]##; s#^https?://github\.com/##; s#\.git$##; s#/$##'
+}
+
+# $1 = candidate git URL (may be empty). Echoes a validated `owner/repo`;
+# when none can be derived (non-GitHub remote, odd URL) it prints a one-line
+# stderr notice and falls back to the canonical upstream.
+_resolve_repo_slug() {
+  local candidate="$1" slug
+  slug=$(_repo_slug_from_url "${candidate:-$UI_CLONE_REPO_DEFAULT}")
+  if ! [[ "$slug" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    echo "post-push-refresh: cannot derive a GitHub owner/repo from '${candidate:-<empty>}' — falling back to the canonical upstream installer (set UI_CLONE_INSTALL_SH_URL or UI_CLONE_REPO to override)" >&2
+    slug=$(_repo_slug_from_url "$UI_CLONE_REPO_DEFAULT")
+  fi
+  printf '%s\n' "$slug"
+}
+# repo-slug-helpers: end
+
 _claude_installed_json="${UI_CLONE_INSTALLED_PLUGINS_JSON:-$HOME/.claude/plugins/installed_plugins.json}"
-_version_before=$(_read_installed_version "$_claude_installed_json")
+_version_before=$(_read_installed_version "$_claude_installed_json" "$REPO_ROOT")
 
 if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ]; then
   INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"
@@ -134,12 +183,17 @@ if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ]; then
   # GitHub raw cache TTL is short but non-zero; 2s avoids occasional stale reads.
   sleep 2
 
-  curl -LsSf https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh \
+  # Install source: see the repo-slug helpers above for the resolution order.
+  _repo_url="${UI_CLONE_REPO:-$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)}"
+  _repo_slug=$(_resolve_repo_slug "$_repo_url")
+  INSTALL_SH_URL="${UI_CLONE_INSTALL_SH_URL:-https://raw.githubusercontent.com/${_repo_slug}/${UI_CLONE_REPO_BRANCH:-main}/install.sh}"
+
+  curl -LsSf "$INSTALL_SH_URL" \
     | INSTALL_DIR="$INSTALL_DIR" bash -s -- --no-deps 2>&1 \
     | sed 's/^/[post-push-refresh] /' || \
     echo "⚠️ post-push-refresh: curl install failed — check network / GitHub" >&2
 
-  _version_after=$(_read_installed_version "$_claude_installed_json")
+  _version_after=$(_read_installed_version "$_claude_installed_json" "$REPO_ROOT")
   if [ -n "$_version_after" ] && [ "$_version_before" != "$_version_after" ]; then
     echo "" >&2
     echo "🔴🔴🔴 PLUGIN VERSION CHANGED: ${_version_before:-none} -> ${_version_after} 🔴🔴🔴" >&2

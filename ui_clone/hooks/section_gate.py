@@ -80,7 +80,7 @@ def _is_driver_session(project_root: Path, session_id_from_payload: str = "") ->
     append-if-missing writer in `ui_clone.driver_session` which holds
     `fcntl.flock` across the read-modify-write so concurrent driver
     sessions don't stomp each other. Manual `echo > .driver-session.id`
-    is single-writer and was the source of the 2026-05-24 multi-driver
+    is single-writer and was the source of an earlier multi-driver
     stomping incident.
     """
     marker = project_root / ".driver-session.id"
@@ -1442,8 +1442,7 @@ def _enforce_canvas_replay_stamp(ref_dir: Path) -> str | None:
     opted into the canvas-replay closeout policy (v0.7.0). Canvas-replay
     is the opt-in escape from the 30-min canvas CSS replication cap for
     refs whose visual identity is canvas-driven (WebGL UnicornStudio
-    scenes, generative scroll-driven plates). Review finding applied
-    (2026-05-25):
+    scenes, generative scroll-driven plates). Review finding applied:
 
       [1] No new GATE_ORDER entry — modifier inside post-implement.
       [2] Attestation file is operator's explicit license confirmation.

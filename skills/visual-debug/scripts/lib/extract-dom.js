@@ -31,7 +31,7 @@
     // box-sizing must be captured: getComputedStyle().height on a border-box
     // element is a border-box px value (padding INSIDE). Re-emitting that height
     // without box-sizing:border-box (content-box default) adds the padding on
-    // top, inflating every padded section by its vertical padding (navercorp B1:
+    // top, inflating every padded section by its vertical padding (one observed site B1:
     // each section grew by exactly padT+padB). Capturing it lets the transpiler
     // reproduce the reference box model faithfully.
     'box-sizing',
@@ -46,7 +46,7 @@
     // track sizing, but a child's explicit placement (e.g. a hero carousel
     // spanning grid-row:1/4 down the left column) lives on the child. Without
     // it, grid auto-flow scatters every child into default cells and
-    // overlapping siblings collapse onto each other (navercorp hero: the
+    // overlapping siblings collapse onto each other (one observed site hero: the
     // right-rail banner cards fell onto the carousel). getComputedStyle
     // resolves an auto-placed item to "auto" (already filtered by NOISE), so
     // only real placements are captured — no per-node bloat. grid-area/order/
@@ -437,7 +437,7 @@
       parseFloat(s.width) > 0
     ) {
       // Split-text libraries emit a DEDICATED whitespace element per word gap
-      // (realfood's disintegrating headline: a childless <span> </span> between
+      // (observed on a split-text headline: a childless <span> </span> between
       // the word spans, measured 17.28px wide at font-size 96px). directText
       // trims that lone whitespace text node away, so the element survived as
       // an empty <span> and the clone rendered "RealFoodcan" — the inter-word
@@ -454,7 +454,7 @@
         .replace(/\s+/g, ' ').trim().slice(0, 2000);
       if (aggregate) out.text = aggregate;
     }
-    // Mid-text-span fidelity (loop-e2e-9): `text` joins DIRECT text nodes
+    // Mid-text-span fidelity (observed on a live reference): `text` joins DIRECT text nodes
     // only, so an inline child between two fragments ("treating <span>chronic
     // disease</span>—much") stores "treating —much" — an order no faithful
     // impl renders. Keep the live-rendered full string alongside the
@@ -469,7 +469,7 @@
       }
     }
     // F1 option-B: preserve text-node POSITION when direct text interleaves
-    // with element children (navercorp ticker: "(<blind><num> <percent>)" —
+    // with element children (one observed site ticker: "(<blind><num> <percent>)" —
     // the merged `text` "()" loses which side of .percent each paren sat on).
     // Strings = whitespace-collapsed text fragments, ints = index into
     // children[]. Stored only when the element-child count matched the

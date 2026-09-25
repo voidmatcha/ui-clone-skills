@@ -123,7 +123,7 @@ scroll-agent-browser() {
 
 derived_ready_wait_ms() {
   local splash_summary="${REF_DIR}/${STATES_PREFIX:-states}/splash/summary.json"
-  # RealFood's first-load splash can remain active beyond 2.6s. A fresh
+  # One observed site's first-load splash stayed active beyond 2.6s. A fresh
   # derived session has no shared lifecycle state, so keep a conservative
   # floor even when the measured splash summary is shorter.
   local fallback="${CAPTURE_DERIVED_READY_WAIT_MS:-3500}"

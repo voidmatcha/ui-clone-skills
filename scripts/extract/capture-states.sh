@@ -626,8 +626,8 @@ EVAL_JS='(async () => {
   // `reason: wall-clock-cap`, and a settled bookend taken before the page
   // actually settled, which behavior-parity-check reads as a continuous ref
   // animation the impl lacks. 10000ms lets that choreography finish and stays
-  // well under the overlay-exit window. Measured on navercorp.com/tech/
-  // innovation: 5000ms timed out with motionEvidence ["media",
+  // well under the overlay-exit window. Measured on one observed
+  // site: 5000ms timed out with motionEvidence ["media",
   // "active-animation"]; 10000ms settles at ~6.3s with `stable-2s`.
   //
   // `authoritativeNegative` now rests on a separate splash settle clock. The
@@ -1065,7 +1065,7 @@ def _splash_contract(states, capture_mode, summary):
     # structural DOM shift) plus the run settling on its own. The rule and its
     # rationale live in ui_clone/splash_contract.py; the evidence it read is
     # stamped next to the verdict so a reader can check the verdict against it.
-    # Measured on navercorp.com/tech/innovation - 11-13 polled states from
+    # Measured on one observed site - 11-13 polled states from
     # entry animations and media readiness, classes empty throughout, DOM +2%,
     # no overlay - this certifies; the old `len(states) == 1` rule refused it.
     evidence = absence_evidence(states, capture_mode=capture_mode, timed_out=timed_out)

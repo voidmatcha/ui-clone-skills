@@ -2,7 +2,7 @@
 # font-binaries-present-check.sh — fail when the ref references root-relative
 # font binaries but none of them actually landed in impl/public.
 #
-# Closes the navercorp failure class: transfer-fonts.sh records that N fonts are
+# Closes the observed site failure class: transfer-fonts.sh records that N fonts are
 # referenced by the ref CSS, but impl/public/font ships zero files, so
 # Pretendard/Inter/etc. all 404 to system fonts — while asset-transfer reports
 # "44/44 transferred" because it counts CSS references, not delivered binaries.

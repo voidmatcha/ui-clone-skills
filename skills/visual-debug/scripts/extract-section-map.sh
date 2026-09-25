@@ -143,7 +143,7 @@ cat <<'JSEOF' > "$EVAL_JS_FILE"
       } else if (tag === 'div' && h > 100) {
         const childrenArr = elementChildren(el);
         // L-CAP-3 (loop-ebpb-0/1): content-empty rails are never sections.
-        // ebay-playbook mounts 6 invisible, classless, childless 1350px divs
+        // one observed site mounts 6 invisible, classless, childless 1350px divs
         // inside an absolute rail under <body>; enumerating them poisoned the
         // section-compare/geometry denominators with 12 phantom rows across
         // two loops. A div with NO element children, NO text, and NO media

@@ -649,7 +649,7 @@ from pathlib import Path
 
 artifact, cid, ref = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
 if cid == "section-compare" and artifact == ref / "sections/result.txt":
-    # fable-20260910 follow-up review round 3 (deferred item C, now FIXED):
+    # Follow-up review round 3 (deferred item C, now FIXED):
     # this used to reuse _check_sections_result_health, the GATE's canonical
     # pass/fail verdict (fails on ANY fail_count > 0). That made one failing
     # static section a hard prerequisite failure for every motion-consumer
@@ -823,7 +823,7 @@ if [ "$FAIL" -gt 0 ]; then
   echo -e "${RED}Run \`uv run --project \"\$PLUGIN_ROOT\" --no-dev --frozen python -m ui_clone.gate $REF_DIR post-implement\` for the canonical verdict and per-check fix commands.${NC}"
   exit 1
 fi
-# fable-20260910 follow-up review round 3 (LOW): re-deriving "is this an
+# Follow-up review round 3 (LOW): re-deriving "is this an
 # iteration-scoped run" from raw env-var non-emptiness diverges from
 # check_iteration.select's own parsing (splits UI_CLONE_ITERATION_CHECKS on
 # "," and drops empties before deciding `active`, ui_clone/check_iteration.py

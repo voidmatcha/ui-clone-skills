@@ -108,7 +108,7 @@ def walk(node: object, depth: int = 0) -> None:
     text = node.get("text")
     text_full = node.get("textFull")
     if isinstance(text_full, str) and text_full.strip():
-        # Mid-text-span paragraph (loop-e2e-9): `text` is the DIRECT text
+        # Mid-text-span paragraph (end-to-end run): `text` is the DIRECT text
         # nodes joined with the inline-span content dropped ("treating
         # —much") — an extraction artifact no faithful impl can render.
         # Require the LIVE order (textFull); keep the joined fragments as
@@ -261,7 +261,7 @@ JSX_TEXT_PATTERNS = [
     # Avoid capturing JSX expressions ({foo}), JSX comments, or attribute fragments.
     # Trailing whitespace before the closing `<` is allowed: a mid-text inline
     # child (`treating <span>`) otherwise drops the ENTIRE leading fragment
-    # from both the fabrication scan and the missing-side word set (loop-e2e-9).
+    # from both the fabrication scan and the missing-side word set (end-to-end run).
     # The lookahead keeps whitespace-only gaps out while allowing a one-codepoint
     # punctuation/emoji node needed to reconstruct adjacent visible copy.
     # Include the actual HTML tag boundary instead of accepting any `>...<`

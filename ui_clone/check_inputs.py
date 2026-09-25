@@ -362,7 +362,7 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     ),
     "live-parity-sweep": _ci(SRC + PUBLIC),
     "ref-screenshot-asset": _ci(SRC + PUBLIC, ("section-map.json",)),
-    # F3 (fable-20260910): section-compare.sh live-navigates the impl URL and
+    # F3 (review): section-compare.sh live-navigates the impl URL and
     # (RECATCH_REF unset) the ref URL each run, sectioning against
     # section-map.json ground truth. Was UNREGISTERED here, so
     # compute_check_input_hash returned None -> check_iteration's
@@ -379,7 +379,7 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     # it as a ref input would feed each run's own live-measurement jitter
     # (sub-pixel rect drift, timing) straight into the next retry's
     # fingerprint, defeating should_pause's repeated-failure guard exactly the
-    # way F3 was defeated (fable-20260910 follow-up review, LOW A). Matches
+    # way F3 was defeated (follow-up review, LOW A). Matches
     # the documented "rollup constituents ... excludes each rollup's own
     # output" convention above. See _CHECK_ALLOW in
     # tests/gates/test_check_inputs_lockstep.py for the matching test carve-out.

@@ -504,7 +504,8 @@ else:
     # Geometric state machine: a header can change height/padding/transform/
     # position on scroll with NO class toggle. Fold geometry into the ref's
     # "is this a state machine" verdict so class-less geometric headers stop
-    # self-skipping (the realfood-gov 100->64 blind spot).
+    # self-skipping (an observed 100->64px header shrink with no class toggle
+    # was invisible to class-only detection).
     ref_geo_changes, ref_geo_samples = geo_changes(ref_probe)
 
 # A header is a verifiable state machine if it mutates class/attrs OR moves

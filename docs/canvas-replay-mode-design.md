@@ -1,6 +1,6 @@
 # Canvas-replay closeout mode — design
 
-> Status: **DESIGN** (not implemented). Captures the architectural choice surfaced by the kayiseisagu / juanmora / 26-site loop (2026-05-24/25). Implementation is opt-in and deferred until an operator explicitly requests it.
+> Status: **DESIGN** (not implemented). Captures the architectural choice surfaced by the kayiseisagu / juanmora / multi-site loop. Implementation is opt-in and deferred until an operator explicitly requests it.
 
 ## Problem
 

@@ -329,7 +329,7 @@ function snap(el, e){
     s.childVisualSig = ts;
   }
   if (e.kind === 'reveal' || e.kind === 'splash') {
-    // Fix M (loop-e2e-6): height/text channels for bar-grow + count-up
+    // Fix M (end-to-end run): height/text channels for bar-grow + count-up
     // reveals. Heights come from the same non-replaced child set as childSig
     // (span/div/em/b/i/p/a — excludes img/video/iframe/svg/canvas so lazy
     // media cannot fake growth); textDigest is the digits of innerText.
@@ -399,7 +399,7 @@ JSEOF
 # ── Click-to-open opener walk (real-pointer hover pass fallback) ──────────
 # Shared by the hover-pass evals. The owner walk only HOVERS a nav-like
 # ancestor, so a target inside a panel that opens on CLICK is never laid out
-# and its hover measures nothing: on navercorp.com/tech/innovation the
+# and its hover measures nothing: on one observed site the
 # .btn-lang__list buttons sit behind .btn-selected (a plain
 # <button type="button">, no aria-expanded) and .search-tab__box behind
 # .btn-search. Neither container matches the nav|menu|gnb|lnb owner test.
@@ -791,7 +791,7 @@ PHASE1="(async () => {
   // 15/17 fires failures; the ref renders everything upfront so this is an
   // impl-shape difference, not a selector bug). Scroll the document through
   // once so lazy/in-view content mounts, then return to top before marking.
-  // Pre-sweep initial snapshot (loop-e2e-5/codex): the mount sweep below
+  // Pre-sweep initial snapshot (end-to-end run): the mount sweep below
   // FIRES IO reveals before the 'before' snapshot is taken, so always-mounted
   // reveal targets read final->final and false-negative as dead. Capture the
   // pristine state of every directly-resolvable target FIRST; the merge
@@ -887,7 +887,7 @@ PHASE1="(async () => {
       }
     }
     if (!el) { out[i] = { found: false }; continue; }
-    // Collision-safe multi-index tagging (loop-e2e-4): several spec entries
+    // Collision-safe multi-index tagging (end-to-end run): several spec entries
     // can resolve to the SAME element (e.g. width-scrub + autoplay on one
     // <video>); a single-value attribute lets the last writer win and the
     // before/after merge then misreports the earlier entries as 'element not
@@ -912,7 +912,7 @@ if [ -z "$BEFORE_JSON" ] || [ "$BEFORE_JSON" = "null" ]; then
   exit 2
 fi
 
-# PHASE2 runs as CHUNKED evals (loop-e2e-4): a single async eval over ~20
+# PHASE2 runs as CHUNKED evals (end-to-end run): a single async eval over ~20
 # probes needs >20s of settle waits and hits the agent-browser eval budget
 # (~25s hard error), silently losing every probe after the first few and
 # misreporting them as 'element not found'. Each chunk drives only its
@@ -1040,19 +1040,19 @@ PHASE2_TEMPLATE="(async () => {
         const smoothEngine = !!(window.lenis || window.Lenis || window.ScrollSmoother
           || /lenis|has-scroll-smooth/.test(document.documentElement.className)
           || document.querySelector('[data-scroll-container],#smooth-content,[class*=lenis]'));
-        // Fix K (loop-e2e-6): early positions (clamped >= 0) cover scrubs
+        // Fix K (end-to-end run): early positions (clamped >= 0) cover scrubs
         // whose useScroll offset ['start start','end start'] completes while
         // the element is still at/near the top of the page (hero width
         // scrub saturates by scrollY~300 — the old {0,.5,1} sweep sampled
         // only the saturated tail). Extra samples cannot false-pass a dead
         // scrub: variation still requires measured property change across
         // advanced scroll (test_dead_scrub_with_extended_early_samples).
-        // Child signature + inline width per sample (loop-e2e-5): scrub
+        // Child signature + inline width per sample (end-to-end run): scrub
         // motion often animates DESCENDANTS (deck cards, word spans) or an
         // inline width track (hero video 80vw->100vw) while the target's
         // own transform stays identity. Same signal class snap() already
         // records for reveals — children's transform|opacity only.
-        // Fix L (loop-e2e-6): color series for class-swap scrubs (word
+        // Fix L (end-to-end run): color series for class-swap scrubs (word
         // reveals dim via COLOR; opacity stays 1). Judged only when the
         // spec declares a color-family property.
         // zIndex third field feeds the per-element scrub judge (deck
@@ -2029,7 +2029,7 @@ if [ -n "$WHEEL_TARGETS" ] && [ "$WHEEL_TARGETS" != "[]" ]; then
       }
       if (!el) { continue; }
       const cs = getComputedStyle(el); const rr = el.getBoundingClientRect();
-      // childSig + width per wheel sample (loop-e2e-5): descendant motion and
+      // childSig + width per wheel sample (end-to-end run): descendant motion and
       // inline width tracks are the dominant scrub styles this re-probe
       // previously read as flat.
       var chs = el.querySelectorAll('span,div,em,b,i,p,a,img,video,svg,g,path');
@@ -2040,7 +2040,7 @@ if [ -n "$WHEEL_TARGETS" ] && [ "$WHEEL_TARGETS" != "[]" ]; then
     }
     return JSON.stringify(out);
   })()"
-  # Fix K (loop-e2e-6): sample once at the top BEFORE the first wheel step —
+  # Fix K (end-to-end run): sample once at the top BEFORE the first wheel step —
   # early-page scrubs (hero width 80vw->100vw over scrollY 0..~300) saturate
   # before the first 700px step, so a sweep that only samples after stepping
   # reads a permanently-flat tail and false-fails a live scrub.
@@ -2099,7 +2099,7 @@ PY
   rm -f "$WHEEL_SAMPLES"
 fi
 
-# ── Load-phase probe (loop-e2e-5) ─────────────────────────────────────────
+# ── Load-phase probe (end-to-end run) ─────────────────────────────────────────
 # Splash overlays, autoplay tracks and timer carousels fire BEFORE the
 # post-sweep probes can observe them (the intro overlay settles ~2.45s after
 # navigate; the carousel rotates content, not transforms). Fresh-navigate and

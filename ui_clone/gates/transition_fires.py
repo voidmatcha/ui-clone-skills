@@ -547,7 +547,7 @@ def _reveal_probe_temporal_fired(probe: object) -> bool:
 
 def _load_phase_fired(load_samples: list, kind: str) -> bool:
     """Load-phase series evidence for motion that completes BEFORE the
-    post-sweep probe (loop-e2e-5): splash overlays settle ~2.45s after
+    post-sweep probe (end-to-end run): splash overlays settle ~2.45s after
     navigate, IO reveals fire during the mount sweep, stroke draws complete
     at mount, and timer carousels rotate CONTENT (img srcs) rather than
     transforms. The series is sampled on a fresh navigate, so variation here
@@ -713,7 +713,7 @@ def _affected_hover_fired(
 
 
 def _child_height_grew(before: dict, after: dict) -> bool:
-    """Fix M (loop-e2e-6): bar-grow reveals animate descendant heights 0->Npx
+    """Fix M (end-to-end run): bar-grow reveals animate descendant heights 0->Npx
     with no opacity/transform delta. Growth must start from ~0 (a bar at
     rest) and clear a jitter threshold — a partially-rendered box (lazy
     media / font reflow) starts above 1px and is excluded driver-side by
@@ -732,7 +732,7 @@ def _child_height_grew(before: dict, after: dict) -> bool:
 
 
 def _text_digest_changed(before: dict, after: dict) -> bool:
-    """Fix M (loop-e2e-6): numeric count-ups mutate textContent only. The
+    """Fix M (end-to-end run): numeric count-ups mutate textContent only. The
     digest (digits of innerText) is compared PRE-sweep vs post-trigger; the
     channel is property-gated (count/textcontent) by the caller. Residual
     live-clock risk is bounded by spec provenance — a spec entry declaring a
@@ -758,7 +758,7 @@ def _samples_vary(
     first = samples[0]
     f_t = _norm_transform(first.get("transform"))
     f_op = _f(first.get("opacity"))
-    # Child-signature + inline-width series (loop-e2e-5): scrub motion often
+    # Child-signature + inline-width series (end-to-end run): scrub motion often
     # lives in DESCENDANTS (deck cards, word-reveal spans) or in an inline
     # width track (hero video 80vw->100vw) — the target's own transform stays
     # I. childSig carries only children's transform|opacity (no
@@ -768,7 +768,7 @@ def _samples_vary(
     f_w = _f(first.get("width"))
     f_h = _f(first.get("height"))
     declares_height = "height" in prop
-    # Fix L (loop-e2e-6): word-reveal scrubs swap classes that change computed
+    # Fix L (end-to-end run): word-reveal scrubs swap classes that change computed
     # COLOR only (dimmed -> highlight; opacity stays 1). The color series is a
     # separate field and counts ONLY when the spec declares a color-family
     # property (codex review: animation-timeline:scroll() / body.scrolled-class
@@ -1456,7 +1456,7 @@ def decide(
         or _stroke_drew(before, after)
         or (kind == "splash" and _opacity_changed(before, after))
     )
-    # Fix M (loop-e2e-6): height/text channels, gated on the spec-declared
+    # Fix M (end-to-end run): height/text channels, gated on the spec-declared
     # property (strokeDashoffset precedent). `before` is the PRE-sweep
     # pristine snapshot when available (driver prefers PRE), so the diff is
     # rest-state vs post-trigger, never mid-animation vs mid-animation.

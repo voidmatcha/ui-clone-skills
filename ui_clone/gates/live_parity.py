@@ -1,7 +1,7 @@
 """Live-parity census decisions — pure logic for live-parity-sweep.sh.
 
 Three failure classes proved structurally noisy on timer/scroll-dynamic pages
-(realfood loop-e2e-4 evidence capsule):
+(end-to-end run evidence capsule):
 
 1. Image-file-count drift: custom setInterval carousels rotate the rendered
    food even while off-screen, and the pin hooks only reach swiper / slick /
@@ -12,7 +12,7 @@ Three failure classes proved structurally noisy on timer/scroll-dynamic pages
    stays blocking.
 
 2. scrollHeight exact equality: pages with scroll-activated content legally
-   grow/shrink (realfood erf region +-180px), so equality across two
+   grow/shrink (one observed site's erf region +-180px), so equality across two
    independent sessions is luck. Tolerance is max(0.5%, 200px) — far below the
    2.2x balloon class (specific regression) this check exists to catch; geometry-sanity
    independently enforces docH within 15%.

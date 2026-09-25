@@ -506,7 +506,7 @@ def _observed_scroll_motion(self: Gate) -> bool:
     # finalizer is DERIVED FROM transition-spec.json — spec-derived artifacts
     # may never serve as observation evidence about the spec (a 1-entry
     # placeholder spec manufactured the evidence of its own adequacy on
-    # realfood-e2e-1).
+    # one end-to-end run).
     if isinstance(cov, dict) and cov.get("source") == "ui_clone.extraction_artifacts":
         cov = None
     if isinstance(cov, dict) and any(
@@ -607,7 +607,7 @@ def _check_scroll_spec_coverage(self: Gate, spec: Any) -> list[CheckResult]:
     # first — and `observed` read transition-coverage.json, an artifact
     # DERIVED from the spec under audit, so a 1-entry placeholder spec
     # manufactured the evidence of its own adequacy and the check returned
-    # [] before ever consulting the independent signals (realfood-e2e-1).
+    # [] before ever consulting the independent signals (one end-to-end run).
     # sticky-elements / _observed_scroll_motion remain available as
     # corroboration for diagnostics but no longer gate this check.
     if not self._scroll_motion_signals():

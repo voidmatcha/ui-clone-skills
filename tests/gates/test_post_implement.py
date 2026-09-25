@@ -689,7 +689,7 @@ def test_visual_debug_stamp_orphaned_provisional_blocks(
 ) -> None:
     """Provisional stamp WITHOUT matching env var = crashed auto-verify; reject.
 
-    Stamp-race fix (codex review 2026-05-27): a previous auto-verify.sh run
+    Stamp-race fix (codex review): a previous auto-verify.sh run
     crashed mid-execution after writing the provisional stamp (`passed=true,
     provisional=true`) but before writing the final verdict. Without this
     guard, the next post-implement check would falsely trust the stale
@@ -885,7 +885,7 @@ def test_transitions_result_missing_is_not_required_for_scroll_only_motion(
     assert not any(r.label == "transitions/result.txt visual health" for r in failures)
 
 
-# ── anti-cheat pattern detection (F1 — claude fidelity analysis 2026-05-25) ──
+# ── anti-cheat pattern detection (hidden stub elements) ──────────────────────
 
 
 def _setup_impl_root_for_anti_cheat(tmp_path: Path, src_files: dict[str, str]) -> Path:
@@ -913,7 +913,7 @@ def _setup_impl_root_for_anti_cheat(tmp_path: Path, src_files: dict[str, str]) -
 
 
 def test_anti_cheat_stub_classname_fails(tmp_path: Path) -> None:
-    """Pattern observed in juanmora claude (26-site loop 2026-05-24/25):
+    """Pattern observed in juanmora claude (multi-site loop):
     className with -stub suffix on a check-required selector. Must fail."""
     ref = _setup_impl_root_for_anti_cheat(tmp_path, {
         "Hero.tsx": (
@@ -995,7 +995,7 @@ def test_anti_cheat_no_impl_root_returns_none(tmp_path: Path) -> None:
     assert not failures, "missing impl_root must not produce anti-cheat fail"
 
 
-# ── spec-bundle grounding (F — claude fidelity analysis 2026-05-25) ──
+# ── spec-bundle grounding (F — fidelity analysis) ──
 
 
 def _seed_spec_with_chunks(ref: Path, chunks: list[str]) -> None:
@@ -1132,7 +1132,7 @@ def test_spec_bundle_grounding_skips_when_spec_missing(tmp_path: Path) -> None:
     assert not grounding, "no spec → no grounding check"
 
 
-# ── E1: bundle-grep context inject (claude fidelity 2026-05-25, codex review) ──
+# ── E1: bundle-grep context inject (fidelity analysis, codex review) ──
 
 
 def _seed_pipeline_state_for_e1(ref: Path, counts: dict[str, int]) -> None:

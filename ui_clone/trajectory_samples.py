@@ -50,8 +50,8 @@ def _targets_requiring_runtime_evidence(
     A bundle-sourced GSAP entry (`sourceArtifact: bundle-extraction.json`) or a
     class-toggle scroll-state-machine with no runtime-dump linkage structurally
     never gets a byScroll row no matter how many times it is recaptured —
-    treating its absence as a hard failure created a dead end (fable-20260910
-    follow-up review: F1's identity-resolution fix closed the textual-selector
+    treating its absence as a hard failure created a dead end (follow-up
+    review: F1's identity-resolution fix closed the textual-selector
     mismatch but not this "no evidence is even possible" branch)."""
     wanted = set(targets)
     out: set[str] = set()

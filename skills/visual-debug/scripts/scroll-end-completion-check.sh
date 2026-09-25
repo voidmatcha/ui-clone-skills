@@ -275,8 +275,8 @@ for VP in "${VPS[@]}"; do
       return map;
     }
 
-    // Growing-page guard (loop-e2e-4): lazy/scroll-activated content can grow
-    // scrollHeight AFTER maxScroll was cached (realfood erf region +180px),
+    // Growing-page guard (end-to-end run): lazy/scroll-activated content can grow
+    // scrollHeight AFTER maxScroll was cached (one observed site's erf region +180px),
     // which parks state-machine thresholds (e.g. nav nearBottom at sh-200)
     // INSIDE the stale minus50..max window and flags ref-faithful behavior as
     // stuck. Recompute the live bottom before each sample so all three
@@ -445,10 +445,10 @@ for VP in "${VPS[@]}"; do
   # STUCK_COUNT below. Counting it here as well used to force status "error"/
   # exit 2 (inconclusive) instead of "fail"/exit 1 for a genuinely measured
   # defect, and check_iteration.classify() then mis-filed it as
-  # "infrastructure" instead of "implementation" (fable-20260910 follow-up
+  # "infrastructure" instead of "implementation" (follow-up
   # review round 3, LOW). Only a target that vanished mid-probe — where no
   # residual could be measured at all — leaves the run truly inconclusive.
-  # fable-20260911 follow-up review: renamed from TEMPORAL_COUNT — this now
+  # Follow-up review: renamed from TEMPORAL_COUNT — this now
   # counts ONLY unmeasurableTargets (a target that vanished mid-probe), not
   # temporal/continuous motion in general (see the comment above).
   UNMEASURABLE_COUNT=$(node -e "

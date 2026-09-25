@@ -242,7 +242,7 @@ elif not impl.get("ok"):
     reasons.append(f"impl probe failed at mobile viewport: {impl.get('error','unknown')}")
 else:
     # Ref-relative overflow (batch-12 ITEM 6 achievability): the REFERENCE itself
-    # may carry inherent horizontal overflow at mobile — e.g. realfood's
+    # may carry inherent horizontal overflow at mobile — e.g. one observed site's
     # JS-positioned foods/pyramid strip extends to ~1151px (overflow ~776px),
     # clipped by overflow-x:clip. An ABSOLUTE "overflow>4px => fail" rule fails the
     # reference against its OWN ground truth (a gate so strict it cannot self-pass).

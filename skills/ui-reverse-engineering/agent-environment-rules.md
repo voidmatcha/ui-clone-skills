@@ -61,18 +61,18 @@ read -r W H <<< "$vp"
 
 Silent empty-variable bugs are common when reusing scripts written in bash. Verify with `echo "W=$W H=$H"` once before relying on the values inside a long loop.
 
-## Monorepo path resolution rule
+## Project-root and workspace discovery rule
 
-When the user names a project with a space — *"X showcase"*, *"Y dashboard"*, *"Z app"* — do NOT treat that as a literal directory `~/Documents/X showcase/`.
-
-Always check monorepo layouts first:
+When the user names a project informally — *"X showcase"*, *"Y dashboard"*, *"Z app"* — do NOT treat that as a literal directory named after the phrase. Discover the real project root and, for monorepos, the workspace that owns the target app:
 
 ```bash
-ls ~/Documents/<X>/apps/<showcase|dashboard|app>
-ls ~/Documents/<X>/packages/
+git rev-parse --show-toplevel                      # repo root (fails outside a checkout)
+node -e 'const p=require("./package.json");console.log(JSON.stringify(p.workspaces||[]))'
+ls pnpm-workspace.yaml turbo.json nx.json lerna.json 2>/dev/null   # other workspace manifests
+ls apps/ packages/ 2>/dev/null                     # common workspace folders
 ```
 
-Only fall back to the literal-path interpretation if no monorepo match exists. Confirm with `pwd` after `cd`. Acting on the literal path silently puts every artifact in the wrong place and the pipeline gates pass against an empty repo — the worst failure mode because every check looks green.
+Pick the workspace whose `package.json` name or folder matches the user's phrase. Only fall back to the literal-path interpretation if no repo or workspace match exists. Confirm with `pwd` after `cd`. Acting on the literal path silently puts every artifact in the wrong place and the pipeline gates pass against an empty repo — the worst failure mode because every check looks green.
 
 ## agent-browser CLI rule
 
@@ -116,7 +116,7 @@ Gate validators look for `tmp/ref/<c>/static/ref/`, NOT `tmp/ref/<c>/capture/sta
 
 **Always invoke `ui-capture` with the 3rd `[component]` arg** so it writes to `tmp/ref/<c>/` directly — `ui-capture <url> "" <component>` (Claude slash command: `/ui-capture <url> "" <component>`). Pass `""` for the local-url slot when you only need ref capture.
 
-`tmp/ref/` lives **inside the project root** that owns the component, not under `~/`. If you've `cd`'d to `~/Documents/<repo>/apps/<app>/`, that's where `tmp/ref/` should be. Verify with `pwd && ls tmp/ref/<c>/` before each gate run — gates have no opinion about which directory is "the right one"; they validate the path you pass in.
+`tmp/ref/` lives **inside the project root** that owns the component, not under `~/`. If you've `cd`'d to the workspace directory that owns the app (e.g. `<repo>/apps/<app>/`), that's where `tmp/ref/` should be. Verify with `pwd && ls tmp/ref/<c>/` before each gate run — gates have no opinion about which directory is "the right one"; they validate the path you pass in.
 
 ## Stale dev-server rule (agent-vs-user reproducibility delta)
 

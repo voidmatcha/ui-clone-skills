@@ -10,7 +10,7 @@
 # WHY: rect/style ground truth is captured in whatever runtime state the page
 # happens to be in. A stray hover bakes an open megamenu into section-map.json,
 # which then OVERRIDES the frozen reference baseline the auto-research evaluator
-# reuses — so a faithful idle clone permanently FAILs (navercorp A-06). The cure
+# reuses — so a faithful idle clone permanently FAILs (one observed site A-06). The cure
 # is to force the page back to a known idle state (scroll top + close hover/open
 # states + rAF settle) BEFORE any rect/style read, assert nothing open-state
 # remains, and record a `capturedIdle` provenance object on the artifact.

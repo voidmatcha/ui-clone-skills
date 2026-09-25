@@ -335,7 +335,7 @@ def test_scroll_growth_with_scroll_listener_pass(
 
 def test_scroll_growth_no_listener_fail(ref_dir: Path, impl_root: Path) -> None:
     """Scrollable ref + impl has NO scroll-state primitive → fail. Many
-    sites in the 26-site loop produced flat impls that ignored scroll
+    sites in the multi-site loop produced flat impls that ignored scroll
     state entirely; this gate catches that."""
     _write_scroll(
         ref_dir,
@@ -704,7 +704,7 @@ def test_non_motion_rich_bundle_keeps_legacy_skip(ref_dir: Path) -> None:
 def test_infinite_scroll_emits_policy_hint(
     ref_dir: Path, impl_root: Path,
 ) -> None:
-    """Fix 3 reframed (codex review 2026-05-27): scroll/summary.json
+    """Fix 3 reframed (codex review): scroll/summary.json
     `infiniteScroll=true` must produce a non-blocking policy-recommendation
     `warn` so the iteration loop sees the unclonable-shape signal BEFORE
     exhausting 10 post-implement iterations. Drives codex's
@@ -750,7 +750,7 @@ def test_infinite_scroll_emits_policy_hint(
 def test_motion_rich_partial_capture_fails(
     ref_dir: Path, impl_root: Path,
 ) -> None:
-    """Fix 2 (codex review 2026-05-27): motion-rich ref with states/ present
+    """Fix 2 (codex review): motion-rich ref with states/ present
     but one or more phase artifacts MISSING must fail with a partial-
     capture diagnostic — not silently pass via the "no signal" fallback.
 

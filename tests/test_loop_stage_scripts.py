@@ -10,6 +10,8 @@ These wrap the per-stage operational pattern from the convergence plan:
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -20,12 +22,35 @@ FINALIZE = ROOT / "scripts" / "loop" / "finalize-stage.sh"
 
 # ─── launch-stage.sh ────────────────────────────────────────────────────────
 
-def _run_launch(stage: str) -> subprocess.CompletedProcess[str]:
+# Neutral launcher values: the script must not bake in any machine-specific
+# multiplexer, workspace id, model, or permission mode.
+LAUNCH_ENV = {
+    "UI_CLONE_LOOP_MUX": "mux-cli",
+    "UI_CLONE_LOOP_WORKSPACE": "workspace-1",
+}
+LAUNCH_PERSONAL_VARS = (
+    "UI_CLONE_LOOP_MUX",
+    "UI_CLONE_LOOP_WORKSPACE",
+    "UI_CLONE_LOOP_AGENT_CMD",
+    "UI_CLONE_LOOP_MODEL",
+    "UI_CLONE_LOOP_PERMISSION_MODE",
+    "UI_CLONE_LOOP_SHELL_PROMPT_ANSWER",
+)
+
+
+def _run_launch(
+    stage: str, extra_env: dict[str, str] | None = None, *, base: bool = True
+) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k not in LAUNCH_PERSONAL_VARS}
+    if base:
+        env.update(LAUNCH_ENV)
+    env.update(extra_env or {})
     return subprocess.run(
         ["bash", str(LAUNCH), stage],
         capture_output=True,
         text=True,
         timeout=10,
+        env=env,
     )
 
 
@@ -63,18 +88,108 @@ def test_launch_stage_d_full_scope_comprehensive() -> None:
     assert "verify" in out
 
 
-def test_launch_emits_purplemux_tab_lines() -> None:
-    """Every stage's launch output must include the purplemux tab launch
-    incantation so the user knows what to run."""
+def test_launch_emits_env_driven_mux_tab_lines() -> None:
+    """Every stage's launch output must include the multiplexer tab launch
+    incantation, built from UI_CLONE_LOOP_MUX / UI_CLONE_LOOP_WORKSPACE."""
     for stage in ("A", "B", "C", "D"):
         proc = _run_launch(stage)
         assert proc.returncode == 0, f"stage {stage} failed: {proc.stderr}"
-        assert "purplemux tab" in proc.stdout, (
-            f"stage {stage} missing purplemux tab line"
+        assert "mux-cli tab create -w workspace-1" in proc.stdout, (
+            f"stage {stage} missing env-driven tab create line"
+        )
+        assert 'mux-cli tab send -w workspace-1 "$TAB_ID"' in proc.stdout, (
+            f"stage {stage} missing env-driven tab send line"
         )
         assert "--plugin-dir" in proc.stdout, (
             f"stage {stage} missing --plugin-dir flag (hooks won't fire without it)"
         )
+
+
+def test_launch_requires_mux_and_workspace() -> None:
+    """Unset required launcher values → exit 2 with a message naming the var."""
+    for missing in ("UI_CLONE_LOOP_MUX", "UI_CLONE_LOOP_WORKSPACE"):
+        env = {k: v for k, v in LAUNCH_ENV.items() if k != missing}
+        proc = _run_launch("A", env, base=False)
+        assert proc.returncode == 2, proc.stdout
+        assert missing in proc.stderr
+        assert "tab create" not in proc.stdout
+
+
+def test_launch_defaults_omit_model_and_permission_flags() -> None:
+    """Without UI_CLONE_LOOP_MODEL / _PERMISSION_MODE / _SHELL_PROMPT_ANSWER
+    the launch uses host defaults: no --model, no --permission-mode, and no
+    shell-prompt dismissal step."""
+    proc = _run_launch("A")
+    assert proc.returncode == 0, proc.stderr
+    assert "--model" not in proc.stdout
+    assert "--permission-mode" not in proc.stdout
+    assert "Dismiss" not in proc.stdout
+    assert "&& claude --plugin-dir" in proc.stdout
+
+
+def test_launch_honours_model_permission_agent_and_prompt_answer_env() -> None:
+    proc = _run_launch(
+        "C",
+        {
+            "UI_CLONE_LOOP_AGENT_CMD": "agent-cli",
+            "UI_CLONE_LOOP_MODEL": "model-x",
+            "UI_CLONE_LOOP_PERMISSION_MODE": "mode-y",
+            "UI_CLONE_LOOP_SHELL_PROMPT_ANSWER": "q",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "&& agent-cli --plugin-dir" in proc.stdout
+    assert "--permission-mode mode-y" in proc.stdout
+    assert "--model model-x" in proc.stdout
+    assert 'mux-cli tab send -w workspace-1 "$TAB_ID" q\n' in proc.stdout
+
+
+def test_launch_step_numbering_is_contiguous_with_and_without_prompt_answer() -> None:
+    """The optional prompt-dismissal step must not leave a hole in the
+    printed step numbers."""
+    without = _run_launch("A")
+    assert without.returncode == 0, without.stderr
+    assert re.findall(r"^# (\d+)\) ", without.stdout, re.M) == ["1", "2", "3"]
+    assert "Dismiss" not in without.stdout
+
+    with_answer = _run_launch("A", {"UI_CLONE_LOOP_SHELL_PROMPT_ANSWER": "y"})
+    assert with_answer.returncode == 0, with_answer.stderr
+    assert re.findall(r"^# (\d+)\) ", with_answer.stdout, re.M) == ["1", "2", "3", "4"]
+    assert "# 2) Dismiss the shell startup prompt:" in with_answer.stdout
+
+
+def test_launch_shell_quotes_env_values() -> None:
+    """Values with spaces or shell metacharacters are printed as single shell
+    words (printf %q), so the copy-pasted command keeps them intact."""
+    proc = _run_launch(
+        "C",
+        {
+            "UI_CLONE_LOOP_WORKSPACE": "ws one",
+            "UI_CLONE_LOOP_MODEL": "model x",
+            "UI_CLONE_LOOP_PERMISSION_MODE": "mode;y",
+            "UI_CLONE_LOOP_SHELL_PROMPT_ANSWER": "y $HOME",
+            "UI_CLONE_LOOP_AGENT_CMD": "agent cli",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert "tab create -w ws\\ one " in out
+    assert "--model model\\ x" in out
+    assert "--permission-mode mode\\;y" in out
+    assert "&& agent\\ cli --plugin-dir" in out
+    assert re.search(r'"\$TAB_ID" (y\\ \\\$HOME|\'y \$HOME\')\n', out), out
+    # Stage C's placeholder section ids are angle-bracketed; they must not be
+    # printed as bare redirections (%q also escapes the commas).
+    assert "UI_CLONE_VERIFY_SECTIONS=hero\\,\\<sec2\\>\\,\\<sec3\\>" in out
+
+
+def test_launch_script_carries_no_personal_launcher_values() -> None:
+    """The script must not embed a multiplexer name, a workspace id, a model
+    name, or a permission mode — those come from the environment."""
+    source = LAUNCH.read_text(encoding="utf-8")
+    for token in ("--model opus", "--permission-mode auto", " ws-"):
+        assert token not in source, f"personal launcher value baked in: {token!r}"
+    assert "UI_CLONE_LOOP_WORKSPACE" in source
 
 
 def test_launch_emits_prompt_file_reference() -> None:

@@ -149,7 +149,7 @@ PY
 # clamp_arc_last <first> <last> <cutoff>
 #   Prints <last> bounded into [first, cutoff]. Used to bound splash arc
 #   measurement to the common recording window when a looping bg video keeps
-#   whole-frame change detection alive to the end of each clip (e2e-9: arc
+#   whole-frame change detection alive to the end of each clip (observed: arc
 #   delta 96 == recording-length delta 96 — the verdict was measuring
 #   recorder-stop jitter, not the splash timeline). Motion starting after the
 #   cutoff collapses to arc 0, which the one-side-no-motion anti-bypass in
@@ -164,7 +164,7 @@ clamp_arc_last() {
 
 # arc_common_budget <ref_first> <ref_total> <impl_first> <impl_total>
 #   Prints the common per-side arc budget: min(ref_total-ref_first,
-#   impl_total-impl_first). The symmetric arc clamp (batch-4 item 1) bounds
+#   impl_total-impl_first). The symmetric arc clamp bounds
 #   EACH side's last-change to its_own_first_change + this budget. The prior
 #   looping-video clamp bounded both last-changes to ONE absolute cutoff
 #   (min total frames), which truncated the side with the LATER first-change
@@ -235,7 +235,7 @@ compute_ssim_series() {
 # arc_timing_verdict <ref_first> <ref_last> <impl_first> <impl_last> <max_delta>
 #   Compares ARC-INTERNAL timing (first-to-last-change duration) instead of
 #   absolute first-change offsets: the live-network ref's first paint jitters
-#   18-108 frames run-to-run (e2e-8 brief), so an absolute-offset delta fails
+#   18-108 frames run-to-run (measured on a live reference), so an absolute-offset delta fails
 #   honest runs, while a wrong impl TIMELINE (too-long splash, missing
 #   dismissal) shows up as a different arc length regardless of when paint
 #   started. Anti-bypass: a side with no change points carries first==last==1
@@ -267,8 +267,8 @@ arc_timing_verdict() {
 # arc_calibrated_verdict <ref_fc> <ref_lc> <ref_total> <impl_fc> <impl_lc> \
 #                        <impl_total> <refcal_fc> <refcal_lc> <refcal_total> \
 #                        <default_max_delta> <cal_margin>
-#   Splash arc verdict CALIBRATED against a live ref-vs-refcal arc-noise floor
-#   (batch-4 item 1). The static arc max_delta false-fails ref-vs-ref on the
+#   Splash arc verdict CALIBRATED against a live ref-vs-refcal arc-noise floor.
+#   The static arc max_delta false-fails ref-vs-ref on the
 #   phase-noisy splash class: the cold reference recording (loaded 1st)
 #   over-detects its last change by up to ~40 frames vs the warm impl/refcal
 #   recordings (loaded 2nd/3rd off a shared cache) — measured ref-vs-ref arc

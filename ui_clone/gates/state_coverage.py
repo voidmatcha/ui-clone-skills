@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 
 # Recognized scroll-state primitives. Order matters only for the "found"
-# message — first match wins. Sourced from the 26-site loop observation
+# message — first match wins. Sourced from the multi-site loop observation
 # of which APIs impls actually use across React + Next.js + plain Vite
 # stacks.
 _SCROLL_PRIMITIVES: tuple[str, ...] = (
@@ -387,7 +387,7 @@ def _check_scroll_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
     if summary.get("static") is True:
         # Page fits in viewport — scroll check is N/A.
         return None
-    # Fix 3 reframed (review 2026-05-27): infiniteScroll signal is
+    # Fix 3 reframed: infiniteScroll signal is
     # captured by capture-scroll.sh into summary.json but was previously
     # not surfaced anywhere. Emit a non-blocking policy-recommendation
     # warn so the iteration loop sees the unclonable-shape hint EARLY
@@ -493,7 +493,7 @@ def _check_hover_coverage(ref_dir: Path, src_text: str) -> CheckResult | None:
             "but impl/src has no hover handlers (`:hover`, `hover:`, "
             "onMouseEnter, whileHover). The impl will be visually static "
             "where the ref reacts to cursor — common cause of structural-"
-            "complete-but-feels-dead clones in the 26-site loop."
+            "complete-but-feels-dead clones in the multi-site loop."
         ),
         fix=(
             "Read states/hover/manifest.json and implement only the captured "
@@ -605,7 +605,7 @@ Reads <ref_dir>/states/{splash,scroll,hover,click}/ and grep-checks impl/src/**.
             )
         ]
 
-    # Fix 2 (review 2026-05-27): partial-capture detector for
+    # Fix 2: partial-capture detector for
     # motion-rich refs. states/ exists (so the "states/ absent" branch
     # above did not fire) but one or more required phase artifacts is
     # missing — e.g. capture-states.sh ran but capture-scroll.sh

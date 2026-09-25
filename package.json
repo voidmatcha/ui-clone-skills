@@ -30,7 +30,6 @@
     "bin/",
     "ui_clone/",
     "docs/",
-    "!docs/claude-fidelity-analysis.md",
     "!docs/clone-reviews/",
     "!docs/*-E1.md",
     "!docs/superpowers/",

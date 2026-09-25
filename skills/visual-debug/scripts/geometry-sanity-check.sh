@@ -94,7 +94,7 @@ try:
             "tag": semantic_tag,
             "refH": h,
             "refTop": s.get("top") if isinstance(s.get("top"), (int, float)) else None,
-            # Sticky travel-union provenance (loop-e2e-4 vs e2e-12): the frozen
+            # Sticky travel-union provenance (an earlier vs a later end-to-end run): the frozen
             # ref height is a RANGE only when the producer recorded a sticky
             # travel-union whose stored height already equals the parent range;
             # if it stored the instant box (no field, or height << range) the
@@ -192,7 +192,7 @@ MEASURE_JS="(() => {
       if (!cands.length) { try { cands = Array.prototype.slice.call(document.querySelectorAll('[class*=\"' + sec.cls + '\"]')); } catch (_) {} }
       el = pick(cands, sec.refTop);
     }
-    // Sticky travel-union (loop-e2e-4): section-map stores a sticky's parent
+    // Sticky travel-union (end-to-end run): section-map stores a sticky's parent
     // scroll-range, not its instant box — report both so the judge can pick
     // the comparable extent deterministically.
     let isSticky = false, stickyRangeH = null;
@@ -245,7 +245,7 @@ for s in geom.get("sections") or []:
     # The frozen ref height is a sticky TRAVEL UNION (range) only when the
     # producer recorded a stickyRangeH whose value the stored height already
     # equals (>= 85% of it). When the ref stored the INSTANT box (legacy
-    # e2e-12: no stickyRangeH field, or height << range), compare the live
+    # end-to-end run: no stickyRangeH field, or height << range), compare the live
     # instant box against it — substituting the live 2700 travel-union there
     # is a false 200% fail.
     ref_srh = s.get("refStickyRangeH")

@@ -342,7 +342,7 @@ def class_signature_count(*artifacts, include_css: bool = True) -> int:
     JSX: stylesheets define far more classes (pseudo/state/unused variants) than
     ever land on rendered elements, so the forensic *gate* threshold must be a
     fraction of THIS count, not of the inflated CSS-definition count — otherwise
-    the gate is mathematically unreachable (realfood: 136 DOM classes but 599
+    the gate is mathematically unreachable (one observed site: 136 DOM classes but 599
     CSS-defined, so 25%*599=149 > 136 blocks every clone).
     """
     found: set[str] = set()
@@ -509,7 +509,7 @@ def sticky_containing_block(css_class):
 
     Without this the generator renders the sticky flat at App level, so its
     containing block becomes the whole page body and it pins for the entire
-    scroll instead of releasing at the end of its section (the realfood
+    scroll instead of releasing at the end of its section (the observed site's
     "sticky never releases" bug). class_signature already proves the structure
     preserves section->sticky nesting; we just surface the wrapper to codegen.
     """

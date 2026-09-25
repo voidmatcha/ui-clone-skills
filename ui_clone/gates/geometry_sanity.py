@@ -141,7 +141,7 @@ def resolve_impl_height(
 
     - When the ref's stored height IS the travel union (``ref_is_range``), the
       comparable impl extent is the live parent scroll-range — the instant box
-      would fail by construction (loop-e2e-4: ref 2550 vs impl 900 while live
+      would fail by construction (end-to-end run: ref 2550 vs impl 900 while live
       ref == live impl at every viewport).
     - When the ref stored the element's INSTANT BOX (a sticky section recorded
       at ~900px with no position field), compare the live instant box against

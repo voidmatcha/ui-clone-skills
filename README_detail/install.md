@@ -66,6 +66,53 @@ receive `CLAUDE_PLUGIN_ROOT` / `CODEX_PLUGIN_ROOT` from the plugin host; the
 project-scoped Codex hooks, standalone scripts, and inline skill snippets use that
 marker when no host-provided plugin root is available.
 
+## Maintainer push hooks (optional, development checkout only)
+
+`scripts/hooks/pre-push-guard.sh` (runs `scripts/ci/pre-push-security.sh` and
+`scripts/ci/ci-local.sh` before a `git push`) and
+`scripts/hooks/post-push-refresh.sh` (re-installs from the just-pushed state
+after a successful push) are not part of the plugin. They only run when the
+agent host is told to call them around its Bash tool. The wiring is
+machine-local and untracked (`.claude/` is gitignored), so each maintainer adds
+it to their own `.claude/settings.local.json` or `.claude/settings.json` in the
+checkout:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-$PWD}/scripts/hooks/pre-push-guard.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-$PWD}/scripts/hooks/post-push-refresh.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Both scripts read the tool input from stdin, exit 0 for anything that is not
+a `git push`, and honor the bypass variables documented in their headers
+(`UI_RE_SKIP_CI_LOCAL=1`, `UI_RE_SKIP_RELEASE_CHECKS=1`,
+`UI_CLONE_SKIP_POST_PUSH_REFRESH=1`). The Codex analogue is a project-local
+`.codex/hooks.json` with the same two commands; it is gitignored for the same
+reason.
+
 ## Install only one host
 
 ```bash
