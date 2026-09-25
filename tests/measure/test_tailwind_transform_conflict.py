@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -137,3 +138,94 @@ def test_browser_eval_failure_exits_setup_error(tmp_path: Path) -> None:
     assert "probe failed during browser eval" in proc.stderr
     assert "fake eval failed" in proc.stderr
     assert "No Tailwind" not in proc.stdout
+
+
+def _write_parity_agent_browser(
+    bin_dir: Path, impl_conflicts: list[dict[str, str]], ref_conflicts: list[dict[str, str]]
+) -> None:
+    (bin_dir / "impl.json").write_text(json.dumps(json.dumps(impl_conflicts)), encoding="utf-8")
+    (bin_dir / "ref.json").write_text(json.dumps(json.dumps(ref_conflicts)), encoding="utf-8")
+    fake = bin_dir / "agent-browser"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        "session=''\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--session" ]; then session="$2"; shift 2; continue; fi\n'
+        '  if [ "$1" = "eval" ]; then\n'
+        f'    case "$session" in *-ref) cat "{bin_dir / "ref.json"}" ;; '
+        f'      *) cat "{bin_dir / "impl.json"}" ;; esac\n'
+        "    exit 0\n"
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+
+def _conflict(*, scale: str = "0.9", x: int = 100) -> dict[str, str]:
+    return {
+        "tag": "DIV",
+        "id": "",
+        "cls": "fc-snail-autoplay fc-snail-a",
+        "transform": f"matrix(1, 0, 0, 1, {x}, 0)",
+        "translate": "0px 20%",
+        "rotate": "none",
+        "scale": scale,
+        "matchKey": "div.fc-snail-a.fc-snail-autoplay",
+    }
+
+
+def test_reference_matching_composition_is_not_reported_as_tailwind_conflict(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_parity_agent_browser(bin_dir, [_conflict(x=691)], [_conflict(x=512)])
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    (ref_dir / "head.json").write_text(
+        json.dumps({"sourceUrl": "https://reference.invalid/"}), encoding="utf-8"
+    )
+    env = _base_env(bin_dir)
+    env.update({"REF_DIR": str(ref_dir), "WAIT_MS": "0"})
+
+    proc = subprocess.run(
+        ["/bin/bash", str(SCRIPT), "tw-reference", "http://impl.invalid"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    artifact = json.loads((ref_dir / "tailwind-conflict.json").read_text(encoding="utf-8"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert artifact["status"] == "pass"
+    assert artifact["referenceMatchCount"] == 1
+    assert artifact["conflicts"] == []
+
+
+def test_reference_with_different_individual_scale_keeps_conflict_failure(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_parity_agent_browser(bin_dir, [_conflict(scale="0.9")], [_conflict(scale="1")])
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    (ref_dir / "head.json").write_text(
+        json.dumps({"sourceUrl": "https://reference.invalid/"}), encoding="utf-8"
+    )
+    env = _base_env(bin_dir)
+    env.update({"REF_DIR": str(ref_dir), "WAIT_MS": "0"})
+
+    proc = subprocess.run(
+        ["/bin/bash", str(SCRIPT), "tw-reference-mismatch", "http://impl.invalid"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    artifact = json.loads((ref_dir / "tailwind-conflict.json").read_text(encoding="utf-8"))
+    assert proc.returncode == 1
+    assert artifact["status"] == "fail"
+    assert artifact["conflictCount"] == 1
+    assert artifact["referenceMatchCount"] == 0

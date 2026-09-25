@@ -2,6 +2,79 @@
 
 ## [Unreleased]
 
+## [0.8.17] - 2026-09-23
+
+### Fixed
+
+- Resolve direct dispatcher imports from the owning checkout and invalidate
+  hover-check reuse when its reference absence evidence changes.
+- Bound repair loops across worker handoffs, reuse running check jobs, and require
+  comparable before/after evidence instead of repeated full verification sweeps.
+- Separate checker repair from clone work and keep behavior-changing static
+  diagnostics out of runtime parity claims. Align both hosts on targeted checks.
+- Section capture pairs the live implementation crop with the reference's
+  recovered scroll position in the non-frozen pass too (the implementation is
+  always force-scrolled once the reference position is known, so bottom-anchor,
+  flat-retry, and signal-recovery run only on the reference side).
+- One failed section screenshot no longer aborts the whole section capture; the
+  section is reported as UNMEASURED (capture failed) from
+  `sections/capture-failures.json`. Dynamic-mask coverage now follows class-alias
+  section ids instead of reporting 0.0 for them.
+
+## [0.8.16] - 2026-09-23
+
+### Fixed
+
+- Bind required-check dispatch to the active plugin package and load section
+  capture policies without import failures.
+- Preserve enclosing CSS at-rule conditions when recognizing source-authored
+  state rules; keep background and mask replacements observable on animated nodes.
+- Share bounded pre-navigation transport recovery across main, splash-state,
+  and scroll capture; preserve navigation failure diagnostics without replaying
+  the navigation or treating missing files as transient connection failures.
+- Keep resolved hover-candidate receipts out of capture and hover-region
+  inventories. Suppress absent descendant re-derivation only with fresh measured
+  evidence; preserve activation checks and explicit positive obligations.
+- Bring eligible offscreen video-only motion surfaces into view before frame
+  sampling while retaining failure for non-advancing playback.
+- Drive declared click selectors independently of the measured transition target;
+  preserve action failures through the verdict even if unrelated motion occurs.
+- Separate splash lifecycle settlement from periodic media and offscreen DOM
+  churn; retain ancestor-opacity reveals and material visual replacements as
+  absence-invalidating evidence, with conservative handling of older captures.
+- Preserve the distinction between upstream-repository restrictions and public
+  live-page extraction. Run-based skill audits keep clone workspaces read-only
+  unless implementation work is separately requested.
+
+## [0.8.15] - 2026-09-22
+
+### Fixed
+
+- Capture changing scroll ranges through bounded browser continuations, preserve
+  forward snapshot order, and reject incomplete or stale capture evidence.
+- Require measured document endpoints in scroll completion and motion rollups,
+  including delayed height changes and clipped semantic page content.
+- Capture small CSS images, masks, posters, and generated pseudo-element assets;
+  retain initially transparent assets and assign sections using DOM ownership.
+- Distinguish failed, interrupted, and setup-failed full verification runs from
+  partial iterations, with per-run receipt ownership and actionable recovery.
+- Bound derived browser session names, preserve setup diagnostics, retry transient
+  pre-navigation connection failures, and clear stale errors after capture success.
+- Reach gated transition targets with bounded real scroll input, and retain
+  measured absent automatic hover candidates only while their capture inputs match.
+
+## [0.8.14] - 2026-09-22
+
+### Fixed
+
+- Stop installing the three public Codex skills as additional direct copies
+  under `~/.agents/skills`. Codex already discovers them from the installed
+  plugin cache, so the direct copies produced duplicate unnamespaced entries;
+  older `~/.codex/skills` symlinks could make each skill appear three times.
+  Codex-targeted upgrades now remove only legacy direct copies and symlinks
+  whose ownership can be proven, while preserving user-modified or unrelated
+  skill directories.
+
 ## [0.8.13] - 2026-09-20
 
 ### Fixed

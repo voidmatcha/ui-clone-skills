@@ -673,6 +673,8 @@ def _verification_plan_requires_produces(self: Gate, produces: str) -> bool:
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
+    if not isinstance(plan, dict):
+        return False
     checks = plan.get("requiredChecks") or []
     if not isinstance(checks, list):
         return False
@@ -851,7 +853,7 @@ def _check_html_paste_required(self: Gate) -> CheckResult | None:
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    if plan.get("schemaVersion") != 1:
+    if not isinstance(plan, dict) or plan.get("schemaVersion") != 1:
         return None
     checks = plan.get("requiredChecks")
     if not isinstance(checks, list):

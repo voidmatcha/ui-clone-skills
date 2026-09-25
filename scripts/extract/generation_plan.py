@@ -65,6 +65,53 @@ CSS_DOWNLOAD_TIMEOUT_SECONDS = 20
 CSS_RUNTIME_UNLOCK_SCAN_BYTES = 256 * 1024
 
 
+def _css_escape_identifier(value: str) -> str:
+    """Return the CSS.escape()-equivalent spelling of one identifier token."""
+    result: list[str] = []
+    length = len(value)
+    for index, char in enumerate(value):
+        codepoint = ord(char)
+        if codepoint == 0:
+            result.append("\ufffd")
+        elif (
+            1 <= codepoint <= 31
+            or codepoint == 127
+            or (index == 0 and char.isdigit())
+            or (index == 1 and char.isdigit() and value.startswith("-"))
+        ):
+            result.append(f"\\{codepoint:x} ")
+        elif index == 0 and char == "-" and length == 1:
+            result.append("\\-")
+        elif codepoint >= 128 or char == "-" or char == "_" or char.isalnum():
+            result.append(char)
+        else:
+            result.append(f"\\{char}")
+    return "".join(result)
+
+
+def _selector_from_tag_and_classes(tag: str, class_name: str) -> str:
+    class_tokens = class_name.split()
+    return tag + "".join(
+        f".{_css_escape_identifier(token)}" for token in class_tokens
+    )
+
+
+def _section_selector(section: dict, tag: str, class_name: str) -> str:
+    """Prefer captured selectors, then build a valid selector from identity."""
+    for key in ("captureSelector", "selector"):
+        captured = section.get(key)
+        if isinstance(captured, str) and captured.strip():
+            return captured.strip()
+
+    if class_name.split():
+        return _selector_from_tag_and_classes(tag, class_name)
+
+    section_id = section.get("id")
+    if isinstance(section_id, str) and section_id.strip():
+        return f"{tag}#{_css_escape_identifier(section_id.strip())}"
+    return tag
+
+
 def walk_values(value):
     if isinstance(value, dict):
         for child in value.values():
@@ -409,8 +456,11 @@ for s in sections:
     name = "".join(part.capitalize() or "" for part in raw.replace("-", " ").replace("_", " ").split())
     if not name:
         name = f"Section{len(components)}"
-    selector = f"{tag}.{cls}".rstrip(".") if cls else tag
-    init = init_by_selector.get(selector) or init_by_selector.get(f".{cls}") or {}
+    selector = _section_selector(s, tag, cls)
+    class_selector = "".join(
+        f".{_css_escape_identifier(token)}" for token in cls.split()
+    )
+    init = init_by_selector.get(selector) or init_by_selector.get(class_selector) or {}
     components.append({
         "name": name,
         "matchedSection": sid,
@@ -478,8 +528,11 @@ def sticky_containing_block(css_class):
             for anc in reversed(ancestors):
                 apos = (anc.get("styles") or {}).get("position")
                 if apos == "relative":
-                    acls = (anc.get("class") or "").split()
-                    sel = f"{anc.get('tag','')}." + ".".join(acls) if acls else anc.get("tag", "")
+                    ancestor_tag = anc.get("tag", "")
+                    ancestor_classes = anc.get("class") or ""
+                    sel = _selector_from_tag_and_classes(
+                        ancestor_tag, ancestor_classes
+                    )
                     result.update({
                         "selector": sel.rstrip("."),
                         "height": (anc.get("styles") or {}).get("height"),
@@ -531,8 +584,13 @@ if isinstance(sticky_entries, list):
         # whose height bounds the pin), not flat at App level — else it pins to
         # the page body and never releases. css-fixed / gsap-pin stay at App.
         render_at = containing_block["selector"] if containing_block else "App"
+        sticky_selector = entry.get("selector")
+        if not isinstance(sticky_selector, str) or not sticky_selector.strip():
+            sticky_selector = _selector_from_tag_and_classes(
+                entry.get("tag", ""), css_class
+            )
         sticky_plan.append({
-            "selector": f"{entry.get('tag', '')}.{css_class}".rstrip("."),
+            "selector": sticky_selector.strip(),
             "position": position,
             "top": entry.get("top") if entry.get("top") is not None else entry.get("stickyTop"),
             "zIndex": entry.get("zIndex"),

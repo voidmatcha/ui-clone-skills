@@ -64,9 +64,12 @@ wall-clock sink (~5min+/cycle). Closeout safety is enforced elsewhere
 full suite), so inner iterations are SAFE to scope:
 
 1. **Tier:** `UI_CLONE_VERIFY_TIER=standard` while iterating (one-shot browser
-   checks, no 60fps video). Comprehensive ONLY for the closeout verify.
-2. **Sections:** `UI_CLONE_VERIFY_SECTIONS=<failing,csv>` re-compares only the
-   sections you just fixed (read the failing list from `sections/result.json`).
+   checks, no 60fps video). Use comprehensive for closeout or when the named
+   failure requires frame-by-frame evidence; scope the latter to affected IDs.
+2. **Sections:** focus implementation edits on the failing section rows. The
+   section comparer currently measures the captured section inventory;
+   `UI_CLONE_VERIFY_SECTIONS` has no implemented consumer and does not reduce
+   that scope. Do not advertise it as an optimization or omit required rows.
 3. **Transitions:** `UI_CLONE_FIRES_IDS=<id1,id2>` re-probes the affected spec
    entries — writes `transition-fires.scoped.json` so the canonical artifact is
    never clobbered by a partial measurement. Firing alone does not prove the
@@ -86,6 +89,59 @@ full suite), so inner iterations are SAFE to scope:
    explicitly only when the ref evidence is genuinely stale. Carousel state is
    pinned automatically (Swiper/Splide stop + slide 0, videos at frame 0) on
    BOTH sides, so freeze your impl's initial carousel index at 0 to match.
+
+## Waiting and evidence reuse
+
+Keep one owned job per affected capture/check and reuse its job handle. Prefer
+completion notifications or a bounded wait (typically 30–60 seconds) over repeated
+`tail`/status calls. Inspect a bounded log excerpt on completion, a new error, or
+a suspected stall; an unchanged log is not a reason to launch another job. For a
+new status request, check recent session activity and the owned job/process state
+without rerunning verification. A stale "done" banner, an idle metadata field,
+or a living preview server alone cannot establish whether the agent is working.
+Distinguish active work, waiting on a live check, awaiting input, and stopped;
+state uncertainty when those signals disagree. See `operational-rules.md` for
+stalled-run recovery.
+
+Read changed failing rows and diffs, not whole reports on every iteration. Reuse
+existing matched images through the Phase E diagnostic path above; repeatedly
+opening the same screenshots is not a new diagnosis and does not waive the
+iterator's vision-free contract.
+
+## Diagnose the measurement before repairing the implementation
+
+A failed check may indicate a product mismatch, an invalid capture, or a checker
+that exercised the wrong state. Inspect the recorded action selector, measured
+selector, match counts, viewport, and input sequence before assigning the cause.
+Classify each failure as implementation, reference/capture, checker, or unknown.
+For unknown failures, run a bounded diagnostic before editing implementation code.
+For example, a missing measurement descendant is not proved to be an offscreen
+activation; a laid-out video may require viewport entry; a click trigger may be
+outside the measured container. Preserve the original failure artifact and repair
+the producer/checker with both a recovery case and a genuine-failure regression.
+Do not replace ambiguous motion with a PASS, fabricate an absent splash, or relax
+thresholds to accommodate a specific site. Reproduce only the affected check after
+a tool repair; canonical clone completion still requires the normal final gates.
+
+Keep checker repairs in an isolated tooling checkout with the reproducer and
+regression results. Do not overwrite installed plugin caches during a clone run.
+If tooling repair exceeds the assigned worker scope, return the evidence to the
+coordinator. If the user has already authorized that repository and repair scope,
+carry the authorization in the worker brief and continue without asking again.
+The visual-debug iterator remains implementation-only; assign authorized checker
+maintenance to a separate tooling worker, then return its validated evidence.
+Record any checker revision or capture-setting change and remeasure
+the affected baseline before comparing results; a newly passing checker after a
+tool change alone is not evidence that the implementation improved.
+
+Static appearance controls must not certify runtime behavior. Freezing shader
+time, forcing final styles, removing a scroll container's clipping, or disabling
+an animation may help isolate a diagnostic, but changes the behavior under test.
+Keep those results separate from canonical motion/interaction evidence and rerun
+the affected checks under the unmodified live behavior. Applying a behavior-changing
+override to both sides does not make it valid runtime evidence. Source-to-source
+calibration can identify unstable measurement; it cannot erase a reproducible
+implementation divergence or turn an unmeasured target into PASS.
 
 ## Discipline
 
@@ -120,14 +176,32 @@ for behavior, and per-section AE for pixel mismatches. Do not require an unrelat
 full visual sweep to prove a content or runtime repair. A build or total-height
 match alone does not establish progress.
 
-- Record the before/after failing row or metric and the affected component.
-- During visual iterations, record per-section AE deltas. Two iterations without
+- Record a compact receipt in the existing iteration log: failing check/row,
+  hypothesis, affected component/change, before/after metric or verdict, and
+  evidence paths. Compare only matching reference evidence, viewport/state,
+  checker revision, and settings; mark incompatible results as not comparable.
+- During visual iterations, record per-section AE deltas. For any failure class,
+  two scoped iterations without
   meaningful improvement require a new source-backed hypothesis or the delegated
   source-forensics path; do not repeat the same correction or broaden blindly.
 - Never obtain convergence by weakening thresholds, hiding content, inventing
   spacers, or excluding failures without reference-backed applicability evidence.
 - Final closeout still requires comprehensive, unscoped checks and canonical stamps.
   Partial improvements must be reported alongside unresolved failures.
+  Report PASS, FAIL, UNMEASURED, SKIP, and STRUCTURAL_ONLY counts separately against
+  the planned scope, including missing expected rows. "All measured sections pass"
+  is not full coverage. A new crop, ROI, recapture, or checker revision changes the
+  comparison basis; do not present a higher pass count as improvement until the
+  same obligations are measured under comparable conditions.
+
+The coordinator keeps the same compact receipt history across worker handoffs and
+context compaction. Include the failure identity, attempted hypotheses, last
+comparable result, and next diagnostic question. A new worker/job name does not
+restart the attempt budget. After a bounded bailout, either answer that question
+with new evidence or report the unresolved failure; do not dispatch the same loop.
+If the evidence run must end without resolution, use the documented non-success
+terminal state in `$PLUGIN_ROOT/docs/agent-cli.md` and preserve failing artifacts.
+Do not invent a successful stamp or bypass the Stop hook to end a stalled run.
 
 ## Bailout cases (return immediately)
 

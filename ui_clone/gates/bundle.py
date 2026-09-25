@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .base import CheckResult
+from .reference import _has_resolved_auto_absence_provenance, _region_entries
 
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
@@ -75,7 +76,12 @@ def gate_bundle(self: Gate) -> list[CheckResult]:
     if not has_discovered_interactions:
         hover_payload = self._load_json("hover-css-rules.json")
         hover_rules = hover_payload.get("rules") if isinstance(hover_payload, dict) else None
-        if isinstance(hover_rules, list) and hover_rules:
+        regions_payload = self._load_json("regions.json")
+        measured_auto_absence = (
+            isinstance(regions_payload, dict)
+            and _has_resolved_auto_absence_provenance(self, regions_payload)
+        )
+        if isinstance(hover_rules, list) and hover_rules and not measured_auto_absence:
             results.append(
                 CheckResult(
                     "hover transition evidence",
@@ -93,9 +99,7 @@ def gate_bundle(self: Gate) -> list[CheckResult]:
             list(regions_payload) if isinstance(regions_payload, list) else []
         )
         if isinstance(regions_payload, dict):
-            for value in regions_payload.values():
-                if isinstance(value, list):
-                    region_entries.extend(entry for entry in value if isinstance(entry, dict))
+            region_entries.extend(_region_entries(regions_payload))
         regions_are_placeholder = isinstance(regions_payload, dict) and (
             regions_payload.get("placeholder") is True
             or regions_payload.get("detectionRan") is False

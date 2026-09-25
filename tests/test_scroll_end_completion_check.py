@@ -74,8 +74,16 @@ def test_empty_probe_output_fails_closed(tmp_path: Path) -> None:
         assert payload["status"] != "pass"
 
 
+@pytest.mark.parametrize("endpoint", [None, {"reached": False, "remaining": 6500}])
+def test_unproven_document_end_cannot_pass(tmp_path: Path, endpoint: dict | None) -> None:
+    out = json.dumps({"maxScroll": 5000, "candidates": 2, "stuck": [], "endpoint": endpoint})
+    proc, artifact = _run(tmp_path, eval_output=out)
+    assert proc.returncode == 2, proc.stdout
+    assert json.loads(artifact.read_text())["status"] == "error"
+
+
 def test_valid_probe_no_stuck_is_genuine_pass(tmp_path: Path) -> None:
-    out = json.dumps({"maxScroll": 5000, "candidates": 2, "stuck": []})
+    out = json.dumps({"endpoint": {"reached": True}, "maxScroll": 5000, "candidates": 2, "stuck": []})
     proc, artifact = _run(tmp_path, eval_output=out)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     payload = json.loads(artifact.read_text(encoding="utf-8"))
@@ -83,7 +91,7 @@ def test_valid_probe_no_stuck_is_genuine_pass(tmp_path: Path) -> None:
 
 
 def test_valid_probe_with_stuck_still_fails(tmp_path: Path) -> None:
-    out = json.dumps({"maxScroll": 5000, "candidates": 2, "stuck": [".hero"]})
+    out = json.dumps({"endpoint": {"reached": True}, "maxScroll": 5000, "candidates": 2, "stuck": [".hero"]})
     proc, artifact = _run(tmp_path, eval_output=out)
     assert proc.returncode == 1, f"a real stuck element must fail (exit 1): {proc.stdout}"
     payload = json.loads(artifact.read_text(encoding="utf-8"))
@@ -101,7 +109,7 @@ def test_temporal_motion_alone_is_not_the_inconclusive_signal_anymore(tmp_path: 
     # (see test_unmeasurable_target_is_still_the_only_source_of_inconclusive_error).
     # A bare temporalMotion entry carrying neither is not a real JS output
     # shape, but must not be treated as a false blocker if it ever appears.
-    out = json.dumps({"maxScroll": 5000, "candidates": 2, "stuck": [],
+    out = json.dumps({"endpoint": {"reached": True}, "maxScroll": 5000, "candidates": 2, "stuck": [],
                       "temporalMotion": [{"selector": ".card"}]})
     proc, artifact = _run(tmp_path, eval_output=out)
     assert proc.returncode == 0, proc.stdout
@@ -115,7 +123,7 @@ def test_confirmed_time_only_motion_does_not_block_a_pass(tmp_path: Path) -> Non
     # minus50->max delta is fully explained by its own fixed-position control
     # drift must not force the whole probe into "error" — only an UNRESOLVED
     # residual should.
-    out = json.dumps({"maxScroll": 5000, "candidates": 1, "stuck": [],
+    out = json.dumps({"endpoint": {"reached": True}, "maxScroll": 5000, "candidates": 1, "stuck": [],
                       "temporalMotion": [{"selector": ".ticker", "confirmedTimeOnly": True,
                                           "residual": {"opacity": 0, "tx": 0, "ty": 0}}]})
     proc, artifact = _run(tmp_path, eval_output=out)
@@ -133,7 +141,7 @@ def test_unresolved_residual_on_continuous_motion_still_blocks(tmp_path: Path) -
     # This must surface as a genuine FAIL (exit 1, status "fail"), not
     # "error"/exit 2 (which check_iteration.classify() mis-files as
     # "infrastructure" instead of "implementation").
-    out = json.dumps({"maxScroll": 5000, "candidates": 1,
+    out = json.dumps({"endpoint": {"reached": True}, "maxScroll": 5000, "candidates": 1,
                       "stuck": [{"selector": ".mixed", "delta": {"opacity": 0, "tx": 0, "ty": 5}}],
                       "temporalMotion": [{"selector": ".mixed", "confirmedTimeOnly": False,
                                           "residual": {"opacity": 0, "tx": 0, "ty": 5}}]})
@@ -148,7 +156,7 @@ def test_unmeasurable_target_is_still_the_only_source_of_inconclusive_error(
 ) -> None:
     # A target that vanished mid-probe (no residual could even be computed)
     # is the one case that stays genuinely inconclusive.
-    out = json.dumps({"maxScroll": 5000, "candidates": 1, "stuck": [],
+    out = json.dumps({"endpoint": {"reached": True}, "maxScroll": 5000, "candidates": 1, "stuck": [],
                       "unmeasurableTargets": [{"selector": ".gone"}]})
     proc, artifact = _run(tmp_path, eval_output=out)
     assert proc.returncode == 2, proc.stdout
@@ -171,10 +179,20 @@ const el = {
  getBoundingClientRect:()=>({width:100,height:100}),
  setAttribute(k,v){this.attrs[k]=v;}, removeAttribute(k){delete this.attrs[k];}
 };
+const html = {tagName:'HTML',parentElement:null,scrollHeight:5800,clientHeight:800};
+const body = {tagName:'BODY',parentElement:html,scrollHeight:5800,clientHeight:800,closest:()=>null};
+const landmark = {
+ tagName:'MAIN',id:'page',className:'',parentElement:body,
+ matches:()=>false,getBoundingClientRect:()=>({width:1000,height:2000,bottom:2000})
+};
 global.window={innerHeight:800,scrollY:0,scrollTo({top}){this.scrollY=top;}};
-global.document={documentElement:{scrollHeight:5800},
- querySelectorAll:()=>[el], querySelector:()=>MODE==='missing' && ticks>=4 ? null : el};
-global.getComputedStyle=()=>{
+global.document={documentElement:html,body,scrollingElement:html,
+ querySelectorAll:s=>s.startsWith('main,') && (MODE==='root-overflow' || MODE==='fixed-landmark') ? [landmark]
+   : s.includes('footer') ? [] : [el],
+ querySelector:()=>MODE==='missing' && ticks>=4 ? null : el};
+global.getComputedStyle=node=>{
+ if (node===landmark) return {display:'block',position:MODE==='fixed-landmark'?'fixed':'static',overflowY:'visible'};
+ if (node===body || node===html) return {display:'block',position:'static',overflowY:'auto'};
  const y=window.scrollY;
  const ty=MODE==='timer' ? ticks*10
    : MODE==='mixed' ? ticks*10 + (y===5000 ? 100 : 0)
@@ -182,7 +200,11 @@ global.getComputedStyle=()=>{
    : y===0 ? 0 : MODE==='stuck' && y===5000 ? 20 : 10;
  return {display:'block',visibility:'visible',animationName:'none',opacity:'1',transform:`matrix(1,0,0,1,0,${ty})`};
 };
-global.setTimeout=f=>{ticks++;f();};
+global.setTimeout=f=>{
+ ticks++;
+ if (MODE==='late-growth' && ticks===12) document.documentElement.scrollHeight=6200;
+ f();
+};
 Promise.resolve(PROBE).then(x=>console.log(x));
 '''
     harness = harness.replace('MODE', json.dumps(mode)).replace('PROBE', proc.stdout)
@@ -245,6 +267,25 @@ def test_settled_scroll_driven_target_still_passes() -> None:
     assert not payload.get('temporalMotion'), payload
 
 
+def test_growth_triggered_after_sampling_cannot_certify_stale_endpoint() -> None:
+    payload = _execute_browser_probe('late-growth')
+    assert payload['endpoint']['reached'] is False, payload
+    assert payload['endpoint']['reason'] == 'document-changed-after-sampling', payload
+    assert payload['endpoint']['scrollHeight'] == 6200, payload
+
+
+def test_root_scroller_does_not_hide_clipped_document_landmark() -> None:
+    payload = _execute_browser_probe('root-overflow')
+    assert payload['endpoint']['reached'] is False, payload
+    assert payload['endpoint']['clippedLandmarks'] == ['main#page'], payload
+
+
+def test_fixed_semantic_panel_is_not_a_document_endpoint_landmark() -> None:
+    payload = _execute_browser_probe('fixed-landmark')
+    assert payload['endpoint']['reached'] is True, payload
+    assert payload['endpoint']['clippedLandmarks'] == [], payload
+
+
 def test_missing_probe_target_cannot_disappear_into_a_pass() -> None:
     payload = _execute_browser_probe('missing')
     assert payload.get('unmeasurableTargets'), payload
@@ -252,7 +293,7 @@ def test_missing_probe_target_cannot_disappear_into_a_pass() -> None:
 
 
 def test_missing_target_receipt_is_an_error(tmp_path: Path) -> None:
-    out = json.dumps({"maxScroll": 5000, "candidates": 1, "stuck": [],
+    out = json.dumps({"endpoint": {"reached": True}, "maxScroll": 5000, "candidates": 1, "stuck": [],
                       "unmeasurableTargets": [{"selector": ".card"}]})
     proc, artifact = _run(tmp_path, eval_output=out)
     assert proc.returncode == 2, proc.stdout

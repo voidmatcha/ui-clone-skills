@@ -6,6 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "visual-debug" / "scripts"
 
@@ -152,6 +154,120 @@ def test_forced_state_class_check_exempts_sanitized_ref_css(tmp_path: Path) -> N
     assert artifact["status"] == "pass"
     assert artifact["sanitizedRefCssSkipped"] == ["src/ref-css/site.css"]
     assert artifact["issues"] == []
+
+
+def _write_source_state_css(ref: Path, css: str) -> None:
+    source_css = ref / "css"
+    source_css.mkdir()
+    (source_css / "captured.css").write_text(css, encoding="utf-8")
+
+
+def test_forced_state_class_check_exempts_exact_source_authored_rule(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": [{"id": "panel-reveal", "trigger": "scroll"}]}),
+        encoding="utf-8",
+    )
+    css = (
+        ".panel.is-active, .panel:hover { opacity: 1; transform: none; "
+        "transition: none; max-height: 420px; }"
+    )
+    _write_source_state_css(ref, css)
+    impl = _write_impl(
+        tmp_path,
+        'export function App(){return <section className="panel">Panel</section>}',
+        css,
+    )
+
+    proc = _run("forced-state-class-check.sh", ref, impl)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "forced-state-class.json").read_text(encoding="utf-8"))
+    assert artifact["status"] == "pass"
+    assert artifact["sourceAuthoredStateRuleCount"] == 1
+    provenance = artifact["sourceAuthoredStateRules"][0]
+    assert provenance["file"] == "src/style.css"
+    assert provenance["source"] == "css/captured.css"
+    assert len(provenance["sourceSha256"]) == 64
+    assert provenance["selector"] == ".panel.is-active,.panel:hover"
+    assert len(provenance["ruleSha256"]) == 64
+
+
+def test_forced_state_class_check_blocks_source_rule_with_modified_body(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": [{"id": "panel-reveal", "trigger": "scroll"}]}),
+        encoding="utf-8",
+    )
+    _write_source_state_css(
+        ref, ".panel.is-active { opacity: 1; max-height: 420px; }"
+    )
+    impl = _write_impl(
+        tmp_path,
+        'export function App(){return <section className="panel">Panel</section>}',
+        ".panel.is-active { opacity: 1; max-height: 999px; }",
+    )
+
+    proc = _run("forced-state-class-check.sh", ref, impl)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "forced-state-class.json").read_text(encoding="utf-8"))
+    assert artifact["sourceAuthoredStateRules"] == []
+    assert any(issue["kind"] == "forced-final-style" for issue in artifact["issues"])
+
+
+def test_forced_state_class_check_blocks_source_rule_with_changed_selector(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": [{"id": "panel-reveal", "trigger": "scroll"}]}),
+        encoding="utf-8",
+    )
+    _write_source_state_css(ref, ".panel.is-active { opacity: 1; }")
+    impl = _write_impl(
+        tmp_path,
+        'export function App(){return <section className="other">Panel</section>}',
+        ".other.is-active { opacity: 1; }",
+    )
+
+    proc = _run("forced-state-class-check.sh", ref, impl)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "forced-state-class.json").read_text(encoding="utf-8"))
+    assert artifact["sourceAuthoredStateRules"] == []
+    assert any(issue["kind"] == "forced-final-style" for issue in artifact["issues"])
+
+
+def test_forced_state_class_check_blocks_rule_absent_from_source_css(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": [{"id": "panel-reveal", "trigger": "scroll"}]}),
+        encoding="utf-8",
+    )
+    _write_source_state_css(ref, ".panel { opacity: 0; }")
+    impl = _write_impl(
+        tmp_path,
+        'export function App(){return <section className="panel">Panel</section>}',
+        ".panel.is-active { opacity: 1; }",
+    )
+
+    proc = _run("forced-state-class-check.sh", ref, impl)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "forced-state-class.json").read_text(encoding="utf-8"))
+    assert artifact["sourceAuthoredStateRules"] == []
+    assert any(issue["kind"] == "forced-final-style" for issue in artifact["issues"])
 
 
 def test_forced_state_class_check_blocks_blanket_final_state_without_important(
@@ -822,6 +938,74 @@ def test_runtime_proof_rollup_accepts_measured_splash_mount_and_exit(
     assert "implSamples=2" in splash["note"]
 
 
+def test_runtime_proof_rollup_accepts_matched_persistent_page_surfaces(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_splash_runtime_plan(ref)
+    (ref / "splash-lifecycle.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "pass",
+                "ref": {
+                    "mounted": True,
+                    "exited": False,
+                    "persistentPageSurface": True,
+                },
+                "impl": {
+                    "mounted": True,
+                    "exited": False,
+                    "persistentPageSurface": True,
+                },
+                "refCapture": {"samples": [{"t": 0}, {"t": 4500}]},
+                "implCapture": {"samples": [{"t": 0}, {"t": 4500}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc, artifact = _run_runtime_rollup(ref)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    splash = _splash_component(artifact)
+    assert splash["valid"] is True
+    assert "matched persistent page surfaces" in splash["note"]
+
+
+def test_runtime_proof_rollup_rejects_unmatched_persistent_page_surface(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_splash_runtime_plan(ref)
+    (ref / "splash-lifecycle.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "pass",
+                "ref": {
+                    "mounted": True,
+                    "exited": False,
+                    "persistentPageSurface": True,
+                },
+                "impl": {"mounted": True, "exited": False},
+                "refCapture": {"samples": [{"t": 0}, {"t": 4500}]},
+                "implCapture": {"samples": [{"t": 0}, {"t": 4500}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc, artifact = _run_runtime_rollup(ref)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    splash = _splash_component(artifact)
+    assert splash["valid"] is False
+    assert "not matched on both sides" in splash["note"]
+
+
 def _write_splash_contract(ref: Path, *, certified: bool) -> None:
     splash = ref / "states" / "splash"
     splash.mkdir(parents=True, exist_ok=True)
@@ -1055,6 +1239,182 @@ _VIDEO_ONLY_PROBE = json.dumps(
 )
 
 
+def _run_canvas_replay_runtime_case(
+    tmp_path: Path,
+    *,
+    video_src: str = "http://localhost:9/canvas-replay/hero.webm",
+    scope_tokens: list[str] | None = None,
+    sections: object | None = None,
+    video_samples: list[dict[str, object]] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "canvas-webgl-detection.json").write_text(
+        json.dumps({"canvasCount": 1, "primaryRenderType": "webgl"}),
+        encoding="utf-8",
+    )
+    (ref / "canvas-replay-plan.json").write_text(
+        json.dumps({
+            "decision": "canvas-replay",
+            "sections": sections if sections is not None else [{
+                "section": "hero",
+                "region": {"x": 0, "y": 0, "width": 1440, "height": 900},
+                "replayAsset": "public/canvas-replay/hero.webm",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    probe = json.dumps({
+        "canvasTotal": 0,
+        "canvasAdvanced": 0,
+        "webglAdvanced": 0,
+        "lottieInstances": 0,
+        "lottieAdvanced": 0,
+        "videoTotal": len(video_samples) if video_samples is not None else 1,
+        "videoAdvanced": (
+            sum(bool(sample.get("advanced")) for sample in video_samples)
+            if video_samples is not None else 1
+        ),
+        "videoSamples": video_samples if video_samples is not None else [{
+            "src": video_src,
+            "advanced": True,
+            "scopeTokens": scope_tokens if scope_tokens is not None else ["hero"],
+            "rect": {"x": 0, "y": 0, "width": 1440, "height": 900},
+        }],
+    })
+    env = _make_agent_browser_stub(tmp_path / "bin", probe)
+    proc = subprocess.run(
+        [
+            "bash",
+            str(SCRIPTS / "runtime-frame-proof-check.sh"),
+            "sess",
+            "http://localhost:9",
+            str(ref),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    artifact = json.loads((ref / "runtime-frame-proof.json").read_text(encoding="utf-8"))
+    return proc, artifact
+
+
+def test_runtime_frame_proof_accepts_declared_advancing_canvas_replay(
+    tmp_path: Path,
+) -> None:
+    proc, artifact = _run_canvas_replay_runtime_case(
+        tmp_path, video_src="http://localhost:9/canvas-replay/hero.webm"
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert artifact["status"] == "pass"
+    assert artifact["videoFrameProofKind"] == "canvas-replay-video"
+
+
+def test_runtime_frame_proof_rejects_unrelated_advancing_video_for_canvas_replay(
+    tmp_path: Path,
+) -> None:
+    proc, artifact = _run_canvas_replay_runtime_case(
+        tmp_path, video_src="http://localhost:9/videos/unrelated-promo.webm"
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert artifact["status"] == "fail"
+    assert artifact["videoFrameProofKind"] == ""
+
+
+def test_runtime_frame_proof_rejects_declared_replay_outside_hero_scope(
+    tmp_path: Path,
+) -> None:
+    proc, artifact = _run_canvas_replay_runtime_case(
+        tmp_path,
+        video_src="http://localhost:9/canvas-replay/hero.webm",
+        scope_tokens=["footer", "promo"],
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert artifact["status"] == "fail"
+    assert artifact["canvasReplayAsset"] is None
+
+
+def test_runtime_frame_proof_requires_every_declared_replay_section(
+    tmp_path: Path,
+) -> None:
+    sections = [
+        {"section": "hero", "replayAsset": "public/canvas-replay/hero.webm"},
+        {"section": "features", "replayAsset": "public/canvas-replay/features.webm"},
+    ]
+    proc, artifact = _run_canvas_replay_runtime_case(
+        tmp_path,
+        sections=sections,
+        video_samples=[{
+            "src": "http://localhost:9/canvas-replay/hero.webm",
+            "advanced": True,
+            "scopeTokens": ["hero"],
+        }],
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert artifact["status"] == "fail"
+    assert artifact["canvasReplayAsset"] is None
+
+
+def test_runtime_frame_proof_accepts_all_declared_replay_sections(
+    tmp_path: Path,
+) -> None:
+    sections = [
+        {"section": "hero", "replayAsset": "public/canvas-replay/hero.webm"},
+        {"section": "features", "replayAsset": "public/canvas-replay/features.webm"},
+    ]
+    samples = [
+        {
+            "src": "http://localhost:9/canvas-replay/hero.webm",
+            "advanced": True,
+            "scopeTokens": ["hero"],
+        },
+        {
+            "src": "http://localhost:9/canvas-replay/features.webm",
+            "advanced": True,
+            "scopeTokens": ["features"],
+        },
+    ]
+    proc, artifact = _run_canvas_replay_runtime_case(
+        tmp_path, sections=sections, video_samples=samples
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert artifact["status"] == "pass"
+    assert artifact["canvasReplayAssets"] == [
+        "canvas-replay/hero.webm",
+        "canvas-replay/features.webm",
+    ]
+
+
+@pytest.mark.parametrize(
+    "sections",
+    [
+        [],
+        "invalid",
+        [{}],
+        [{"section": "hero"}],
+        [{"replayAsset": "public/canvas-replay/hero.webm"}],
+    ],
+)
+def test_runtime_frame_proof_rejects_empty_or_malformed_replay_sections(
+    tmp_path: Path, sections: object
+) -> None:
+    proc, artifact = _run_canvas_replay_runtime_case(
+        tmp_path, sections=sections
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert artifact["status"] == "fail"
+    assert artifact["canvasReplayAssets"] == []
+
+
 def test_runtime_frame_proof_stamps_video_surface_for_video_only_ref(
     tmp_path: Path,
 ) -> None:
@@ -1096,3 +1456,126 @@ def test_runtime_frame_proof_stamps_video_surface_for_video_only_ref(
     assert artifact["status"] == "pass", artifact
     assert artifact["videoFrameProofKind"] == "video-surface", artifact
     assert artifact["videoCountsAsAnimationSurface"] is True, artifact
+
+
+def test_runtime_frame_proof_records_offscreen_video_stimulation(
+    tmp_path: Path,
+) -> None:
+    """A video-only page may start muted playback only after intersection."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "required-media.json").write_text(
+        json.dumps({"videos": [{"src": "https://cdn.example.com/below-fold.mp4"}]}),
+        encoding="utf-8",
+    )
+    probe = json.dumps(
+        {
+            "canvasTotal": 0,
+            "canvasAdvanced": 0,
+            "webglAdvanced": 0,
+            "lottieInstances": 0,
+            "lottieAdvanced": 0,
+            "videoTotal": 1,
+            "videoAdvanced": 1,
+            "videoViewportStimulated": True,
+            "videoStimulatedSrc": "http://localhost/videos/below-fold.mp4",
+        }
+    )
+    env = _make_agent_browser_stub(tmp_path / "bin", probe)
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(SCRIPTS / "runtime-frame-proof-check.sh"),
+            "sess",
+            "http://localhost:9",
+            str(ref),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "runtime-frame-proof.json").read_text(encoding="utf-8"))
+    assert artifact["status"] == "pass"
+    assert artifact["videoViewportStimulated"] is True
+    assert artifact["videoStimulatedSrc"].endswith("/below-fold.mp4")
+    script = (SCRIPTS / "runtime-frame-proof-check.sh").read_text(encoding="utf-8")
+    assert 'candidate.scrollIntoView({ block: "center", inline: "nearest" })' in script
+    assert "eligibleVideos.some(intersectsViewport)" in script
+
+
+def test_runtime_frame_proof_still_fails_frozen_video_after_stimulation(
+    tmp_path: Path,
+) -> None:
+    """Viewport stimulation is not proof unless currentTime advances."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "required-media.json").write_text(
+        json.dumps({"videos": [{"src": "https://cdn.example.com/frozen.mp4"}]}),
+        encoding="utf-8",
+    )
+    probe = json.dumps(
+        {
+            "canvasTotal": 0,
+            "canvasAdvanced": 0,
+            "webglAdvanced": 0,
+            "lottieInstances": 0,
+            "lottieAdvanced": 0,
+            "videoTotal": 1,
+            "videoAdvanced": 0,
+            "videoViewportStimulated": True,
+            "videoStimulatedSrc": "http://localhost/videos/frozen.mp4",
+        }
+    )
+    env = _make_agent_browser_stub(tmp_path / "bin", probe)
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(SCRIPTS / "runtime-frame-proof-check.sh"),
+            "sess",
+            "http://localhost:9",
+            str(ref),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "runtime-frame-proof.json").read_text(encoding="utf-8"))
+    assert artifact["status"] == "fail"
+    assert artifact["videoAdvanced"] == 0
+    assert any("none" in reason and "advanced" in reason for reason in artifact["reasons"])
+
+
+@pytest.mark.parametrize("context", [
+    "@media (prefers-reduced-motion: reduce)",
+    "@supports (display: grid)",
+    "@layer accessibility",
+])
+@pytest.mark.parametrize("preserve_context", [True, False])
+def test_source_state_rule_requires_matching_at_rule_context(
+    tmp_path: Path, context: str, preserve_context: bool,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": [{"trigger": "scroll"}]})
+    )
+    rule = ".panel, .panel.is-visible {opacity:1!important;transform:none!important;transition:none!important;}"
+    source = context + " {" + rule + "}"
+    _write_source_state_css(ref, source)
+    impl = _write_impl(tmp_path, "export default function App() {}", source if preserve_context else rule)
+    proc = _run("forced-state-class-check.sh", ref, impl)
+    assert proc.returncode == (0 if preserve_context else 1), proc.stdout + proc.stderr
+    artifact = json.loads((ref / "forced-state-class.json").read_text())
+    assert artifact["sourceAuthoredStateRuleCount"] == (1 if preserve_context else 0)

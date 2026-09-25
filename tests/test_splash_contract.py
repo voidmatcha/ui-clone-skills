@@ -341,6 +341,18 @@ def test_structural_shift_uses_the_samplers_moving_baseline() -> None:
     assert structural_shift([_state(0, dom_length=121759), _state(1, dom_length=124262)]) is False
 
 
+@pytest.mark.parametrize("malformed", [{}, {"changed": False}, {"changed": "false", "hash": "1", "count": 1}])
+def test_malformed_visible_structure_channel_fails_closed(malformed: dict[str, Any]) -> None:
+    states = [_state(0), _state(2400)]
+    states[0]["visibleStructure"] = {"changed": False, "hash": "1", "count": 1}
+    states[1]["visibleStructure"] = malformed
+
+    evidence = absence_evidence(states, capture_mode="pre-navigation", timed_out=False)
+
+    assert evidence.structural_shift is True
+    assert certify_absence(evidence) is False
+
+
 def test_overlay_predicate_matches_the_probe() -> None:
     visible = {"selector": "#intro", "coverage": 0.98, "visible": True, "opacity": "1"}
     states = [_state(0, overlay=visible), _state(900)]

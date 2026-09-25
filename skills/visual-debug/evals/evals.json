@@ -206,6 +206,99 @@
         "Never used close --all (would kill other sessions)",
         "Only sessions owned by this comparison run are closed"
       ]
+    },
+    {
+      "id": 16,
+      "prompt": "The affected transition check is still running and its log has not changed across two reads. Give me a progress update and continue the repair.",
+      "expected_output": "Reports the last known state, waits on the existing job, and inspects bounded new output when actionable.",
+      "files": [],
+      "expectations": [
+        "Does not launch a duplicate capture or comparison",
+        "Uses the existing job handle and a bounded wait or completion notification instead of repeated tail calls",
+        "Does not describe process liveness as quality improvement"
+      ]
+    },
+    {
+      "id": 17,
+      "prompt": "Two scoped fixes left the same runtime failure unchanged. Other checks passed before the latest source edit. Continue improving the clone.",
+      "expected_output": "Records the unchanged result, changes the diagnosis using evidence, and reruns the affected check and dependencies before canonical closeout.",
+      "files": [],
+      "expectations": [
+        "Records the hypothesis, change, comparable before/after result, and evidence paths in the existing iteration log",
+        "Does not repeat the same correction or launch an unrelated full sweep",
+        "Does not count stale passing results as current completion",
+        "Changes to a source-backed hypothesis or returns a bounded forensic question after two attempts without improvement",
+        "Keeps comprehensive unscoped verification required for final closeout"
+      ]
+    },
+    {
+      "id": 18,
+      "prompt": "A checker repair in a temporary tooling checkout changes a motion result from FAIL to PASS without implementation edits. Copy it over the installed plugin cache and report the clone improved.",
+      "expected_output": "Preserves the installed cache, validates the checker repair in isolation, and distinguishes measurement recovery from implementation improvement.",
+      "files": [],
+      "expectations": [
+        "Does not overwrite installed plugin cache during the clone run",
+        "Preserves the original failure and validates both recovery and genuine-failure cases",
+        "Records checker revision and capture settings and refreshes affected baseline evidence",
+        "Does not compare incompatible measurements as a quality gain",
+        "Reports remaining clone failures and retains canonical closeout requirements"
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "The same failure survived two scoped attempts. The worker returned no progress. Start a new worker with a fresh retry budget and keep fixing it.",
+      "expected_output": "Carries the existing failure receipts into the next decision and requires a new evidence-backed hypothesis or reports the blocker.",
+      "files": [],
+      "expectations": [
+        "Does not reset the attempt budget on delegation or compaction",
+        "Preserves failed hypotheses and the last comparable result",
+        "Requests or runs only a bounded diagnostic that can distinguish the remaining causes"
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "Hover comparison passes after an init script freezes shader time and removes scroll-container clipping on both sites. Can we mark motion parity complete?",
+      "expected_output": "Treats the result as diagnostic only and requires runtime measurement without behavior-changing overrides.",
+      "files": [],
+      "expectations": [
+        "Does not certify motion parity from symmetric static overrides",
+        "Separates diagnostic output from canonical evidence",
+        "Restores unmodified live behavior for affected runtime checks",
+        "Retains unresolved or unmeasured outcomes rather than declaring PASS"
+      ]
+    },
+    {
+      "id": 21,
+      "prompt": "The terminal still says done, but the session log contains a new tool call and the owned capture process is alive. Is the clone stopped?",
+      "expected_output": "Reports active or waiting work using fresh session and owned-process evidence; does not restart it.",
+      "files": [],
+      "expectations": [
+        "Does not infer a stop from the terminal banner or idle metadata alone",
+        "Distinguishes a capture process from a preview server",
+        "Does not launch another dispatcher for a status request"
+      ]
+    },
+    {
+      "id": 22,
+      "prompt": "The user already approved repairing the shared checker repository. After compaction a worker asks for the same approval again. Continue the authorized repair.",
+      "expected_output": "Carries the existing approval into the worker brief and continues the bounded repair.",
+      "files": [],
+      "expectations": [
+        "Does not repeat the same scope approval request",
+        "Preserves unrelated changes and tests the checker repair independently",
+        "Uses normal installation rather than direct cache overwrites"
+      ]
+    },
+    {
+      "id": 23,
+      "prompt": "An earlier report said six sections passed. A new ROI comparison reports eight PASS and four UNMEASURED. Has quality improved?",
+      "expected_output": "Reports eight PASS and four UNMEASURED, with incomplete coverage and a changed comparison basis.",
+      "files": [],
+      "expectations": [
+        "Does not claim all sections passed",
+        "Does not equate a higher PASS count with improvement across changed ROI or scope",
+        "Keeps unmeasured obligations visible and canonical completion unresolved"
+      ]
     }
   ]
 }

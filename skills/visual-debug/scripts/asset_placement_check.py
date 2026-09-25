@@ -153,6 +153,7 @@ except (OSError, json.JSONDecodeError) as exc:
 
 section_rows: list[dict[str, Any]] = []
 section_id_to_index: dict[str, int] = {}
+section_identity_indexes: dict[str, set[int]] = {}
 section_source_classes: dict[int, set[str]] = {}
 for ordinal, row in enumerate(sections):
     if not isinstance(row, dict):
@@ -182,10 +183,16 @@ for ordinal, row in enumerate(sections):
         "position": str(row.get("position") or "").strip().lower(),
         "ordinal": ordinal,
     })
-    for value in (section_id, row.get("name"), row.get("sourceClass")):
+    for value in (
+        section_id,
+        row.get("name"),
+        row.get("sourceClass"),
+        row.get("className"),
+    ):
         key = normalize_name(value)
         if key:
             section_id_to_index[key] = section_index_i
+            section_identity_indexes.setdefault(key, set()).add(section_index_i)
     scoped_classes = scoped_source_class(row.get("sourceClass"))
     if scoped_classes:
         section_source_classes.setdefault(section_index_i, set()).update(scoped_classes)
@@ -289,6 +296,35 @@ def section_for_top(top_value: Any) -> int | None:
     # Tolerate small extraction jitter just above/below a section edge.
     nearest = sorted(section_rows, key=lambda row: min(abs(top - row["top"]), abs(top - row["bottom"])))
     return int(nearest[0]["index"]) if nearest else None
+
+
+def section_for_entry(entry: dict[str, Any]) -> int | None:
+    """Prefer captured DOM ownership over ambiguous visual coordinates.
+
+    Adjacent positioned sections can overlap visually. A point inside that
+    overlap cannot establish which DOM section owns an image, so new captures
+    carry the closest semantic ancestor's identity. Older captures retain the
+    conservative coordinate fallback.
+    """
+    for key in ("sectionIndex", "ownerSectionIndex"):
+        value = entry.get(key)
+        try:
+            candidate = int(value)
+        except (TypeError, ValueError):
+            continue
+        if any(row["index"] == candidate for row in section_rows):
+            return candidate
+    for key in (
+        "sectionId",
+        "ownerSectionId",
+        "sectionClass",
+        "ownerSectionClass",
+    ):
+        identity = normalize_name(entry.get(key))
+        indexes = section_identity_indexes.get(identity, set())
+        if len(indexes) == 1:
+            return next(iter(indexes))
+    return section_for_top(first_number(entry, ("top", "y")))
 
 
 def component_path(file_value: str) -> Path:
@@ -730,7 +766,7 @@ for entry in visible:
     src = entry.get("src") or entry.get("url")
     if not isinstance(src, str) or not src.startswith(("http://", "https://", "//")):
         continue
-    section_index = section_for_top(first_number(entry, ("top", "y")))
+    section_index = section_for_entry(entry)
     if section_index is None:
         skipped += 1
         continue

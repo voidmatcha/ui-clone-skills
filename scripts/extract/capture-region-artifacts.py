@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -22,6 +23,8 @@ MAX_REGIONS = 20
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 AUTO_SOURCE = "ui_clone.extraction_artifacts"
 BRIDGE_SOURCE = "scripts/extract/capture-region-artifacts.py"
+REGION_METADATA_KEYS = frozenset({"resolvedAutoCandidates"})
+MAX_DERIVED_SESSION_BYTES = 24
 _BROWSER_ENV: ContextVar[dict[str, str] | None] = ContextVar("browser_env", default=None)
 _ORIGIN_CONTEXT: ContextVar[tuple[str, Path] | None] = ContextVar("origin_context", default=None)
 _ORIGIN_SPEC = importlib.util.spec_from_file_location(
@@ -35,6 +38,17 @@ _ORIGIN_SPEC.loader.exec_module(_ORIGIN_VALIDATOR)
 
 class OriginValidationError(RuntimeError):
     """The browser no longer supplies evidence from its authorized page origin."""
+
+
+def _derived_session_name(parent: str) -> str:
+    """Return a deterministic owned-session name within the socket path budget."""
+    candidate = f"{parent}-region-artifacts"
+    if len(candidate.encode("utf-8")) <= MAX_DERIVED_SESSION_BYTES:
+        return candidate
+    readable = re.sub(r"[^A-Za-z0-9]+", "-", parent).strip("-").lower()[:8]
+    readable = readable or "capture"
+    digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:10]
+    return f"ra-{readable}-{digest}"
 
 
 def _as_number(value: Any) -> float | None:
@@ -77,7 +91,7 @@ def _normalize_region_geometry(node: Any) -> None:
                     return
 
         for key, value in node.items():
-            if type(value) in (dict, list):
+            if key not in REGION_METADATA_KEYS and type(value) in (dict, list):
                 _normalize_region_geometry(value)
     elif isinstance(node, list):
         for value in node:
@@ -245,6 +259,25 @@ def _images_differ(idle: Path, active: Path) -> bool:
         return False
 
 
+def _identical_prior_hover_frames(ref_dir: Path, artifacts: object) -> bool:
+    """Confirm a bridge-owned hover's old raster pair contained no state delta."""
+    if not isinstance(artifacts, dict):
+        return False
+    paths = []
+    for state in ("idle", "active"):
+        relative = artifacts.get(state)
+        if not isinstance(relative, str) or not relative:
+            return False
+        path = (ref_dir / relative).resolve()
+        if not path.is_relative_to(ref_dir.resolve()) or not path.is_file():
+            return False
+        paths.append(path)
+    try:
+        return _png_pixels(paths[0]) == _png_pixels(paths[1])
+    except (OSError, ValueError, zlib.error):
+        return False
+
+
 def _load_or_derive_regions(ref_dir: Path) -> dict[str, Any]:
     regions_path = ref_dir / "regions.json"
     current: Any = None
@@ -268,18 +301,42 @@ def _load_or_derive_regions(ref_dir: Path) -> dict[str, Any]:
     except (FileNotFoundError, json.JSONDecodeError):
         section_map = None
 
+    spec_is_auto = isinstance(transition_spec, dict) and (
+        bool(transition_spec.get("placeholder")) or transition_spec.get("source") == AUTO_SOURCE
+    )
+    spec_is_bridge_owned = isinstance(transition_spec, dict) and (
+        transition_spec.get("source") == BRIDGE_SOURCE
+    )
     current_source = current.get("source") if isinstance(current, dict) else None
-    current_is_live = current_source == BRIDGE_SOURCE or any(
+    current_resolved_auto = (
+        current.get("resolvedAutoCandidates") if isinstance(current, dict) else None
+    )
+    current_has_negative_receipt = isinstance(current_resolved_auto, list) and bool(
+        current_resolved_auto
+    )
+    current_fingerprint = _hover_candidate_input_fingerprint(ref_dir)
+    current_receipt_attempted, _ = _fresh_resolved_auto_receipt(
+        ref_dir,
+        current,
+        current_fingerprint,
+    )
+    current_negative_is_fresh = bool(
+        current_has_negative_receipt
+        and current_fingerprint
+        and current_receipt_attempted
+        and (spec_is_auto or spec_is_bridge_owned)
+    )
+    current_is_live = (
+        current_source == BRIDGE_SOURCE
+        and (not current_has_negative_receipt or current_negative_is_fresh)
+    ) or any(
         isinstance(region.get("artifacts"), dict) and bool(region["artifacts"])
         for region in _walk_region_dicts(current)
     )
     current_is_derived = current_source in {
         "derive-from-transition-spec",
         AUTO_SOURCE,
-    }
-    spec_is_auto = isinstance(transition_spec, dict) and (
-        bool(transition_spec.get("placeholder")) or transition_spec.get("source") == AUTO_SOURCE
-    )
+    } or (current_source == BRIDGE_SOURCE and current_has_negative_receipt)
     derived = derive_regions_json(transition_spec, section_map)
     derivation_mismatch = (
         isinstance(current, dict)
@@ -305,6 +362,90 @@ def _load_or_derive_regions(ref_dir: Path) -> dict[str, Any]:
     if not isinstance(current, dict):
         raise ValueError("regions.json must contain a JSON object")
     return current
+
+
+def _hover_candidate_input_fingerprint(ref_dir: Path) -> str:
+    """Return the shared fingerprint for artifacts that produce auto hover candidates."""
+    try:
+        from ui_clone.extraction_artifacts import _hover_candidate_input_fingerprint as fingerprint
+    except ModuleNotFoundError:
+        # Direct script execution puts scripts/extract, rather than the checkout
+        # root, on sys.path. Resolve the sibling package without changing the
+        # fingerprint implementation.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from ui_clone.extraction_artifacts import _hover_candidate_input_fingerprint as fingerprint
+
+    return fingerprint(ref_dir)
+
+
+def _fresh_resolved_auto_receipt(
+    ref_dir: Path,
+    regions: Any,
+    fingerprint: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load exact prior hover-negative rows when their producer inputs are unchanged."""
+    if not fingerprint or not isinstance(regions, dict):
+        return [], []
+    if regions.get("autoCandidateInputFingerprint") != fingerprint:
+        return [], []
+    metadata = regions.get("resolvedAutoCandidates")
+    if not isinstance(metadata, list):
+        return [], []
+    keys = {
+        _candidate_key(item)
+        for item in metadata
+        if isinstance(item, dict) and _candidate_key(item)[0] == "hover"
+    }
+    if not keys:
+        return [], []
+    try:
+        prior = json.loads((ref_dir / SUMMARY_NAME).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return [], []
+    if not isinstance(prior, dict) or not (
+        prior.get("autoSpec") is True
+        and prior.get("autoCandidateInputFingerprint") == fingerprint
+        and prior.get("status") == "pass"
+    ):
+        return [], []
+    prior_attempted = prior.get("attempted")
+    prior_captured = prior.get("captured")
+    prior_skipped = prior.get("skipped")
+    prior_unsupported = prior.get("unsupported")
+    counts = prior.get("counts")
+    if not (
+        isinstance(prior_attempted, list)
+        and isinstance(prior_captured, list)
+        and isinstance(prior_skipped, list)
+        and isinstance(prior_unsupported, list)
+        and not prior_unsupported
+        and isinstance(counts, dict)
+        and counts.get("attempted") == len(prior_attempted)
+        and counts.get("captured") == len(prior_captured)
+        and counts.get("skipped") == len(prior_skipped)
+        and counts.get("unsupported") == 0
+    ):
+        return [], []
+    attempted = [
+        dict(item)
+        for item in prior_attempted
+        if isinstance(item, dict) and _candidate_key(item) in keys
+    ]
+    skipped = [
+        dict(item)
+        for item in prior_skipped
+        if isinstance(item, dict)
+        and _candidate_key(item) in keys
+        and item.get("resolution") == RESOLVED_ABSENCE_MARKER
+        and item.get("autoCandidateInputFingerprint") == fingerprint
+        and isinstance(item.get("candidateKey"), dict)
+        and _candidate_key(item["candidateKey"]) == _candidate_key(item)
+    ]
+    if {_candidate_key(item) for item in attempted} != keys or {
+        _candidate_key(item) for item in skipped
+    } != keys:
+        return [], []
+    return attempted, skipped
 
 
 def _region_signature(node: Any) -> tuple[tuple[str, str, str], ...]:
@@ -370,6 +511,11 @@ _SCROLL_SETTLE_JS = (
 MAX_OPENER_CANDIDATES = 4
 MAX_OPENER_ANCESTOR_DEPTH = 6
 OPENER_SETTLE_MS = 450
+MAX_ADAPTIVE_SCROLL_PROBES = 24
+ADAPTIVE_SCROLL_STEP_PX = 600
+ADAPTIVE_SCROLL_SETTLE_MS = 250
+ADAPTIVE_SCROLL_END_DWELL_MS = 1200
+REQUIRED_STABLE_EXTENT_PROBES = 2
 
 # Only self-contained controls are clicked to reveal a panel. `a[href]` is
 # excluded on purpose: following a link would navigate away and every later
@@ -479,11 +625,32 @@ def _normalized_style(name: str, value: object) -> str:
     return text
 
 
+def _same_rendered_transform(before: object, after: object) -> bool:
+    """Ignore matrix serialization jitter smaller than a rendered pixel."""
+    left = re.fullmatch(r"matrix\(([^)]+)\)", str(before or ""))
+    right = re.fullmatch(r"matrix\(([^)]+)\)", str(after or ""))
+    if not left or not right:
+        return False
+    try:
+        left_values = [float(value.strip()) for value in left.group(1).split(",")]
+        right_values = [float(value.strip()) for value in right.group(1).split(",")]
+    except ValueError:
+        return False
+    return (
+        len(left_values) == len(right_values) == 6
+        and all(abs(a - b) <= 0.0001 for a, b in zip(left_values, right_values))
+    )
+
+
 def _changed_properties(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     return sorted(
         key
         for key in set(before) | set(after)
-        if _normalized_style(_style_property_name(key), before.get(key))
+        if not (
+            _style_property_name(key) == "transform"
+            and _same_rendered_transform(before.get(key), after.get(key))
+        )
+        and _normalized_style(_style_property_name(key), before.get(key))
         != _normalized_style(_style_property_name(key), after.get(key))
     )
 
@@ -496,10 +663,14 @@ def _resolve_target_js(literal: str, marker: str) -> str:
         f"const nodes=[...document.querySelectorAll({literal})];"
         f"for(const stale of document.querySelectorAll('[{REGION_MARKER_ATTRIBUTE}]'))"
         f"stale.removeAttribute('{REGION_MARKER_ATTRIBUTE}');"
-        "let chosen=null;"
+        "let chosen=null,beyondExtent=0,maxBlockedBottom=0;"
         "for(const el of nodes){"
         "const initial=el.getBoundingClientRect();"
         f"if(initial.width<{MIN_HOVER_TARGET_PX}||initial.height<{MIN_HOVER_TARGET_PX})continue;"
+        "const absoluteBottom=initial.bottom+window.scrollY;"
+        "if(absoluteBottom>document.documentElement.scrollHeight+2){"
+        "beyondExtent++;maxBlockedBottom=Math.max(maxBlockedBottom,absoluteBottom);"
+        "}"
         "el.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});"
         + _SCROLL_SETTLE_JS +
         "const r=el.getBoundingClientRect();"
@@ -508,12 +679,69 @@ def _resolve_target_js(literal: str, marker: str) -> str:
         "const hit=document.elementFromPoint(cx,cy);"
         "if(hit&&(hit===el||el.contains(hit))){chosen=el;break;}"
         "}"
-        "if(!chosen)return {found:false,matches:nodes.length};"
+        "if(!chosen)return {found:false,matches:nodes.length,"
+        "blockedBeyondExtent:beyondExtent>0,beyondExtent,maxBlockedBottom,"
+        "scrollHeight:document.documentElement.scrollHeight,scrollY:window.scrollY};"
         f"chosen.setAttribute('{REGION_MARKER_ATTRIBUTE}',{marker_literal});"
         "chosen.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});"
         "return {found:true,matches:nodes.length};"
         "})()})()"
     )
+
+
+def _scroll_metrics_js() -> str:
+    return (
+        "(() => {const d=document.documentElement;return {found:true,scrollY:window.scrollY,"
+        "scrollHeight:d.scrollHeight,maxScroll:Math.max(0,d.scrollHeight-window.innerHeight),"
+        "viewportHeight:window.innerHeight};})()"
+    )
+
+
+def _adaptive_resolve_target(
+    session: str,
+    literal: str,
+    marker: str,
+    initial: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Advance a gated document with bounded real wheel input, then retry."""
+    resolved = initial
+    previous_height: float | None = None
+    stable_extent_probes = 0
+    for _ in range(MAX_ADAPTIVE_SCROLL_PROBES):
+        before = _eval(session, _scroll_metrics_js())
+        max_scroll = float(before.get("maxScroll") or 0)
+        scroll_y = float(before.get("scrollY") or 0)
+        at_end = abs(max_scroll - scroll_y) <= 40
+        step = max(
+            120,
+            min(
+                ADAPTIVE_SCROLL_STEP_PX,
+                round(float(before.get("viewportHeight") or ADAPTIVE_SCROLL_STEP_PX) * 0.75),
+            ),
+        )
+        if _run(session, "scroll", "down", str(step)).returncode != 0:
+            return resolved, False
+        dwell_ms = ADAPTIVE_SCROLL_END_DWELL_MS if at_end else ADAPTIVE_SCROLL_SETTLE_MS
+        if _run(session, "wait", str(dwell_ms)).returncode != 0:
+            return resolved, False
+
+        resolved = _eval(session, _resolve_target_js(literal, marker))
+        if resolved.get("found") is True:
+            return resolved, True
+
+        after = _eval(session, _scroll_metrics_js())
+        height = float(after.get("scrollHeight") or 0)
+        after_max = float(after.get("maxScroll") or 0)
+        after_y = float(after.get("scrollY") or 0)
+        stable_height = previous_height is not None and abs(height - previous_height) <= 2
+        stable_at_end = abs(after_max - after_y) <= 40
+        stable_extent_probes = (
+            stable_extent_probes + 1 if stable_height and stable_at_end else 0
+        )
+        if stable_extent_probes >= REQUIRED_STABLE_EXTENT_PROBES:
+            break
+        previous_height = height
+    return resolved, False
 
 
 def _resolve_openers_js(literal: str, index: int) -> str:
@@ -775,6 +1003,8 @@ def _capture_one(
     region: dict[str, Any],
     index: int,
     ref_dir: Path,
+    *,
+    allow_adaptive_traversal: bool = False,
 ) -> tuple[bool, str, dict[str, str] | None, dict[str, Any] | None]:
     selector = region.get("selector")
     if not isinstance(selector, str) or not selector.strip():
@@ -817,10 +1047,33 @@ def _capture_one(
     resolved = _eval(session, _resolve_target_js(literal, marker))
     matches = int(resolved.get("matches") or 0)
     opener_selector: str | None = None
+    adaptive_traversal = False
     if resolved.get("found") is not True and matches > 0:
         # Occluded, not absent: reach the target the way a user does, by
         # hovering the ancestor that reveals it.
-        resolved, opener_selector = _open_then_resolve(session, literal, marker, index)
+        blocked_resolution = resolved
+        opener_resolution, opener_selector = _open_then_resolve(
+            session, literal, marker, index
+        )
+        # With a target beyond the current document extent, the opener scan has
+        # no on-screen ancestor to try. Preserve the resolver's extent receipt
+        # so the bounded scroll recovery below can distinguish it from ordinary
+        # occlusion.
+        resolved = (
+            blocked_resolution
+            if "matches" not in opener_resolution
+            and opener_resolution.get("navigated") is not True
+            else opener_resolution
+        )
+    if (
+        resolved.get("found") is not True
+        and matches > 0
+        and resolved.get("blockedBeyondExtent") is True
+        and allow_adaptive_traversal
+    ):
+        resolved, adaptive_traversal = _adaptive_resolve_target(
+            session, literal, marker, resolved
+        )
     if resolved.get("navigated") is True:
         # Distinct from "none are hoverable": the opener walk left the page.
         # Folding it into the generic skip hid the escape and let every later
@@ -1076,6 +1329,8 @@ def _capture_one(
         # Both frames were captured with this ancestor hovered; the delta is
         # still the target's own hover, but the state is not reachable at idle.
         observation["openedVia"] = opener_selector
+    if adaptive_traversal:
+        observation["adaptiveScrollTraversal"] = True
     outside_box = [
         key
         for key in changed
@@ -1506,6 +1761,8 @@ def _capture_regions(
     counter: list[int],
     preserve_failed_dispatch: bool,
     dispatch_is_obligation: bool,
+    allow_adaptive_traversal: bool,
+    bridge_recapture: bool = False,
 ) -> Any:
     if isinstance(node, list):
         kept = []
@@ -1544,8 +1801,18 @@ def _capture_regions(
                     summary["attempted"].append(
                         {"region": label, "selector": selector, "triggerType": trigger}
                     )
-                    capture = _capture_one if trigger in HOVER_TRIGGERS else _capture_scroll_one
-                    ok, reason, artifacts, observation = capture(session, item, index, ref_dir)
+                    if trigger in HOVER_TRIGGERS:
+                        ok, reason, artifacts, observation = _capture_one(
+                            session,
+                            item,
+                            index,
+                            ref_dir,
+                            allow_adaptive_traversal=allow_adaptive_traversal,
+                        )
+                    else:
+                        ok, reason, artifacts, observation = _capture_scroll_one(
+                            session, item, index, ref_dir
+                        )
                     if not ok or artifacts is None or observation is None:
                         skip_row: dict[str, Any] = {
                             "region": label,
@@ -1567,9 +1834,14 @@ def _capture_regions(
                         preserved_dispatch = bool(
                             preserve_failed_dispatch and item.get("dispatchOnly")
                         )
+                        stale_bridge_frames = bool(
+                            bridge_recapture
+                            and trigger in HOVER_TRIGGERS
+                            and _identical_prior_hover_frames(ref_dir, prior_artifacts)
+                        )
                         retired = (
                             _is_resolved_absence(reason)
-                            and not has_prior_artifacts
+                            and (not has_prior_artifacts or stale_bridge_frames)
                             and not preserved_dispatch
                         )
                         if retired:
@@ -1611,20 +1883,28 @@ def _capture_regions(
                     counter,
                     preserve_failed_dispatch,
                     dispatch_is_obligation,
+                    allow_adaptive_traversal,
+                    bridge_recapture,
                 )
             )
         return kept
     if isinstance(node, dict):
         return {
-            key: _capture_regions(
-                value,
-                session,
-                ref_dir,
-                summary,
-                seen,
-                counter,
-                preserve_failed_dispatch,
-                dispatch_is_obligation,
+            key: (
+                value
+                if key in REGION_METADATA_KEYS
+                else _capture_regions(
+                    value,
+                    session,
+                    ref_dir,
+                    summary,
+                    seen,
+                    counter,
+                    preserve_failed_dispatch,
+                    dispatch_is_obligation,
+                    allow_adaptive_traversal,
+                    bridge_recapture,
+                )
             )
             for key, value in node.items()
         }
@@ -1649,7 +1929,9 @@ def _unsupported_regions(node: Any, *, dispatch_only_is_supported: bool) -> list
                         "triggerType": trigger,
                     }
                 )
-        for value in node.values():
+        for key, value in node.items():
+            if key in REGION_METADATA_KEYS:
+                continue
             unsupported.extend(
                 _unsupported_regions(value, dispatch_only_is_supported=dispatch_only_is_supported)
             )
@@ -1704,7 +1986,11 @@ def _prune_auto_dispatch_regions(
         return kept
     if isinstance(node, dict):
         return {
-            key: _prune_auto_dispatch_regions(value, skipped, signals)
+            key: (
+                value
+                if key in REGION_METADATA_KEYS
+                else _prune_auto_dispatch_regions(value, skipped, signals)
+            )
             for key, value in node.items()
         }
     return node
@@ -2107,6 +2393,38 @@ def _probe_failed(skipped: list[dict[str, Any]]) -> bool:
     return any(_is_probe_failure(str(entry.get("reason") or "")) for entry in skipped)
 
 
+def _candidate_key(entry: dict[str, Any]) -> tuple[str, str]:
+    trigger = str(entry.get("triggerType") or "").strip().lower()
+    if trigger in HOVER_TRIGGERS:
+        trigger = "hover"
+    return trigger, str(entry.get("selector") or "").strip()
+
+
+def _resolved_auto_candidates(
+    attempted: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+    *,
+    auto_spec: bool,
+) -> list[dict[str, str]]:
+    """Return exact auto candidates whose live probe conclusively measured absence."""
+    if not auto_spec or not attempted or _probe_failed(skipped):
+        return []
+    attempted_keys = {_candidate_key(entry) for entry in attempted}
+    resolved_keys = {
+        _candidate_key(entry)
+        for entry in skipped
+        if entry.get("resolution") == RESOLVED_ABSENCE_MARKER
+        and _candidate_key(entry)[0] == "hover"
+    }
+    resolved_keys &= attempted_keys
+    if not attempted_keys or not resolved_keys:
+        return []
+    return [
+        {"triggerType": trigger, "selector": selector}
+        for trigger, selector in sorted(resolved_keys)
+    ]
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
@@ -2142,10 +2460,25 @@ def _promote_transition_spec(
         isinstance(existing.get("provenance"), dict)
         and existing["provenance"].get("kind") == "live-capture"
     )
+    retired_bridge_hover_targets = {
+        str(item.get("selector") or "")
+        for item in skipped
+        if existing.get("source") == BRIDGE_SOURCE
+        and item.get("resolution") == RESOLVED_ABSENCE_MARKER
+        and _candidate_key(item)[0] == "hover"
+    }
     repaired_existing: list[dict[str, Any]] = []
     repaired_any = False
     for transition in existing_transitions:
         trigger = str(transition.get("trigger") or "").strip().lower()
+        if (
+            trigger.startswith("hover")
+            and str(transition.get("target") or transition.get("selector") or "")
+            in retired_bridge_hover_targets
+            and "live-capture" in str(transition.get("bundle_branch") or "").lower()
+        ):
+            repaired_any = True
+            continue
         prior_animation = transition.get("animation")
         animation_type = (
             str(prior_animation.get("type") or "").strip().lower()
@@ -2335,7 +2668,7 @@ def main(argv: list[str] | None = None) -> int:
     summary: dict[str, Any] = {
         "schemaVersion": 1,
         "url": args.url,
-        "session": args.session if args.reuse_session else f"{args.session}-region-artifacts",
+        "session": args.session if args.reuse_session else _derived_session_name(args.session),
         "reuseSession": args.reuse_session,
         "attempted": [],
         "captured": [],
@@ -2352,7 +2685,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"capture-region-artifacts: {exc}", file=sys.stderr)
         return 2
 
-    auto_spec = _spec_is_auto(ref_dir)
+    bridge_recapture = _spec_is_bridge_owned(ref_dir) and not _spec_is_auto(ref_dir)
+    auto_spec = _spec_is_auto(ref_dir) or bridge_recapture
+    auto_candidate_fingerprint = _hover_candidate_input_fingerprint(ref_dir)
+    summary["autoCandidateInputFingerprint"] = auto_candidate_fingerprint
+    reused_attempted, reused_skipped = _fresh_resolved_auto_receipt(
+        ref_dir,
+        regions,
+        auto_candidate_fingerprint,
+    )
+    if reused_attempted:
+        # A mixed positive/negative run promotes transition-spec.json to the
+        # bridge source. Its bound negative candidates remain auto inventory.
+        auto_spec = True
+        summary["attempted"].extend(reused_attempted)
+        summary["skipped"].extend(reused_skipped)
+        summary["reusedResolvedAutoCandidates"] = True
+    summary["autoSpec"] = auto_spec
     session = summary["session"]
     if auto_spec:
         regions = _prune_auto_dispatch_regions(
@@ -2388,9 +2737,11 @@ def main(argv: list[str] | None = None) -> int:
             summary_path,
             ref_dir,
             auto_spec,
+            auto_candidate_fingerprint,
             session,
             dispatch_is_obligation,
             owns_session,
+            bridge_recapture,
         )
     finally:
         _ORIGIN_CONTEXT.reset(origin_token)
@@ -2464,9 +2815,11 @@ def _capture_main(
     summary_path: Path,
     ref_dir: Path,
     auto_spec: bool,
+    auto_candidate_fingerprint: str,
     session: str,
     dispatch_is_obligation: bool,
     owns_session: bool,
+    bridge_recapture: bool,
 ) -> int:
     try:
         if owns_session:
@@ -2484,13 +2837,23 @@ def _capture_main(
             ):
                 result = _run(session, *command)
                 if result.returncode != 0:
-                    summary["skipped"].append(
-                        {
-                            "region": "session",
-                            "reason": f"agent-browser {command[0]} failed",
-                        }
-                    )
+                    diagnostic = (result.stderr or result.stdout).strip()
+                    failure = {
+                        "region": "session",
+                        "reason": f"agent-browser {command[0]} failed",
+                        "command": list(command),
+                        "returnCode": result.returncode,
+                    }
+                    if diagnostic:
+                        failure["diagnostic"] = diagnostic[-2000:]
+                    summary["skipped"].append(failure)
                     _write_json(summary_path, summary)
+                    suffix = f": {diagnostic}" if diagnostic else ""
+                    print(
+                        f"capture-region-artifacts: agent-browser {command[0]} failed"
+                        f" (exit {result.returncode}){suffix}",
+                        file=sys.stderr,
+                    )
                     return 2
                 if command[0] == "open" and _ORIGIN_VALIDATOR.record_navigation(
                     args.url,
@@ -2510,6 +2873,8 @@ def _capture_main(
             [0],
             preserve_failed_dispatch=not auto_spec,
             dispatch_is_obligation=dispatch_is_obligation,
+            allow_adaptive_traversal=owns_session,
+            bridge_recapture=bridge_recapture,
         )
         summary["unsupported"] = _unsupported_regions(updated, dispatch_only_is_supported=False)
         summary["unsupported"].extend(
@@ -2519,6 +2884,31 @@ def _capture_main(
                 summary["skipped"],
             )
         )
+        resolved_auto_candidates = _resolved_auto_candidates(
+            summary["attempted"],
+            summary["skipped"],
+            auto_spec=auto_spec,
+        )
+        attempted_keys = {_candidate_key(entry) for entry in summary["attempted"]}
+        resolved_keys = {
+            (entry["triggerType"], entry["selector"])
+            for entry in resolved_auto_candidates
+        }
+        resolved_auto_inventory = bool(
+            resolved_auto_candidates
+            and auto_candidate_fingerprint
+            and attempted_keys == resolved_keys
+            and not summary["captured"]
+            and not summary["unsupported"]
+        )
+        if resolved_auto_candidates and auto_candidate_fingerprint:
+            for entry in summary["skipped"]:
+                if _candidate_key(entry) in resolved_keys:
+                    entry["candidateKey"] = {
+                        "triggerType": _candidate_key(entry)[0],
+                        "selector": _candidate_key(entry)[1],
+                    }
+                    entry["autoCandidateInputFingerprint"] = auto_candidate_fingerprint
         inventory_unproven = _probe_failed(summary["skipped"])
         # Kept before the notInstantiated split below moves entries out of
         # summary["skipped"]; consumers that judge whether the probe worked
@@ -2549,9 +2939,20 @@ def _capture_main(
         )
         summary["status"] = (
             "fail"
-            if summary["unsupported"] or (expected_evidence and not summary["counts"]["captured"])
+            if summary["unsupported"]
+            or (
+                expected_evidence
+                and not summary["counts"]["captured"]
+                and not resolved_auto_inventory
+            )
             else "pass"
         )
+        if isinstance(updated, dict):
+            # Rebuild receipt metadata from this run only. Carrying a prior
+            # row forward can turn an ordinary failed scroll probe into a
+            # resolved hover candidate on the next traversal.
+            updated.pop("resolvedAutoCandidates", None)
+            updated.pop("autoCandidateInputFingerprint", None)
         if summary["captured"] and isinstance(updated, dict):
             updated["source"] = BRIDGE_SOURCE
             updated["placeholder"] = False
@@ -2566,6 +2967,28 @@ def _capture_main(
             if SUMMARY_NAME not in derived_from:
                 derived_from.append(SUMMARY_NAME)
             updated["derivedFrom"] = derived_from
+            if resolved_auto_candidates and auto_candidate_fingerprint:
+                updated["resolvedAutoCandidates"] = resolved_auto_candidates
+                updated["autoCandidateInputFingerprint"] = auto_candidate_fingerprint
+        elif resolved_auto_inventory and isinstance(updated, dict):
+            updated["source"] = BRIDGE_SOURCE
+            updated["placeholder"] = False
+            updated["detectionRan"] = True
+            updated["resolvedAutoCandidates"] = resolved_auto_candidates
+            updated["autoCandidateInputFingerprint"] = auto_candidate_fingerprint
+            # These producer inputs are immutable during this bridge. Keep the
+            # output newer than every present input without depending on the
+            # transition spec that this same run promotes afterwards.
+            updated["derivedFrom"] = [
+                name
+                for name in (
+                    "hover-css-rules.json",
+                    "structure.json",
+                    "states/hover/summary.json",
+                    "states/hover/manifest.json",
+                )
+                if (ref_dir / name).is_file()
+            ]
         # Persisting the pruned list after a failed probe would delete the
         # candidate inventory instead of recording that it went unproven.
         if summary["captured"] or not inventory_unproven:
@@ -2599,7 +3022,9 @@ def _walk_region_dicts(node: Any) -> list[dict[str, Any]]:
     if isinstance(node, dict):
         if isinstance(node.get("triggerType"), str):
             regions.append(node)
-        for value in node.values():
+        for key, value in node.items():
+            if key in REGION_METADATA_KEYS:
+                continue
             regions.extend(_walk_region_dicts(value))
     elif isinstance(node, list):
         for value in node:

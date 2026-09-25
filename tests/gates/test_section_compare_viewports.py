@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ui_clone.gate import Gate
 
-from ._helpers import _project_root
+from ._helpers import _project_root, _stamp_check_input_hash, _write_impl_fixture
 
 PLAN_VIEWPORTS = [
     {"w": 375, "h": 812, "label": "mobile"},
@@ -154,6 +154,124 @@ def test_gate_keeps_single_viewport_for_non_responsive_site(tmp_path: Path) -> N
     results = Gate(ref).gate_section_compare()
     failures = [r for r in results if r.status == "fail"]
     assert not failures, f"non-responsive single-viewport result must pass: {failures}"
+
+
+def test_gate_rejects_section_result_stale_after_impl_edit(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    (ref / "sections").mkdir(parents=True)
+    impl = _write_impl_fixture(ref)
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": []}), encoding="utf-8"
+    )
+    (ref / "required-media.json").write_text(
+        json.dumps({"schemaVersion": 1, "videos": [], "lottie": []}),
+        encoding="utf-8",
+    )
+    (ref / "sections" / "result.txt").write_text(
+        "| Hero | 12 | 10 | ok | ✅ |\n"
+        "\n**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    _stamp_check_input_hash(ref, "section-compare", impl)
+
+    (impl / "src" / "App.tsx").write_text(
+        "export default function App(){return <main>Changed</main>}\n",
+        encoding="utf-8",
+    )
+
+    results = Gate(ref).gate_section_compare()
+    failures = [r for r in results if r.status == "fail"]
+    assert failures, "stale sections/result.txt must not pass closeout"
+    combined = " ".join(r.message for r in failures).lower()
+    assert "stale" in combined and "section-compare" in combined
+
+
+def test_gate_accepts_section_result_with_matching_input_hash(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    (ref / "sections").mkdir(parents=True)
+    impl = _write_impl_fixture(ref)
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": []}), encoding="utf-8"
+    )
+    (ref / "required-media.json").write_text(
+        json.dumps({"schemaVersion": 1, "videos": [], "lottie": []}),
+        encoding="utf-8",
+    )
+    (ref / "sections" / "result.txt").write_text(
+        "| Hero | 12 | 10 | ok | ✅ |\n"
+        "\n**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    _stamp_check_input_hash(ref, "section-compare", impl)
+
+    results = Gate(ref).gate_section_compare()
+    failures = [r for r in results if r.status == "fail"]
+    assert not failures, f"fresh input hash should allow section evidence: {failures}"
+
+
+def test_gate_rejects_section_result_without_sidecar_when_inputs_are_newer(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    (ref / "sections").mkdir(parents=True)
+    _write_impl_fixture(ref)
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": []}), encoding="utf-8"
+    )
+    (ref / "required-media.json").write_text(
+        json.dumps({"schemaVersion": 1, "videos": [], "lottie": []}),
+        encoding="utf-8",
+    )
+    result = ref / "sections" / "result.txt"
+    result.write_text(
+        "| Hero | 12 | 10 | ok | ✅ |\n"
+        "\n**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    old = 1_700_000_000
+    os.utime(result, (old, old))
+
+    results = Gate(ref).gate_section_compare()
+    failures = [r for r in results if r.status == "fail"]
+    assert failures, "sidecar-less result older than inputs must be stale"
+    combined = " ".join(r.message for r in failures).lower()
+    assert "stale" in combined and "newer than" in combined
+
+
+def test_gate_accepts_section_result_without_sidecar_when_result_is_newer(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    (ref / "sections").mkdir(parents=True)
+    _write_impl_fixture(ref)
+    (ref / "transition-spec.json").write_text(
+        json.dumps({"transitions": []}), encoding="utf-8"
+    )
+    (ref / "required-media.json").write_text(
+        json.dumps({"schemaVersion": 1, "videos": [], "lottie": []}),
+        encoding="utf-8",
+    )
+    result = ref / "sections" / "result.txt"
+    result.write_text(
+        "| Hero | 12 | 10 | ok | ✅ |\n"
+        "\n**Result: 1 PASS, 0 FAIL, 0 SKIP, 0 STRUCTURAL_ONLY**\n",
+        encoding="utf-8",
+    )
+    newer_than_inputs = max(
+        path.stat().st_mtime
+        for path in [
+            ref / "section-map.json",
+            ref / "transition-spec.json",
+            ref / "required-media.json",
+            ref.parent / "impl" / "src" / "App.tsx",
+            ref.parent / "impl" / "public" / "fixture.txt",
+        ]
+    ) + 5
+    os.utime(result, (newer_than_inputs, newer_than_inputs))
+
+    results = Gate(ref).gate_section_compare()
+    failures = [r for r in results if r.status == "fail"]
+    assert not failures, f"newer sidecar-less section evidence should pass: {failures}"
 
 
 # ── fan-out spec resolution (loop-e2e-9 viewport-fanout-mask-gap) ───────────

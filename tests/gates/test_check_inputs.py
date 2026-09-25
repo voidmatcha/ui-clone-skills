@@ -22,6 +22,7 @@ from ui_clone.check_inputs import (
     InputFingerprintUnavailable,
     compute_check_input_hash,
     get_check_inputs,
+    load_section_capture_policy,
     newest_input_mtime,
 )
 
@@ -46,6 +47,25 @@ def test_input_independent_check_returns_empty(tmp_path: Path) -> None:
     # capacity-probe is registered with no inputs → "" (never stale), NOT None.
     assert get_check_inputs("capacity-probe") is not None
     assert _h(tmp_path, tmp_path, "capacity-probe") == ""
+
+
+@pytest.mark.parametrize("artifact", [
+    "structure.json",
+    "states/hover/summary.json",
+    "states/hover/manifest.json",
+    "capture-region-artifacts-summary.json",
+])
+def test_hover_absence_evidence_change_invalidates_reuse(
+    tmp_path: Path, artifact: str,
+) -> None:
+    impl, ref = tmp_path / "impl", tmp_path / "ref"
+    _impl_tree(impl)
+    evidence = ref / artifact
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text('{"state":"before"}\n')
+    before = _h(impl, ref, "hover-state-compare")
+    evidence.write_text('{"state":"after"}\n')
+    assert before and _h(impl, ref, "hover-state-compare") != before
 
 
 def test_section_compare_is_registered_with_a_real_fingerprint(tmp_path: Path) -> None:
@@ -549,3 +569,10 @@ def test_masked_static_font_declaration_change_invalidates_hash(tmp_path: Path) 
     before = compute_check_input_hash(tmp_path, ref, "masked-region-static")
     declaration.write_text('{"fonts": [{"original": "Original", "replacement": "Arial"}]}')
     assert compute_check_input_hash(tmp_path, ref, "masked-region-static") != before
+
+
+def test_load_valid_section_capture_policy(tmp_path: Path) -> None:
+    (tmp_path / "section-capture-policy.json").write_text(
+        '{"schemaVersion":1,"staticOnly":true,"environment":{"EXCLUDE_DYNAMIC":"1"}}'
+    )
+    assert load_section_capture_policy(tmp_path) == {"EXCLUDE_DYNAMIC": "1"}

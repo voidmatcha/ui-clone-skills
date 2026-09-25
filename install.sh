@@ -131,6 +131,7 @@ INSTALL_CLAUDE=1
 INSTALL_CODEX=1
 ASSUME_YES=0
 DO_UNINSTALL=0
+CODEX_DELIVERY_PROVEN=0
 for arg in "$@"; do
   case "$arg" in
     --no-deps) NO_DEPS=1 ;;
@@ -471,7 +472,6 @@ register_marketplace() {
   prepare_plugin_projection || return
   prepare_claude_plugin_source || return
   remove_legacy_claude_skill_links || return
-  install_public_agent_skills || return
   install_local_cli_bin || return
 
   # An unchanged marketplace path still needs the staging above to have run:
@@ -517,6 +517,33 @@ remove_legacy_claude_skill_links() {
       if [ "$resolved" = "$(cd "$expected" && pwd -P)" ]; then
         rm -f "$dst"
         ok "removed legacy Claude skill shadow $dst"
+        break
+      fi
+    done
+  done
+}
+
+remove_legacy_codex_skill_links() {
+  # Pre-plugin Codex installs linked the public skills directly under
+  # ~/.codex/skills. Codex now also discovers the plugin cache, so those links
+  # create an unnamespaced duplicate beside each plugin-owned skill. Remove
+  # only links that resolve to one of this project's known sources.
+  local legacy_root="${CODEX_HOME:-$HOME/.codex}/skills"
+  local skill dst resolved expected
+  [ -d "$legacy_root" ] || return 0
+
+  for skill in $CODEX_PUBLIC_SKILLS; do
+    dst="$legacy_root/$skill"
+    [ -L "$dst" ] || continue
+    resolved="$(cd "$dst" 2>/dev/null && pwd -P)" || continue
+    for expected in \
+      "$REPO_ROOT/skills/$skill" \
+      "$CODEX_PLUGIN_DIR/skills/$skill" \
+      "$CLAUDE_PLUGIN_SRC/skills/$skill"; do
+      [ -e "$expected" ] || continue
+      if [ "$resolved" = "$(cd "$expected" && pwd -P)" ]; then
+        rm -f "$dst"
+        ok "removed legacy Codex skill shadow $dst"
         break
       fi
     done
@@ -607,6 +634,44 @@ plugin_manifest_version() {
   sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "$REPO_ROOT/.claude-plugin/plugin.json" | head -1
 }
 
+plugin_content_mismatches() {
+  local source_root="$1"
+  local cache_root="$2"
+  SOURCE_ROOT="$source_root" CACHE_ROOT="$cache_root" \
+    RUNTIME_NAMES="$CLAUDE_PLUGIN_SRC_PRUNE" python3 - <<'PY'
+import hashlib
+import os
+from pathlib import Path
+
+source = Path(os.environ["SOURCE_ROOT"])
+cache = Path(os.environ["CACHE_ROOT"])
+
+for src in sorted(path for path in source.rglob("*") if path.is_file()):
+    rel = src.relative_to(source)
+    dst = cache / rel
+    if not dst.is_file():
+        print(f"missing:{rel}")
+        continue
+    if hashlib.sha256(src.read_bytes()).digest() != hashlib.sha256(dst.read_bytes()).digest():
+        print(f"changed:{rel}")
+
+# Limit the reverse comparison to directories owned by the shipped source.
+# Hosts may add private metadata at the cache root. Prune environments before
+# walking them: a uv environment contains many legitimate cache-only sources.
+runtime_names = set(os.environ["RUNTIME_NAMES"].split())
+for directory in sorted(path for path in source.iterdir() if path.is_dir()):
+    cached_directory = cache / directory.name
+    for root, dirs, files in os.walk(cached_directory):
+        dirs[:] = sorted(name for name in dirs if name not in runtime_names)
+        for name in sorted(files):
+            if name in runtime_names or name.endswith((".pyc", ".pyo")):
+                continue
+            rel = (Path(root) / name).relative_to(cache)
+            if not (source / rel).is_file():
+                print(f"unexpected:{rel}")
+PY
+}
+
 verify_claude_plugin_delivery() {
   # The install step is not the delivery. The host COPIES the marketplace source
   # into its own per-version cache and loads from there, so 'install succeeded'
@@ -663,41 +728,7 @@ verify_claude_plugin_delivery() {
   # Root host metadata and the staging policy's runtime/build residue are allowed.
   local content_mismatch attempt
   for attempt in 1 2; do
-    content_mismatch="$(
-      SOURCE_ROOT="$CLAUDE_PLUGIN_SRC" CACHE_ROOT="$cache_dir" \
-        RUNTIME_NAMES="$CLAUDE_PLUGIN_SRC_PRUNE" python3 - <<'PY'
-import hashlib
-import os
-from pathlib import Path
-
-source = Path(os.environ["SOURCE_ROOT"])
-cache = Path(os.environ["CACHE_ROOT"])
-
-for src in sorted(path for path in source.rglob("*") if path.is_file()):
-    rel = src.relative_to(source)
-    dst = cache / rel
-    if not dst.is_file():
-        print(f"missing:{rel}")
-        continue
-    if hashlib.sha256(src.read_bytes()).digest() != hashlib.sha256(dst.read_bytes()).digest():
-        print(f"changed:{rel}")
-
-# Limit the reverse comparison to directories owned by the shipped source.
-# Claude may add private metadata at the cache root. Prune environments before
-# walking them: a uv environment contains many legitimate cache-only sources.
-runtime_names = set(os.environ["RUNTIME_NAMES"].split())
-for directory in sorted(path for path in source.iterdir() if path.is_dir()):
-    cached_directory = cache / directory.name
-    for root, dirs, files in os.walk(cached_directory):
-        dirs[:] = sorted(name for name in dirs if name not in runtime_names)
-        for name in sorted(files):
-            if name in runtime_names or name.endswith((".pyc", ".pyo")):
-                continue
-            rel = (Path(root) / name).relative_to(cache)
-            if not (source / rel).is_file():
-                print(f"unexpected:{rel}")
-PY
-    )" || return 1
+    content_mismatch="$(plugin_content_mismatches "$CLAUDE_PLUGIN_SRC" "$cache_dir")" || return 1
     [ -n "$content_mismatch" ] || break
     if [ "$attempt" -eq 2 ]; then
       err "Hook delivery probe FAILED: Claude kept stale bytes for $PLUGIN_NAME $version."
@@ -1108,111 +1139,6 @@ assert_claude_plugin_source_sane() {
 
 
 
-record_public_skill_ownership() {
-  local skill="$1"
-  local installed_path="$2"
-  mkdir -p "$(dirname "$PUBLIC_SKILLS_OWNERSHIP")"
-
-  OWNERSHIP_PATH="$PUBLIC_SKILLS_OWNERSHIP" SKILL_NAME="$skill" \
-    INSTALLED_PATH="$installed_path" SOURCE_ROOT="$REPO_ROOT" \
-    PLUGIN_MANIFEST="$REPO_ROOT/.claude-plugin/plugin.json" python3 - <<'PY'
-import hashlib
-import json
-import os
-import stat
-import tempfile
-from pathlib import Path
-
-
-def tree_hash(root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
-        relative = path.relative_to(root).as_posix().encode()
-        if path.is_symlink():
-            kind, content = b"L", os.readlink(path).encode()
-        elif path.is_dir():
-            kind, content = b"D", b""
-        else:
-            kind = b"X" if path.stat().st_mode & 0o111 else b"F"
-            content = path.read_bytes()
-        digest.update(kind + b"\0" + relative + b"\0")
-        digest.update(str(len(content)).encode() + b"\0" + content + b"\0")
-    return digest.hexdigest()
-
-
-def atomic_write_json(path: Path, data: object) -> None:
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
-    temp_name = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent,
-            prefix=f".{path.name}.", delete=False,
-        ) as handle:
-            temp_name = handle.name
-            os.fchmod(handle.fileno(), mode)
-            json.dump(data, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, path)
-    finally:
-        if temp_name and os.path.exists(temp_name):
-            os.unlink(temp_name)
-
-
-ownership_path = Path(os.environ["OWNERSHIP_PATH"])
-try:
-    data = json.loads(ownership_path.read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError):
-    data = {}
-if not isinstance(data, dict):
-    data = {}
-data["schemaVersion"] = 1
-skills = data.get("skills")
-if not isinstance(skills, dict):
-    skills = {}
-    data["skills"] = skills
-
-installed = Path(os.environ["INSTALLED_PATH"]).resolve()
-source_root = Path(os.environ["SOURCE_ROOT"]).resolve()
-try:
-    plugin = json.loads(Path(os.environ["PLUGIN_MANIFEST"]).read_text(encoding="utf-8"))
-    version = plugin.get("version") if isinstance(plugin, dict) else None
-except (OSError, json.JSONDecodeError):
-    version = None
-
-skills[os.environ["SKILL_NAME"]] = {
-    "path": str(installed),
-    "sha256": tree_hash(installed),
-    "source": str(source_root),
-    "version": version,
-}
-atomic_write_json(ownership_path, data)
-PY
-}
-
-install_public_agent_skills() {
-  mkdir -p "$AGENTS_SKILLS_DIR"
-
-  local skill src dst
-  for skill in $CODEX_PUBLIC_SKILLS; do
-    src="$REPO_ROOT/skills/$skill"
-    dst="$AGENTS_SKILLS_DIR/$skill"
-    if [ ! -d "$src" ]; then
-      err "Missing public Codex skill directory: $src"
-      return 1
-    fi
-
-    rm -rf "$dst"
-    cp -R "$src" "$dst"
-    if ! record_public_skill_ownership "$skill" "$dst"; then
-      rm -rf "$dst"
-      return 1
-    fi
-    ok "Codex public skill $skill → $dst"
-  done
-}
-
 install_local_cli_bin() {
   # Deliberately points into the Codex projection, NOT at $REPO_ROOT/bin.
   # ~/.local/bin/ui-clone -> $CODEX_PLUGIN_DIR/bin/ui-clone -> $REPO_ROOT/bin/ui-clone:
@@ -1412,13 +1338,12 @@ codex_source_version() {
   sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1
 }
 
-# Assert the version being installed, not "some version". A previous release can
-# leave a populated directory behind, so a scan that accepts any version dir with
-# a manifest reports success while the CURRENT copy is the empty one — the exact
-# failure this assertion exists to catch.
+# Assert the version and every shipped byte being installed, not "some version".
+# A previous or same-version release can leave a populated directory behind, so
+# manifest presence alone reports success while the active cache remains stale.
 verify_codex_plugin_delivered() {
   have codex || return 0
-  local cache_root version dir
+  local cache_root version dir content_mismatch
   cache_root="${CODEX_HOME:-$HOME/.codex}/plugins/cache/$CODEX_MARKETPLACE_NAME/$PLUGIN_NAME"
   [ -d "$cache_root" ] || { warn "Codex plugin cache missing at $cache_root"; return 1; }
   version="$(codex_source_version || true)"
@@ -1427,13 +1352,20 @@ verify_codex_plugin_delivered() {
     return 1
   fi
   dir="$cache_root/$version"
-  if [ -f "$dir/.codex-plugin/plugin.json" ]; then
-    ok "Codex plugin delivered ($version)"
-    return 0
+  if [ ! -f "$dir/.codex-plugin/plugin.json" ]; then
+    err "Codex plugin cache $version has no .codex-plugin/plugin.json — the copy is empty."
+    err "Codex skips symlinks when copying; the marketplace source must be real files."
+    return 1
   fi
-  err "Codex plugin cache $version has no .codex-plugin/plugin.json — the copy is empty."
-  err "Codex skips symlinks when copying; the marketplace source must be real files."
-  return 1
+  content_mismatch="$(plugin_content_mismatches "$CLAUDE_PLUGIN_SRC" "$dir")" || return 1
+  if [ -n "$content_mismatch" ]; then
+    err "Codex plugin delivery FAILED: cached $PLUGIN_NAME $version differs from the staged source."
+    err "  first mismatch: $(printf '%s\n' "$content_mismatch" | head -1)"
+    err "  cache: $dir"
+    return 1
+  fi
+  ok "Codex plugin delivered and content-matched ($version)"
+  return 0
 }
 
 register_codex_marketplace() {
@@ -1450,7 +1382,6 @@ register_codex_marketplace() {
   # whatever the last Claude-side run happened to stage.
   prepare_claude_plugin_source || return
   prepare_plugin_projection || return
-  install_public_agent_skills || return
   install_local_cli_bin || return
   install_codex_native_agents || return
   write_codex_personal_marketplace || return
@@ -1476,12 +1407,15 @@ register_codex_marketplace() {
   if grep -qE "(^|[[:space:]])${PLUGIN_NAME}@${CODEX_MARKETPLACE_NAME}[[:space:]]+installed" <<<"$codex_listing" &&
      verify_codex_plugin_delivered; then
     skip "Codex plugin $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+    CODEX_DELIVERY_PROVEN=1
   elif codex plugin add "$PLUGIN_NAME@$CODEX_MARKETPLACE_NAME" >/dev/null 2>&1; then
     ok "Codex plugin installed → $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
-    verify_codex_plugin_delivered || true
+    verify_codex_plugin_delivered || return 1
+    CODEX_DELIVERY_PROVEN=1
   else
-    warn "Codex personal marketplace is ready, but plugin install did not complete."
-    warn "Run manually: codex plugin add $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+    err "Codex personal marketplace is ready, but plugin install did not complete."
+    err "Run manually: codex plugin add $PLUGIN_NAME@$CODEX_MARKETPLACE_NAME"
+    return 1
   fi
 }
 
@@ -1820,6 +1754,7 @@ PY
 }
 
 remove_installed_public_skills() {
+  local mode="${1:-uninstall}"
   local skill dst status
   for skill in $CODEX_PUBLIC_SKILLS; do
     dst="$AGENTS_SKILLS_DIR/$skill"
@@ -1833,9 +1768,19 @@ remove_installed_public_skills() {
       removable:*)
         rm -rf "$dst"
         if clear_public_skill_ownership "$skill"; then
-          ok "removed Codex public skill $dst"
+          ok "removed redundant direct skill $dst"
         else
           mark_uninstall_incomplete "removed $dst but could not update its ownership receipt"
+        fi
+        ;;
+      customized)
+        if [ "$mode" = "migration" ]; then
+          warn "preserving post-install edits in $dst; remove or relocate it manually to avoid duplicate skill discovery"
+        fi
+        ;;
+      *)
+        if [ "$mode" = "migration" ]; then
+          warn "preserving unowned direct skill $dst; remove or relocate it manually to avoid duplicate skill discovery"
         fi
         ;;
     esac
@@ -2259,7 +2204,17 @@ main() {
 
   if [ "$NO_MARKETPLACE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 1 ]; then
     section "Codex plugin"
-    register_codex_marketplace
+    register_codex_marketplace || return 1
+  fi
+
+  # Older releases copied the public skills into direct discovery roots. Remove
+  # those fallback surfaces only after the plugin cache has been proven to match
+  # the staged source. A missing CLI, --no-marketplace, or failed delivery must
+  # leave the last working direct installation intact.
+  if [ "$CODEX_DELIVERY_PROVEN" -eq 1 ]; then
+    section "Legacy direct skill cleanup"
+    remove_legacy_codex_skill_links
+    remove_installed_public_skills migration
   fi
 
   # Older releases registered ui-clone hooks globally. Clean those entries on

@@ -18,6 +18,7 @@ from ui_clone.evidence_validation import (  # noqa: E402
     transition_proof_evidence,
     transition_proof_semantic_error,
 )
+from ui_clone.scroll_completion import validate_scroll_completion  # noqa: E402
 
 ref_dir = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
@@ -226,11 +227,7 @@ def measure_reveal(d: dict | None) -> tuple[bool, str]:
 def measure_scroll_end(d: dict | None) -> tuple[bool, str]:
     if d is None:
         return True, "not produced (no scroll-scrub signal)"
-    if d.get("status") == "skip":
-        return True, "skipped"
-    if d.get("status") != "pass":
-        return False, f"status={d.get('status')}"
-    return True, "scroll-scrub settles"
+    return validate_scroll_completion(d)
 
 def measure_keyframes(d: dict | None) -> tuple[bool, str]:
     if d is None:
@@ -544,7 +541,8 @@ def runtime_proof_sources() -> list[str]:
     if reveal and reveal.get("status") == "pass":
         sources.append("reveal-trigger")
     scroll_end = read_json_safe(ref_dir / "scroll-completion.json")
-    if scroll_end and scroll_end.get("status") == "pass":
+    scroll_end_ok, _ = measure_scroll_end(scroll_end)
+    if scroll_end and scroll_end_ok and scroll_end.get("status") == "pass":
         sources.append("scroll-end-completion")
     vm_path = ref_dir / "transitions" / "video-motion-result.txt"
     if vm_path.exists():

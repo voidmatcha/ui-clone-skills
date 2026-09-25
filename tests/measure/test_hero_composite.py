@@ -346,6 +346,131 @@ def test_hero_composite_check_inventories_canvas_kind(tmp_path: Path) -> None:
     assert "canvas" in artifact["missingInImpl"]
 
 
+def test_hero_composite_follows_rendered_local_component_to_canvas(
+    tmp_path: Path,
+) -> None:
+    """A hero canvas rendered by a local child component counts as hero output."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src" / "components"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "section", "class": "hero",
+            "children": [{"tag": "canvas", "children": []}],
+        }],
+    }))
+    (src / "HeroStage.tsx").write_text(
+        'import StripeField from "./StripeField";\n'
+        'export default function HeroStage() {\n'
+        '  return <section data-section="hero"><StripeField /></section>;\n'
+        '}\n'
+    )
+    (src / "StripeField.tsx").write_text(
+        'import { Canvas } from "@react-three/fiber";\n'
+        'export default function StripeField() { return <Canvas />; }\n'
+    )
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    artifact = json.loads((ref / "hero-composite.json").read_text())
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert artifact["impl"]["canvas"] is True, artifact
+    assert artifact["implCandidateFiles"] == [
+        "src/components/HeroStage.tsx",
+        "src/components/StripeField.tsx",
+    ]
+
+
+def test_hero_composite_rejects_canvas_rendered_outside_hero_region(
+    tmp_path: Path,
+) -> None:
+    """A rendered canvas elsewhere on the page cannot satisfy the hero."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src" / "components"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "section", "class": "hero",
+            "children": [{"tag": "canvas", "children": []}],
+        }],
+    }))
+    (src / "HeroStage.tsx").write_text(
+        'import UnusedCanvas from "./UnusedCanvas";\n'
+        'export default function HeroStage() {\n'
+        '  return <>\n'
+        '    <section data-section="hero" />\n'
+        '    <aside><UnusedCanvas /></aside>\n'
+        '  </>;\n'
+        '}\n'
+    )
+    (src / "UnusedCanvas.tsx").write_text(
+        'export default function UnusedCanvas() { return <canvas />; }\n'
+    )
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    artifact = json.loads((ref / "hero-composite.json").read_text())
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert artifact["impl"]["canvas"] is False, artifact
+    assert "canvas" in artifact["missingInImpl"], artifact
+    assert artifact["implCandidateFiles"] == ["src/components/HeroStage.tsx"]
+
+
+def test_hero_composite_does_not_follow_unused_canvas_import(
+    tmp_path: Path,
+) -> None:
+    """An imported but unrendered canvas component cannot satisfy the hero."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src" / "components"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(json.dumps({
+        "tag": "body",
+        "children": [{
+            "tag": "section", "class": "hero",
+            "children": [{"tag": "canvas", "children": []}],
+        }],
+    }))
+    (src / "HeroStage.tsx").write_text(
+        'import UnusedCanvas from "./UnusedCanvas";\n'
+        'export default function HeroStage() {\n'
+        '  return <section data-section="hero" />;\n'
+        '}\n'
+    )
+    (src / "UnusedCanvas.tsx").write_text(
+        'export default function UnusedCanvas() { return <canvas />; }\n'
+    )
+
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    artifact = json.loads((ref / "hero-composite.json").read_text())
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert artifact["impl"]["canvas"] is False, artifact
+    assert artifact["implCandidateFiles"] == ["src/components/HeroStage.tsx"]
+
+
 def test_hero_composite_counts_button_across_inline_style_bloat(
     tmp_path: Path,
 ) -> None:
@@ -476,3 +601,78 @@ def test_hero_composite_accepts_css_module_hero_class_marker(
         f"region candidate; got: {art}"
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def _run_canvas_replay_hero_case(
+    tmp_path: Path, *, video_src: str
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    src = impl / "src"
+    ref.mkdir()
+    src.mkdir(parents=True)
+    (ref / "structure.json").write_text(
+        json.dumps({
+            "tag": "body",
+            "children": [{
+                "tag": "section",
+                "class": "hero",
+                "children": [{"tag": "canvas", "children": []}],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (ref / "canvas-replay-plan.json").write_text(
+        json.dumps({
+            "decision": "canvas-replay",
+            "sections": [{
+                "section": "hero",
+                "replayAsset": "public/canvas-replay/hero.webm",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (src / "Hero.tsx").write_text(
+        'export function Hero() {\n'
+        '  return <section data-section="hero">\n'
+        f'    <video src="{video_src}" autoPlay muted loop />\n'
+        '  </section>;\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    script = (
+        _project_root() / "skills" / "visual-debug" / "scripts" / "hero-composite-check.sh"
+    )
+    proc = subprocess.run(
+        ["bash", str(script), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    artifact = json.loads((ref / "hero-composite.json").read_text(encoding="utf-8"))
+    return proc, artifact
+
+
+def test_hero_composite_accepts_declared_canvas_replay_asset_in_hero(
+    tmp_path: Path,
+) -> None:
+    proc, artifact = _run_canvas_replay_hero_case(
+        tmp_path, video_src="/canvas-replay/hero.webm"
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert artifact["canvasReplaySubstituted"] is True
+    assert artifact["missingInImpl"] == []
+
+
+def test_hero_composite_rejects_unrelated_hero_video_as_canvas_replay(
+    tmp_path: Path,
+) -> None:
+    proc, artifact = _run_canvas_replay_hero_case(
+        tmp_path, video_src="/videos/unrelated-promo.webm"
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert artifact["canvasReplaySubstituted"] is False
+    assert artifact["missingInImpl"] == ["canvas"]

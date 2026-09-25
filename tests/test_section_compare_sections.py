@@ -8,6 +8,7 @@ from ui_clone.section_compare_sections import (
     augment_impl_sections_from_section_map,
     build_crop_manifest,
     build_drift_diagnostic,
+    has_grid_layout_mismatch,
     main,
     merge_ref_runtime_sections,
     pair_sections,
@@ -40,6 +41,94 @@ def test_section_compare_system_python_paths_avoid_runtime_pep604_unions() -> No
         f"inside isinstance() crash there: {offenders}"
     )
 
+
+def test_grid_layout_mismatch_ignores_none_but_preserves_real_grid() -> None:
+    no_grid = {"display": "flex", "gridCols": "none"}
+    missing_grid = {"display": "flex", "gridCols": None}
+    real_grid = {"display": "grid", "gridCols": "repeat(3, minmax(0, 1fr))"}
+    matching_grid = {"display": "grid", "gridCols": "1fr 1fr 1fr"}
+
+    assert not has_grid_layout_mismatch(no_grid, missing_grid)
+    assert has_grid_layout_mismatch(real_grid, missing_grid)
+    assert not has_grid_layout_mismatch(real_grid, matching_grid)
+
+
+def test_synthesize_ref_sections_preserves_only_valid_capture_selector() -> None:
+    base = {
+        "index": 0,
+        "tag": "footer",
+        "name": "site-footer",
+        "className": "site-footer shell",
+        "top": 358,
+        "left": 0,
+        "width": 1440,
+        "height": 542,
+    }
+
+    valid = synthesize_ref_sections_from_section_map(
+        {"sections": [{**base, "selector": "footer.site-footer"}]},
+        [],
+        active_view_width=1440,
+    )
+    invalid = synthesize_ref_sections_from_section_map(
+        {"sections": [{**base, "selector": "color: red;"}]},
+        [],
+        active_view_width=1440,
+    )
+
+    assert valid[0]["selector"] == "footer.site-footer"
+    assert "selector" not in invalid[0]
+
+
+
+def test_synthesize_ref_dedupes_section_map_name_alias_runtime_twins() -> None:
+    section_map = {
+        "sections": [
+            {
+                "index": 0,
+                "tag": "header",
+                "name": "framer-hqghb9",
+                "className": "framer-hqghb9",
+                "selector": "header.framer-hqghb9",
+                "top": 0,
+                "left": 410,
+                "width": 620,
+                "height": 84,
+            }
+        ]
+    }
+    semantic_candidates = [
+        {
+            "index": 6,
+            "tag": "header",
+            "id": None,
+            "className": "framer-hqghb9",
+            "rect": {"top": 0, "left": 410, "width": 620, "height": 84},
+            "childCount": 1,
+        }
+    ]
+    runtime_sections = [
+        {
+            "index": 0,
+            "tag": "header",
+            "id": None,
+            "className": "framer-hqghb9",
+            "rect": {"top": 0, "left": 410, "width": 620, "height": 84},
+            "childCount": 1,
+        }
+    ]
+
+    synthesized = synthesize_ref_sections_from_section_map(
+        section_map,
+        semantic_candidates,
+        active_view_width=1440,
+        runtime_sections=runtime_sections,
+    )
+
+    assert len(synthesized) == 1
+    assert synthesized[0]["selector"] == "header.framer-hqghb9"
+    assert synthesized[0]["className"] == "framer-hqghb9"
+    assert synthesized[0]["rect"] == {"top": 0, "left": 410, "width": 620, "height": 84}
 
 def _pair(
     name: str,
@@ -1441,6 +1530,59 @@ def test_merge_ref_runtime_prefers_semantic_row_over_empty_wrapper() -> None:
     )
     assert matches[0]["ref"]["id"] == "content"
     assert matches[0]["impl"]["id"] == "content"
+
+
+def test_merge_ref_runtime_keeps_semantic_measurements_over_live_wrapper() -> None:
+    semantic_groups = [
+        {
+            "name": "footer-columns",
+            "childCount": 2,
+            "containerLeft": 80,
+            "containerWidth": 1280,
+        }
+    ]
+    synthesized = [{
+        **_section_map_row(
+            0,
+            tag="footer",
+            cls="framer-footer",
+            top=358,
+            height=542,
+            width=1440,
+        ),
+        "display": "flex",
+        "childCount": 3,
+        "contentBox": {"boxCount": 3, "left": 0, "width": 1440},
+        "contentGroups": semantic_groups,
+    }]
+    runtime = [{
+        **_impl_row(
+            7,
+            tag="div",
+            cls="framer-footer-container hidden-desktop",
+            top=358,
+            height=542,
+            width=1440,
+        ),
+        "display": "block",
+        "childCount": 1,
+        "contentBox": {"boxCount": 1, "left": 0, "width": 1440},
+        "contentGroups": [{"name": "framer-footer", "childCount": 3}],
+    }]
+
+    merged = merge_ref_runtime_sections(synthesized, runtime)
+
+    assert len(merged) == 1
+    assert merged[0]["tag"] == "footer"
+    assert merged[0]["className"] == "framer-footer"
+    assert merged[0]["display"] == "flex"
+    assert merged[0]["childCount"] == 3
+    assert merged[0]["contentBox"] == {
+        "boxCount": 3,
+        "left": 0,
+        "width": 1440,
+    }
+    assert merged[0]["contentGroups"] == semantic_groups
 
 
 def test_merge_ref_runtime_keeps_materially_inset_single_child_region() -> None:

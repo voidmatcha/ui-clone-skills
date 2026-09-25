@@ -279,6 +279,79 @@ def test_asset_placement_prefers_more_specific_overlapping_flow_section(
     assert artifact["checked"] == 1
 
 
+def test_asset_placement_prefers_dom_owner_over_overlapping_flow_geometry(
+    tmp_path: Path,
+) -> None:
+    """Captured ancestor provenance resolves overlaps that coordinates cannot."""
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src" / "components").mkdir(parents=True)
+    ref.mkdir()
+    asset_types = (
+        "bg-image",
+        "css-mask-image",
+        "video-poster",
+        "pseudo-before-content",
+        "pseudo-after-content",
+    )
+    (ref / "visible-images.json").write_text(json.dumps([
+        {
+            "type": asset_type,
+            "src": f"https://cdn.example.com/assets/{asset_type}.svg",
+            "top": 12994,
+            "ownerSectionClass": "z-33 bg-surface contact",
+        }
+        for asset_type in asset_types
+    ]))
+    (ref / "section-map.json").write_text(json.dumps({
+        "sections": [
+            {
+                "index": 8,
+                "top": 12306,
+                "height": 913,
+                "position": "relative",
+                "className": "z-33 bg-surface contact",
+            },
+            {
+                "index": 9,
+                "id": "site-footer",
+                "top": 12859,
+                "height": 377,
+                "position": "relative",
+                "className": "site-footer",
+            },
+        ]
+    }))
+    (ref / "component-map.json").write_text(json.dumps({
+        "sections": [
+            {"index": 8, "file": "src/components/Z33.tsx"},
+            {"index": 9, "file": "src/components/SiteFooter.tsx"},
+        ]
+    }))
+    (impl / "src" / "components" / "Z33.tsx").write_text(
+        "export const assets = [\n"
+        + "".join(f'  "/assets/{asset_type}.svg",\n' for asset_type in asset_types)
+        + "];\nexport function Z33(){return <section />}\n",
+        encoding="utf-8",
+    )
+    (impl / "src" / "components" / "SiteFooter.tsx").write_text(
+        "export function SiteFooter(){return <footer />}\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(ASSET_PLACEMENT_SCRIPT), str(ref), str(impl)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "asset-placement.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["checked"] == len(asset_types)
+
+
 def test_asset_placement_uses_nested_rect_coordinates_and_section_y(tmp_path: Path) -> None:
     """Extractor output may put image coordinates under rect and section starts under y."""
     ref = tmp_path / "ref"

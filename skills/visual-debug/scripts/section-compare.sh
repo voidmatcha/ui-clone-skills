@@ -914,6 +914,25 @@ is_motion_structural_only_protected() {
   return 1
 }
 
+# Per-section screenshot failure recorded by ui_clone.section_capture in
+# sections/capture-failures.json ({name: {side: error}}). Prints the error
+# text (empty when the section/side captured cleanly or the sidecar is absent).
+capture_failure_reason() {
+  local _cf_name="$1" _cf_side="$2" _cf_file="$DIR/sections/capture-failures.json"
+  [ -s "$_cf_file" ] || return 0
+  python3 - "$_cf_file" "$_cf_name" "$_cf_side" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    data = {}
+row = data.get(sys.argv[2]) if isinstance(data, dict) else None
+reason = row.get(sys.argv[3]) if isinstance(row, dict) else None
+if isinstance(reason, str) and reason.strip():
+    print(" ".join(reason.split()))
+PY
+}
+
 echo "═══ Section-Level Comparison ═══"
 echo "Original: $ORIG_URL"
 echo "Implementation: $IMPL_URL"
@@ -1998,6 +2017,14 @@ if [ "$EXCLUDE_DYNAMIC" = "1" ] && [ "$REUSE_FROZEN_REF" != "1" ]; then
       return Array.from(document.querySelectorAll(selectors)).flatMap((el, index) => {
         const rect = el.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) return [];
+        const ownerChain = [];
+        for (let owner = el; owner && owner !== document.documentElement; owner = owner.parentElement) {
+          ownerChain.push({
+            tag: owner.tagName.toLowerCase(),
+            id: owner.id || null,
+            className: (owner.className?.toString?.() || '').substring(0, 240),
+          });
+        }
         return [{
           index,
           tag: el.tagName.toLowerCase(),
@@ -2007,6 +2034,7 @@ if [ "$EXCLUDE_DYNAMIC" = "1" ] && [ "$REUSE_FROZEN_REF" != "1" ]; then
           left: Math.round((rect.left + window.scrollX) * 100) / 100,
           width: Math.round(rect.width * 100) / 100,
           height: Math.round(rect.height * 100) / 100,
+          ownerChain,
         }];
       });
     } catch (_err) {
@@ -2049,6 +2077,7 @@ SECTION_CAPTURE_REUSE_FROZEN_REF="${REUSE_FROZEN_REF:-0}" \
 SECTION_CAPTURE_SKIP_FINISH="${SKIP_FINISH_ANIMATIONS:-0}" \
 SECTION_CAPTURE_WAIT_SCROLL_SETTLE="${WAIT_SCROLL_SETTLE:-0.5}" \
 SECTION_CAPTURE_DYNAMIC_PAUSE_EXTRA="${DYNAMIC_PAUSE_EXTRA:-}" \
+SECTION_CAPTURE_CANVAS_UNDERLAY="${EXCLUDE_DYNAMIC:-0}" \
 SECTION_CAPTURE_FIXED_OVERLAY_SELECTORS="${SECTION_FIXED_OVERLAY_SELECTORS:-}" \
 SECTION_CAPTURE_REF_CALIB="${SECTION_REF_CALIB:-0}" \
 SECTION_CAPTURE_REF_URL="$ORIG_URL" \
@@ -2056,6 +2085,27 @@ SECTION_CAPTURE_VIEW_W="${VIEW_W:-}" \
 SECTION_CAPTURE_VIEW_H="${VIEW_H:-}" \
 PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
   python3 -m ui_clone.section_capture "$DIR/sections/matches.json" 2>&1
+
+# Canvas pixels are normalized to a deterministic dark underlay during capture.
+# When BOTH sides prove visible DOM text painted above that canvas, section_capture
+# also writes the same reference-anchored foreground ROI. Run the unchanged crop
+# guards over those tight crops; any missing/blank/flat ROI remains fail-closed.
+FOREGROUND_ROI_DIR="$DIR/sections/foreground-roi"
+if [ -d "$FOREGROUND_ROI_DIR/ref" ] && [ -d "$FOREGROUND_ROI_DIR/impl" ]; then
+  cp "$DIR/sections/matches.json" "$FOREGROUND_ROI_DIR/matches.json"
+  # Dynamic-mask coverage is NOT measured for the tight foreground ROI crops
+  # (the ROI is chosen because DOM text paints above the normalized canvas, so
+  # the section-level mask geometry does not describe it). Write the empty
+  # manifest — section_guards treats a missing entry as unmeasured (0.0), so
+  # the >60% masked guard never applies to ROI crops. Behavior is unchanged
+  # from the earlier hard-coded 0.0 rows; this only stops presenting an
+  # unmeasured value as a measured one.
+  echo "{}" > "$FOREGROUND_ROI_DIR/mask-coverage.json"
+  if ! PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m ui_clone.section_guards "$FOREGROUND_ROI_DIR" >/dev/null 2>&1; then
+    rm -f "$FOREGROUND_ROI_DIR/crop-guards.tsv"
+  fi
+fi
 
 # ── batch-13 ITEM 1: ref-instability dynamic-section classification ──
 # Compute each section's REF-OWN frame-to-frame variance (ref vs ref-calib, two
@@ -2112,8 +2162,10 @@ if [ "$SECTION_PERCEPTUAL_DENSE" = "1" ]; then
       echo "  ⛔ ref-screenshot-asset.json status=fail — perceptual pass disabled (screenshot cheat detected)."
     fi
   fi
-  python3 - "$DIR/sections/matches.json" "$DIR/sections/structure-severity.txt" <<'PY' 2>/dev/null || true
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 - "$DIR/sections/matches.json" "$DIR/sections/structure-severity.txt" <<'PY' 2>/dev/null || true
 import json, sys
+from ui_clone.section_compare_sections import has_grid_layout_mismatch
 matches_path, out_path = sys.argv[1], sys.argv[2]
 try:
     matches = json.load(open(matches_path))
@@ -2133,7 +2185,7 @@ for m in matches:
     issues = []
     if ref.get('hasSvgText') and not impl.get('hasSvgText'):
         issues.append('SVG_TEXT_MISSING')
-    if ref.get('gridCols') and not impl.get('gridCols'):
+    if has_grid_layout_mismatch(ref, impl):
         issues.append('LAYOUT_MISMATCH')
     if ref.get('display') != impl.get('display'):
         issues.append('DISPLAY_MISMATCH')
@@ -2267,8 +2319,18 @@ while IFS= read -r _matched_crop_name; do
   if [ -f "$_matched_ref_crop" ]; then
     REF_IMGS+=("$_matched_ref_crop")
   else
-    RESULTS="${RESULTS}| ${_matched_crop_name} | — | — | setup | ❌ FAIL (current matched reference crop missing — recapture required) |\n"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    # section_capture records a per-section screenshot failure instead of
+    # aborting the whole capture. That is a capture-side defect (no reference
+    # evidence), so it lands in the UNMEASURED bucket, not in FAIL.
+    _capture_fail_reason=$(capture_failure_reason "$_matched_crop_name" "ref")
+    if [ -n "$_capture_fail_reason" ]; then
+      UNMEASURED_COUNT=$((UNMEASURED_COUNT + 1))
+      RESULTS="${RESULTS}| ${_matched_crop_name} | — | — | unmeasured | ⚠️ UNMEASURED (ref capture failed: $(printf '%s' "$_capture_fail_reason" | cut -c1-110)) |\n"
+      echo "  ↳ ${_matched_crop_name}: reference screenshot failed — ${_capture_fail_reason}"
+    else
+      RESULTS="${RESULTS}| ${_matched_crop_name} | — | — | setup | ❌ FAIL (current matched reference crop missing — recapture required) |\n"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
   fi
 done < <(
   python3 -c '
@@ -2292,7 +2354,14 @@ for REF_IMG in "${REF_IMGS[@]}"; do
     # rendered (genuinely missing), not a benign skip. Fail it by default so a
     # build that drops whole sections can't pass with FAIL_COUNT==0; set
     # UI_CLONE_ALLOW_MISSING_SECTIONS=1 to downgrade to a non-blocking skip.
-    if [ "${UI_CLONE_ALLOW_MISSING_SECTIONS:-0}" = "1" ]; then
+    _impl_capture_fail_reason=$(capture_failure_reason "$NAME" "impl")
+    if [ -n "$_impl_capture_fail_reason" ]; then
+      # The impl section exists (it was matched) but its screenshot failed:
+      # a capture defect, not evidence that the section is missing.
+      UNMEASURED_COUNT=$((UNMEASURED_COUNT + 1))
+      RESULTS="${RESULTS}| ${NAME} | — | — | unmeasured | ⚠️ UNMEASURED (impl capture failed: $(printf '%s' "$_impl_capture_fail_reason" | cut -c1-110)) |\n"
+      echo "  ↳ ${NAME}: implementation screenshot failed — ${_impl_capture_fail_reason}"
+    elif [ "${UI_CLONE_ALLOW_MISSING_SECTIONS:-0}" = "1" ]; then
       RESULTS="${RESULTS}| ${NAME} | — | — | — | ⚠️ MISSING impl (allowed) |\n"
       SKIP_COUNT=$((SKIP_COUNT + 1))
     else
@@ -2300,6 +2369,19 @@ for REF_IMG in "${REF_IMGS[@]}"; do
       FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     continue
+  fi
+
+  ROI_REF_IMG="$FOREGROUND_ROI_DIR/ref/${NAME}.png"
+  ROI_IMPL_IMG="$FOREGROUND_ROI_DIR/impl/${NAME}.png"
+  ROI_GUARD_FILE="$FOREGROUND_ROI_DIR/crop-guards.tsv"
+  FOREGROUND_ROI_ACTIVE=0
+  if [ -f "$ROI_REF_IMG" ] && [ -f "$ROI_IMPL_IMG" ] && [ -f "$ROI_GUARD_FILE" ]; then
+    ROI_GUARD_ROW=$(awk -F'\t' -v n="$NAME" '$1==n{print; exit}' "$ROI_GUARD_FILE" 2>/dev/null || true)
+    if [ -z "$ROI_GUARD_ROW" ]; then
+      REF_IMG="$ROI_REF_IMG"
+      IMPL_IMG="$ROI_IMPL_IMG"
+      FOREGROUND_ROI_ACTIVE=1
+    fi
   fi
 
   # Skip strict AE for STRUCTURAL_WRAPPER sections (ref has no visible content
@@ -2345,7 +2427,11 @@ for REF_IMG in "${REF_IMGS[@]}"; do
   # Apply policy=all guards before the near-black detector below; otherwise a
   # black impl crop can be counted as a real FAIL and `continue` before the
   # existing guard conversion ever runs.
-  GUARD_ROW=$(awk -F'\t' -v n="$NAME" '$1==n{print; exit}' "$DIR/sections/crop-guards.tsv" 2>/dev/null || true)
+  if [ "$FOREGROUND_ROI_ACTIVE" = "1" ]; then
+    GUARD_ROW=""
+  else
+    GUARD_ROW=$(awk -F'\t' -v n="$NAME" '$1==n{print; exit}' "$DIR/sections/crop-guards.tsv" 2>/dev/null || true)
+  fi
   GUARD_REASON=""
   GUARD_POLICY=""
   GUARD_SOURCE=""
@@ -3068,8 +3154,9 @@ PY
 echo ""
 echo "▸ Structure comparison..."
 
-python3 -c "
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
 import json
+from ui_clone.section_compare_sections import has_grid_layout_mismatch
 
 matches = json.loads(open('$DIR/sections/matches.json').read())
 diffs = []
@@ -3093,7 +3180,7 @@ for m in matches:
         issues.append('SVG_TEXT_EXTRA: impl has SVG text paths, ref does not')
 
     # Check layout system mismatch
-    if ref.get('gridCols') and not impl.get('gridCols'):
+    if has_grid_layout_mismatch(ref, impl):
         issues.append(f'LAYOUT_MISMATCH: ref uses grid ({ref[\"gridCols\"][:40]}), impl does not')
     if ref.get('display') != impl.get('display'):
         issues.append(f'DISPLAY_MISMATCH: ref={ref[\"display\"]}, impl={impl[\"display\"]}')

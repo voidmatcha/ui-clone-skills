@@ -80,15 +80,97 @@ JS=$(cat <<'JS'
   };
 
   const imageMap = new Map();
+  const sectionOwner = (el) => {
+    let owner = null;
+    try {
+      owner = el.closest(
+        'section,footer,header,main,article,[role="region"],[role="main"],[role="banner"],[role="contentinfo"]'
+      );
+    } catch (_) {
+      owner = null;
+    }
+    if (!owner) return {};
+    return {
+      ownerSectionId: owner.id || '',
+      ownerSectionClass: (owner.className && owner.className.toString
+        ? owner.className.toString()
+        : '').slice(0, 80),
+      ownerSectionTag: owner.tagName.toLowerCase(),
+    };
+  };
   const addImage = (entry) => {
     const src = absUrl(entry.src || '');
     if (!src || !/^(https?:|data:image\/|blob:)/i.test(src)) return;
-    const key = `${entry.type || 'image'} ${src} ${entry.top || 0} ${entry.left || 0}`;
+    const key = `${entry.type || 'image'} ${src} ${entry.top || 0} ${entry.left || 0} ${entry.pseudo || ''}`;
     if (!imageMap.has(key)) imageMap.set(key, { ...entry, src });
+  };
+  const imageUrls = (value) => {
+    const urls = [];
+    const urlRe = /url\(["']?([^"')]+)["']?\)/g;
+    let match;
+    while ((match = urlRe.exec(value || '')) !== null) urls.push(match[1]);
+    return urls;
+  };
+  const hasLayoutBox = (rect) => rect.width >= 1 && rect.height >= 1;
+  const visibilityEvidence = (el, style) => {
+    const opacity = parseFloat(style.opacity || '1');
+    let elementPainted = true;
+    try {
+      elementPainted = typeof el.checkVisibility === 'function'
+        ? el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})
+        : style.display !== 'none' && style.visibility !== 'hidden';
+    } catch (_) {
+      elementPainted = style.display !== 'none' && style.visibility !== 'hidden';
+    }
+    return {
+      display: style.display || '',
+      visibility: style.visibility || '',
+      opacity: Number.isFinite(opacity) ? opacity : 1,
+      currentlyPainted: elementPainted
+        && style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && (!Number.isFinite(opacity) || opacity > 0),
+    };
+  };
+  const addComputedImages = (el, style, rect, pseudo = '') => {
+    const common = {
+      element: `${firstClassSelector(el)}${pseudo}`,
+      pseudo: pseudo || undefined,
+      ...visibilityEvidence(el, style),
+      ...sectionOwner(el),
+      ...rectPayload(rect)
+    };
+    for (const src of imageUrls(style.backgroundImage)) {
+      addImage({
+        type: 'bg-image',
+        cssProperty: 'background-image',
+        originalSrc: src,
+        computedValue: style.backgroundImage,
+        src,
+        ...common
+      });
+    }
+    const maskImage = style.maskImage && style.maskImage !== 'none'
+      ? style.maskImage
+      : style.webkitMaskImage;
+    const maskProperty = style.maskImage && style.maskImage !== 'none'
+      ? 'mask-image'
+      : '-webkit-mask-image';
+    for (const src of imageUrls(maskImage)) {
+      addImage({
+        type: 'css-mask-image',
+        cssProperty: maskProperty,
+        originalSrc: src,
+        computedValue: maskImage,
+        src,
+        ...common
+      });
+    }
   };
   document.querySelectorAll('img').forEach((img) => {
     const rect = img.getBoundingClientRect();
-    if (rect.width < 1 || rect.height < 1) return;
+    if (!hasLayoutBox(rect)) return;
+    const style = getComputedStyle(img);
     const src = img.currentSrc || img.src || img.getAttribute('src') || img.dataset.src || img.dataset.lazy || '';
     addImage({
       type: 'image',
@@ -97,23 +179,55 @@ JS=$(cat <<'JS'
       originalSrc: img.getAttribute('src') || '',
       src,
       srcset: img.currentSrc ? (img.getAttribute('srcset') || '') : '',
+      ...visibilityEvidence(img, style),
+      ...sectionOwner(img),
       ...rectPayload(rect)
     });
   });
   const bgUrlRe = /url\(["']?([^"')]+)["']?\)/g;
+  document.querySelectorAll('video[poster]').forEach((video) => {
+    const rect = video.getBoundingClientRect();
+    if (!hasLayoutBox(rect)) return;
+    const style = getComputedStyle(video);
+    addImage({
+      type: 'video-poster',
+      element: firstClassSelector(video),
+      originalSrc: video.getAttribute('poster') || '',
+      src: video.poster || video.getAttribute('poster') || '',
+      ...visibilityEvidence(video, style),
+      ...sectionOwner(video),
+      ...rectPayload(rect)
+    });
+  });
   document.querySelectorAll('*').forEach((el) => {
     const rect = el.getBoundingClientRect();
-    if (rect.width < 50 || rect.height < 50) return;
-    const bg = getComputedStyle(el).backgroundImage || '';
-    if (!bg || bg === 'none' || !bg.includes('url(')) return;
-    let match;
-    while ((match = bgUrlRe.exec(bg)) !== null) {
-      addImage({
-        type: 'bg-image',
-        element: firstClassSelector(el),
-        src: match[1],
-        ...rectPayload(rect)
-      });
+    if (!hasLayoutBox(rect)) return;
+    const style = getComputedStyle(el);
+    addComputedImages(el, style, rect);
+    for (const pseudo of ['::before', '::after']) {
+      let pseudoStyle;
+      try {
+        pseudoStyle = getComputedStyle(el, pseudo);
+      } catch (_) {
+        continue;
+      }
+      const pseudoContent = String(pseudoStyle.content || '').trim();
+      if (!pseudoContent || pseudoContent === 'none' || pseudoContent === 'normal') continue;
+      addComputedImages(el, pseudoStyle, rect, pseudo);
+      for (const src of imageUrls(pseudoContent)) {
+        addImage({
+          type: `pseudo-${pseudo.slice(2)}-content`,
+          cssProperty: 'content',
+          element: `${firstClassSelector(el)}${pseudo}`,
+          pseudo,
+          originalSrc: src,
+          computedValue: pseudoContent,
+          src,
+          ...visibilityEvidence(el, pseudoStyle),
+          ...sectionOwner(el),
+          ...rectPayload(rect)
+        });
+      }
     }
   });
 
@@ -332,7 +446,7 @@ visible_payload = {
     "summary": {"count": len(images)},
 }
 if not images:
-    visible_payload["note"] = "No visible <img> or CSS background-image assets observed during Step 2.5 extraction."
+    visible_payload["note"] = "No DOM-bound image assets with layout boxes observed during Step 2.5 extraction."
 _write_json(ref_dir / "visible-images.json", visible_payload)
 
 variables = _extract_variables(sorted(css_dir.glob("*.css")))

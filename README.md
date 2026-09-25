@@ -165,7 +165,7 @@ The off-pipeline Stop guard combines external browsing with HTML, CSS, or compon
 
 ## Documentation
 
-The three routing skills stay compact and load 51 focused sub-docs only when a pipeline step needs them. Start with the task-level pages, then open operational contracts when you need exact commands or gate behavior.
+The three routing skills stay compact and load 59 focused sub-docs only when a pipeline step needs them. Start with the task-level pages, then open operational contracts when you need exact commands or gate behavior.
 
 - [Installation and host setup](./README_detail/install.md)
 - [Full reverse-engineering pipeline](./README_detail/ui-reverse-engineering.md)

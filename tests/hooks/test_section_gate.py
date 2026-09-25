@@ -696,6 +696,99 @@ class TestSectionGate:
         assert "continuation state" not in reason
         assert "CronCreate" not in reason
 
+    def test_denied_croncreate_releases_stop_for_manual_handback(
+        self, tmp_path: Path
+    ) -> None:
+        ref_dir = self._arm_for_ref(tmp_path)
+        receipt = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert receipt is not None
+        transcript = tmp_path / "session.jsonl"
+        tool_use_id = "toolu_denied_cron"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": receipt["createdAt"],
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": tool_use_id,
+                                "name": "CronCreate",
+                                "input": cc.cron_create_input(receipt),
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": receipt["createdAt"],
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "is_error": True,
+                                "content": (
+                                    "Permission for this action was denied by the Claude Code "
+                                    "auto mode classifier. Reason: [Unauthorized Persistence]."
+                                ),
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n"
+        )
+        set_active_marker(ref_dir)
+        mark_ref_session(ref_dir, self.SESSION_ID, source="test")
+
+        result = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": self.SESSION_ID,
+                    "transcript_path": str(transcript),
+                }
+            ),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_CLONE_HOOK_HOST": "claude",
+            },
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+        assert "manual handback" in result.stderr
+        assert "do not retry CronCreate" in result.stderr
+        current = cc.load_receipt(tmp_path, self.SESSION_ID)
+        assert current is not None
+        assert current["state"] == cc.STATE_UNSUPPORTED
+        assert current["reason"] == "CronCreate permission denied by host auto mode"
+
+        repeated = run_hook(
+            self.MODULE,
+            stdin_data=json.dumps(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": self.SESSION_ID,
+                    "transcript_path": str(transcript),
+                }
+            ),
+            env={
+                "CLAUDE_PROJECT_DIR": str(tmp_path),
+                "UI_CLONE_HOOK_HOST": "claude",
+            },
+        )
+        assert repeated.returncode == 0
+        assert repeated.stdout.strip() == ""
+        assert "remains disabled" in repeated.stderr
+        assert "CronCreate exactly once" not in repeated.stderr
+
     def test_running_receipt_adopts_exact_existing_one_shot_without_recreating(
         self, tmp_path: Path
     ) -> None:

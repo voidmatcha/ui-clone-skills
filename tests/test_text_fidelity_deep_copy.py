@@ -303,6 +303,77 @@ def test_typescript_generics_are_not_scanned_as_jsx_text(
     assert result["fabrications_count"] == 0
 
 
+def test_data_attribute_suffixes_are_not_scanned_as_copy(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "dom-scaffold.json").write_text(
+        json.dumps({"tree": {"tag": "main", "children": []}}),
+        encoding="utf-8",
+    )
+    (impl / "src" / "App.tsx").write_text(
+        "export default function App() {\n"
+        "  return (\n"
+        '    <div data-framer-name="Logo + Menu" data-label="Join button" '
+        'data-title="Variant 1" />\n'
+        "  );\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["status"] == "pass"
+    assert result["total_meaningful_strings"] == 0
+    assert result["fabrications_count"] == 0
+
+
+def test_standalone_text_props_remain_fabrication_evidence(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    impl = tmp_path / "impl"
+    (impl / "src").mkdir(parents=True)
+    ref.mkdir()
+    (ref / "dom-scaffold.json").write_text(
+        json.dumps({"tree": {"tag": "main", "children": []}}),
+        encoding="utf-8",
+    )
+    (impl / "src" / "App.tsx").write_text(
+        "function Card(_: Record<string, string>) { return null; }\n"
+        "export default function App() {\n"
+        '  return <Card name="Invented card name" label="Invented card label" '
+        'description="Invented card description" />;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(ref), str(impl)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["status"] == "fail"
+    assert result["fabrications_count"] == 3
+    assert {row["text"] for row in result["fabrications"]} == {
+        "Invented card name",
+        "Invented card label",
+        "Invented card description",
+    }
+
+
 def test_cjk_copy_split_by_br_reconstructs_required_aggregate(
     tmp_path: Path,
 ) -> None:

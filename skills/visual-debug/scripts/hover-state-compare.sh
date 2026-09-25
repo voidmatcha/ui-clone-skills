@@ -1507,7 +1507,9 @@ hover_expected() {
 affected_selector_for_hover() {  # <activation-selector>
   python3 - "$REF_DIR/transition-spec.json" "$HOVER_CSS" "$1" <<'PY'
 import json
+import hashlib
 import sys
+from pathlib import Path
 
 spec_path, hover_css_path, activation = sys.argv[1:4]
 
@@ -1520,12 +1522,101 @@ def load(path):
 def selectors(raw):
     return [part.strip() for part in str(raw or "").split(",") if part.strip()]
 
+def candidate_key(row):
+    if not isinstance(row, dict):
+        return None
+    trigger = str(row.get("triggerType") or "").strip().lower()
+    selector = " ".join(str(row.get("selector") or "").split())
+    if trigger != "hover" or not selector:
+        return None
+    return trigger, selector
+
+def input_fingerprint(ref_dir):
+    inputs = (
+        "hover-css-rules.json",
+        "structure.json",
+        "states/hover/summary.json",
+        "states/hover/manifest.json",
+    )
+    digest = hashlib.sha256()
+    for relative in inputs:
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        path = ref_dir / relative
+        if not path.is_file():
+            return "", inputs
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            return "", inputs
+        digest.update(b"present\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}", inputs
+
+def has_fresh_measured_absence(ref_dir, selector):
+    """Trust only the producer's freshness-bound negative receipt.
+
+    This suppresses re-deriving a nonexistent affected descendant. It does
+    not remove the activation from hover measurement.
+    """
+    regions = load(ref_dir / "regions.json")
+    summary = load(ref_dir / "capture-region-artifacts-summary.json")
+    fingerprint, inputs = input_fingerprint(ref_dir)
+    if not fingerprint or not isinstance(regions, dict) or not isinstance(summary, dict):
+        return False
+    if not (
+        regions.get("source") == "scripts/extract/capture-region-artifacts.py"
+        and set(regions.get("derivedFrom") or []) == set(inputs)
+        and regions.get("autoCandidateInputFingerprint") == fingerprint
+        and summary.get("status") == "pass"
+        and summary.get("autoSpec") is True
+        and summary.get("autoCandidateInputFingerprint") == fingerprint
+    ):
+        return False
+
+    key = ("hover", " ".join(selector.split()))
+    resolved = regions.get("resolvedAutoCandidates")
+    attempted = summary.get("attempted")
+    skipped = summary.get("skipped")
+    captured = summary.get("captured")
+    unsupported = summary.get("unsupported")
+    counts = summary.get("counts")
+    if not all(isinstance(rows, list) for rows in (resolved, attempted, skipped, captured, unsupported)):
+        return False
+    if not isinstance(counts, dict) or any(
+        counts.get(name) != len(rows)
+        for name, rows in (
+            ("attempted", attempted),
+            ("captured", captured),
+            ("skipped", skipped),
+            ("unsupported", unsupported),
+        )
+    ):
+        return False
+    if key not in {candidate_key(row) for row in resolved}:
+        return False
+    if key not in {candidate_key(row) for row in attempted}:
+        return False
+    if key in {candidate_key(row) for row in captured + unsupported}:
+        return False
+    return any(
+        candidate_key(row) == key
+        and row.get("resolution") == "absence-measured"
+        and row.get("autoCandidateInputFingerprint") == fingerprint
+        and candidate_key(row.get("candidateKey")) == key
+        for row in skipped
+        if isinstance(row, dict)
+    )
+
 spec = load(spec_path)
+spec_claims_activation = False
 for item in spec.get("transitions") or []:
     if not isinstance(item, dict):
         continue
     if activation not in selectors(item.get("target")):
         continue
+    spec_claims_activation = True
     if str(item.get("affectedTargetAbsent") or "").strip():
         # The bridge measured this rule's descendant as rendered nowhere and
         # observed the activation in its own right. Falling through to
@@ -1537,6 +1628,11 @@ for item in spec.get("transitions") or []:
     if affected and affected != activation:
         print(affected)
         raise SystemExit(0)
+
+# A later authored/promoted positive transition is authoritative. Only use a
+# negative receipt when transition-spec has no positive activation obligation.
+if not spec_claims_activation and has_fresh_measured_absence(Path(spec_path).parent, activation):
+    raise SystemExit(0)
 
 hover_css = load(hover_css_path)
 rules = hover_css if isinstance(hover_css, list) else hover_css.get("rules") or []
@@ -1599,7 +1695,14 @@ if command -v jq >/dev/null 2>&1; then
       "$HOVER_CSS" 2>/dev/null >> "$TARGETS_FILE" || true
   fi
   jq -r '
-    [.. | objects | select(.triggerType? | type == "string") | select(.triggerType | test("[Hh]over"))]
+    def region_entries:
+      if type == "object" then
+        (if (.triggerType? | type == "string") then . else empty end),
+        (to_entries[] | select(.key != "resolvedAutoCandidates") | .value | region_entries)
+      elif type == "array" then .[] | region_entries
+      else empty
+      end;
+    [region_entries | select(.triggerType | test("[Hh]over"))]
     | .[]
     | "\(.name // .triggerType)\t\(.triggerType)\t\(.selector)"
   ' "$REGIONS" >> "$TARGETS_FILE" 2>/dev/null || true

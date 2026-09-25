@@ -85,7 +85,12 @@ def walk_regions(node: Any) -> list[dict[str, Any]]:
     if isinstance(node, dict):
         if isinstance(node.get("triggerType"), str):
             out.append(node)
-        for value in node.values():
+        for key, value in node.items():
+            # Measured-negative auto candidates are provenance receipts for
+            # retired candidates, not regions that still require captures.
+            # Keep this aligned with ui_clone.gates.reference._region_entries.
+            if key == "resolvedAutoCandidates":
+                continue
             out.extend(walk_regions(value))
     elif isinstance(node, list):
         for value in node:

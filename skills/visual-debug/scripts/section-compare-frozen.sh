@@ -123,6 +123,8 @@ for _pass1_attempt in 1 2; do
   _pass1_last_log="$OUT_DIR/sections/section-compare-frozen-pass1-attempt${_pass1_attempt}.log"
   set +e
   EXCLUDE_DYNAMIC="$EXCLUDE_DYNAMIC" RECATCH_REF=1 SECTION_SKIP_IMPL_RESIZE=1 \
+    SECTION_CAPTURE_IMPL_IS_REFERENCE=1 \
+    SECTION_CAPTURE_REQUIRE_SCROLL_CAP_NORMALIZED=1 \
     bash "$SECTION_COMPARE" "$REF_URL" "$REF_URL" "$_pass1_session" "$OUT_DIR" \
     >"$_pass1_last_log" 2>&1
   _pass1_rc=$?
@@ -179,6 +181,37 @@ _promote_impl_path_ref() {  # <sections-dir>
     cp "$section_dir/impl-scroll-positions.json" \
       "$section_dir/ref-scroll-positions.json"
   fi
+  if [ -s "$section_dir/capture-failures.json" ]; then
+    # The promoted crops were captured on the impl side; carry their
+    # per-section screenshot failures over as reference failures.
+    python3 - "$section_dir/capture-failures.json" <<'PY' || true
+import json, sys
+path = sys.argv[1]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    raise SystemExit(0)
+out = {}
+for name, sides in data.items():
+    if isinstance(sides, dict) and isinstance(sides.get("impl"), str):
+        out[name] = {"ref": sides["impl"]}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(out, fh, indent=2)
+    fh.write("\n")
+PY
+  fi
+  if [ -d "$section_dir/foreground-roi/impl" ]; then
+    rm -rf "$section_dir/foreground-roi/ref"
+    mkdir -p "$section_dir/foreground-roi/ref"
+    cp "$section_dir/foreground-roi/impl/"*.png \
+      "$section_dir/foreground-roi/ref/" 2>/dev/null || true
+  fi
+  if [ -s "$section_dir/impl-foreground-rois.json" ]; then
+    cp "$section_dir/impl-foreground-rois.json" \
+      "$section_dir/ref-foreground-rois.json"
+  fi
   if [ -s "$section_dir/impl-semantic-candidates.json" ]; then
     cp "$section_dir/impl-semantic-candidates.json" \
       "$section_dir/ref-semantic-candidates.json"
@@ -212,6 +245,8 @@ done
 _calib_session="$(_internal_session cal)"
 set +e
 EXCLUDE_DYNAMIC="$EXCLUDE_DYNAMIC" RECATCH_REF=0 SECTION_SKIP_IMPL_RESIZE=1 \
+  SECTION_CAPTURE_IMPL_IS_REFERENCE=1 \
+  SECTION_CAPTURE_REQUIRE_SCROLL_CAP_NORMALIZED=1 \
   bash "$SECTION_COMPARE" "$REF_URL" "$REF_URL" "$_calib_session" "$OUT_DIR" \
   >/dev/null 2>&1
 _calib_rc=$?

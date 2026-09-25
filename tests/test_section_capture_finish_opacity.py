@@ -29,12 +29,15 @@ from ui_clone.section_capture import _finish_js
 
 HARNESS = """
 const els = [
-  mk("css-gated", "transform: translate3d(-2.8px, -2.3px, 0px);", ""),
-  mk("inline-midflight", "transform: translate3d(1px, 1px, 0px); opacity: 0.9995;", "0.9995"),
-  mk("inline-hidden", "transform: translate3d(1px, 1px, 0px); opacity: 0;", "0"),
+  mk("css-gated", "transform: translate3d(-2.8px, -2.3px, 0px);", "", "translate3d(-2.8px, -2.3px, 0px)"),
+  mk("inline-midflight", "transform: translate3d(1px, 1px, 0px); opacity: 0.9995;", "0.9995", "translate3d(1px, 1px, 0px)"),
+  mk("inline-hidden", "transform: translate3d(1px, 1px, 0px); opacity: 0;", "0", "translate3d(1px, 1px, 0px)"),
+  mk("base-transform", "transform: translateX(-50%%) translate3d(2px, -3px, 0px); opacity: 0.9995;", "0.9995", "translateX(-50%%) translate3d(2px, -3px, 0px)"),
+  mk("large-translation", "transform: scale(1) translate3d(20px, 0px, 0px); opacity: 0.9995;", "0.9995", "scale(1) translate3d(20px, 0px, 0px)"),
+  mk("attr-fallback", "transform: rotate(2deg) translate3d(1px, 1px, 0px); opacity: 0.9995;", "0.9995", ""),
 ];
-function mk(name, attr, op) {
-  return { name, _attr: attr, style: { opacity: op, transform: "" },
+function mk(name, attr, op, transform) {
+  return { name, _attr: attr, style: { opacity: op, transform: transform },
            getAttribute: function () { return this._attr; } };
 }
 globalThis.window = globalThis;
@@ -43,11 +46,11 @@ globalThis.document = {
   querySelectorAll: (sel) => (String(sel).indexOf("translate3d") >= 0 ? els : []),
 };
 %(FINISH)s;
-console.log(JSON.stringify(els.map((e) => ({ name: e.name, opacity: e.style.opacity }))));
+console.log(JSON.stringify(els.map((e) => ({ name: e.name, opacity: e.style.opacity, transform: e.style.transform }))));
 """
 
 
-def _run_finish_js() -> dict[str, str]:
+def _run_finish_js() -> dict[str, dict[str, str]]:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is required to execute the capture fast-forward JS")
@@ -58,18 +61,38 @@ def _run_finish_js() -> dict[str, str]:
         timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
-    return {row["name"]: row["opacity"] for row in json.loads(proc.stdout.strip())}
+    return {row["name"]: row for row in json.loads(proc.stdout.strip())}
 
 
 def test_finish_js_does_not_inject_opacity_on_stylesheet_gated_element() -> None:
     """The pyramid `.food` class: inline transform, no inline opacity."""
-    assert _run_finish_js()["css-gated"] == ""
+    assert _run_finish_js()["css-gated"]["opacity"] == ""
 
 
 def test_finish_js_still_snaps_a_declared_inline_opacity_to_one() -> None:
     """A genuinely mid-flight framer element keeps being fast-forwarded."""
-    assert _run_finish_js()["inline-midflight"] == "1"
+    row = _run_finish_js()["inline-midflight"]
+    assert row["opacity"] == "1"
+    assert row["transform"] == "translate3d(0px, 0px, 0px)"
 
 
 def test_finish_js_leaves_an_inline_hidden_element_hidden() -> None:
-    assert _run_finish_js()["inline-hidden"] == "0"
+    assert _run_finish_js()["inline-hidden"]["opacity"] == "0"
+
+
+def test_finish_js_preserves_authored_base_transform_functions() -> None:
+    row = _run_finish_js()["base-transform"]
+    assert row["opacity"] == "1"
+    assert row["transform"] == "translateX(-50%) translate3d(0px, 0px, 0px)"
+
+
+def test_finish_js_does_not_snap_large_translate3d_motion() -> None:
+    row = _run_finish_js()["large-translation"]
+    assert row["opacity"] == "0.9995"
+    assert row["transform"] == "scale(1) translate3d(20px, 0px, 0px)"
+
+
+def test_finish_js_preserves_transform_when_style_object_lacks_parsed_value() -> None:
+    row = _run_finish_js()["attr-fallback"]
+    assert row["opacity"] == "1"
+    assert row["transform"] == "rotate(2deg) translate3d(0px, 0px, 0px)"

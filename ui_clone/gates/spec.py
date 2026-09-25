@@ -787,14 +787,43 @@ def _token_present(token: str, captured: set[str]) -> bool:
     return any(c == token or c.startswith(token + "__") for c in captured)
 
 
+def _dom_tokens_from_html(html: str) -> tuple[set[str], set[str]]:
+    from html.parser import HTMLParser
+
+    class Tokens(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.classes: set[str] = set()
+            self.ids: set[str] = set()
+            self.template_depth = 0
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag == "template":
+                self.template_depth += 1
+            if self.template_depth:
+                return
+            for name, value in attrs:
+                if name == "class" and value:
+                    self.classes.update(value.split())
+                elif name == "id" and value:
+                    self.ids.add(value)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "template" and self.template_depth:
+                self.template_depth -= 1
+
+    parser = Tokens()
+    parser.feed(html)
+    parser.close()
+    return parser.classes, parser.ids
+
+
 def _captured_splash_dom_tokens(ref_dir: Path) -> list[tuple[set[str], set[str]]]:
     """Read recorded splash DOM snapshots, never spec-authored subtree claims.
 
     Each snapshot stays separate: tokens from different moments must not jointly
     invent a target. Paths are fixed capture outputs and confined to this ref.
     """
-    from html.parser import HTMLParser
-
     from ui_clone.evidence_validation import load_strict_json_file
 
     root = ref_dir.resolve()
@@ -822,28 +851,6 @@ def _captured_splash_dom_tokens(ref_dir: Path) -> list[tuple[set[str], set[str]]
     if not times:
         return []
 
-    class Tokens(HTMLParser):
-        def __init__(self) -> None:
-            super().__init__()
-            self.classes: set[str] = set()
-            self.ids: set[str] = set()
-            self.template_depth = 0
-
-        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-            if tag == "template":
-                self.template_depth += 1
-            if self.template_depth:
-                return
-            for name, value in attrs:
-                if name == "class" and value:
-                    self.classes.update(value.split())
-                elif name == "id" and value:
-                    self.ids.add(value)
-
-        def handle_endtag(self, tag: str) -> None:
-            if tag == "template" and self.template_depth:
-                self.template_depth -= 1
-
     snapshots: list[tuple[set[str], set[str]]] = []
     for name in [*(f"{ts}ms.json" for ts in sorted(times)), "settled.json"]:
         data = load(splash / name)
@@ -852,10 +859,64 @@ def _captured_splash_dom_tokens(ref_dir: Path) -> list[tuple[set[str], set[str]]
         expected_ts = max(times) if name == "settled.json" else int(name.removesuffix("ms.json"))
         if data["ts_ms"] != expected_ts or not isinstance(data.get("outerHTML"), str):
             continue
-        parser = Tokens()
-        parser.feed(data["outerHTML"])
-        parser.close()
-        snapshots.append((parser.classes, parser.ids))
+        snapshots.append(_dom_tokens_from_html(data["outerHTML"]))
+    return snapshots
+
+
+def _captured_scroll_dom_tokens(ref_dir: Path) -> list[tuple[set[str], set[str]]]:
+    """Read canonical scroll DOM snapshots recorded by capture-scroll.sh.
+
+    The trajectory chooses fixed ``<pct>pct.json`` outputs; snapshot metadata
+    must match the corresponding trajectory row. Each DOM remains separate so
+    tokens captured at different scroll positions cannot invent a selector.
+    """
+    from ui_clone.evidence_validation import load_strict_json_file
+
+    root = ref_dir.resolve()
+    scroll = ref_dir / "states" / "scroll"
+
+    def load(path: Path) -> Any:
+        try:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root) or not resolved.is_file():
+                return None
+            return load_strict_json_file(resolved)
+        except (OSError, ValueError, RuntimeError):
+            return None
+
+    summary = load(scroll / "summary.json")
+    trajectory = load(scroll / "trajectory.json")
+    if not isinstance(summary, dict) or summary.get("checked") is not True:
+        return []
+    if not isinstance(trajectory, list) or not trajectory:
+        return []
+
+    snapshots: list[tuple[set[str], set[str]]] = []
+    seen_pcts: set[int] = set()
+    for row in trajectory:
+        if not isinstance(row, dict):
+            return []
+        pct = row.get("pct")
+        scroll_y = row.get("scrollY")
+        if (
+            type(pct) is not int
+            or not 0 <= pct <= 100
+            or pct in seen_pcts
+            or isinstance(scroll_y, bool)
+            or not isinstance(scroll_y, int | float)
+            or scroll_y < 0
+        ):
+            return []
+        seen_pcts.add(pct)
+        data = load(scroll / f"{pct}pct.json")
+        if (
+            not isinstance(data, dict)
+            or data.get("pct") != pct
+            or data.get("scrollY") != scroll_y
+            or not isinstance(data.get("outerHTML"), str)
+        ):
+            return []
+        snapshots.append(_dom_tokens_from_html(data["outerHTML"]))
     return snapshots
 
 
@@ -867,8 +928,9 @@ def _check_spec_selectors_present_in_dom(
     selector that targets a SUBPAGE (mined from minified JS), not this capture.
     Such a target survives the syntax check, then fails far downstream at
     transition-fires ("element not found") after a full generate. Validate the
-    settled structure plus recorded splash DOM snapshots, because real intro
-    targets can unmount before structure.json is captured.
+    settled structure plus recorded splash and scroll DOM snapshots, because
+    real targets can unmount before structure.json is captured or mount only
+    after scrolling.
 
     Conservative by construction: only class/id identifiers are checked (they are
     reliably captured); tag-only and attribute-only targets are skipped; and
@@ -946,7 +1008,10 @@ def _check_spec_selectors_present_in_dom(
     transitions = spec.get("transitions")
     transitions = transitions if isinstance(transitions, list) else []
     absent: list[tuple[str, str]] = []
-    splash_snapshots = _captured_splash_dom_tokens(self.ref_dir)
+    state_snapshots = [
+        *_captured_splash_dom_tokens(self.ref_dir),
+        *_captured_scroll_dom_tokens(self.ref_dir),
+    ]
     for i, t in enumerate(transitions):
         if not isinstance(t, dict) or _is_stub_entry(t):
             continue
@@ -960,7 +1025,7 @@ def _check_spec_selectors_present_in_dom(
             continue  # tag-only / attr-only — not reliably checkable
         if not _selector_present(cleaned, classes, ids) and not any(
             _selector_present(cleaned, state_classes, state_ids)
-            for state_classes, state_ids in splash_snapshots
+            for state_classes, state_ids in state_snapshots
         ):
             absent.append((str(t.get("id", f"#{i}")), target))
 
@@ -973,7 +1038,7 @@ def _check_spec_selectors_present_in_dom(
             "spec-selectors-present-in-dom",
             "fail",
             f"{len(absent)} transition-spec target(s) reference class/id selectors absent "
-            f"from the captured homepage DOM (structure.json and recorded splash snapshots): {sample}{extra}. Each will "
+            f"from the captured homepage DOM (structure.json and recorded state snapshots): {sample}{extra}. Each will "
             "fail downstream at transition-fires ('element not found') after a full generate, "
             "so it must be resolved now, at spec time. For each: (1) if the target is a "
             "same-page node that mounts only after an interaction (hover/tab/scroll), re-capture "

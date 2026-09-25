@@ -1693,6 +1693,13 @@ def _continuation_stop_prefix(
                 session_id,
                 _continuation.UI_RE_SKILL,
             )
+        if _continuation.is_croncreate_denied(receipt):
+            raise _ContinuationArmedRelease(
+                "⏸ UI-RE automatic continuation remains disabled; manual handback\n\n"
+                "The host previously denied this receipt's exact CronCreate request. "
+                "Do not retry it. The clone remains incomplete and waits for an explicit "
+                "user request to continue the pipeline manually.\n\n"
+            )
         if receipt.get("state") in {
             _continuation.STATE_COMPLETE,
             _continuation.STATE_TERMINAL,
@@ -1712,6 +1719,24 @@ def _continuation_stop_prefix(
             if receipt is None:
                 raise _continuation.ContinuationError(
                     "receipt disappeared during cron reconciliation"
+                )
+        if receipt.get("state") == _continuation.STATE_ARMING and payload is not None:
+            denial_reason = _continuation.croncreate_denial_reason(
+                payload.get("transcript_path"),
+                receipt,
+            )
+            if denial_reason is not None:
+                _continuation.mark_unsupported(
+                    project_root,
+                    session_id,
+                    denial_reason,
+                )
+                raise _ContinuationArmedRelease(
+                    "⏸ UI-RE automatic continuation denied; manual handback\n\n"
+                    "The host denied the exact owned CronCreate request. Automatic "
+                    "continuation is disabled for this receipt; do not retry CronCreate "
+                    "or change permissions from the agent. The clone remains incomplete, "
+                    "and a later explicit user request may continue the pipeline manually.\n\n"
                 )
     except _continuation.ContinuationError as exc:
         if "duplicate" in str(exc).lower():

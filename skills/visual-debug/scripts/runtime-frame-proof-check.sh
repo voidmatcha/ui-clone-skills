@@ -289,14 +289,53 @@ agent-browser --session "$PROBE_SESSION" eval '
   // canvas-replay video whose currentTime advances renders the reference
   // OWN recorded motion, so a 0-canvas hero is NOT blank.
   const videos = Array.from(document.querySelectorAll("video")).filter(visible);
+  const intersectsViewport = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
+  };
+  const playbackEligible = (video) =>
+    video.muted || video.defaultMuted || video.hasAttribute("muted");
+
+  // Intersection-driven players can be laid out correctly but remain paused
+  // until they enter the viewport. Stimulate that state before the baseline
+  // sample only for a video-only surface with no eligible video already in
+  // view. Gesture-gated video and canvas/Lottie probes keep their old path.
+  const eligibleVideos = videos.filter(playbackEligible);
+  const hasCanvasOrLottieSurface =
+    canvases.length > 0 || lottieBefore.some((sample) => sample.hasInstance);
+  let videoViewportStimulated = false;
+  let videoStimulatedSrc = "";
+  if (
+    !hasCanvasOrLottieSurface &&
+    eligibleVideos.length > 0 &&
+    !eligibleVideos.some(intersectsViewport)
+  ) {
+    const candidate = eligibleVideos[0];
+    candidate.scrollIntoView({ block: "center", inline: "nearest" });
+    window.dispatchEvent(new Event("scroll"));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await inRAF(() => null);
+    videoViewportStimulated = intersectsViewport(candidate);
+    videoStimulatedSrc = candidate.currentSrc || candidate.src || "";
+  }
+
   const sampleVideo = (v) => {
     const r = v.getBoundingClientRect();
+    const scopeTokens = [];
+    for (let el = v; el && el !== document.documentElement; el = el.parentElement) {
+      for (const value of [el.id, el.getAttribute("data-section"), el.getAttribute("data-testid")]) {
+        if (value) scopeTokens.push(value);
+      }
+      if (el.classList) scopeTokens.push(...el.classList);
+    }
     return {
+      src: v.currentSrc || v.src || "",
       currentTime: v.currentTime || 0,
       paused: !!v.paused,
       readyState: v.readyState || 0,
       w: Math.round(r.width),
       h: Math.round(r.height),
+      scopeTokens: Array.from(new Set(scopeTokens)),
     };
   };
   const videoBefore = videos.map(sampleVideo);
@@ -314,10 +353,16 @@ agent-browser --session "$PROBE_SESSION" eval '
   await new Promise(r => setTimeout(r, 1500));
 
   const videoAfter = videos.map(sampleVideo);
-  const videoAdvanced = videoBefore.filter((b, i) => {
+  const videoDidAdvance = (b, i) => {
     const a = videoAfter[i] || {};
     return (a.currentTime || 0) - (b.currentTime || 0) > 0.05 && a.w > 10 && a.h > 10;
-  }).length;
+  };
+  const videoSamples = videoBefore.map((sample, i) => ({
+    src: sample.src,
+    advanced: videoDidAdvance(sample, i),
+    scopeTokens: sample.scopeTokens,
+  }));
+  const videoAdvanced = videoSamples.filter(sample => sample.advanced).length;
 
   const canvasAfter = canvases.map((c, i) => {
     try {
@@ -383,6 +428,9 @@ agent-browser --session "$PROBE_SESSION" eval '
     lottieAdvanced,
     videoTotal: videos.length,
     videoAdvanced,
+    videoSamples,
+    videoViewportStimulated,
+    videoStimulatedSrc,
     canvasBefore, canvasAfter,
     webglBefore, webglAfter,
     lottieBefore, lottieAfter,
@@ -397,6 +445,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 out_path, probe_path, impl_url = sys.argv[1:4]
 
@@ -430,6 +479,9 @@ lottie_inst = int(probe.get("lottieInstances", 0))
 lottie_adv = int(probe.get("lottieAdvanced", 0))
 video_total = int(probe.get("videoTotal", 0))
 video_adv = int(probe.get("videoAdvanced", 0))
+video_samples = probe.get("videoSamples", [])
+video_viewport_stimulated = bool(probe.get("videoViewportStimulated", False))
+video_stimulated_src = str(probe.get("videoStimulatedSrc", ""))
 video_frame_proof_kind = ""
 
 
@@ -443,12 +495,58 @@ def _load_replay_plan() -> dict | None:
         return None
 
 
-def _replay_satisfies_blank_hero(plan, video_advanced) -> bool:
-    """Mirror of ui_clone.policies.canvas_replay_auto.replay_satisfies_blank_hero
-    (inlined so the gate has no import dependency on the package path)."""
-    if not isinstance(plan, dict) or plan.get("decision") != "canvas-replay":
+def _normalized_asset_path(value: object) -> str:
+    raw = str(value or "").strip()
+    parsed = urlsplit(raw)
+    path = unquote(parsed.path if parsed.scheme or parsed.netloc else raw.split("?", 1)[0].split("#", 1)[0])
+    return path.lstrip("/").removeprefix("public/")
+
+
+def _sample_is_in_declared_scope(sample: dict, section: dict) -> bool:
+    declared = str(section.get("section", "")).strip().lower()
+    if not declared:
         return False
-    return int(video_advanced or 0) > 0
+    tokens = {str(token).strip().lower() for token in sample.get("scopeTokens", [])}
+    if declared in tokens:
+        return True
+    return "hero" in declared and any("hero" in token for token in tokens)
+
+
+def _declared_advancing_replay_assets(plan: object, samples: object) -> list[str]:
+    """Return every declared replay path only when each section is satisfied.
+
+    Aggregate video advancement and partial multi-section coverage cannot prove
+    replay. Malformed or empty section declarations fail closed.
+    """
+    if not isinstance(plan, dict) or plan.get("decision") != "canvas-replay":
+        return []
+    if not isinstance(samples, list):
+        return []
+    sections = plan.get("sections")
+    if not isinstance(sections, list) or not sections:
+        return []
+    matched_assets: list[str] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            return []
+        if not str(section.get("section", "")).strip():
+            return []
+        declared_asset = _normalized_asset_path(section.get("replayAsset"))
+        if not declared_asset:
+            return []
+        matched = False
+        for sample in samples:
+            if not isinstance(sample, dict) or not sample.get("advanced"):
+                continue
+            if _normalized_asset_path(sample.get("src")) != declared_asset:
+                continue
+            if _sample_is_in_declared_scope(sample, section):
+                matched = True
+                break
+        if not matched:
+            return []
+        matched_assets.append(declared_asset)
+    return matched_assets
 
 def ref_has_real_canvas() -> bool:
     """True only when the ref artifact carries genuine canvas/WebGL evidence:
@@ -492,6 +590,10 @@ def ref_video_is_motion_surface() -> bool:
     return False
 
 
+declared_advancing_replay_assets = _declared_advancing_replay_assets(
+    _load_replay_plan(), video_samples
+)
+
 if probe.get("error"):
     status = "fail"
     reasons.append(f"probe failed: {probe['error']}")
@@ -499,7 +601,7 @@ elif (
     canvas_total == 0
     and lottie_inst == 0
     and ref_has_real_canvas()
-    and _replay_satisfies_blank_hero(_load_replay_plan(), video_adv)
+    and declared_advancing_replay_assets
 ):
     video_frame_proof_kind = "canvas-replay-video"
     # Ref renders WebGL/canvas and the impl mounts 0 canvases, BUT a declared
@@ -508,8 +610,9 @@ elif (
     # so it was recorded and replayed). Non-blank, declared, faithful → pass.
     status = "pass"
     reasons.append(
-        f"canvas-replay: impl mounts 0 canvases but a declared <video> replay "
-        f"is advancing ({video_adv}/{video_total} videos). The hero renders "
+        f"canvas-replay: impl mounts 0 canvases but all declared <video> "
+        f"replays are advancing ({len(declared_advancing_replay_assets)} "
+        f"sections; {video_adv}/{video_total} videos). The declared regions render "
         "the reference's own recorded motion (canvas-replay-plan.json) — "
         "non-blank and faithful, so the blank-hero fail is satisfied."
     )
@@ -589,6 +692,14 @@ payload = {
     "lottieAdvanced": lottie_adv,
     "videoTotal": video_total,
     "videoAdvanced": video_adv,
+    "videoSamples": video_samples,
+    "canvasReplayAsset": (
+        declared_advancing_replay_assets[0]
+        if len(declared_advancing_replay_assets) == 1 else None
+    ),
+    "canvasReplayAssets": declared_advancing_replay_assets,
+    "videoViewportStimulated": video_viewport_stimulated,
+    "videoStimulatedSrc": video_stimulated_src,
     "videoFrameProofKind": video_frame_proof_kind,
     "videoCountsAsAnimationSurface": video_frame_proof_kind in ("canvas-replay-video", "video-surface"),
     "reasons": reasons,

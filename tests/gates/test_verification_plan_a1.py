@@ -581,13 +581,14 @@ def test_forged_transition_pass_fails_even_with_current_input_fingerprint(
 
 
 
-def test_verification_plan_unsupported_schema_warns(tmp_path: Path) -> None:
-    """Future schemaVersion → warn, plan ignored (forward compat)."""
+@pytest.mark.parametrize("schema_version", [99, True, "1", 1.0, None])
+def test_verification_plan_unsupported_schema_fails(tmp_path: Path, schema_version: Any) -> None:
+    """Unknown or incorrectly typed schemas cannot discard required checks."""
     ref = tmp_path / "ref"
     ref.mkdir()
     _post_implement_baseline(ref)
     (ref / "verification-plan.json").write_text(json.dumps({
-        "schemaVersion": 99,
+        "schemaVersion": schema_version,
         "requiredChecks": [
             {"id": "x", "produces": "x.json", "reason": "y", "severity": "block"}
         ],
@@ -595,9 +596,29 @@ def test_verification_plan_unsupported_schema_warns(tmp_path: Path) -> None:
     gate = Gate(ref)
     results = gate.gate_post_implement()
     failures = [r for r in results if r.status == "fail"]
-    warns = [r for r in results if r.status == "warn"]
-    assert not failures, "Unknown schema must not fail the gate"
-    assert any("schemaVersion" in r.message for r in warns)
+    assert any("schemaVersion" in r.message for r in failures)
+
+
+@pytest.mark.parametrize("payload", [[], None, "invalid"])
+def test_verification_plan_non_object_fails(tmp_path: Path, payload: Any) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(json.dumps(payload))
+    results = Gate(ref).gate_post_implement()
+    assert any(r.status == "fail" and "JSON object" in r.message for r in results)
+
+
+@pytest.mark.parametrize("checks", [{}, False, 0, "", None])
+def test_verification_plan_falsey_non_list_checks_fail(tmp_path: Path, checks: Any) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1, "requiredChecks": checks,
+    }))
+    results = Gate(ref).gate_post_implement()
+    assert any(r.status == "fail" and "must be a list" in r.message for r in results)
 
 
 

@@ -113,9 +113,9 @@ import re
 import sys
 from pathlib import Path
 
-ref_dir = Path(sys.argv[1])
-impl_dir = Path(sys.argv[2])
-out_path = Path(sys.argv[3])
+ref_dir = Path(sys.argv[1]).resolve()
+impl_dir = Path(sys.argv[2]).resolve()
+out_path = Path(sys.argv[3]).resolve()
 
 
 def write_artifact(payload: dict) -> None:
@@ -338,6 +338,127 @@ if not hero_files:
     sys.exit(1)
 
 
+# Follow local component imports only when the importing JSX actually renders
+# that component. Hero shells commonly delegate their canvas to a child such as
+# `<StripeField />`; scanning only the shell reports a false missing canvas.
+# Import presence alone is deliberately insufficient because dead or unrelated
+# imports must not donate element kinds to the hero.
+LOCAL_IMPORT_RE = re.compile(
+    r"""import\s+(?!type\b)(.*?)\s+from\s*["']([^"']+)["']""",
+    re.DOTALL,
+)
+RENDERED_COMPONENT_RE = re.compile(r"<\s*([A-Z][A-Za-z0-9_$]*)\b")
+JSX_TAG_RE = re.compile(
+    r"<\s*(/?)\s*([A-Za-z][A-Za-z0-9_$.:~-]*)([^<>]*?)(/?)\s*>",
+    re.DOTALL,
+)
+SOURCE_SUFFIXES = (".tsx", ".jsx", ".ts", ".js")
+
+
+def imported_local_names(clause: str) -> set[str]:
+    """Return the local bindings declared by one static import clause."""
+    names: set[str] = set()
+    clause = clause.strip()
+    if not clause:
+        return names
+    default = re.match(r"([A-Za-z_$][\w$]*)", clause)
+    if default:
+        names.add(default.group(1))
+    named = re.search(r"\{(.*?)\}", clause, re.DOTALL)
+    if named:
+        for item in named.group(1).split(","):
+            item = re.sub(r"\btype\s+", "", item).strip()
+            if not item:
+                continue
+            alias = re.search(r"\bas\s+([A-Za-z_$][\w$]*)$", item)
+            names.add(alias.group(1) if alias else item.split()[0])
+    namespace = re.search(r"\*\s+as\s+([A-Za-z_$][\w$]*)", clause)
+    if namespace:
+        names.add(namespace.group(1))
+    return names
+
+
+def resolve_local_import(importer: Path, specifier: str) -> Path | None:
+    base = importer.parent / specifier
+    candidates = [base] if base.suffix in SOURCE_SUFFIXES else [
+        *(base.with_suffix(suffix) for suffix in SOURCE_SUFFIXES),
+        *(base / f"index{suffix}" for suffix in SOURCE_SUFFIXES),
+    ]
+    src_resolved = src_root.resolve()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(src_resolved)
+        except (OSError, ValueError):
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def rendered_components_in_hero_regions(text: str) -> set[str]:
+    """Collect component tags nested in explicitly marked hero JSX elements."""
+    rendered: set[str] = set()
+    stack: list[tuple[str, bool]] = []
+    for match in JSX_TAG_RE.finditer(text):
+        closing, tag, _, _ = match.groups()
+        self_closing = match.group(0).rstrip().endswith("/>")
+        if closing:
+            for index in range(len(stack) - 1, -1, -1):
+                if stack[index][0] == tag:
+                    del stack[index:]
+                    break
+            continue
+        in_hero = any(scope for _, scope in stack)
+        scope = in_hero or any(
+            pattern.search(match.group(0)) is not None
+            for pattern in (DATA_SECTION_HERO_RE, HERO_REGION_MARKER_RE)
+        )
+        if scope and tag[0].isupper():
+            rendered.add(tag.split(".", 1)[0])
+        if not self_closing:
+            stack.append((tag, scope))
+    return rendered
+
+
+def rendered_local_dependencies(roots: list[Path]) -> list[Path]:
+    files = list(roots)
+    seen = {path.resolve() for path in roots}
+    root_files = set(seen)
+    index = 0
+    while index < len(files):
+        importer = files[index]
+        index += 1
+        text = file_text(importer)
+        # Broad candidates such as App.tsx can render the full page around one
+        # marked hero section. Only components inside that subtree are hero
+        # dependencies. A child reached through it contributes all its output.
+        has_explicit_region = any(
+            pattern.search(text) is not None
+            for pattern in (DATA_SECTION_HERO_RE, HERO_REGION_MARKER_RE)
+        )
+        if importer.resolve() in root_files and has_explicit_region:
+            rendered = rendered_components_in_hero_regions(text)
+        else:
+            rendered = set(RENDERED_COMPONENT_RE.findall(text))
+        if not rendered:
+            continue
+        for match in LOCAL_IMPORT_RE.finditer(text):
+            if not match.group(2).startswith("."):
+                continue
+            if not (imported_local_names(match.group(1)) & rendered):
+                continue
+            dependency = resolve_local_import(importer, match.group(2))
+            if dependency is None or dependency in seen:
+                continue
+            seen.add(dependency)
+            files.append(dependency)
+    return files
+
+
+hero_files = rendered_local_dependencies(hero_files)
+
+
 # Inventory element kinds across the union of hero candidate files.
 # When the reference hero contains video, button gets a proximity check:
 # a `<button` only counts when there's also a `<video` within 500
@@ -410,19 +531,45 @@ for p in hero_files:
 
 missing = [k for k, v in ref_kinds.items() if v and not impl_kinds[k]]
 
-# Canvas-replay coherence: when canvas-replay-plan.json declares this hero a
-# replay (origin-locked / blank WebGL re-embed) and the impl emits a <video>
-# replay, the <video> substitutes the ref's <canvas> kind — the hero renders
-# the ref's OWN recorded motion. Drop "canvas" from missing in that case.
-def _canvas_replay_declared() -> bool:
+# Canvas-replay coherence: the declaration is section-scoped and names the
+# exact replay asset. Only that asset, rendered by the impl's hero candidates,
+# may substitute for the ref canvas; an unrelated hero video is insufficient.
+REPLAY_SOURCE_RE = re.compile(
+    r"""<(?:video|source)\b[^>]*\bsrc\s*=\s*["']([^"']+)["']""",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalized_asset_path(value: object) -> str:
+    path = str(value or "").strip().split("?", 1)[0].split("#", 1)[0]
+    path = re.sub(r"^[a-z][a-z0-9+.-]*://[^/]+/", "", path, flags=re.IGNORECASE)
+    path = path.lstrip("/")
+    return path.removeprefix("public/")
+
+
+def _declared_hero_replay_asset() -> str:
     try:
         plan = json.loads((ref_dir / "canvas-replay-plan.json").read_text(encoding="utf-8"))
-        return isinstance(plan, dict) and plan.get("decision") == "canvas-replay"
+        if not isinstance(plan, dict) or plan.get("decision") != "canvas-replay":
+            return ""
+        declared = {
+            _normalized_asset_path(section.get("replayAsset"))
+            for section in plan.get("sections", [])
+            if isinstance(section, dict) and section.get("replayAsset")
+        }
+        rendered = {
+            _normalized_asset_path(match.group(1))
+            for path in hero_files
+            for match in REPLAY_SOURCE_RE.finditer(file_text(path))
+        }
+        matches = sorted(declared & rendered)
+        return matches[0] if matches else ""
     except Exception:
-        return False
+        return ""
 
+declared_hero_replay_asset = _declared_hero_replay_asset()
 canvas_replay_substituted = False
-if "canvas" in missing and impl_kinds.get("video") and _canvas_replay_declared():
+if "canvas" in missing and declared_hero_replay_asset:
     missing = [k for k in missing if k != "canvas"]
     canvas_replay_substituted = True
 
@@ -435,6 +582,7 @@ artifact = {
     "impl": impl_kinds,
     "missingInImpl": missing,
     "canvasReplaySubstituted": canvas_replay_substituted,
+    "canvasReplayAsset": declared_hero_replay_asset or None,
     "implCandidateFiles": [
         str(p.relative_to(impl_dir)) for p in hero_files[:10]
     ],

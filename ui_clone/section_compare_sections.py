@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from typing import TypeGuard
 
+from ui_clone.extraction_artifacts import _is_valid_selector
 from ui_clone.section_capture import safe_section_name
 
 Section = dict[str, Any]
@@ -56,6 +57,21 @@ def _class_name(row: Section) -> str:
 
 def _class_tokens(value: str) -> set[str]:
     return {token for token in re.split(r"\s+", value.strip()) if len(token) >= 4}
+
+
+def has_grid_layout_mismatch(ref: Section, impl: Section) -> bool:
+    """Return whether only the reference declares real grid columns.
+
+    Computed style and synthesized section metadata use both ``None`` and the
+    CSS sentinel string ``"none"`` for elements without a grid template.
+    """
+    def uses_grid_columns(row: Section) -> bool:
+        value = row.get("gridCols")
+        if isinstance(value, str):
+            return value.strip().lower() not in {"", "none"}
+        return bool(value)
+
+    return uses_grid_columns(ref) and not uses_grid_columns(impl)
 
 
 def _lockable_class_tokens(value: str) -> set[str]:
@@ -630,6 +646,9 @@ def synthesize_ref_sections_from_section_map(
                 else {}
             ),
         }
+        selector = section.get("selector")
+        if _is_valid_selector(selector):
+            row["selector"] = " ".join(str(selector).split())
 
         candidate = choose(section)
         if candidate is not None:
@@ -940,20 +959,36 @@ def merge_ref_runtime_sections(
         if not same_region:
             return False
 
-        candidate_id = _section_id(candidate)
-        existing_id = _section_id(existing)
-        if candidate_id or existing_id:
-            return bool(
-                candidate_id
-                and existing_id
-                and candidate_id == existing_id
-            )
         if _tag(candidate) != _tag(existing):
             return False
-        if _class_tokens(_class_name(candidate)) & _class_tokens(
-            _class_name(existing)
-        ):
-            return True
+
+        candidate_classes = _class_tokens(_class_name(candidate))
+        existing_classes = _class_tokens(_class_name(existing))
+        class_overlap = candidate_classes & existing_classes
+
+        candidate_id = _section_id(candidate)
+        existing_id = _section_id(existing)
+
+        def class_derived_identity(row_id: str, classes: set[str]) -> bool:
+            return bool(row_id and row_id in classes)
+
+        if candidate_id or existing_id:
+            if candidate_id and existing_id:
+                return candidate_id == existing_id
+            # section-map.json stores the first captured class in ``name``.
+            # _section_id() intentionally treats that as identity elsewhere,
+            # but for duplicate removal it is only a class alias: the matching
+            # runtime row has no DOM id/name and would otherwise be appended as
+            # a phantom duplicate despite exact tag/class/rect equality.
+            lone_id = candidate_id or existing_id
+            lone_id_is_class_alias = (
+                class_derived_identity(candidate_id, candidate_classes)
+                or class_derived_identity(existing_id, existing_classes)
+            )
+            return bool(class_overlap and lone_id and lone_id_is_class_alias)
+
+        # Neither row carries an identity: same tag + same rendered region is
+        # the whole duplicate signal, with or without a shared class token.
         return True
 
     # The section map itself can contain the same live region more than once
@@ -997,12 +1032,17 @@ def merge_ref_runtime_sections(
             if (
                 weak_class_wrapper(merged[duplicate_index])
                 and stronger_semantic_row(runtime_row)
-                ):
+            ):
                 merged[duplicate_index] = merge_live_row(
                     merged[duplicate_index],
                     runtime_row,
                     replace_identity=True,
                 )
+            elif (
+                weak_class_wrapper(runtime_row)
+                and stronger_semantic_row(merged[duplicate_index])
+            ):
+                continue
             else:
                 merged[duplicate_index] = merge_runtime_measurements(
                     merged[duplicate_index],
@@ -2211,7 +2251,51 @@ def calculate_mask_coverage(
     Values are sidecar evidence only. They do not affect section-compare pass
     rows; a later gate can use this JSON to detect pass-under-mask cases.
     """
-    masks = [rect for raw in mask_rects if (rect := _rect_from(raw)) is not None]
+    masks = [raw for raw in mask_rects if isinstance(raw, dict) and _rect_from(raw) is not None]
+
+    def owned_by_section(mask: Section, section: Section, name: str) -> bool:
+        """Reject dynamic media that only overlaps a section geometrically.
+
+        Fixed headers and sticky overlays often share coordinates with a hero
+        canvas without owning it. New mask evidence carries the media node's DOM
+        owner chain so coverage follows containment. Older artifacts without an
+        owner chain retain the geometry-only behavior for compatibility.
+        """
+        owners = mask.get("ownerChain")
+        if not isinstance(owners, list):
+            return True
+        section_id = str(section.get("id") or "").strip()
+        section_tag = _tag(section)
+        section_classes = _class_tokens(_class_name(section))
+        name_key = name.strip().lower()
+        # synthesize_ref_sections_from_section_map() stores _section_id()
+        # (DOM id OR section-map ``name``, which is the first captured class)
+        # in ``id``. A class-alias id never equals a DOM owner id, so exact-id
+        # matching alone reported 0.0 coverage for every such section. Fall
+        # back to tag/class/name matching only when the id is a class alias;
+        # a real DOM id keeps the strict containment rule.
+        section_id_is_class_alias = bool(
+            section_id and section_id in _class_name(section).split()
+        )
+        for owner in owners:
+            if not isinstance(owner, dict):
+                continue
+            owner_id = str(owner.get("id") or "").strip()
+            if section_id:
+                if owner_id == section_id:
+                    return True
+                if not section_id_is_class_alias:
+                    continue
+            owner_tag = str(owner.get("tag") or "").strip().lower()
+            owner_classes = _class_tokens(str(owner.get("className") or ""))
+            if section_tag and owner_tag != section_tag:
+                continue
+            if section_classes and section_classes <= owner_classes:
+                return True
+            if name_key and (owner_id.lower() == name_key or name_key in owner_classes):
+                return True
+        return False
+
     coverage: dict[str, float] = {}
     for match in matches:
         if not isinstance(match, dict) or not match.get("ref"):
@@ -2225,9 +2309,16 @@ def calculate_mask_coverage(
             coverage[name] = 0.0
             continue
         section_area = section["width"] * section["height"]
-        clipped = [
-            rect for mask in masks if (rect := _intersect(section, mask)) is not None
-        ]
+        clipped = []
+        for mask in masks:
+            if not owned_by_section(mask, ref, name):
+                continue
+            mask_rect = _rect_from(mask)
+            if mask_rect is None:
+                continue
+            intersection = _intersect(section, mask_rect)
+            if intersection is not None:
+                clipped.append(intersection)
         pct = 0.0 if section_area <= 0 else min(100.0, (_union_area(clipped) / section_area) * 100)
         coverage[name] = round(pct, 2)
     return coverage

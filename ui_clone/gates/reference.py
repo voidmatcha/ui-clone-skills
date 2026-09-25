@@ -9,7 +9,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from ..extraction_artifacts import _is_valid_selector
+from ..extraction_artifacts import (
+    _HOVER_CANDIDATE_INPUTS,
+    _hover_candidate_input_fingerprint,
+    _is_valid_selector,
+)
 from .base import CheckResult
 
 # Mirrors scripts/extract/capture-region-artifacts.py RESOLVED_ABSENCE_MARKER:
@@ -36,7 +40,11 @@ def _region_entries(regions: Any) -> list[dict[str, Any]]:
             if isinstance(node.get("triggerType"), str):
                 entries.append(node)
                 return
-            for value in node.values():
+            for key, value in node.items():
+                # A measured-negative receipt names retired candidates, not
+                # regions that the page still claims or needs artifacts for.
+                if key == "resolvedAutoCandidates":
+                    continue
                 walk(value)
         elif isinstance(node, list):
             for value in node:
@@ -280,11 +288,112 @@ def _has_live_capture_provenance(self: Gate, regions: dict[str, Any]) -> bool:
     return True
 
 
+def _has_resolved_auto_absence_provenance(
+    self: Gate,
+    regions: dict[str, Any],
+) -> bool:
+    """Validate a complete, fresh browser proof that auto hover candidates are inert."""
+    if not (
+        regions.get("source") == "scripts/extract/capture-region-artifacts.py"
+        and regions.get("placeholder") is False
+        and regions.get("detectionRan") is True
+        and _region_entries(regions) == []
+    ):
+        return False
+    derived = regions.get("derivedFrom")
+    if not isinstance(derived, list) or set(derived) != set(_HOVER_CANDIDATE_INPUTS):
+        return False
+    if any(not (self.ref_dir / relative).is_file() for relative in _HOVER_CANDIDATE_INPUTS):
+        return False
+
+    fingerprint = _hover_candidate_input_fingerprint(self.ref_dir)
+    if not fingerprint or regions.get("autoCandidateInputFingerprint") != fingerprint:
+        return False
+    spec = self._load_json("transition-spec.json")
+    if not isinstance(spec, dict) or not (
+        spec.get("source") == "ui_clone.extraction_artifacts"
+        and spec.get("placeholder") is True
+        and spec.get("transitions") == []
+    ):
+        return False
+    summary = self._load_json("capture-region-artifacts-summary.json")
+    if not isinstance(summary, dict) or not (
+        summary.get("status") == "pass"
+        and summary.get("autoSpec") is True
+        and summary.get("autoCandidateInputFingerprint") == fingerprint
+    ):
+        return False
+
+    attempted = summary.get("attempted")
+    skipped = summary.get("skipped")
+    resolved = regions.get("resolvedAutoCandidates")
+    if not all(isinstance(rows, list) for rows in (attempted, skipped, resolved)):
+        return False
+    assert isinstance(attempted, list)
+    assert isinstance(skipped, list)
+    assert isinstance(resolved, list)
+    if not attempted or len(attempted) != len(skipped) or len(attempted) != len(resolved):
+        return False
+
+    def direct_key(row: object) -> tuple[str, str] | None:
+        if not isinstance(row, dict):
+            return None
+        trigger = str(row.get("triggerType") or "").strip().lower()
+        selector = " ".join(str(row.get("selector") or "").split())
+        if trigger != "hover" or not _is_valid_selector(selector):
+            return None
+        return trigger, selector
+
+    attempted_keys = [direct_key(row) for row in attempted]
+    resolved_keys = [direct_key(row) for row in resolved]
+    if None in attempted_keys or None in resolved_keys:
+        return False
+    if len(set(attempted_keys)) != len(attempted_keys):
+        return False
+    if set(attempted_keys) != set(resolved_keys):
+        return False
+
+    skipped_keys: list[tuple[str, str] | None] = []
+    for row in skipped:
+        if not isinstance(row, dict) or not (
+            row.get("resolution") == RESOLVED_ABSENCE_MARKER
+            and row.get("autoCandidateInputFingerprint") == fingerprint
+        ):
+            return False
+        candidate = row.get("candidateKey")
+        candidate_key = direct_key(candidate)
+        if candidate_key is None or direct_key(row) != candidate_key:
+            return False
+        skipped_keys.append(candidate_key)
+    if len(set(skipped_keys)) != len(skipped_keys) or set(skipped_keys) != set(attempted_keys):
+        return False
+
+    for key in ("captured", "unsupported", "notInstantiated"):
+        rows = summary.get(key, [])
+        if not isinstance(rows, list) or rows:
+            return False
+    counts = summary.get("counts")
+    expected_counts = {
+        "attempted": len(attempted),
+        "captured": 0,
+        "skipped": len(skipped),
+        "unsupported": 0,
+        "notInstantiated": 0,
+    }
+    if not isinstance(counts, dict) or any(
+        isinstance(counts.get(key), bool) or counts.get(key) != expected
+        for key, expected in expected_counts.items()
+    ):
+        return False
+    return True
+
+
 def _has_real_detection_provenance(self: Gate, regions: dict[str, Any]) -> bool:
     """Accept deterministic projections or browser-measured live captures."""
     return (
         _has_derived_detection_provenance(regions)
         or _has_live_capture_provenance(self, regions)
+        or _has_resolved_auto_absence_provenance(self, regions)
         or _has_inventory_capture_provenance(self, regions)
     )
 
@@ -346,6 +455,12 @@ def _transition_evidence_result(self: Gate) -> CheckResult:
             "interactive transition state evidence",
             "pass",
             "captured transition artifacts with matching live or inventory provenance",
+        )
+    if isinstance(regions, dict) and _has_resolved_auto_absence_provenance(self, regions):
+        return CheckResult(
+            "measured transition absence",
+            "pass",
+            "all auto hover candidates were freshly probed and measured inert",
         )
     return video_result
 
@@ -504,6 +619,8 @@ def _check_regions_not_placeholder(self: Gate) -> CheckResult | None:
                 "scripts/extract/capture-region-artifacts.py so the summary "
                 "and measured artifact files match regions.json.",
             )
+        return None
+    if not entries and _has_resolved_auto_absence_provenance(self, regions):
         return None
     if not motion_signals and not hover_rules:
         return None

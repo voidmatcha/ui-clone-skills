@@ -52,6 +52,33 @@ Original JS libraries use scroll position to drive CSS transforms. Without GSAP,
 2. **Progress calculation** from section's scroll position
 3. **Direct DOM manipulation** via refs (not React state — for performance)
 
+#### Input-owned scroll sequences
+
+A passive scroll observer is not a replacement for a controller that owns wheel
+or touch input. When the captured runtime or bundle clips page height, cancels
+input, advances a phase after a dwell, or restores progress on resize, record
+and implement that state contract before tuning visual offsets:
+
+- Preserve the observed wheel, touch, and keyboard ownership conditions,
+  cancellation rules, listener options, and cleanup. A handler that calls
+  `preventDefault()` cannot be passive; ordinary scroll observers stay passive.
+- Keep phase-entry, display, dwell, and unlock transitions distinct. A timer
+  that releases a document-height cap must also refresh dependent state when
+  no new scroll event occurs. Do not restart a dwell on unrelated render or
+  input events unless the reference does.
+- Preserve the reference's viewport policy: mobile browser chrome resizing,
+  orientation changes, and desktop resizing need not reset progress alike.
+- Verify forward traversal, reverse traversal, a pause at each gate, and
+  navigation past the gate. Record actual scroll position and current document
+  height; an intermediate cap is not the page end. Test each input mode the
+  reference owns instead of treating `scrollTo()` as proof of touch behavior.
+
+Use publicly available source, when present, to check the extracted contract
+against the deployed bundle. Record the source revision and deployment evidence;
+source-only differences are hypotheses until that relationship is established.
+Turn omissions into generic extraction or verification regressions, not
+site-name branches, copied applications, or fixed pixel heights.
+
 #### Progress formula
 
 ```

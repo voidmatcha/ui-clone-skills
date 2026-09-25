@@ -80,7 +80,7 @@ def test_plugin_projection_prunes_stale_local_artifacts() -> None:
 def test_hook_shim_resolves_symlink_projection_to_real_project_root() -> None:
     text = (REPO_ROOT / "hooks" / "shim.sh").read_text(encoding="utf-8")
 
-    assert "realpath \"$script_path\"" in text
+    assert 'realpath "$script_path"' in text
     assert 'uv run --project "$project_root"' in text
     assert 'dirname "$script_path")/..' in text
 
@@ -109,9 +109,7 @@ def test_shared_hook_venv_contract_is_present_everywhere_it_must_be() -> None:
     assert "UV_PROJECT_ENVIRONMENT" in bin_ui_clone
     assert "--no-dev" in bin_ui_clone and "--frozen" in bin_ui_clone
 
-    auto_verify = (REPO_ROOT / "scripts" / "verify" / "auto-verify.sh").read_text(
-        encoding="utf-8"
-    )
+    auto_verify = (REPO_ROOT / "scripts" / "verify" / "auto-verify.sh").read_text(encoding="utf-8")
     assert "UI_CLONE_HOOK_VENV" in auto_verify
     assert "--no-dev --frozen" in auto_verify
 
@@ -131,9 +129,7 @@ def test_shared_hook_venv_contract_is_present_everywhere_it_must_be() -> None:
     # --no-dev/--frozen here was the one mirror-caller three independent
     # fable reviews found left behind: it synced the dev group (pytest,
     # mypy, ruff, ...) into the shared venv inside its own 30s timeout.
-    common_py = (REPO_ROOT / "ui_clone" / "hooks" / "_common.py").read_text(
-        encoding="utf-8"
-    )
+    common_py = (REPO_ROOT / "ui_clone" / "hooks" / "_common.py").read_text(encoding="utf-8")
     assert '"--no-dev",\n            "--frozen",' in common_py
 
 
@@ -161,17 +157,13 @@ def test_codex_install_uses_personal_projection_marketplace() -> None:
 def test_codex_install_projects_and_installs_native_agents() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
-    assert (
-        "CODEX_NATIVE_AGENTS_DIR=\"${CODEX_HOME:-$HOME/.codex}/agents\"" in text
-    )
+    assert 'CODEX_NATIVE_AGENTS_DIR="${CODEX_HOME:-$HOME/.codex}/agents"' in text
     assert 'CODEX_PUBLIC_SKILLS="ui-reverse-engineering ui-capture visual-debug"' in text
     assert (
         'CODEX_PLUGIN_PROJECTION_ITEMS=".claude-plugin .codex-plugin .codex/agents bin hooks scripts'
         in text
     )
-    projection_match = re.search(
-        r'^CODEX_PLUGIN_PROJECTION_ITEMS="([^"]+)"', text, re.MULTILINE
-    )
+    projection_match = re.search(r'^CODEX_PLUGIN_PROJECTION_ITEMS="([^"]+)"', text, re.MULTILINE)
     assert projection_match is not None
     assert "README_detail" in projection_match.group(1).split()
     assert "install_codex_native_agents" in text
@@ -179,8 +171,6 @@ def test_codex_install_projects_and_installs_native_agents() -> None:
     assert "for item in .codex-plugin .codex skills hooks scripts" not in text
     assert "for skill in $CODEX_PUBLIC_SKILLS" in text
     assert 'ln -s "$src" "$dst"' in text
-
-
 
 
 def test_codex_native_agent_relink_repairs_symlink_left_broken_by_a_rename() -> None:
@@ -194,9 +184,9 @@ def test_codex_native_agent_relink_repairs_symlink_left_broken_by_a_rename() -> 
     marker = 'dst="$CODEX_NATIVE_AGENTS_DIR/$(basename "$src")"'
     assert marker in text, "codex native agent relink loop moved — update this test"
     body = text.split(marker, 1)[1].split("write_codex_personal_marketplace", 1)[0]
-    assert (
-        '[ -L "$dst" ] && [ ! -e "$dst" ]' in body
-    ), "relink loop never clears a dangling symlink before ln -s"
+    assert '[ -L "$dst" ] && [ ! -e "$dst" ]' in body, (
+        "relink loop never clears a dangling symlink before ln -s"
+    )
 
 
 def test_projection_prune_removes_a_dangling_symlink() -> None:
@@ -205,9 +195,9 @@ def test_projection_prune_removes_a_dangling_symlink() -> None:
     links survive every reinstall — the prune silently exempts exactly the
     entries it exists to remove."""
     text = INSTALL_SH.read_text(encoding="utf-8")
-    assert (
-        '[ -e "$existing" ] || [ -L "$existing" ] || continue' in text
-    ), "projection prune still skips dangling symlinks"
+    assert '[ -e "$existing" ] || [ -L "$existing" ] || continue' in text, (
+        "projection prune still skips dangling symlinks"
+    )
 
 
 def test_install_creates_local_ui_clone_bin_from_projection() -> None:
@@ -215,10 +205,11 @@ def test_install_creates_local_ui_clone_bin_from_projection() -> None:
 
     assert 'LOCAL_BIN_DIR="${UI_CLONE_LOCAL_BIN_DIR:-$HOME/.local/bin}"' in text
     assert 'LOCAL_CLI_BIN="$LOCAL_BIN_DIR/ui-clone"' in text
-    assert 'install_local_cli_bin()' in text
+    assert "install_local_cli_bin()" in text
     assert 'local src="$CODEX_PLUGIN_DIR/bin/ui-clone"' in text
     assert 'ln -s "$src" "$dst"' in text
-    assert 'install_local_cli_bin || return' in text
+    assert "install_local_cli_bin || return" in text
+
 
 def test_shell_quote_produces_copy_paste_safe_codex_command() -> None:
     helper = _extract_shell_quote()
@@ -246,6 +237,53 @@ printf "codex plugin marketplace add %s\\n" "$(shell_quote "$REPO_ROOT")"
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _write_cache_faking_codex(
+    path: Path,
+    *,
+    populate: bool = True,
+    add_exit: int = 0,
+    listed: bool = False,
+    runtime_extra: bool = False,
+) -> None:
+    copy = (
+        '  cp -R "$src"/. "$dst"/\n'
+        if populate
+        else "  # deliberately leave the cache unchanged\n"
+    )
+    listing = (
+        '  printf "ui-clone-skills@local  installed, enabled  0.8.17  %s\\n" "$src"\n'
+        if listed
+        else "  :\n"
+    )
+    extra = (
+        '  mkdir -p "$dst/ui_clone/__pycache__" "$dst/.venv/lib"\n'
+        '  printf runtime > "$dst/ui_clone/__pycache__/runtime.pyc"\n'
+        '  printf runtime > "$dst/.venv/lib/runtime.py"\n'
+        if runtime_extra
+        else ""
+    )
+    _write_executable(
+        path,
+        "#!/usr/bin/env bash\n"
+        'printf "codex %s\\n" "$*" >> "$COMMAND_LOG"\n'
+        'src="$HOME/.local/share/ui-clone-skills-claude-src"\n'
+        'if [ "$1 $2" = "plugin list" ]; then\n'
+        f"{listing}"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1 $2" = "plugin add" ]; then\n'
+        f"  [ {add_exit} -eq 0 ] || exit {add_exit}\n"
+        '  ver="$(sed -n \'s/.*"version"[[:space:]]*:[[:space:]]*"\\([^\"]*\\)".*/\\1/p\' "$src/.codex-plugin/plugin.json" | head -1)"\n'
+        '  dst="${CODEX_HOME:-$HOME/.codex}/plugins/cache/local/ui-clone-skills/$ver"\n'
+        '  mkdir -p "$dst"\n'
+        f"{copy}"
+        f"{extra}"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+    )
 
 
 def _write_python_wrapper(path: Path) -> None:
@@ -452,10 +490,7 @@ def test_editable_install_hides_recovered_pep668_probe_error(tmp_path: Path) -> 
     ]
     assert installs == [
         f"{python}|-m pip install --quiet --user -e {REPO_ROOT}",
-        (
-            f"{python}|-m pip install --quiet --user --break-system-packages "
-            f"-e {REPO_ROOT}"
-        ),
+        (f"{python}|-m pip install --quiet --user --break-system-packages -e {REPO_ROOT}"),
     ]
     assert python.with_suffix(".installed").exists()
 
@@ -577,6 +612,24 @@ def _write_claude_plugin_source(path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+
+
+def _skill_tree_hash(root: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode()
+        if path.is_symlink():
+            kind, content = b"L", os.readlink(path).encode()
+        elif path.is_dir():
+            kind, content = b"D", b""
+        else:
+            kind = b"X" if path.stat().st_mode & 0o111 else b"F"
+            content = path.read_bytes()
+        digest.update(kind + b"\0" + relative + b"\0")
+        digest.update(str(len(content)).encode() + b"\0" + content + b"\0")
+    return digest.hexdigest()
 
 
 def test_uninstall_removes_owned_artifacts_and_preserves_conflicts(
@@ -747,10 +800,7 @@ def test_uninstall_removes_owned_artifacts_and_preserves_conflicts(
     ]
     assert "codex plugin remove ui-clone-skills@local" in command_log.read_text()
     assert "python3 -m pip uninstall -y ui-clone-skills" in command_log.read_text()
-    assert (
-        "claude plugin uninstall ui-clone-skills@voidmatcha"
-        in command_log.read_text()
-    )
+    assert "claude plugin uninstall ui-clone-skills@voidmatcha" in command_log.read_text()
     assert "preserving user-owned path" in result.stdout
 
 
@@ -856,7 +906,7 @@ def test_uninstall_preserves_non_owned_python_distributions(tmp_path: Path) -> N
         assert not command_log.exists()
 
 
-def test_public_skill_receipt_handles_source_upgrade_and_user_edits(
+def test_codex_install_migrates_owned_direct_skills_and_preserves_edits(
     tmp_path: Path,
 ) -> None:
     checkout = tmp_path / "checkout"
@@ -864,82 +914,67 @@ def test_public_skill_receipt_handles_source_upgrade_and_user_edits(
     shutil.copy2(INSTALL_SH, checkout / "install.sh")
     shutil.copy2(REPO_ROOT / "pyproject.toml", checkout / "pyproject.toml")
     shutil.copytree(REPO_ROOT / ".claude-plugin", checkout / ".claude-plugin")
+    shutil.copytree(REPO_ROOT / ".codex-plugin", checkout / ".codex-plugin")
     shutil.copytree(REPO_ROOT / "skills", checkout / "skills")
     shutil.copytree(REPO_ROOT / "bin", checkout / "bin")
-    # hooks/hooks.json is the file that decides whether the installed plugin
-    # has any hooks at all; the installer refuses a source without it.
     shutil.copytree(REPO_ROOT / "hooks", checkout / "hooks")
-
     home = tmp_path / "home"
+    agents_skills = home / ".agents" / "skills"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     command_log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
-    _write_executable(
-        fake_bin / "claude",
-        '#!/usr/bin/env bash\nprintf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n',
-    )
+    _write_cache_faking_codex(fake_bin / "codex")
     env = os.environ.copy()
     env.update(
         {
             "HOME": str(home),
-            "AGENTS_SKILLS_DIR": str(home / ".agents" / "skills"),
+            "CODEX_HOME": str(home / ".codex"),
+            "AGENTS_SKILLS_DIR": str(agents_skills),
             "UI_CLONE_LOCAL_BIN_DIR": str(home / ".local" / "bin"),
             "COMMAND_LOG": str(command_log),
             "PATH": f"{fake_bin}:{env['PATH']}",
         }
     )
 
-    subprocess.run(
-        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    skills = ("ui-reverse-engineering", "ui-capture", "visual-debug")
+    receipt_skills = {}
+    for skill in skills:
+        installed = agents_skills / skill
+        shutil.copytree(checkout / "skills" / skill, installed)
+        receipt_skills[skill] = {
+            "path": str(installed.resolve()),
+            "sha256": _skill_tree_hash(installed),
+            "source": str(checkout),
+            "version": "0.8.13",
+        }
     ownership = home / ".config" / "ui-clone-skills" / "public-skills.json"
-    receipt = json.loads(ownership.read_text(encoding="utf-8"))
-    assert receipt["skills"]["ui-capture"]["source"] == str(checkout)
-    assert receipt["skills"]["ui-capture"]["sha256"]
-    assert "version" in receipt["skills"]["ui-capture"]
-
-    with (checkout / "skills" / "ui-capture" / "detection.md").open(
-        "a", encoding="utf-8"
-    ) as handle:
-        handle.write("\nsource version N+1\n")
-    subprocess.run(
-        ["bash", str(checkout / "install.sh"), "--uninstall"],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
+    ownership.parent.mkdir(parents=True)
+    ownership.write_text(
+        json.dumps({"schemaVersion": 1, "skills": receipt_skills}, indent=2) + "\n",
+        encoding="utf-8",
     )
-    assert not (home / ".agents" / "skills" / "ui-capture").exists()
-
-    subprocess.run(
-        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    customized = home / ".agents" / "skills" / "visual-debug"
+    customized = agents_skills / "visual-debug"
     (customized / "user-notes.md").write_text("keep me\n", encoding="utf-8")
     result = subprocess.run(
-        ["bash", str(checkout / "install.sh"), "--uninstall"],
+        [
+            "bash",
+            str(checkout / "install.sh"),
+            "--codex-only",
+            "--no-deps",
+        ],
         cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,
+        check=True,
     )
-    assert result.returncode == 1
     assert "post-install edits" in result.stdout
-    assert "Uninstall complete." not in result.stdout
+    assert not (agents_skills / "ui-reverse-engineering").exists()
+    assert not (agents_skills / "ui-capture").exists()
     assert (customized / "user-notes.md").read_text(encoding="utf-8") == "keep me\n"
-    assert ownership.is_file()
+    remaining = json.loads(ownership.read_text(encoding="utf-8"))["skills"]
+    assert set(remaining) == {"visual-debug"}
 
 
 def test_legacy_skill_history_removes_untouched_and_preserves_unknown(
@@ -950,6 +985,7 @@ def test_legacy_skill_history_removes_untouched_and_preserves_unknown(
     shutil.copy2(INSTALL_SH, checkout / "install.sh")
     shutil.copy2(REPO_ROOT / "pyproject.toml", checkout / "pyproject.toml")
     shutil.copytree(REPO_ROOT / ".claude-plugin", checkout / ".claude-plugin")
+    shutil.copytree(REPO_ROOT / ".codex-plugin", checkout / ".codex-plugin")
     shutil.copytree(REPO_ROOT / "skills", checkout / "skills")
     shutil.copytree(REPO_ROOT / "bin", checkout / "bin")
     # hooks/hooks.json is the file that decides whether the installed plugin
@@ -974,6 +1010,7 @@ def test_legacy_skill_history_removes_untouched_and_preserves_unknown(
     fake_bin.mkdir()
     command_log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_codex(fake_bin / "codex")
     _write_executable(
         fake_bin / "claude",
         '#!/usr/bin/env bash\nprintf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n',
@@ -994,15 +1031,10 @@ def test_legacy_skill_history_removes_untouched_and_preserves_unknown(
 
     legacy_home = tmp_path / "legacy-home"
     legacy_env = environment(legacy_home)
-    subprocess.run(
-        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
-        cwd=tmp_path,
-        env=legacy_env,
-        capture_output=True,
-        text=True,
-        check=True,
+    shutil.copytree(
+        checkout / "skills" / "ui-capture",
+        legacy_home / ".agents" / "skills" / "ui-capture",
     )
-    (legacy_home / ".config" / "ui-clone-skills" / "public-skills.json").unlink()
     with (checkout / "skills" / "ui-capture" / "detection.md").open(
         "a", encoding="utf-8"
     ) as handle:
@@ -1013,7 +1045,12 @@ def test_legacy_skill_history_removes_untouched_and_preserves_unknown(
         check=True,
     )
     subprocess.run(
-        ["bash", str(checkout / "install.sh"), "--uninstall"],
+        [
+            "bash",
+            str(checkout / "install.sh"),
+            "--codex-only",
+            "--no-deps",
+        ],
         cwd=tmp_path,
         env=legacy_env,
         capture_output=True,
@@ -1024,27 +1061,26 @@ def test_legacy_skill_history_removes_untouched_and_preserves_unknown(
 
     unknown_home = tmp_path / "unknown-home"
     unknown_env = environment(unknown_home)
-    subprocess.run(
-        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+    shutil.copytree(
+        checkout / "skills" / "ui-capture",
+        unknown_home / ".agents" / "skills" / "ui-capture",
+    )
+    customized = unknown_home / ".agents" / "skills" / "ui-capture"
+    (customized / "user-notes.md").write_text("keep me\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            "bash",
+            str(checkout / "install.sh"),
+            "--codex-only",
+            "--no-deps",
+        ],
         cwd=tmp_path,
         env=unknown_env,
         capture_output=True,
         text=True,
         check=True,
     )
-    (unknown_home / ".config" / "ui-clone-skills" / "public-skills.json").unlink()
-    customized = unknown_home / ".agents" / "skills" / "ui-capture"
-    (customized / "user-notes.md").write_text("keep me\n", encoding="utf-8")
-    result = subprocess.run(
-        ["bash", str(checkout / "install.sh"), "--uninstall"],
-        cwd=tmp_path,
-        env=unknown_env,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 1
-    assert "cannot prove ownership" in result.stdout
-    assert "Uninstall complete." not in result.stdout
+    assert "preserving unowned direct skill" in result.stdout
     assert (customized / "user-notes.md").read_text(encoding="utf-8") == "keep me\n"
 
 
@@ -1056,6 +1092,7 @@ def test_marketplace_rewrite_is_atomic_and_preserves_permissions(
     shutil.copy2(INSTALL_SH, checkout / "install.sh")
     shutil.copy2(REPO_ROOT / "pyproject.toml", checkout / "pyproject.toml")
     shutil.copytree(REPO_ROOT / ".claude-plugin", checkout / ".claude-plugin")
+    shutil.copytree(REPO_ROOT / ".codex-plugin", checkout / ".codex-plugin")
     shutil.copytree(REPO_ROOT / ".codex", checkout / ".codex")
     shutil.copytree(REPO_ROOT / "skills", checkout / "skills")
     shutil.copytree(REPO_ROOT / "bin", checkout / "bin")
@@ -1068,10 +1105,7 @@ def test_marketplace_rewrite_is_atomic_and_preserves_permissions(
     fake_bin.mkdir()
     command_log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
-    _write_executable(
-        fake_bin / "codex",
-        '#!/usr/bin/env bash\nprintf "codex %s\\n" "$*" >> "$COMMAND_LOG"\n',
-    )
+    _write_cache_faking_codex(fake_bin / "codex")
     marketplace = home / ".agents" / "plugins" / "marketplace.json"
     marketplace.parent.mkdir(parents=True)
     original = {
@@ -1132,6 +1166,7 @@ def test_marketplace_symlink_survives_install_and_uninstall(tmp_path: Path) -> N
     shutil.copy2(INSTALL_SH, checkout / "install.sh")
     shutil.copy2(REPO_ROOT / "pyproject.toml", checkout / "pyproject.toml")
     shutil.copytree(REPO_ROOT / ".claude-plugin", checkout / ".claude-plugin")
+    shutil.copytree(REPO_ROOT / ".codex-plugin", checkout / ".codex-plugin")
     shutil.copytree(REPO_ROOT / ".codex", checkout / ".codex")
     shutil.copytree(REPO_ROOT / "skills", checkout / "skills")
     shutil.copytree(REPO_ROOT / "bin", checkout / "bin")
@@ -1144,10 +1179,7 @@ def test_marketplace_symlink_survives_install_and_uninstall(tmp_path: Path) -> N
     fake_bin.mkdir()
     command_log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
-    _write_executable(
-        fake_bin / "codex",
-        '#!/usr/bin/env bash\nprintf "codex %s\\n" "$*" >> "$COMMAND_LOG"\n',
-    )
+    _write_cache_faking_codex(fake_bin / "codex")
 
     marketplace = home / ".agents" / "plugins" / "marketplace.json"
     marketplace.parent.mkdir(parents=True)
@@ -1313,8 +1345,7 @@ def test_claude_install_refreshes_recognized_known_marketplace_source(
     commands = command_log.read_text(encoding="utf-8")
     remove = "claude plugin marketplace remove voidmatcha"
     add = (
-        "claude plugin marketplace add "
-        f"{home / '.local' / 'share' / 'ui-clone-skills-claude-src'}"
+        f"claude plugin marketplace add {home / '.local' / 'share' / 'ui-clone-skills-claude-src'}"
     )
     assert remove in commands
     assert add in commands
@@ -1481,8 +1512,7 @@ def test_claude_legacy_settings_fallback_and_conflict_preservation(
         encoding="utf-8",
     )
     (conflict_plugin / "marketplace.json").write_text(
-        json.dumps({"name": "voidmatcha", "plugins": [{"name": "another-plugin"}]})
-        + "\n",
+        json.dumps({"name": "voidmatcha", "plugins": [{"name": "another-plugin"}]}) + "\n",
         encoding="utf-8",
     )
     known = conflict_home / ".claude" / "plugins" / "known_marketplaces.json"
@@ -1765,6 +1795,9 @@ def test_claude_marketplace_source_is_self_contained_real_files(tmp_path: Path) 
         assert (source / "skills" / name / "SKILL.md").is_file(), (
             f"public skill {name} must carry a real SKILL.md in the source"
         )
+    assert not (home / ".agents" / "skills").exists(), (
+        "Claude installation must not create a separate Codex skill surface"
+    )
 
 
 def test_claude_install_removes_only_owned_legacy_skill_shadows(tmp_path: Path) -> None:
@@ -1775,7 +1808,7 @@ def test_claude_install_removes_only_owned_legacy_skill_shadows(tmp_path: Path) 
     log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
     _write_cache_faking_claude(fake_bin / "claude", populate=True)
-    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
 
     legacy = home / ".claude" / "skills"
     legacy.mkdir(parents=True)
@@ -1797,6 +1830,153 @@ def test_claude_install_removes_only_owned_legacy_skill_shadows(tmp_path: Path) 
     assert not (legacy / "ui-capture").exists()
     assert user_owned.is_dir()
     assert (user_owned / "SKILL.md").read_text(encoding="utf-8") == "user owned\n"
+    assert not (home / ".agents" / "skills").exists(), (
+        "Claude installation must not create a separate Codex skill surface"
+    )
+
+
+def test_codex_no_marketplace_preserves_legacy_skill_shadows(tmp_path: Path) -> None:
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+
+    legacy = home / ".codex" / "skills"
+    legacy.mkdir(parents=True)
+    (legacy / "ui-capture").symlink_to(checkout / "skills" / "ui-capture")
+    user_owned = legacy / "visual-debug"
+    user_owned.mkdir()
+    (user_owned / "SKILL.md").write_text("user owned\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
+            "AGENTS_SKILLS_DIR": str(home / ".agents" / "skills"),
+            "UI_CLONE_LOCAL_BIN_DIR": str(home / ".local" / "bin"),
+            "COMMAND_LOG": str(command_log),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(checkout / "install.sh"),
+            "--codex-only",
+            "--no-deps",
+            "--no-marketplace",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (legacy / "ui-capture").is_symlink()
+    assert user_owned.is_dir()
+    assert (user_owned / "SKILL.md").read_text(encoding="utf-8") == "user owned\n"
+    assert not (home / ".agents" / "skills").exists(), (
+        "Codex installation must expose skills only through the plugin cache"
+    )
+
+
+@pytest.mark.parametrize(
+    ("populate", "add_exit", "expected_error"),
+    [
+        (False, 0, "differs from the staged source"),
+        (True, 7, "plugin install did not complete"),
+    ],
+)
+def test_codex_delivery_failure_preserves_legacy_skills(
+    tmp_path: Path, populate: bool, add_exit: int, expected_error: str
+) -> None:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_codex(
+        fake_bin / "codex", populate=populate, add_exit=add_exit, listed=not populate
+    )
+
+    legacy = home / ".codex" / "skills"
+    legacy.mkdir(parents=True)
+    shadow = legacy / "ui-capture"
+    shadow.symlink_to(REPO_ROOT / "skills" / "ui-capture")
+
+    if not populate:
+        version = json.loads(
+            (REPO_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )["version"]
+        cache = home / ".codex" / "plugins" / "cache" / "local" / "ui-clone-skills" / version
+        (cache / ".codex-plugin").mkdir(parents=True)
+        (cache / ".codex-plugin" / "plugin.json").write_text("{}\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
+            "AGENTS_SKILLS_DIR": str(home / ".agents" / "skills"),
+            "UI_CLONE_LOCAL_BIN_DIR": str(home / ".local" / "bin"),
+            "UI_CLONE_PYTHON_CANDIDATES": "/bin/false",
+            "COMMAND_LOG": str(command_log),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "--codex-only", "--no-deps"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert expected_error in result.stdout + result.stderr
+    assert shadow.is_symlink(), "failed delivery must preserve the last working skill surface"
+
+
+def test_codex_verified_delivery_then_migrates_legacy_skills(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_codex(fake_bin / "codex", runtime_extra=True)
+
+    legacy = home / ".codex" / "skills"
+    legacy.mkdir(parents=True)
+    shadow = legacy / "ui-capture"
+    shadow.symlink_to(REPO_ROOT / "skills" / "ui-capture")
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
+            "AGENTS_SKILLS_DIR": str(home / ".agents" / "skills"),
+            "UI_CLONE_LOCAL_BIN_DIR": str(home / ".local" / "bin"),
+            "UI_CLONE_PYTHON_CANDIDATES": "/bin/false",
+            "COMMAND_LOG": str(command_log),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "--codex-only", "--no-deps"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "content-matched" in result.stdout
+    assert not shadow.exists()
 
 
 def test_reinstall_refreshes_an_already_installed_claude_plugin(tmp_path: Path) -> None:
@@ -1826,11 +2006,11 @@ def test_reinstall_refreshes_an_already_installed_claude_plugin(tmp_path: Path) 
     # Reports the plugin as already installed, the way a second run sees it.
     _write_executable(
         fake_bin / "claude",
-        '#!/usr/bin/env bash\n'
+        "#!/usr/bin/env bash\n"
         'printf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n'
         'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
         '  printf "  ui-clone-skills@voidmatcha\\n"\n'
-        'fi\n',
+        "fi\n",
     )
     env = os.environ.copy()
     env.update(
@@ -1870,25 +2050,21 @@ def _write_cache_faking_claude(path: Path, *, populate: bool) -> None:
     reproduces the observed failure: the version directory is created but the
     copy lands nothing, because the source was symlinks.
     """
-    copy = (
-        'cp -R "$src"/. "$dst"/\n'
-        if populate
-        else '# deliberately leaves the cache dir empty\n'
-    )
+    copy = 'cp -R "$src"/. "$dst"/\n' if populate else "# deliberately leaves the cache dir empty\n"
     _write_executable(
         path,
-        '#!/usr/bin/env bash\n'
+        "#!/usr/bin/env bash\n"
         'printf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n'
         'if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ] && [ "$3" = "add" ]; then\n'
         '  printf "%s" "$4" > "$HOME/.fake-marketplace-src"\n'
-        'fi\n'
+        "fi\n"
         'if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then\n'
         '  src="$(cat "$HOME/.fake-marketplace-src")"\n'
         '  ver="$(sed -n \'s/.*"version": "\\([^"]*\\)".*/\\1/p\' "$src/.claude-plugin/plugin.json" | head -1)"\n'
         '  dst="$HOME/.claude/plugins/cache/voidmatcha/ui-clone-skills/$ver"\n'
         '  mkdir -p "$dst"\n'
-        f'  {copy}'
-        'fi\n',
+        f"  {copy}"
+        "fi\n",
     )
 
 
@@ -1934,7 +2110,7 @@ def test_install_fails_when_the_host_caches_the_plugin_without_its_hooks(
     log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
     _write_cache_faking_claude(fake_bin / "claude", populate=False)
-    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
 
     result = subprocess.run(
         ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
@@ -1980,7 +2156,9 @@ def test_install_runs_an_installed_hook_from_the_host_cache(tmp_path: Path) -> N
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, f"stdout:\n{result.stdout[-2000:]}\nstderr:\n{result.stderr[-2000:]}"
+    assert result.returncode == 0, (
+        f"stdout:\n{result.stdout[-2000:]}\nstderr:\n{result.stderr[-2000:]}"
+    )
 
     assert uv_log.is_file(), "the installer never executed a hook from the cache"
     invocations = uv_log.read_text(encoding="utf-8")
@@ -2020,14 +2198,12 @@ def test_install_self_heals_stale_same_version_claude_cache(
     log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
     _write_cache_faking_claude(fake_bin / "claude", populate=True)
-    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
 
-    version = json.loads(
-        (checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
-    )["version"]
-    cache_dir = (
-        home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills" / version
-    )
+    version = json.loads((checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))[
+        "version"
+    ]
+    cache_dir = home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills" / version
     cache_file = cache_dir / cache_relative
 
     first = subprocess.run(
@@ -2051,19 +2227,17 @@ def test_install_self_heals_stale_same_version_claude_cache(
     # the fallback install.sh's recovery now depends on.
     _write_executable(
         fake_bin / "claude",
-        '#!/usr/bin/env bash\n'
+        "#!/usr/bin/env bash\n"
         'printf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n'
         'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
         '  printf "  ui-clone-skills@voidmatcha\\n"\n'
-        'fi\n'
+        "fi\n"
         'if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then\n'
         '  src="$(cat "$HOME/.fake-marketplace-src")"\n'
-        '  dst="$HOME/.claude/plugins/cache/voidmatcha/ui-clone-skills/'
-        + version
-        + '"\n'
+        '  dst="$HOME/.claude/plugins/cache/voidmatcha/ui-clone-skills/' + version + '"\n'
         '  mkdir -p "$dst"\n'
         '  cp -R "$src"/. "$dst"/\n'
-        'fi\n',
+        "fi\n",
     )
     result = subprocess.run(
         ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
@@ -2135,8 +2309,7 @@ def test_install_refuses_a_claude_source_that_resolves_inside_the_checkout(
     )
 
     assert result.returncode != 0, (
-        "staging inside the checkout must fail the install\n"
-        f"stdout:\n{result.stdout[-1500:]}"
+        f"staging inside the checkout must fail the install\nstdout:\n{result.stdout[-1500:]}"
     )
     assert not (checkout / "claude-src").exists(), (
         "the installer must not leave a staged copy inside the working tree"
@@ -2160,7 +2333,7 @@ def test_install_prunes_superseded_cache_versions(tmp_path: Path) -> None:
     log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
     _write_cache_faking_claude(fake_bin / "claude", populate=True)
-    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
 
     cache = home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills"
     stale = cache / "0.7.1"
@@ -2171,9 +2344,9 @@ def test_install_prunes_superseded_cache_versions(tmp_path: Path) -> None:
     other.mkdir(parents=True)
     (other / "keep.txt").write_text("not ours\n", encoding="utf-8")
 
-    version = json.loads(
-        (checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
-    )["version"]
+    version = json.loads((checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))[
+        "version"
+    ]
     installed = home / ".claude" / "plugins" / "installed_plugins.json"
     installed.parent.mkdir(parents=True, exist_ok=True)
     installed.write_text(
@@ -2223,12 +2396,12 @@ def test_install_never_reclaims_the_version_it_just_verified(tmp_path: Path) -> 
     log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
     _write_cache_faking_claude(fake_bin / "claude", populate=True)
-    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
 
     cache = home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills"
-    version = json.loads(
-        (checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
-    )["version"]
+    version = json.loads((checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))[
+        "version"
+    ]
     # The host record lags: it still names only the previous version.
     previous = cache / "0.7.1"
     previous.mkdir(parents=True)
@@ -2278,7 +2451,7 @@ def test_install_keeps_cache_versions_when_the_host_record_is_unreadable(
     log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
     _write_cache_faking_claude(fake_bin / "claude", populate=True)
-    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
 
     cache = home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills"
     stale = cache / "0.7.1"
@@ -2317,7 +2490,7 @@ def test_install_warns_when_the_plugin_is_installed_but_not_enabled(
     log = tmp_path / "commands.log"
     _write_python_wrapper(fake_bin / "python3")
     _write_cache_faking_claude(fake_bin / "claude", populate=True)
-    _write_executable(fake_bin / "uv", '#!/usr/bin/env bash\nexit 0\n')
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
 
     settings = home / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)

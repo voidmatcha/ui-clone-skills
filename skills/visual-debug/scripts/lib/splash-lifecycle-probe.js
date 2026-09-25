@@ -97,6 +97,9 @@
     var minCoverageRatio = present.reduce(function (lowest, sample) {
       return Math.min(lowest, overlayCoverage(sample.overlay));
     }, present.length ? 1 : 0);
+    var persistentPageSurface = Boolean(
+      firstOverlay && firstOverlay.pageSurface === true && present.length > 0 && !exited
+    );
 
     return {
       sampleCount: samples.length,
@@ -112,15 +115,16 @@
       durationMs: Math.max(0, durationMs),
       initialCoverageRatio: rounded(initialCoverageRatio),
       minCoverageRatio: rounded(minCoverageRatio),
+      persistentPageSurface: persistentPageSurface,
     };
   }
 
-  function sideViolations(prefix, side) {
+  function sideViolations(prefix, side, allowPersistentPageSurface) {
     var violations = [];
     if (!side.mounted) {
       violations.push(prefix + "-overlay-absent");
     }
-    if (side.mounted && !side.exited) {
+    if (side.mounted && !side.exited && !(allowPersistentPageSurface && side.persistentPageSurface)) {
       violations.push(prefix + "-overlay-never-exited");
     }
     if (side.reappeared) {
@@ -138,8 +142,14 @@
   function compareLifecycles(refSamples, implSamples) {
     var ref = analyzeTimeline(refSamples);
     var impl = analyzeTimeline(implSamples);
-    var violations = sideViolations("ref", ref).concat(sideViolations("impl", impl));
-    if (ref.phaseChanged && impl.mounted && !impl.phaseChanged) {
+    var referenceIsPersistentPageSurface = ref.persistentPageSurface;
+    var violations = sideViolations("ref", ref, true).concat(
+      sideViolations("impl", impl, referenceIsPersistentPageSurface)
+    );
+    if (referenceIsPersistentPageSurface && !impl.persistentPageSurface) {
+      violations.push("impl-persistent-page-surface-missing");
+    }
+    if (!referenceIsPersistentPageSurface && ref.phaseChanged && impl.mounted && !impl.phaseChanged) {
       violations.push("impl-overlay-static");
     }
     if (ref.durationMs >= MIN_DURATION_COMPARE_MS) {
@@ -273,6 +283,13 @@
       position === "fixed" ||
       (position === "absolute" && (Number.isFinite(z) ? z : 0) >= 10);
     if (!overlayish) return null;
+    var pageSurfaceAncestor = el.closest ? el.closest("main,section,article,[role='main']") : null;
+    // A fixed, base-layer child of a semantic page region is commonly a hero
+    // canvas/stage. It can cover the viewport for the whole first-load window,
+    // but it is part of the document surface rather than a temporary splash.
+    // Keep it in the capture so compareLifecycles can require the impl to have
+    // the same persistent surface classification before waiving splash exit.
+    var pageSurface = position === "fixed" && (Number.isFinite(z) ? z : 0) <= 0 && Boolean(pageSurfaceAncestor);
     return {
       selector: selectorFor(el),
       domPath: domPathFor(el),
@@ -288,6 +305,7 @@
       transform: style.transform === "none" ? "" : style.transform,
       zIndex: Number.isFinite(z) ? z : 0,
       position: position,
+      pageSurface: pageSurface,
     };
   }
 

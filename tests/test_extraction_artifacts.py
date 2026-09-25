@@ -12,6 +12,60 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_auto_hover_fixture(ref: Path, selectors: list[str]) -> None:
+    _write_json(
+        ref / "hover-css-rules.json",
+        {
+            "source": "scripts/extract/capture-hover.sh",
+            "status": "pass",
+            "derivedFrom": ["live-cssom"],
+            "rules": [
+                {
+                    "selector": f"{selector}:hover .icon",
+                    "activationSelector": selector,
+                    "declarations": "opacity: .8",
+                    "source": "scripts/extract/capture-hover.sh:live-cssom",
+                }
+                for selector in selectors
+            ],
+        },
+    )
+    _write_json(ref / "structure.json", {"tag": "body", "children": []})
+    _write_json(ref / "states/hover/summary.json", {"changedCount": 0})
+    _write_json(ref / "states/hover/manifest.json", {"states": []})
+
+
+def _write_auto_hover_negative_receipt(ref: Path, selectors: list[str]) -> None:
+    from ui_clone.extraction_artifacts import _hover_candidate_input_fingerprint
+
+    fingerprint = _hover_candidate_input_fingerprint(ref)
+    skipped = [
+        {
+            "resolution": "absence-measured",
+            "candidateKey": {"triggerType": "hover", "selector": selector},
+            "autoCandidateInputFingerprint": fingerprint,
+        }
+        for selector in selectors
+    ]
+    _write_json(
+        ref / "transition-spec.json",
+        {
+            "source": "ui_clone.extraction_artifacts",
+            "placeholder": True,
+            "transitions": [],
+            "skipped": skipped,
+        },
+    )
+    _write_json(
+        ref / "capture-region-artifacts-summary.json",
+        {
+            "autoSpec": True,
+            "autoCandidateInputFingerprint": fingerprint,
+            "skipped": skipped,
+        },
+    )
+
+
 def test_full_finalizer_writes_canonical_handoff_artifacts(tmp_path: Path) -> None:
     ref = tmp_path / "ref"
     ref.mkdir()
@@ -299,6 +353,158 @@ def test_empty_live_hover_inventory_suppresses_unused_raw_css(
     ]
 
 
+def test_measured_auto_hover_negative_is_not_rederived_for_same_inputs(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.extraction_artifacts import _finalize_transition_spec
+
+    ref = tmp_path / "ref"
+    _write_auto_hover_fixture(ref, [".dormant"])
+    _write_auto_hover_negative_receipt(ref, [".dormant"])
+
+    _finalize_transition_spec(ref, {})
+
+    spec = json.loads((ref / "transition-spec.json").read_text(encoding="utf-8"))
+    assert spec["transitions"] == []
+    assert spec["skipped"][0]["candidateKey"]["selector"] == ".dormant"
+
+
+def test_measured_auto_hover_negative_is_invalidated_by_runtime_input_change(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.extraction_artifacts import _finalize_transition_spec
+
+    ref = tmp_path / "ref"
+    _write_auto_hover_fixture(ref, [".became-live"])
+    _write_auto_hover_negative_receipt(ref, [".became-live"])
+    _write_json(ref / "states/hover/summary.json", {"changedCount": 1})
+
+    _finalize_transition_spec(ref, {})
+
+    spec = json.loads((ref / "transition-spec.json").read_text(encoding="utf-8"))
+    assert [entry["target"] for entry in spec["transitions"]] == [".became-live"]
+
+
+def test_measured_auto_hover_negative_only_suppresses_its_exact_candidate(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.extraction_artifacts import _finalize_transition_spec
+
+    ref = tmp_path / "ref"
+    _write_auto_hover_fixture(ref, [".dormant", ".live"])
+    _write_auto_hover_negative_receipt(ref, [".dormant"])
+
+    _finalize_transition_spec(ref, {})
+
+    spec = json.loads((ref / "transition-spec.json").read_text(encoding="utf-8"))
+    hover_targets = [
+        entry["target"]
+        for entry in spec["transitions"]
+        if entry["trigger"] == "hover"
+    ]
+    assert hover_targets == [".live"]
+
+
+def test_measured_auto_hover_receipt_cannot_suppress_manual_spec(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.extraction_artifacts import _finalize_transition_spec
+
+    ref = tmp_path / "ref"
+    _write_auto_hover_fixture(ref, [".manual"])
+    _write_auto_hover_negative_receipt(ref, [".manual"])
+    spec_path = ref / "transition-spec.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["source"] = "author-maintained"
+    spec["placeholder"] = False
+    _write_json(spec_path, spec)
+
+    _finalize_transition_spec(ref, {})
+
+    updated = json.loads(spec_path.read_text(encoding="utf-8"))
+    assert [entry["target"] for entry in updated["transitions"]] == [".manual"]
+
+
+def test_scroll_state_machine_plan_signal_does_not_invent_body_transition(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.extraction_artifacts import _finalize_transition_spec
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_json(
+        ref / "verification-plan.json",
+        {"signals": {"hasScrollStateMachine": True}},
+    )
+
+    _finalize_transition_spec(ref, {})
+
+    spec = json.loads((ref / "transition-spec.json").read_text(encoding="utf-8"))
+    assert [entry["trigger"] for entry in spec["transitions"]] == ["page-load"]
+    plan = json.loads((ref / "verification-plan.json").read_text(encoding="utf-8"))
+    assert plan["signals"]["hasScrollStateMachine"] is True
+
+
+def test_scroll_state_machine_plan_signal_converges_after_measured_hover_absence(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.extraction_artifacts import _finalize_transition_spec
+
+    ref = tmp_path / "ref"
+    _write_auto_hover_fixture(ref, [".dormant"])
+    _write_auto_hover_negative_receipt(ref, [".dormant"])
+    _write_json(
+        ref / "verification-plan.json",
+        {"signals": {"hasScrollStateMachine": True}},
+    )
+
+    _finalize_transition_spec(ref, {})
+    first = (ref / "transition-spec.json").read_text(encoding="utf-8")
+    _finalize_transition_spec(ref, {})
+    second = (ref / "transition-spec.json").read_text(encoding="utf-8")
+
+    assert json.loads(first)["transitions"] == []
+    assert second == first
+
+
+def test_observed_scroll_motion_survives_state_machine_plan_signal(
+    tmp_path: Path,
+) -> None:
+    from ui_clone.extraction_artifacts import _finalize_transition_spec
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _write_json(
+        ref / "verification-plan.json",
+        {"signals": {"hasScrollStateMachine": True, "hasScrollScrub": True}},
+    )
+    _write_json(
+        ref / "animation-runtime-dump.json",
+        {
+            "scrollLinkedStyles": [
+                {
+                    "selector": ".observed",
+                    "varies": ["transform"],
+                    "byScroll": {
+                        "0": {"transform": "none"},
+                        "1": {"transform": "translateX(20px)"},
+                    },
+                }
+            ]
+        },
+    )
+
+    _finalize_transition_spec(ref, {})
+
+    spec = json.loads((ref / "transition-spec.json").read_text(encoding="utf-8"))
+    scroll = [entry for entry in spec["transitions"] if entry["trigger"] == "scroll-scrub"]
+    assert [entry["target"] for entry in scroll] == [".observed"]
+    assert scroll[0]["animation"]["scrollKeyframes"]["source"] == (
+        "animation-runtime-dump.json:scrollLinkedStyles"
+    )
+    assert not any(entry["trigger"] == "scroll-state-machine" for entry in spec["transitions"])
+
+
 def test_invalid_live_hover_inventory_falls_back_to_raw_css(tmp_path: Path) -> None:
     from ui_clone.extraction_artifacts import _finalize_interactions
 
@@ -396,6 +602,49 @@ def test_external_sdks_framer_motion_false_positive_fixed(tmp_path: Path) -> Non
         f"basic motion.div usage must detect framer-motion: {sdks3['detected']}"
     )
     assert "framer-motion" in sdks3["usedMotion"], "motion.div is a construction site"
+
+
+def test_external_sdks_lenis_ignores_cleanup_without_runtime(tmp_path: Path) -> None:
+    from ui_clone.extraction_artifacts import _finalize_bundles
+
+    decoy_ref = tmp_path / "decoy"
+    (decoy_ref / "bundles").mkdir(parents=True)
+    (decoy_ref / "bundles" / "init.mjs.js").write_text(
+        "document.getElementsByClassName('lenis-scrolling')[0]?.classList.remove('lenis-scrolling');",
+        encoding="utf-8",
+    )
+    _finalize_bundles(decoy_ref, {})
+    decoy_sdks = json.loads(
+        (decoy_ref / "external-sdks.json").read_text(encoding="utf-8")
+    )
+    assert "lenis" not in decoy_sdks["detected"]
+    assert "lenis" not in decoy_sdks["usedMotion"]
+
+    runtime_ref = tmp_path / "runtime"
+    (runtime_ref / "bundles").mkdir(parents=True)
+    (runtime_ref / "bundles" / "scroll.js").write_text(
+        "const scroll = new Lenis({smoothWheel:true}); scroll.raf(performance.now());",
+        encoding="utf-8",
+    )
+    _finalize_bundles(runtime_ref, {})
+    runtime_sdks = json.loads(
+        (runtime_ref / "external-sdks.json").read_text(encoding="utf-8")
+    )
+    assert "lenis" in runtime_sdks["detected"]
+    assert "lenis" in runtime_sdks["usedMotion"]
+
+    minified_ref = tmp_path / "minified"
+    (minified_ref / "bundles").mkdir(parents=True)
+    (minified_ref / "bundles" / "vendor.js").write_text(
+        'class a{get className(){return"lenis-smooth"}};const o={smoothWheel:!0};',
+        encoding="utf-8",
+    )
+    _finalize_bundles(minified_ref, {})
+    minified_sdks = json.loads(
+        (minified_ref / "external-sdks.json").read_text(encoding="utf-8")
+    )
+    assert "lenis" in minified_sdks["detected"]
+    assert "lenis" not in minified_sdks["usedMotion"]
 
 
 def test_external_sdks_webflow_ix2_ignores_css_module_decoys(tmp_path: Path) -> None:

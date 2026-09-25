@@ -47,6 +47,10 @@ class El {
   get className() { return this.attrs.class || ''; }
   set className(v) { this.attrs.class = v; }
   get parentElement() { return this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : null; }
+  get childNodes() {
+    const text = this.text ? [{ nodeType: 3, textContent: this.text }] : [];
+    return text.concat(this.children);
+  }
   append(c) { c.parentNode = this; this.children.push(c); return c; }
   remove() {
     if (!this.parentNode) return;
@@ -99,6 +103,7 @@ function scenario(name) {
   const body = h('body', {});
   html.append(body);
   const events = [];
+  let tick = () => {};
   switch (name) {
     case 'half-viewport-loader-exits': {
       // An in-flow loader covering 55% of the viewport sits over the hero
@@ -190,6 +195,74 @@ function scenario(name) {
       events.push({ at: 700, run: () => { html.className = 'lenis lenis-smooth'; app.text += 'z'.repeat(100); } });
       break;
     }
+    case 'periodic-motion-offscreen-hydration': {
+      // Mobbin-shaped negative: visible structure stays put while a hero icon
+      // animates forever and hydration prunes a large offscreen SSR branch.
+      // The general evidence hash must keep recording the motion, while the
+      // splash-specific settle channel reaches a conclusive negative.
+      const app = h('div', { id: 'app', rect: cover(1.0), text: 'x'.repeat(2000) });
+      const hero = h('section', { id: 'hero', rect: cover(0.8), text: 'hero' });
+      const icon = h('div', { id: 'rotating-icon', rect: [0, 0, 200, 100] });
+      const offscreen = h('section', {
+        id: 'ssr-alternate', rect: [0, VH * 3, VW, VH], text: 'z'.repeat(12000),
+      });
+      app.append(hero);
+      app.append(icon);
+      app.append(offscreen);
+      body.append(app);
+      events.push({ at: 400, run: () => offscreen.remove() });
+      tick = (now) => { icon.style.transform = `rotate(${Math.floor(now / 100)}deg)`; };
+      break;
+    }
+    case 'empty-viewport-populates': {
+      const content = h('main', { id: 'content', rect: cover(1.0), text: 'ready' });
+      events.push({ at: 400, run: () => body.append(content) });
+      break;
+    }
+    case 'persistent-shell-copy-replaced': {
+      const app = h('main', { id: 'app', rect: cover(1.0), text: 'Loading' });
+      body.append(app);
+      events.push({ at: 400, run: () => { app.text = 'Account dashboard'; } });
+      break;
+    }
+    case 'hidden-ancestor-reveals': {
+      const wrapper = h('div', {
+        id: 'loading-wrapper', rect: cover(1.0), style: { opacity: '0' },
+      });
+      const content = h('main', { id: 'content', rect: cover(1.0), text: 'Dashboard' });
+      wrapper.append(content);
+      body.append(wrapper);
+      events.push({ at: 400, run: () => { wrapper.style.opacity = '1'; } });
+      break;
+    }
+    case 'animated-background-replaced': {
+      const image = h('div', {
+        id: 'hero-art', rect: cover(0.8),
+        style: { backgroundImage: 'url(/loading.webp)' },
+      });
+      body.append(image);
+      events.push({ at: 400, run: () => { image.style.backgroundImage = 'url(/hero.webp)'; } });
+      break;
+    }
+    case 'image-asset-replaced': {
+      const image = h('img', { id: 'hero-art', rect: cover(0.8), src: '/loading.webp' });
+      body.append(image);
+      for (let index = 0; index < 24; index += 1) {
+        body.append(h('div', {
+          id: `minor-${index}`, rect: [index * 12, 820, 10, 10], text: String(index),
+        }));
+      }
+      events.push({ at: 400, run: () => { image.attrs.src = '/hero.webp'; } });
+      break;
+    }
+    case 'svg-asset-replaced': {
+      const svg = h('svg', { id: 'hero-mark', rect: cover(0.8), viewBox: '0 0 100 100' });
+      const path = h('path', { d: 'M0 0 L10 10' });
+      svg.append(path);
+      body.append(svg);
+      events.push({ at: 400, run: () => { path.attrs.d = 'M0 100 L100 0'; } });
+      break;
+    }
     case 'hydration-remount-same-class':
     case 'skeleton-replaced-in-place':
     case 'loader-replaced-by-content-different-class':
@@ -237,10 +310,10 @@ function scenario(name) {
     default:
       throw new Error(`unknown scenario: ${name}`);
   }
-  return { html, body, events };
+  return { html, body, events, tick };
 }
 
-const { html, body, events } = scenario(scenarioName);
+const { html, body, events, tick } = scenario(scenarioName);
 const documentRoot = html;
 
 // ── virtual clock + globals the sampler touches ────────────────────────────
@@ -250,13 +323,14 @@ function advance(ms) {
   for (const event of events) {
     if (!event.done && clock >= event.at) { event.done = true; event.run(); }
   }
+  tick(clock);
 }
 
 const g = globalThis;
 g.window = g;
 g.innerWidth = VW;
 g.innerHeight = VH;
-g.Node = { ELEMENT_NODE: 1, DOCUMENT_FRAGMENT_NODE: 11 };
+g.Node = { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_FRAGMENT_NODE: 11 };
 g.performance = { now: () => clock };
 g.requestAnimationFrame = (cb) => { Promise.resolve().then(() => { advance(16); cb(clock); }); return 1; };
 g.setTimeout = (fn, ms) => { Promise.resolve().then(() => { advance(Number(ms) || 0); fn(); }); return 1; };
@@ -264,7 +338,11 @@ g.getComputedStyle = (el) => el.style;
 g.document = {
   documentElement: html,
   body,
-  getAnimations: () => [],
+  getAnimations: () => scenarioName === 'animated-background-replaced'
+    ? [{ playState: 'running', currentTime: clock,
+         effect: { target: body.children[0], getTiming: () => ({ duration: 1000 }),
+                   getKeyframes: () => [{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }] } }]
+    : [],
   querySelectorAll: (selector) => html.querySelectorAll(selector),
 };
 

@@ -111,6 +111,92 @@ def test_hover_pseudo_change_is_visual_evidence() -> None:
     assert tf.decide(entry, obs, set())["status"] == "pass"
 
 
+def _affected(selector: str, *nodes: dict, matched: int | None = None) -> dict:
+    return {
+        "selector": selector,
+        "selectorValid": True,
+        "matched": len(nodes) if matched is None else matched,
+        "nodes": list(nodes),
+    }
+
+
+def test_hover_affected_target_declared_property_change_passes() -> None:
+    selector = ".button .spin, .button .cover"
+    entry = {
+        "id": "child-hover",
+        "trigger": "hover",
+        "target": ".button",
+        "affectedTarget": selector,
+        "animation": {
+            "type": "css-hover",
+            "property": "opacity, transform",
+            "changedProperties": ["opacity", "transform"],
+        },
+    }
+    obs = {
+        "found": True,
+        "before": _state(
+            affected=_affected(
+                selector, {"opacity": 0.0, "transform": "none"}
+            )
+        ),
+        "after": _state(
+            affected=_affected(
+                selector,
+                {"opacity": 1.0, "transform": "matrix(0,1,-1,0,0,0)"},
+            )
+        ),
+    }
+
+    result = tf.decide(entry, obs, set())
+    assert result["status"] == "pass", result
+    assert "opacity" in result["observed"]
+
+
+def test_hover_affected_target_unchanged_descendants_fail() -> None:
+    selector = ".button .spin"
+    entry = {
+        "id": "dead-child-hover",
+        "trigger": "hover",
+        "target": ".button",
+        "affectedTarget": selector,
+        "animation": {
+            "type": "css-hover",
+            "changedProperties": ["opacity", "transform"],
+        },
+    }
+    child = {"opacity": 0.0, "transform": "none"}
+    obs = {
+        "found": True,
+        # A change on the activation wrapper cannot substitute for the
+        # explicitly declared affected descendant.
+        "before": _state(opacity=0.0, affected=_affected(selector, child)),
+        "after": _state(opacity=1.0, affected=_affected(selector, child)),
+    }
+
+    assert tf.decide(entry, obs, set())["status"] == "fail"
+
+
+def test_hover_affected_target_selector_mismatch_fails() -> None:
+    selector = ".button .missing"
+    entry = {
+        "id": "mismatched-child-hover",
+        "trigger": "hover",
+        "target": ".button",
+        "affectedTarget": selector,
+        "animation": {"type": "css-hover", "changedProperties": ["opacity"]},
+    }
+    obs = {
+        "found": True,
+        "before": _state(affected=_affected(selector, matched=0)),
+        "after": _state(affected=_affected(selector, matched=0)),
+    }
+
+    result = tf.decide(entry, obs, set())
+    assert result["status"] == "fail"
+    assert "matched 0 descendants" in result["observed"]
+
+
 def test_hover_top_move_alone_fails() -> None:
     """The hover driver snaps BEFORE at scroll-top (PHASE1) and scrollintoview()s
     the target before the real-pointer AFTER snap, so a below-fold target's
@@ -1068,6 +1154,17 @@ def test_transition_fires_hover_patch_preserves_synthetic_js_delta() -> None:
     assert "boxShadow" in text
     assert "filter" in text
     assert "style_changed(current_after, baseline) and not style_changed(pointer_after, baseline)" in text
+
+
+def test_transition_fires_hover_snapshots_declared_affected_target() -> None:
+    root = Path(__file__).resolve().parents[2]
+    script = root / "skills" / "visual-debug" / "scripts" / "transition-fires-check.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert '"affectedTarget": str(t.get("affectedTarget")' in text
+    assert "function affectedSnap(el, e)" in text
+    assert "matches.filter((node) => node === el || el.contains(node))" in text
+    assert "after: snap(el, e)" in text
 
 
 def test_hover_patch_targets_largest_visible_match() -> None:

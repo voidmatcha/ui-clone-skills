@@ -301,7 +301,7 @@ Before proceeding to generation, verify:
 □ Footer exists if section-map.json shows a <footer> tag
 ```
 
-Run the gate (same `UV_PROJECT_ENVIRONMENT`/`PYTHONPATH` exports as SKILL.md's [Validation gates](./SKILL.md#validation-gates)):
+Run the gate (same `UV_PROJECT_ENVIRONMENT`/`PYTHONPATH` exports as [Validation gates](./pipeline-execution.md#validation-gates)):
 ```bash
 UV_PROJECT_ENVIRONMENT="${UI_CLONE_HOOK_VENV:-${XDG_CACHE_HOME:-$HOME/.cache}/ui-clone-skills/hook-venv}" \
   PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}" \

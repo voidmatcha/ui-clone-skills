@@ -70,6 +70,8 @@ command -v agent-browser >/dev/null 2>&1 || {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/extract/capture-browser-bootstrap.sh
+source "$SCRIPT_DIR/capture-browser-bootstrap.sh"
 ARTIFACTS_PY="$SCRIPT_DIR/_capture_artifacts.py"
 [ -f "$ARTIFACTS_PY" ] || {
   echo "capture.sh: missing $ARTIFACTS_PY" >&2
@@ -134,6 +136,21 @@ run_capture_step() {
   CAPTURE_MESSAGE=""
   "$@" || return "$?"
   CAPTURE_MESSAGE=""
+}
+
+bootstrap_page() {
+  CAPTURE_COMMAND="$(format_command agent-browser --session "$CAPTURE_SESSION" get url)"
+  local output status
+  if output="$(capture_browser_bootstrap "capture.sh" agent-browser --session "$CAPTURE_SESSION" 2>&1)"; then
+    CAPTURE_MESSAGE=""
+    printf '%s\n' "$output" >&2
+    return 0
+  else
+    status=$?
+    CAPTURE_MESSAGE="$output"
+    printf '%s\n' "$output" >&2
+    return "$status"
+  fi
 }
 
 run_record_stop() {
@@ -232,7 +249,7 @@ require_capture_artifact "hover-state-capture:artifact-check" "states/hover/summ
 if [ "$REUSE_SESSION" != "true" ]; then
   run_capture_step "pre-open-session-reset" "" agent-browser --session "$CAPTURE_SESSION" close
 fi
-run_capture_step "page-bootstrap" "" agent-browser --session "$CAPTURE_SESSION" get url >/dev/null
+run_capture_step "page-bootstrap" "" bootstrap_page >/dev/null
 run_capture_step "pre-open-viewport" "" agent-browser --session "$CAPTURE_SESSION" set viewport 1440 900
 run_capture_step "color-scheme" "" agent-browser --session "$CAPTURE_SESSION" set media "$CAPTURE_COLOR_SCHEME"
 NAVIGATION_RESPONSE="$(mktemp "${TMPDIR:-/tmp}/ui-clone-navigation.XXXXXX")"
@@ -318,3 +335,4 @@ run_capture_step "regions:write" "regions.json" python3 "$ARTIFACTS_PY" write-re
 # emitted, so any callers grepping for "static/ref/: N screenshots" etc.
 # keep working).
 run_capture_step "summary" "" python3 "$ARTIFACTS_PY" summarize "$ABS_REF"
+run_capture_step "stale-error-cleanup" "capture-error.json" rm -f "$ABS_REF/capture-error.json"

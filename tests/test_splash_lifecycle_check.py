@@ -162,11 +162,13 @@ def _overlay(
     coverage_ratio: float | None = None,
     dom_path: str | None = None,
     node_identity: str | None = None,
+    page_surface: bool = False,
 ) -> dict:
     return {
         "selector": selector,
         **({"domPath": dom_path} if dom_path else {}),
         **({"nodeIdentity": node_identity} if node_identity else {}),
+        **({"pageSurface": True} if page_surface else {}),
         **({"coverageRatio": coverage_ratio} if coverage_ratio is not None else {}),
         "signature": signature,
         "rect": {"x": 0, "y": y, "width": 1280, "height": height},
@@ -268,6 +270,45 @@ def test_compare_lifecycles_fails_static_overlay_that_never_exits() -> None:
     assert verdict["status"] == "fail"
     assert "ref-overlay-never-exited" in verdict["violations"]
     assert "impl-overlay-never-exited" in verdict["violations"]
+
+
+def test_compare_lifecycles_allows_matching_persistent_page_surfaces() -> None:
+    ref = [
+        _overlay_sample(0, _overlay("div.hero-stage", signature="Forward", page_surface=True)),
+        _overlay_sample(100, _overlay("div.hero-stage", signature="Forward 10", page_surface=True)),
+        _overlay_sample(4500, _overlay("div.hero-stage", signature="Forward 10", page_surface=True)),
+    ]
+    impl = [
+        _overlay_sample(0, _overlay("div.hero-stage", signature="Forward", page_surface=True)),
+        _overlay_sample(100, _overlay("div.hero-stage", signature="Forward", page_surface=True)),
+        _overlay_sample(4500, _overlay("div.hero-stage", signature="Forward", page_surface=True)),
+    ]
+
+    verdict = _compare(ref, impl)
+
+    assert verdict["status"] == "pass"
+    assert verdict["ref"]["persistentPageSurface"] is True
+    assert verdict["impl"]["persistentPageSurface"] is True
+    assert "ref-overlay-never-exited" not in verdict["violations"]
+    assert "impl-overlay-never-exited" not in verdict["violations"]
+    assert "impl-overlay-static" not in verdict["violations"]
+
+
+def test_compare_lifecycles_does_not_waive_stuck_impl_splash_for_reference_page_surface() -> None:
+    ref = [
+        _overlay_sample(0, _overlay("div.hero-stage", page_surface=True)),
+        _overlay_sample(4500, _overlay("div.hero-stage", page_surface=True)),
+    ]
+    impl = [
+        _overlay_sample(0, _overlay("#splash", signature="loading")),
+        _overlay_sample(4500, _overlay("#splash", signature="loading")),
+    ]
+
+    verdict = _compare(ref, impl)
+
+    assert verdict["status"] == "fail"
+    assert "impl-overlay-never-exited" in verdict["violations"]
+    assert "impl-persistent-page-surface-missing" in verdict["violations"]
 
 
 def test_compare_lifecycles_treats_replacement_overlay_as_splash_exit() -> None:

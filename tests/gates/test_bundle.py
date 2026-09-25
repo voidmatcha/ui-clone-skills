@@ -211,6 +211,39 @@ def test_gate_bundle_passes_trigger_classified_regions_for_interactions(
     assert not failures, f"trigger-classified regions must pass the bundle gate: {failures}"
 
 
+def test_gate_bundle_ignores_resolved_auto_candidates_beside_live_region(
+    tmp_path: Path,
+) -> None:
+    """Retired candidate receipts are metadata, not artifact-bearing regions."""
+    ref = _bundle_ref_with_required_files(tmp_path)
+    (ref / "interactions-detected.json").write_text(json.dumps({
+        "interactions": [{"id": "hover-0", "trigger": "hover", "target": ".live"}],
+    }))
+    idle = "clip/ref/live-idle.png"
+    active = "clip/ref/live-active.png"
+    for relative in (idle, active):
+        path = ref / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"captured")
+    (ref / "regions.json").write_text(json.dumps({
+        "placeholder": False,
+        "detectionRan": True,
+        "regions": [{
+            "name": "live",
+            "triggerType": "hover",
+            "selector": ".live",
+            "artifacts": {"idle": idle, "active": active},
+        }],
+        "resolvedAutoCandidates": [
+            {"triggerType": "hover", "selector": ".dormant"},
+        ],
+    }))
+
+    failures = [row for row in Gate(ref).gate_bundle() if row.status == "fail"]
+
+    assert failures == []
+
+
 def test_gate_bundle_passes_spec_derived_dispatch_only_regions(
     tmp_path: Path,
 ) -> None:
@@ -476,6 +509,36 @@ def test_gate_bundle_fails_when_hover_rules_exist_but_interactions_are_empty(
     ref = _bundle_ref_with_required_files(tmp_path)
     (ref / "hover-css-rules.json").write_text(
         json.dumps({"rules": [{"selector": ".cta:hover"}], "summary": {"count": 1}})
+    )
+
+    failures = [r for r in Gate(ref).gate_bundle() if r.status == "fail"]
+
+    assert [r.label for r in failures] == ["hover transition evidence"]
+
+
+def test_gate_bundle_accepts_empty_interactions_after_complete_measured_absence(
+    tmp_path: Path,
+) -> None:
+    from .test_reference import _measured_auto_absence_fixture
+
+    ref = _bundle_ref_with_required_files(tmp_path)
+    _measured_auto_absence_fixture(ref)
+
+    failures = [r for r in Gate(ref).gate_bundle() if r.status == "fail"]
+
+    assert failures == []
+
+
+def test_gate_bundle_rejects_stale_measured_absence_for_empty_interactions(
+    tmp_path: Path,
+) -> None:
+    from .test_reference import _measured_auto_absence_fixture
+
+    ref = _bundle_ref_with_required_files(tmp_path)
+    _measured_auto_absence_fixture(ref)
+    (ref / "structure.json").write_text(
+        json.dumps({"tag": "body", "children": [{"tag": "button"}]}),
+        encoding="utf-8",
     )
 
     failures = [r for r in Gate(ref).gate_bundle() if r.status == "fail"]

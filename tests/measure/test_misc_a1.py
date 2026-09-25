@@ -49,6 +49,97 @@ def _write_runtime_rollup_fixture(ref: Path, runtime_frame: dict) -> None:
     }))
 
 
+def _write_runtime_scroll_rollup_fixture(ref: Path, scroll_completion: dict) -> None:
+    ref.mkdir(parents=True, exist_ok=True)
+    (ref / "no-signals-justified.txt").write_text("test fixture")
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "requiredChecks": [
+            {"id": "scroll-end-completion", "produces": "scroll-completion.json"},
+        ],
+    }))
+    for name in [
+        "lottie-runtime.json",
+        "runtime-image-validity.json",
+        "blank-viewport.json",
+        "runtime-dom-parity.json",
+        "motion-coverage.json",
+        "runtime-spec-coverage.json",
+        "runtime-frame-proof.json",
+        "reveal-trigger.json",
+        "hidden-children.json",
+        "svg-provenance.json",
+    ]:
+        (ref / name).write_text(json.dumps({"schemaVersion": 1, "status": "skip"}))
+    (ref / "scroll-completion.json").write_text(json.dumps(scroll_completion))
+    (ref / "hero-composite.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "pass",
+        "ref": {"video": False},
+        "impl": {"video": False},
+        "missingInImpl": [],
+    }))
+    (ref / "header-state-runtime.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "status": "skip",
+        "ref": {"mutates": False},
+        "impl": {"mutates": False},
+    }))
+
+
+def test_runtime_proof_rejects_scroll_pass_without_viewport_endpoint(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_runtime_scroll_rollup_fixture(ref, {
+        "schemaVersion": 1,
+        "status": "pass",
+        "candidates": -1,
+        "maxScroll": -1,
+    })
+
+    script = _project_root() / "skills/visual-debug/scripts/runtime-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "runtime-proof.json").read_text())
+    scroll = next(c for c in artifact["components"] if c["artifact"] == "scroll-completion.json")
+    assert scroll["valid"] is False
+    assert "no viewport endpoint measurements" in scroll["note"]
+
+
+def test_runtime_proof_accepts_measured_static_page_endpoint(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    _write_runtime_scroll_rollup_fixture(ref, {
+        "schemaVersion": 1,
+        "status": "pass",
+        "viewports": [{
+            "w": 1280,
+            "h": 800,
+            "candidates": 0,
+            "endpoint": {
+                "scrollY": 0,
+                "maxScroll": 0,
+                "scrollHeight": 800,
+                "viewportHeight": 800,
+                "remaining": 0,
+                "clippedLandmarks": [],
+                "reached": True,
+            },
+        }],
+    })
+
+    script = _project_root() / "skills/visual-debug/scripts/runtime-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "runtime-proof.json").read_text())
+    scroll = next(c for c in artifact["components"] if c["artifact"] == "scroll-completion.json")
+    assert scroll["valid"] is True
+    assert "candidates=0" in scroll["note"]
+
+
 def _run_runtime_spec_selector_fixture(
     tmp_path: Path,
     runtime_targets: list[str],

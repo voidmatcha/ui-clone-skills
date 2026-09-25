@@ -25,6 +25,10 @@
 #                         detected-breakpoints.json / impl-detected-breakpoints.json,
 #                         plus one probe above the widest declared breakpoint)
 #   FLUIDITY_DOCH_TOL_PCT per-width docH delta tolerance percent (default 8)
+#   REF_SCROLL_CAP_SELECTOR optional selector for a reference-only scroll cap.
+#                         The cap is removed only when the checker proves that
+#                         the matched clipped element and document both grow.
+#                         Without an override, a unique-id cap is auto-probed.
 #
 # Output: <ref-dir>/desktop-band-fluidity.json
 # Exit: 0 pass, 1 fail (a width out of tolerance / impl-only overflow / widthBaked),
@@ -71,6 +75,8 @@ for row in rows_in:
     impl_h = row.get("implDocH")
     ref_ox = bool(row.get("refOverflowX"))
     impl_ox = bool(row.get("implOverflowX"))
+    normalization = row.get("refNormalization") or {"status": "absent"}
+    normalization_failed = normalization.get("status") == "failed"
     delta_pct = None
     if isinstance(ref_h, (int, float)) and ref_h and isinstance(impl_h, (int, float)):
         delta_pct = abs(impl_h - ref_h) / ref_h * 100.0
@@ -84,7 +90,7 @@ for row in rows_in:
         isinstance(ref_h, (int, float)) and ref_h
         and isinstance(impl_h, (int, float))
     )
-    row_pass = not (doch_fail or overflow_fail or unmeasured)
+    row_pass = not (doch_fail or overflow_fail or unmeasured or normalization_failed)
     if not row_pass:
         any_fail = True
     widths.append({
@@ -99,6 +105,7 @@ for row in rows_in:
         "implOverflowX": impl_ox,
         "refBodyWidth": row.get("refBodyWidth"),
         "implBodyWidth": row.get("implBodyWidth"),
+        "refNormalization": normalization,
         "pass": row_pass,
     })
 
@@ -129,6 +136,7 @@ artifact = {
     "widths": widths,
     "widthBaked": width_baked,
     "tolerancePct": tol,
+    "referenceNormalization": [w["refNormalization"] for w in widths],
     "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
 with open(out_path, "w") as fh:
@@ -283,6 +291,111 @@ MEASURE_JS='(() => {
   });
 })()'
 
+# A deployed reference can intentionally keep the document behind a temporary
+# max-height cap until an intro/scroll interaction completes. Comparing that
+# transient height to the implementation is invalid. Normalize only when the
+# live page itself proves all of the following in this run: a unique selector,
+# clipping overflow, hidden content below the cap, element growth, and document
+# growth. A requested selector fails closed when any part of that proof fails.
+CAP_SELECTOR_JSON=$(printf '%s' "${REF_SCROLL_CAP_SELECTOR:-}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+NORMALIZE_REF_JS="(() => {
+  const requested = ${CAP_SELECTOR_JSON};
+  const de = document.documentElement;
+  const beforeDocH = de.scrollHeight;
+  const selectorFor = (el) => {
+    if (!el.id) return null;
+    const selector = '#' + CSS.escape(el.id);
+    return document.querySelectorAll(selector).length === 1 ? selector : null;
+  };
+  let matches = [];
+  try {
+    matches = requested
+      ? [...document.querySelectorAll(requested)]
+      : [...document.querySelectorAll('body *')].filter((el) => {
+          const selector = selectorFor(el);
+          if (!selector) return false;
+          const cs = getComputedStyle(el);
+          const maxH = parseFloat(cs.maxHeight);
+          const overflowClips = ['hidden', 'clip'].includes(cs.overflow)
+            || ['hidden', 'clip'].includes(cs.overflowY);
+          const rect = el.getBoundingClientRect();
+          const bodyNodeCount = Math.max(1, document.body.querySelectorAll('*').length);
+          const ownsMostPage = el.querySelectorAll('*').length >= bodyNodeCount * 0.5;
+          return overflowClips && Number.isFinite(maxH)
+            && el.scrollHeight > el.clientHeight + 100
+            && el.clientHeight >= innerHeight && rect.width >= innerWidth * 0.8
+            && ownsMostPage;
+        });
+  } catch (error) {
+    return JSON.stringify({status:'failed', source: requested ? 'env' : 'auto-probe',
+      selector: requested || null, reason:'invalid-selector', error:String(error), beforeDocH});
+  }
+  if (!matches.length) {
+    return JSON.stringify(requested
+      ? {status:'failed', source:'env', selector:requested, reason:'selector-not-found', beforeDocH}
+      : {status:'absent', source:'auto-probe', selector:null, reason:'no-scroll-cap-candidate', beforeDocH});
+  }
+  const eligible = matches.filter((el) => {
+    const cs = getComputedStyle(el);
+    const maxH = parseFloat(cs.maxHeight);
+    const overflowClips = ['hidden', 'clip'].includes(cs.overflow)
+      || ['hidden', 'clip'].includes(cs.overflowY);
+    return overflowClips && Number.isFinite(maxH)
+      && el.scrollHeight > el.clientHeight + 100;
+  });
+  if (!eligible.length) {
+    return JSON.stringify({status:'failed', source:requested ? 'env' : 'auto-probe',
+      selector:requested || matches.map(selectorFor).filter(Boolean).join(','),
+      reason:'candidate-not-proven-clipping', matchCount:matches.length, beforeDocH});
+  }
+  if (!requested && eligible.length !== 1) {
+    return JSON.stringify({status:'failed', source:'auto-probe', selector:null,
+      reason:'ambiguous-scroll-cap-candidates', matchCount:matches.length,
+      eligibleCount:eligible.length, beforeDocH});
+  }
+  const before = eligible.map((el) => ({
+    el, selector: selectorFor(el), clientHeight: el.clientHeight,
+    inlineValue: el.style.getPropertyValue('max-height'),
+    inlinePriority: el.style.getPropertyPriority('max-height')
+  }));
+  eligible.forEach((el) => el.style.setProperty('max-height', 'none', 'important'));
+  const afterDocH = de.scrollHeight;
+  const elementGrowth = before.map((item) => item.el.clientHeight - item.clientHeight);
+  const docGrowth = afterDocH - beforeDocH;
+  const proven = docGrowth >= Math.max(200, beforeDocH * 0.05)
+    && elementGrowth.some((growth) => growth >= 200);
+  if (!proven) {
+    before.forEach((item) => {
+      if (item.inlineValue) item.el.style.setProperty('max-height', item.inlineValue, item.inlinePriority);
+      else item.el.style.removeProperty('max-height');
+    });
+    return JSON.stringify({status:'failed', source:requested ? 'env' : 'auto-probe',
+      selector:requested || before.map((item) => item.selector).filter(Boolean).join(','),
+      reason:'height-growth-not-proven', matchCount:matches.length,
+      eligibleCount:eligible.length, beforeDocH, afterDocH, docGrowth, elementGrowth});
+  }
+  before.forEach((item) => {
+    item.el.setAttribute('data-ui-clone-cap-value', item.inlineValue);
+    item.el.setAttribute('data-ui-clone-cap-priority', item.inlinePriority);
+  });
+  return JSON.stringify({status:'applied', source:requested ? 'env' : 'auto-probe',
+    selector:requested || before.map((item) => item.selector).filter(Boolean).join(','),
+    matchCount:matches.length, eligibleCount:eligible.length,
+    beforeDocH, afterDocH, docGrowth, elementGrowth});
+})()"
+RESTORE_REF_CAP_JS='(() => {
+  const nodes = [...document.querySelectorAll("[data-ui-clone-cap-value]")];
+  nodes.forEach((el) => {
+    const value = el.getAttribute("data-ui-clone-cap-value") || "";
+    const priority = el.getAttribute("data-ui-clone-cap-priority") || "";
+    if (value) el.style.setProperty("max-height", value, priority);
+    else el.style.removeProperty("max-height");
+    el.removeAttribute("data-ui-clone-cap-value");
+    el.removeAttribute("data-ui-clone-cap-priority");
+  });
+  return JSON.stringify({restored:nodes.length});
+})()'
+
 i=0
 IFS=',' read -ra _WLIST <<< "$WIDTHS"
 for WH in "${_WLIST[@]}"; do
@@ -297,7 +410,9 @@ for WH in "${_WLIST[@]}"; do
     exit 2
   fi
   sleep 1.5
+  agent-browser --session "$REF_SESSION" eval "$NORMALIZE_REF_JS" > "$TMPD/norm.$i" 2>/dev/null || true
   agent-browser --session "$REF_SESSION" eval "$MEASURE_JS" > "$TMPD/ref.$i" 2>/dev/null || true
+  agent-browser --session "$REF_SESSION" eval "$RESTORE_REF_CAP_JS" >/dev/null 2>&1 || true
   agent-browser --session "$IMPL_SESSION" eval "$MEASURE_JS" > "$TMPD/impl.$i" 2>/dev/null || true
   printf '%s' "$WH" > "$TMPD/vp.$i"
   i=$((i + 1))
@@ -337,6 +452,13 @@ for idx in range(count):
     vp = (tmpd / f"vp.{idx}").read_text().strip() if (tmpd / f"vp.{idx}").is_file() else None
     ref = unwrap(tmpd / f"ref.{idx}") or {}
     impl = unwrap(tmpd / f"impl.{idx}") or {}
+    normalization = unwrap(tmpd / f"norm.{idx}")
+    if not isinstance(normalization, dict) or normalization.get("status") not in {"absent", "applied", "failed"}:
+        normalization = {
+            "status": "failed",
+            "source": "env" if __import__('os').environ.get('REF_SCROLL_CAP_SELECTOR') else "auto-probe",
+            "reason": "normalization-probe-unreadable",
+        }
     expected = tuple(int(part) for part in vp.split('x')) if vp else ()
     actual_ref = (ref.get('actualWidth'), ref.get('actualHeight'))
     actual_impl = (impl.get('actualWidth'), impl.get('actualHeight'))
@@ -352,6 +474,7 @@ for idx in range(count):
         "implOverflowX": bool(impl.get("overflowX")),
         "refBodyWidth": ref.get("bodyWidth"),
         "implBodyWidth": impl.get("bodyWidth"),
+        "refNormalization": normalization,
     })
 
 with open(meas_path, "w") as fh:

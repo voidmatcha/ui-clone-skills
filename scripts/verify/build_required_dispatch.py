@@ -4,6 +4,11 @@ import os
 import sys
 from pathlib import Path
 
+# Direct script invocation must resolve this checkout even without PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ui_clone.check_inputs import InputFingerprintUnavailable, load_section_capture_policy
+
 (plan_path, ref_dir, repo_root, impl_root, impl_src, impl_public,
  ref_url, impl_url, session) = sys.argv[1:10]
 plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
@@ -275,6 +280,11 @@ if not has_section_row and has_ref_screenshots and section_script.is_file():
             except (KeyError, TypeError, ValueError):
                 continue
     viewport_env = [f"VIEWPORTS={','.join(vps)}"] if vps else []
+    try:
+        section_capture_env = load_section_capture_policy(ref_dir)
+    except InputFingerprintUnavailable as exc:
+        raise SystemExit(f"ERROR: section capture policy rejected: {exc}") from exc
+    capture_env = [f"{key}={value}" for key, value in section_capture_env.items()]
     if tier == "comprehensive" and frozen_script.is_file():
         # Capture-variance determinism (specific regression): the comprehensive tier runs the
         # 3-pass frozen-ref + impl-path-calib wrapper so the impl is captured at the
@@ -295,14 +305,14 @@ if not has_section_row and has_ref_screenshots and section_script.is_file():
             _os.environ.get("SECTION_FROZEN_TIMEOUT_SEC")
             or str(800 * 3 * max(1, len(vps)))
         ).strip()
-        env_parts = [f"ROW_TIMEOUT_SEC={frozen_timeout}", *viewport_env]
+        env_parts = [f"ROW_TIMEOUT_SEC={frozen_timeout}", *viewport_env, *capture_env]
         section_args = f"ENV:{' '.join(env_parts)} -- {section_positional}"
         section_script_path = str(frozen_script)
     else:
         # quick/standard tier (or wrapper missing): fast single-pass section-compare.
         section_args = (
-            f"ENV:{' '.join(viewport_env)} -- {section_positional}"
-            if viewport_env
+            f"ENV:{' '.join([*viewport_env, *capture_env])} -- {section_positional}"
+            if viewport_env or capture_env
             else section_positional
         )
         section_script_path = str(section_script)

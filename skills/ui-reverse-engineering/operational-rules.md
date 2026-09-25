@@ -26,15 +26,19 @@ Niche execution rules and per-request scope adjustments. Read when your situatio
 
 ## Recovering a stalled / frozen run
 
-- **Symptom:** the session has been quiet for >15 min, the UI shows "N shells still running", but `ps`/`pgrep`/`lsof` find no live processes for those shells.
-- **Root cause (runtime-level, not the pipeline):** a background-shell completion wake-up was lost — the completion event failed to re-invoke the agent and was not retried. No artifact is corrupted; the run simply has no live driver.
-- **Recovery:** send any message. The agent re-enters at the before-starting state inspection step and resumes losslessly from `pipeline-state.json`, `current_gate`, and the on-disk artifacts — re-run the same `python -m ui_clone.pipeline <url> <component> <session> <action>` and it continues where it stopped.
+- **Diagnose before declaring a stall:** identify the exact session, latest turn/tool timestamp, owned check process, and newest result. Terminal banners and pending-shell counts may be stale. A preview server staying alive does not prove the agent is active. If evidence conflicts, report the conflict rather than assuming a stop or progress.
+- **Possible causes:** a live long-running check, pending user input, a terminated process, or a lost completion notification. Quiet output alone cannot distinguish them or prove artifacts are intact.
+- **Recovery:** if the check is alive, wait on its existing handle. If a question is pending, inspect its scope and existing authorization before asking again. If no owned job is running and continuation is authorized, inspect pipeline state and artifact freshness, then resume the specific unfinished action. Never launch a duplicate dispatcher solely to wake the agent. A status-only request does not itself authorize restarting stopped work.
 - **Why exposure is bounded (batch-4 item 2):** verification invocations that would exceed ~8 min are split into <8-min, idempotent chunks with persisted intermediate state, so a lost wake-up loses at most one in-flight chunk. The video-motion scroll sweep is the primary case: each captured position is checkpointed to `<ref-dir>/transitions/.../scroll-chunk-manifest.json` and `UI_CLONE_VMC_SCROLL_CHUNK` bounds positions per invocation. A resumed run skips already-captured positions (frames on disk + manifest) and the dispatcher aggregates the chunked frames into a verdict identical to a monolithic run.
 
 ## Scope adjustments by request shape
 
-| Request | Scope | Adjustments |
-|---|---|---|
-| "clone the hero" | single-section | Phase R scoped; Step 8 compares section viewport only |
-| "replicate this card" | single-element | C1 = cropped; skip C2; skip viewport sweep |
-| "clone the modal" | hidden-element | Trigger first, then capture. Step 9 verifies open + close |
+Section/element-only cloning is not supported end-to-end. The component name
+names artifacts, not a DOM subtree; `--scope=desktop|all` selects responsive
+layouts, not sections. Modal verification also needs explicit open/close evidence.
+
+Explain this limitation before capture or scheduling. Preserve the requested URL,
+selector, and existing evidence; report a scope-support blocker. Do not start a
+full-page run, trim `section-map.json`, fabricate components, or bypass gates to
+make a partial clone pass. Support requires one persisted selection contract
+shared by capture, generation, and verification, retaining source scroll context.

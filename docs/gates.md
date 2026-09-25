@@ -1,6 +1,6 @@
 # Gates and pipeline step numbering
 
-Reference material extracted from `AGENTS.md` to keep the canonical guide thin (it is re-injected into every agent turn). When editing gate behavior in `ui_clone/gate.py` `VALID_GATES`, update the relevant table below; `AGENTS.md` carries only a pointer. Round-by-round anti-cheat hardening narratives live in [`gate-hardening-history.md`](gate-hardening-history.md) so this file stays a thin lookup.
+Reference material extracted from `AGENTS.md` to keep the canonical guide thin (it is re-injected into every agent turn). When editing gate behavior or the gate order (`ui_clone/state.py` `GATE_ORDER`, from which `VALID_GATES` derives), update the relevant table below; `AGENTS.md` carries only a pointer. Round-by-round anti-cheat hardening narratives live in [`gate-hardening-history.md`](gate-hardening-history.md) so this file stays a thin lookup.
 
 ## Pipeline step numbering
 
@@ -19,11 +19,11 @@ Sub-docs must match `skills/ui-reverse-engineering/SKILL.md` pipeline numbering:
 
 ## Gate → artifact mapping
 
-Each gate checks artifacts produced BEFORE that gate fires. Dispatch keys live in `ui_clone/gate.py` `VALID_GATES`:
+Each gate checks artifacts produced BEFORE that gate fires. Dispatch keys are `ui_clone/state.py` `GATE_ORDER` (re-exported as `ui_clone.gate.VALID_GATES`):
 
-- `reference` (after Phase 1 / `/ui-capture`, or after a later Phase 2 repairs deferred provisional/failed evidence): `static/ref/` ≥5 PNGs, `regions.json`, and either ≥1 WebM in `transitions/ref/` or transition artifacts with matching live-capture/inventory provenance. Backed artifacts must include a WebM/MP4 `video` or distinct PNG state paths (`idle`/`active`, `before`/`after`, or `state-N`). Deferral requires Phase 2 later in the same invocation; it must repair the evidence and pass this gate. A Phase-2-only resume rechecks current reference evidence when the five-screenshot baseline exists or reference completion was previously recorded; a recorded completion with a missing baseline fails. Phase 1 status separately requires the full-scroll video; transition PNG pairs do not replace it.
+- `reference` (after Phase 1 / `/ui-capture`, or after a later Phase 2 repairs deferred provisional/failed evidence): `static/ref/` ≥5 PNGs, `regions.json`, and either ≥1 WebM in `transitions/ref/`, transition artifacts with matching live-capture/inventory provenance, or a complete measured-absence receipt for an auto-generated hover inventory. A measured absence is accepted only when the bridge passed, attempted at least one candidate, retired every attempted key with `absence-measured`, recorded no capture/unsupported/not-instantiated work, retained an empty auto-generated spec, and its receipt fingerprint still matches the exact CSS, structure, and hover-state producer inputs. Backed artifacts must include a WebM/MP4 `video` or distinct PNG state paths (`idle`/`active`, `before`/`after`, or `state-N`). Deferral requires Phase 2 later in the same invocation; it must repair the evidence and pass this gate. A Phase-2-only resume rechecks current reference evidence when the five-screenshot baseline exists or reference completion was previously recorded; a recorded completion with a missing baseline fails. Phase 1 status separately requires the full-scroll video; transition PNG pairs do not replace it.
 - `extraction` (after Step 3): `structure.json`, `head.json`, `styles.json`, `fonts.json`, `visible-images.json`, `inline-svgs.json`, `body-state.json`, `design-bundles.json`, `css/variables.txt`, `em-conversion.json` (if `scalingSystem ≠ px-fixed`)
-- `bundle` (after 5c-a): `bundles/` (≥1 JS chunk; warns <3), `interactions-detected.json`, `scroll-engine.json`
+- `bundle` (after 5c-a): `bundles/` (≥1 JS chunk; warns <3), `interactions-detected.json`, `scroll-engine.json`. Non-empty hover CSS with an empty interaction inventory fails unless the same fresh, complete measured-absence receipt accepted by the `reference` gate proves every auto candidate inert.
 - `paid-features` (after 5c-c): `paid-features.json` — every paid font CDN hit must have `decision` ∈ {`use`, `substitute`, `skip`}. Empty findings pass. GSAP plugins are not checked (GSAP is now 100% free). See `skills/visual-debug/scripts/paid-features-detect.sh`.
 - `spec` (after 5d): `bundle-map.json`, `external-sdks.json`, `transition-spec.json` (validates each transition has id/trigger/source_chunk/bundle_branch/target/animation/reference_frames, and grounds `source_chunk` in captured `bundles/`, `css/`, or `html/` files unless it uses the `"inline init"` sentinel), `verification-plan.json` (produced by `skills/visual-debug/scripts/verification-plan.sh` — declares the site-specific required-check list including the universal hydration-check, proxy-mirror-check, and conditional Lottie/runtime rows; without it, `gate_post_implement` would silently skip those checks), `verify/` ≥5 frames. Also cross-validates against `paid-features.json`: any paid font marked `decision="substitute"` must have an entry in `asset-substitution.json` `fonts[]` — otherwise font-parity FAILs after generation.
 - `pre-generate` (before Step 7): `extracted.json`, `transition-coverage.json`, `section-map.json`, hover timing resolved, `dom-state-diff.json` (if hasPreloader), `webflow-*` (if Webflow), audit artifacts (element-roles, element-groups, layout-decisions, component-map)
@@ -82,6 +82,14 @@ conservative; partial iteration receipts cannot satisfy either closeout path.
 Canonical completion binds the selected scope and representative viewports.
 Desktop completion covers the representative viewport plus mandatory live boundary
 probes, and must be reported as desktop-only. Scope expansion requires verification.
+
+`scroll-completion.json` records an `endpoint` measurement per viewport. The
+probe traverses delayed scroll gates before sampling and requires a stable
+document height, actual bottom position, and no document footer clipped beyond
+the scrollable extent. If those conditions cannot be established within its
+bounded traversal, the result is inconclusive (`status: error`), not a settled
+PASS at an intermediate scroll cap. Image decoding and downloaded-asset usage
+checks do not independently prove reference asset completeness.
 
 ## Ref-vs-ref self-pass invariant (batch-11)
 

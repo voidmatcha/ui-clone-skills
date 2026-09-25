@@ -97,6 +97,137 @@ def _phase1(ref: Path) -> None:
     (transitions / "scroll.webm").write_bytes(b"\x1aE\xdf\xa3" + b"\x00" * 100)
 
 
+def _measured_auto_absence_fixture(ref: Path) -> None:
+    from ui_clone.extraction_artifacts import _hover_candidate_input_fingerprint
+
+    _phase1(ref)
+    (ref / "transitions/ref/scroll.webm").unlink()
+    inputs = {
+        "hover-css-rules.json": {
+            "source": "scripts/extract/capture-hover.sh",
+            "status": "pass",
+            "rules": [{"selector": ".dormant:hover", "activation": ".dormant"}],
+        },
+        "structure.json": {"tag": "body", "children": []},
+        "states/hover/summary.json": {"changedCount": 0},
+        "states/hover/manifest.json": {"states": []},
+    }
+    for relative, payload in inputs.items():
+        path = ref / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    fingerprint = _hover_candidate_input_fingerprint(ref)
+    key = {"triggerType": "hover", "selector": ".dormant"}
+    (ref / "transition-spec.json").write_text(json.dumps({
+        "source": "ui_clone.extraction_artifacts",
+        "placeholder": True,
+        "transitions": [],
+    }), encoding="utf-8")
+    (ref / "regions.json").write_text(json.dumps({
+        "source": "scripts/extract/capture-region-artifacts.py",
+        "placeholder": False,
+        "detectionRan": True,
+        "derivedFrom": list(inputs),
+        "regions": [],
+        "resolvedAutoCandidates": [key],
+        "autoCandidateInputFingerprint": fingerprint,
+    }), encoding="utf-8")
+    (ref / "capture-region-artifacts-summary.json").write_text(json.dumps({
+        "status": "pass",
+        "autoSpec": True,
+        "autoCandidateInputFingerprint": fingerprint,
+        "attempted": [{"region": "auto-hover-0", **key}],
+        "captured": [],
+        "skipped": [{
+            "region": "auto-hover-0",
+            **key,
+            "resolution": "absence-measured",
+            "candidateKey": key,
+            "autoCandidateInputFingerprint": fingerprint,
+        }],
+        "unsupported": [],
+        "counts": {
+            "attempted": 1,
+            "captured": 0,
+            "skipped": 1,
+            "unsupported": 0,
+            "notInstantiated": 0,
+        },
+    }), encoding="utf-8")
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"signals": {"hasHover": True}}), encoding="utf-8"
+    )
+
+
+def test_gate_reference_accepts_fresh_complete_measured_auto_absence(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _measured_auto_absence_fixture(ref)
+
+    results = Gate(ref).gate_reference()
+
+    assert [row for row in results if row.status == "fail"] == []
+    assert any(row.label == "measured transition absence" for row in results)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "stale-input",
+        "manual-spec",
+        "probe-failed",
+        "unsupported",
+        "key-mismatch",
+        "count-mismatch",
+        "empty-inventory",
+    ],
+)
+def test_gate_reference_rejects_unproven_auto_absence(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _measured_auto_absence_fixture(ref)
+    summary_path = ref / "capture-region-artifacts-summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if tamper == "stale-input":
+        (ref / "structure.json").write_text(
+            json.dumps({"tag": "body", "children": [{"tag": "a"}]}),
+            encoding="utf-8",
+        )
+    elif tamper == "manual-spec":
+        spec_path = ref / "transition-spec.json"
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec.update({"source": "author-maintained", "placeholder": False})
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    elif tamper == "probe-failed":
+        summary["status"] = "fail"
+    elif tamper == "unsupported":
+        summary["unsupported"] = [{"region": "auto-hover-0", "reason": "unsupported"}]
+        summary["counts"]["unsupported"] = 1
+    elif tamper == "key-mismatch":
+        summary["skipped"][0]["candidateKey"]["selector"] = ".other"
+    elif tamper == "count-mismatch":
+        summary["counts"]["skipped"] = 0
+    else:
+        summary["attempted"] = []
+        summary["skipped"] = []
+        summary["counts"].update({"attempted": 0, "skipped": 0})
+        regions_path = ref / "regions.json"
+        regions = json.loads(regions_path.read_text(encoding="utf-8"))
+        regions["resolvedAutoCandidates"] = []
+        regions_path.write_text(json.dumps(regions), encoding="utf-8")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    failures = [row for row in Gate(ref).gate_reference() if row.status == "fail"]
+
+    assert failures, f"{tamper} receipt must not satisfy the reference gate"
+    assert any(row.label == "transitions/ref motion evidence" for row in failures)
+
+
 def test_gate_reference_fails_degenerate_region_geometry(tmp_path: Path) -> None:
     """A non-placeholder region with degenerate/negative geometry must FAIL —
     the reverted detector's gate rubber-stamped {x:-99,y:-99,w:0,h:0}."""

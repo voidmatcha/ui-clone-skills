@@ -281,8 +281,12 @@ JSX_TEXT_PATTERNS = [
     # JSX attributes/custom-component props are fabrication/accessibility
     # evidence only. Even text-like props are not rendered DOM-text nodes and
     # must never alter the ordered stream used to reconstruct split copy.
-    (re.compile(r"\b(?:alt|title|aria-label|placeholder)\s*=\s*[\"']([^\"'\n]+)[\"']"), False),
-    (re.compile(r"\b(?:label|heading|subheading|title|subtitle|description|caption|name|content|copy|message|text)\s*=\s*[\"']([^\"'\n]+)[\"']"), False),
+    # A word boundary also matches after `-`, causing `name="..."` to be
+    # extracted from non-rendering metadata such as `data-framer-name="..."`.
+    # Require a standalone JSX prop boundary while retaining real `name`,
+    # `label`, and accessibility props.
+    (re.compile(r"(?<![\w-])(?:alt|title|aria-label|placeholder)\s*=\s*[\"']([^\"'\n]+)[\"']"), False),
+    (re.compile(r"(?<![\w-])(?:label|heading|subheading|title|subtitle|description|caption|name|content|copy|message|text)\s*=\s*[\"']([^\"'\n]+)[\"']"), False),
 ]
 
 STATIC_STRING_CONST_RE = re.compile(

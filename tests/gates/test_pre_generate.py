@@ -9,11 +9,49 @@ import pytest
 from ui_clone.dag import GENERATION_PLAN_SOURCES, generation_plan_source_hashes
 from ui_clone.gate import Gate
 from ui_clone.gates.base import CheckResult
+from ui_clone.gates.pre_generate_checks import _check_detection_artifact_integrity
 
 from ._helpers import (
     _write_pre_generate_baseline,
     _write_valid_artifact_provenance,
 )
+
+
+def test_detection_integrity_accepts_complete_measured_auto_absence(
+    tmp_path: Path,
+) -> None:
+    from .test_reference import _measured_auto_absence_fixture
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _measured_auto_absence_fixture(ref)
+    (ref / "interactions-detected.json").write_text(
+        json.dumps({"interactions": []}), encoding="utf-8"
+    )
+
+    assert _check_detection_artifact_integrity(Gate(ref)) == []
+
+
+def test_detection_integrity_rejects_stale_measured_auto_absence(
+    tmp_path: Path,
+) -> None:
+    from .test_reference import _measured_auto_absence_fixture
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _measured_auto_absence_fixture(ref)
+    (ref / "interactions-detected.json").write_text(
+        json.dumps({"interactions": []}), encoding="utf-8"
+    )
+    (ref / "states/hover/summary.json").write_text(
+        json.dumps({"changedCount": 1}), encoding="utf-8"
+    )
+
+    failures = _check_detection_artifact_integrity(Gate(ref))
+
+    assert [row.label for row in failures] == [
+        "interactions-detected.json — hand-emptied"
+    ]
 
 
 def test_gate_pre_generate_requires_hydrated_and_required_media_inventories(

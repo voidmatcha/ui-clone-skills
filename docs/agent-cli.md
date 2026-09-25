@@ -55,6 +55,14 @@ review `/hooks` if prompted and start a fresh session.
 
 ## Pipeline status
 
+### Section selection limitation
+
+The pipeline currently has no end-to-end section-selector option. Its component
+argument names the run; it does not restrict extraction or coverage to a DOM
+subtree. Verification scope (`desktop` / `all`) concerns responsive layouts,
+not section selection. Do not route a section-only request into the automatic
+full-page pipeline or remove captured sections to make its gates pass.
+
 ```bash
 node bin/ui-clone pipeline <url> <component-or-run-dir> <session> status --json
 ```
@@ -282,6 +290,10 @@ conservative. Unset both for final dispatch; `iteration-receipt.json` is a dispa
 receipt, never completion evidence. Partial, dry, failed, or unfinished dispatch receipts block canonical closeout.
 Only a successful full dispatch records `status: completed`; canonical gates still
 validate all artifacts before stamping completion.
+Full runs record `status: failed` with `failedChecks` when checks fail,
+`status: setup-failed` for dispatcher setup errors, and `status: interrupted`
+when an active dispatcher exits before reaching a verdict. Closeout reports these
+states separately so a failed full run is not mistaken for a partial repair run.
 
 Known failures enter a targeted repair loop before another full `auto-verify.sh`
 run: inspect failing rows, fix the cause, and rerun the failed check with its

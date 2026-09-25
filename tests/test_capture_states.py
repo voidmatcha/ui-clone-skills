@@ -121,13 +121,14 @@ def test_fullscreen_overlay_capture_extends_until_exit() -> None:
     go quiet inside 5s. It then hits the cap mid-load and records a settled
     bookend before the page actually settled. The wider ceiling does not change
     what `authoritativeNegative` rests on (the sampled evidence plus the run
-    settling on its own, see ui_clone.splash_contract); it only gives a page
-    more room to settle.
+    splash-relevant channels settling on their own, see
+    ui_clone.splash_contract); it only gives broader evidence more room.
     """
     script = SCRIPT.read_text()
 
     assert "awaitingInitialOverlayExit ? 15000 : 10000" in script
-    assert "!awaitingInitialOverlayExit && (now - lastChangeAt) >= 2000" in script
+    assert "splashSettledAt !== null &&" in script
+    assert "(now - lastChangeAt) >= 2000" in script
     assert "if (initialOverlayExited) break" in script
     assert "elapsed >= captureLimitMs" in script
 
@@ -1109,6 +1110,16 @@ def _run_sampler_scenario(tmp_path: Path, scenario: str) -> dict:
     return contract
 
 
+def _run_sampler_scenario_artifacts(tmp_path: Path, scenario: str) -> tuple[Path, dict, dict]:
+    ref_dir = tmp_path / "ref"
+    proc = _run_capture_states(ref_dir, _make_dom_driven_agent_browser(tmp_path, scenario))
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+    splash = ref_dir / "states" / "splash"
+    contract = json.loads((splash / "contract.json").read_text())
+    summary = json.loads((splash / "summary.json").read_text())
+    return ref_dir, contract, summary
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_sampler_sees_a_half_viewport_in_flow_loader_leave(tmp_path: Path) -> None:
     """A static loader covering 55% of the viewport is a splash to the
@@ -1145,6 +1156,77 @@ def test_sampler_certifies_entry_choreography_with_no_splash(tmp_path: Path) -> 
         "structuralShift": False,
     }
     assert contract["capture"]["authoritativeNegative"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_sampler_separates_periodic_motion_and_offscreen_hydration_from_splash(
+    tmp_path: Path,
+) -> None:
+    """Continuous visible motion and large offscreen DOM pruning are not a
+    splash lifecycle when viewport structure, covering identities, root
+    classes, scroll lock, and the overlay probe remain stable."""
+    ref_dir, contract, summary = _run_sampler_scenario_artifacts(
+        tmp_path, "periodic-motion-offscreen-hydration"
+    )
+
+    assert summary["timedOut"] is True, "full motion evidence should run to its cap"
+    assert summary["splashTimedOut"] is False
+    assert contract["capture"]["evidenceTimedOut"] is True
+    assert contract["capture"]["timedOut"] is False
+    assert contract["capture"]["absenceEvidence"]["structuralShift"] is False
+    assert contract["capture"]["authoritativeNegative"] is True
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "skills" / "visual-debug" / "scripts" / "verification-plan.sh"),
+            str(ref_dir),
+            "--tier=standard",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    plan = json.loads((ref_dir / "verification-plan.json").read_text())
+    rows = {row["id"] for row in plan["requiredChecks"]}
+    assert plan["signals"]["hasSplash"] is False
+    assert "splash-lifecycle" not in rows
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize(
+    "scenario", ["empty-viewport-populates", "persistent-shell-copy-replaced"]
+)
+def test_sampler_refuses_visible_loading_surface_replacement(
+    tmp_path: Path, scenario: str,
+) -> None:
+    """An initially empty viewport and a persistent shell whose direct copy
+    changes both remain inconclusive without stronger absence evidence."""
+    contract = _run_sampler_scenario(tmp_path, scenario)
+
+    evidence = contract["capture"]["absenceEvidence"]
+    assert evidence["structuralShift"] is True
+    assert contract["capture"]["authoritativeNegative"] is False
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize(
+    "scenario", [
+        "hidden-ancestor-reveals", "image-asset-replaced", "svg-asset-replaced",
+        "animated-background-replaced",
+    ]
+)
+def test_sampler_refuses_effective_visibility_and_visual_asset_replacement(
+    tmp_path: Path, scenario: str,
+) -> None:
+    """A reveal through an ancestor and same-selector visual asset swaps are
+    visible loading-surface changes, even when element selectors stay stable."""
+    contract = _run_sampler_scenario(tmp_path, scenario)
+
+    evidence = contract["capture"]["absenceEvidence"]
+    assert evidence["structuralShift"] is True
+    assert contract["capture"]["authoritativeNegative"] is False
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
@@ -1234,33 +1316,38 @@ def test_covering_thresholds_are_not_read_from_the_working_directory(tmp_path: P
 #
 # Keying an id-less element by node closed the aliasing hole above, but a
 # framework re-mount also throws a node away and mounts a fresh one in its
-# place. That is not a splash leaving. The rule: a fresh node inherits the
+# place. That alone is not a covering-identity exit. The rule: a fresh node inherits the
 # identity of the serial-keyed covering node the immediately preceding survey
 # recorded at the same nth-of-type path, if that node is now detached and both
 # carry the same tag and classes. Everything else still records an exit.
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
-def test_sampler_certifies_a_hydration_remount_of_an_id_less_wrapper(tmp_path: Path) -> None:
+def test_sampler_keeps_a_hydration_remount_with_changed_visible_copy_inconclusive(
+    tmp_path: Path,
+) -> None:
     """React/Next hydration mismatch: the server-rendered full-viewport
-    `div.app` is replaced within one poll by a fresh `div.app` node. No splash;
-    the certificate must stand."""
+    `div.app` is replaced within one poll by a fresh `div.app` with different
+    visible copy. Stable geometry alone cannot prove splash absence."""
     contract = _run_sampler_scenario(tmp_path, "hydration-remount-same-class")
 
     evidence = contract["capture"]["absenceEvidence"]
     assert evidence["coveringSurveyed"] is True
     assert evidence["coveringExits"] == []
-    assert contract["capture"]["authoritativeNegative"] is True
+    assert contract["capture"]["absenceEvidence"]["structuralShift"] is True
+    assert contract["capture"]["authoritativeNegative"] is False
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
-def test_sampler_certifies_a_skeleton_replaced_in_place_by_its_content(tmp_path: Path) -> None:
+def test_sampler_keeps_same_class_skeleton_replacement_inconclusive(tmp_path: Path) -> None:
     """A `div.page` skeleton covering 50% of the viewport is replaced within
-    one poll by a fresh `div.page` holding the content. No splash."""
+    one poll by a fresh `div.page` holding different visible content. The
+    shared class is insufficient absence evidence."""
     contract = _run_sampler_scenario(tmp_path, "skeleton-replaced-in-place")
 
     assert contract["capture"]["absenceEvidence"]["coveringExits"] == []
-    assert contract["capture"]["authoritativeNegative"] is True
+    assert contract["capture"]["absenceEvidence"]["structuralShift"] is True
+    assert contract["capture"]["authoritativeNegative"] is False
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
@@ -1271,7 +1358,7 @@ def test_sampler_refuses_a_loader_replaced_in_place_by_content_of_another_class(
     contract = _run_sampler_scenario(tmp_path, "loader-replaced-by-content-different-class")
 
     evidence = contract["capture"]["absenceEvidence"]
-    assert evidence["structuralShift"] is False, "the refusal must isolate to the covering identity"
+    assert evidence["structuralShift"] is True
     assert evidence["coveringExits"], "the replaced loader must register as a covering exit"
     assert contract["capture"]["authoritativeNegative"] is False
 
@@ -1284,7 +1371,7 @@ def test_sampler_refuses_a_same_class_remount_more_than_one_poll_apart(tmp_path:
     contract = _run_sampler_scenario(tmp_path, "remount-two-polls-apart")
 
     evidence = contract["capture"]["absenceEvidence"]
-    assert evidence["structuralShift"] is False, "the refusal must isolate to the covering identity"
+    assert evidence["structuralShift"] is True
     assert evidence["coveringExits"], "the gap between removal and re-mount must register as an exit"
     assert contract["capture"]["authoritativeNegative"] is False
 
@@ -1405,3 +1492,62 @@ path.write_text(json.dumps(state))
         )
         assert proc.returncode == 0, proc.stderr
         assert not (tmp_path / "model.json").exists(), 'owned browser must be closed'
+
+
+@pytest.mark.parametrize(
+    ("message", "failures", "attempts", "succeeds"),
+    [
+        ("Failed to connect: No such file or directory (os error 2)", 1, 2, True),
+        ("Failed to connect: No such file or directory (os error 2)", 9, 3, False),
+        ("init script: No such file or directory", 1, 1, False),
+        ("Permission denied", 1, 1, False),
+    ],
+)
+def test_derived_session_bootstrap_recovery(
+    tmp_path: Path, message: str, failures: int, attempts: int, succeeds: bool,
+) -> None:
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload([]))
+    fake = bin_dir / "agent-browser"
+    original = fake.read_text()
+    probe = f"""
+if [[ " $* " == *" get url "* ]]; then
+  count=0
+  [ ! -f '{tmp_path / "attempts"}' ] || read -r count < '{tmp_path / "attempts"}'
+  count=$((count + 1))
+  echo "$count" > '{tmp_path / "attempts"}'
+  if [ "$count" -le {failures} ]; then
+    echo '{message}' >&2
+    exit 7
+  fi
+fi
+"""
+    fake.write_text(original.replace("cmd=''", probe + "cmd=''", 1))
+    sleep = bin_dir / "sleep"
+    sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
+    sleep.chmod(0o755)
+    result = _run_capture_states(tmp_path / "ref", bin_dir)
+    assert int((tmp_path / "attempts").read_text()) == attempts
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert any(" open " in call for call in calls) is succeeds
+    if not succeeds:
+        assert result.returncode == 2
+        assert message in result.stderr
+        assert not any(" eval " in call for call in calls)
+    identities = [call.split(" get url")[0] for call in calls if " get url" in call]
+    assert len(set(identities)) == 1
+
+
+def test_open_failure_preserves_json_diagnostic_without_retry(tmp_path: Path) -> None:
+    bin_dir = _make_fake_agent_browser(tmp_path, _eval_payload([]), open_returncode=1)
+    fake = bin_dir / "agent-browser"
+    diagnostic = '{"success":false,"error":"navigation failed: target closed"}'
+    fake.write_text(fake.read_text().replace(
+        'if [ "$cmd" = "open" ]; then\n',
+        'if [ "$cmd" = "open" ]; then\n' + f"  echo '{diagnostic}'\n",
+    ))
+    result = _run_capture_states(tmp_path / "ref", bin_dir)
+    assert result.returncode == 2
+    assert diagnostic in result.stderr
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert sum(" open " in call for call in calls) == 1
+    assert not any(" eval " in call for call in calls)

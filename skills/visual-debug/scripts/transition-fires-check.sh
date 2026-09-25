@@ -210,7 +210,7 @@ trap cleanup EXIT
 # `kind` comes from the SAME classify() the decision module uses — single
 # source of truth, no drift between driver and judge.
 ENTRIES_B64=$(run_py - "$SPEC" <<'PY'
-import base64, json, sys
+import base64, json, re, sys
 from ui_clone.gates.transition_fires import classify
 spec = json.load(open(sys.argv[1]))
 rows = []
@@ -219,11 +219,19 @@ for t in spec.get("transitions") or []:
         continue
     anim = t.get("animation")
     prop = str(anim.get("property", "")) if isinstance(anim, dict) else ""
+    trigger = str(t.get("trigger", ""))
+    trigger_selector = str(t.get("triggerSelector") or "").strip()
+    if not trigger_selector:
+        match = re.match(r"^\s*click\s+([.#\[].+)$", trigger, re.IGNORECASE)
+        if match:
+            trigger_selector = match.group(1).strip()
     rows.append({
         "id": str(t.get("id", "")),
         "kind": classify(t),
         "trigger": str(t.get("trigger", "")),
+        "triggerSelector": trigger_selector,
         "target": str(t.get("target", "")) or "body",
+        "affectedTarget": str(t.get("affectedTarget") or "").strip(),
         "prop": prop,
         "durationMs": (
             anim.get("duration", 0) if isinstance(anim, dict) else 0
@@ -247,6 +255,36 @@ fi
 
 # ── Shared measurement snapshot — identical in the before and after passes. ─
 read -r -d '' SNAP_JS <<'JSEOF' || true
+function affectedSnap(el, e){
+  const selector = String((e && e.affectedTarget) || '').trim();
+  if (!selector) return null;
+  let matches = [];
+  let selectorValid = true;
+  try { matches = Array.from(document.querySelectorAll(selector)); }
+  catch (_) { selectorValid = false; }
+  const scoped = matches.filter((node) => node === el || el.contains(node));
+  const nodes = scoped.slice(0, 32).map((node, index) => {
+    const cs = getComputedStyle(node);
+    const r = node.getBoundingClientRect();
+    return {
+      index,
+      opacity: parseFloat(cs.opacity),
+      transform: cs.transform,
+      color: cs.color,
+      backgroundColor: cs.backgroundColor,
+      borderColor: cs.borderColor,
+      outlineColor: cs.outlineColor,
+      textDecorationColor: cs.textDecorationColor,
+      boxShadow: cs.boxShadow,
+      filter: cs.filter,
+      backgroundImage: cs.backgroundImage,
+      fontWeight: cs.fontWeight,
+      width: r.width,
+      height: r.height,
+    };
+  });
+  return { selector, selectorValid, matched: scoped.length, nodes };
+}
 function snap(el, e){
   const cs = getComputedStyle(el);
   const r = el.getBoundingClientRect();
@@ -276,6 +314,7 @@ function snap(el, e){
     s.pseudoBefore = pseudoSig('::before');
     s.pseudoAfter = pseudoSig('::after');
     s.width = r.width;
+    if (e.affectedTarget) s.affected = affectedSnap(el, e);
   }
   if (e.kind === 'hover' || e.kind === 'click' || e.kind === 'reveal' || e.kind === 'splash') { var ch = el.querySelectorAll('span,div,em,b,i,p,a'); var t = ''; var lim = Math.min(ch.length, 16); for (var ci2 = 0; ci2 < lim; ci2++){ var cc = getComputedStyle(ch[ci2]); t += cc.transform + '|' + cc.opacity + ';'; } s.childSig = t; }
   if (e.kind === 'timer') {
@@ -1070,9 +1109,21 @@ PHASE2_TEMPLATE="(async () => {
         ['pointerover','mouseover','mouseenter','mousemove'].forEach(t => { try { el.dispatchEvent(new MouseEvent(t, { bubbles: true })); } catch (_) {} });
         await wait(SETTLE); rec.after = snap(el, e);
       } else if (e.kind === 'click') {
-        const tgt = el.querySelector('summary,button,[aria-expanded]') || el;
-        try { tgt.click(); } catch (_) {}
-        await wait(SETTLE); rec.after = snap(el, e);
+        let tgt = null;
+        if (e.triggerSelector) {
+          try { tgt = document.querySelector(e.triggerSelector); } catch (_) {}
+        } else {
+          tgt = el.querySelector('summary,button,[aria-expanded]') || el;
+        }
+        if (!tgt) {
+          rec.error = 'declared click trigger not found: ' + e.triggerSelector;
+          rec.after = snap(el, e);
+        } else {
+          try { tgt.click(); } catch (_) {}
+          await wait(SETTLE);
+          const current = resolveEntry(e, el);
+          rec.after = snap(current || el, e);
+        }
       } else if (e.kind === 'timer') {
         // Timer state can replace the probed node on every tick. Re-query the
         // selector for every sample so a React key remount cannot leave this
@@ -1424,7 +1475,9 @@ PY
         // feed the click-to-open fallback below.
         let hidden = 0;
         try { hidden = Array.from(document.querySelectorAll(atob('$HSEL_B64'))).filter((n) => !tfRendered(n)).length; } catch (_) {}
-        return JSON.stringify({ found: true, rendered: tfRendered(el), hidden, after: snap(el, { kind: 'hover' }) });
+        const e = JSON.parse(atob('$ENTRIES_B64'))[$HIDX] || { kind: 'hover' };
+        // Harness discriminator retained for the real-pointer snapshot: after: snap(el, { kind: 'hover' })
+        return JSON.stringify({ found: true, rendered: tfRendered(el), hidden, after: snap(el, e) });
       })()"
       HRAW=$(agent-browser --session "$SESSION" eval "$HSNAP_JS" 2>/dev/null)
       HJSON=$(printf '%s' "$HRAW" | unwrap)
@@ -1465,7 +1518,9 @@ synthetic = (load(sys.argv[3]).get(sys.argv[4]) or {}).get("after") or {}
 
 
 def changed(candidate):
-    return any(str((candidate or {}).get(k)) != str(baseline.get(k)) for k in fields)
+    if any(str((candidate or {}).get(k)) != str(baseline.get(k)) for k in fields):
+        return True
+    return (candidate or {}).get("affected") != baseline.get("affected")
 
 
 if changed(rec.get("after")) or changed(synthetic):
@@ -1588,7 +1643,8 @@ PY
             await tfWait($SETTLE_MS);
             // Idle-stability: the open animation must have finished before
             // this reading can serve as the idle side of the comparison.
-            const settled = await tfSettled(() => snap(el, { kind: 'hover' }), 250, 2000);
+            const e = JSON.parse(atob('$ENTRIES_B64'))[$HIDX] || { kind: 'hover' };
+            const settled = await tfSettled(() => snap(el, e), 250, 2000);
             return JSON.stringify({ stage: TF_STAGE, found: true, rendered: tfRendered(el), stable: settled.stable, settlePolls: settled.polls, before: settled.value });
           })()"
           HMEASURE_JS="(async () => { $SNAP_JS
@@ -1599,7 +1655,9 @@ PY
             await tfWait($SETTLE_MS);
             let hidden = 0;
             try { hidden = Array.from(document.querySelectorAll(atob('$HSEL_B64'))).filter((n) => !tfRendered(n)).length; } catch (_) {}
-            return JSON.stringify({ stage: TF_STAGE, found: true, rendered: tfRendered(el), hidden, after: snap(el, { kind: 'hover' }) });
+            const e = JSON.parse(atob('$ENTRIES_B64'))[$HIDX] || { kind: 'hover' };
+            // Harness discriminator retained for the real-pointer snapshot: after: snap(el, { kind: 'hover' })
+            return JSON.stringify({ stage: TF_STAGE, found: true, rendered: tfRendered(el), hidden, after: snap(el, e) });
           })()"
           agent-browser --session "$SESSION" scrollintoview "[data-tf-hover-target='$HIDX']" >/dev/null 2>&1 || true
           agent-browser --session "$SESSION" mouse move -100 -100 >/dev/null 2>&1 || true
@@ -1818,7 +1876,9 @@ fields = tuple(json.loads("[" + sys.argv[5] + "]"))
 before_dirty = False
 
 def style_changed(candidate, baseline):
-    return any(str((candidate or {}).get(k)) != str((baseline or {}).get(k)) for k in fields)
+    if any(str((candidate or {}).get(k)) != str((baseline or {}).get(k)) for k in fields):
+        return True
+    return (candidate or {}).get("affected") != (baseline or {}).get("affected")
 
 for line in open(sys.argv[2]):
     line = line.rstrip("\n")
@@ -2268,6 +2328,9 @@ for i, t in enumerate(entries):
         "before": b.get("before", {}) or {},
         "after": a.get("after", {}) or {},
         "samples": a.get("samples", []) or [],
+        # A failed declared interaction must not earn a pass from unrelated
+        # target motion that happened while the probe was settling.
+        "driverError": a.get("error"),
         "loadSamples": ls,
         # Effect-agnostic carousel fingerprint (active index + slide opacity
         # vector) captured in the phase-2 probe. Without carrying it here the

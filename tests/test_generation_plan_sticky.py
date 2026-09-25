@@ -34,3 +34,32 @@ def test_sticky_strategy_populated_from_elements(tmp_path: Path) -> None:
     blob = json.dumps(ss)
     assert "nav_nav__E77In" in blob, f"selector must use className: {ss}"
     assert ss[0].get("position") == "fixed"
+
+
+def test_sticky_strategy_emits_valid_multiclass_selector(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "section-map.json").write_text(
+        json.dumps({"sections": []}), encoding="utf-8"
+    )
+    (ref / "sticky-elements.json").write_text(
+        json.dumps(
+            {
+                "elements": [
+                    {
+                        "tag": "div",
+                        "className": "sticky-shell md:w-1/2",
+                        "position": "fixed",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(SCRIPT), str(ref)], check=True)
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    assert plan["stickyStrategy"][0]["selector"] == (
+        "div.sticky-shell.md\\:w-1\\/2"
+    )

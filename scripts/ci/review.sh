@@ -14,6 +14,8 @@
 #   [] No stale refs to deleted files (validate-gate.sh, run-pipeline.sh, ui_skills.*)
 #   [] README numbers accurate (sub-doc count, token count, FPS)
 #   [] Cross-skill refs use correct relative paths (../visual-debug/...)
+#   [] Public SKILL.md local Markdown links resolve
+#   [] Public SKILL.md word/line context size is reported (advisory only)
 #   [] Claude/Codex plugin versions match (plugin.json, marketplace.json, codex plugin.json)
 #   [] No hardcoded local paths in SKILL.md (use $SCRIPTS_DIR, $PLUGIN_ROOT)
 #   [] Claude Code and Codex host files valid (AGENTS.md, .codex-plugin/plugin.json, hooks/codex-hooks.json, skills/*/agents/openai.yaml)
@@ -155,6 +157,31 @@ if python3 scripts/ci/review_checks.py public-skills; then
   ok "public skill set is ui-reverse-engineering, ui-capture, visual-debug"
 else
   err "public skill surface parity failed"
+fi
+
+# Advisory only: report both words and lines so maintainers can see context
+# growth without turning prose style or tokenization tricks into a release gate.
+SIZE_OUT=$(python3 scripts/ci/review_checks.py skill-context 2>&1)
+SIZE_RC=$?
+if [ "$SIZE_RC" -ne 0 ]; then
+  err "could not measure public skill entrypoint size"
+  echo "$SIZE_OUT" >&2
+else
+  SIZE_TOTAL=$(printf '%s\n' "$SIZE_OUT" | grep '^TOTAL:' || true)
+  echo "  ℹ️  public skill entrypoints — ${SIZE_TOTAL#TOTAL: }"
+  if [ "$QUIET" = "0" ]; then
+    printf '%s\n' "$SIZE_OUT" | grep -vE '^(TOTAL|WARNING):' | sed 's/^/     /'
+  fi
+  if printf '%s\n' "$SIZE_OUT" | grep -q '^WARNING:'; then
+    SIZE_WARNING=$(printf '%s\n' "$SIZE_OUT" | grep '^WARNING:' | head -1)
+    warn "${SIZE_WARNING#WARNING: }"
+  fi
+fi
+
+if python3 scripts/ci/review_checks.py public-skill-links; then
+  ok "public SKILL.md local Markdown links resolve"
+else
+  err "public SKILL.md has broken local Markdown links"
 fi
 
 # ── 4b. Trigger boundaries ──

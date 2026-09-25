@@ -240,6 +240,73 @@ def test_mark_unsupported_is_only_from_arming(tmp_path: Path) -> None:
         cc.pause(tmp_path, SESSION)
 
 
+def test_detect_croncreate_denial_requires_exact_linked_attempt(tmp_path: Path) -> None:
+    arming = arm_bound(tmp_path)
+    created_at = str(arming["createdAt"])
+    attempt_at = created_at.replace("Z", ".100000Z")
+    denied_at = created_at.replace("Z", ".200000Z")
+    exact_id = "toolu_exact"
+    unrelated_id = "toolu_unrelated"
+    transcript = tmp_path / "session.jsonl"
+    records = [
+        {
+            "type": "assistant",
+            "timestamp": attempt_at,
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": unrelated_id,
+                        "name": "CronCreate",
+                        "input": {"cron": "* * * * *", "prompt": "other"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": exact_id,
+                        "name": "CronCreate",
+                        "input": cc.cron_create_input(arming),
+                    },
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": denied_at,
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": unrelated_id,
+                        "is_error": True,
+                        "content": "Permission denied: Unauthorized Persistence",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": exact_id,
+                        "is_error": True,
+                        "content": (
+                            "Permission for this action was denied by the Claude Code "
+                            "auto mode classifier. Reason: [Unauthorized Persistence]."
+                        ),
+                    },
+                ]
+            },
+        },
+    ]
+    transcript.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    assert cc.croncreate_denial_reason(transcript, arming) == (
+        "CronCreate permission denied by host auto mode"
+    )
+
+    records[0]["message"]["content"][1]["input"] = {  # type: ignore[index]
+        "cron": "* * * * *",
+        "prompt": "different",
+    }
+    transcript.write_text("".join(json.dumps(record) + "\n" for record in records))
+    assert cc.croncreate_denial_reason(transcript, arming) is None
+
+
 def test_finish_owned_delete_pauses_armed_receipt_and_clears_cron_id(tmp_path: Path) -> None:
     arm_bound(tmp_path)
     cc.mark_armed(tmp_path, SESSION, CRON_ID)

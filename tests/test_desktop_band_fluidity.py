@@ -146,6 +146,9 @@ case "$3" in
     exit 0
     ;;
   eval)
+    case "$4" in
+      *"const requested"*) printf '{"status":"absent","source":"auto-probe"}\\n'; exit 0 ;;
+    esac
     printf '{"docH":10000,"overflowX":false,"bodyWidth":1000}\\n'
     exit 0
     ;;
@@ -226,7 +229,11 @@ def test_explicit_width_override_still_wins(tmp_path: Path) -> None:
 case "$3" in
   open|close) exit 0 ;;
   set) printf '%s\\n' "$5" >> "$FAKE_VIEWPORT_LOG"; exit 0 ;;
-  eval) printf '{"docH":10000,"overflowX":false,"bodyWidth":1000}\\n'; exit 0 ;;
+  eval)
+    case "$4" in
+      *"const requested"*) printf '{"status":"absent","source":"auto-probe"}\\n'; exit 0 ;;
+    esac
+    printf '{"docH":10000,"overflowX":false,"bodyWidth":1000}\\n'; exit 0 ;;
 esac
 exit 2
 """,
@@ -289,6 +296,9 @@ if args[3] == 'set':
     if os.environ['PROBE_FAILURE'] == 'setup': sys.exit(1)
     state.write_text(json.dumps([int(args[5]), int(args[6])]))
 if args[3] == 'eval':
+    if 'const requested' in args[4]:
+        print(json.dumps({'status':'absent', 'source':'auto-probe'}))
+        sys.exit(0)
     w,h=json.loads(state.read_text())
     if os.environ['PROBE_FAILURE'] == 'wrong-size': w=800
     print(json.dumps({'actualWidth':w, 'actualHeight':h, 'docH':10000, 'overflowX':False, 'bodyWidth':w}))
@@ -307,3 +317,54 @@ if args[3] == 'eval':
     if failure == 'none':
         assert all(row['viewportValid'] for row in data['widths'])
         assert {tuple(row['actualRefViewport']) for row in data['widths']} == {(1280, 900), (1440, 900)}
+
+
+def test_unproven_reference_scroll_cap_fails_closed(tmp_path: Path) -> None:
+    proc, art = _judge(tmp_path, {"widths": [
+        {
+            "viewport": "1440x900",
+            "refDocH": 10000,
+            "implDocH": 10000,
+            "refOverflowX": False,
+            "implOverflowX": False,
+            "refNormalization": {
+                "status": "failed",
+                "source": "env",
+                "selector": "#scroll-cap",
+                "reason": "height-growth-not-proven",
+            },
+        }
+    ]})
+
+    assert proc.returncode == 1
+    assert art["status"] == "fail"
+    assert art["widths"][0]["pass"] is False
+    assert art["widths"][0]["refNormalization"]["reason"] == "height-growth-not-proven"
+
+
+def test_proven_reference_scroll_cap_uses_normalized_height(tmp_path: Path) -> None:
+    proc, art = _judge(tmp_path, {"widths": [
+        {
+            "viewport": "1440x900",
+            "refDocH": 13236,
+            "implDocH": 13236,
+            "refOverflowX": False,
+            "implOverflowX": False,
+            "refNormalization": {
+                "status": "applied",
+                "source": "auto-probe",
+                "selector": "#fc-scroll-cap",
+                "beforeDocH": 5219,
+                "afterDocH": 13236,
+                "docGrowth": 8017,
+                "elementGrowth": [8017],
+            },
+        }
+    ]})
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert art["status"] == "pass"
+    proof = art["referenceNormalization"][0]
+    assert proof["status"] == "applied"
+    assert proof["selector"] == "#fc-scroll-cap"
+    assert proof["afterDocH"] == art["widths"][0]["refDocH"]

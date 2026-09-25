@@ -359,6 +359,79 @@ def _run_inventory_check(ref: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_capture_artifact_inventory_ignores_resolved_candidate_receipts(
+    tmp_path: Path,
+) -> None:
+    """Measured-negative candidates are receipts, not capture regions."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "regions.json").write_text(
+        json.dumps(
+            {
+                "regions": [],
+                "resolvedAutoCandidates": [
+                    {
+                        "triggerType": "hover",
+                        "selector": "a.measured-static",
+                        "resolution": "absence-measured",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = _run_inventory_check(ref)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "capture-artifact-inventory.json").read_text())
+    assert artifact["status"] == "pass"
+    assert artifact["regionsChecked"] == 0
+    assert artifact["missingArtifacts"] == []
+
+
+def test_capture_artifact_inventory_receipts_do_not_hide_missing_real_region(
+    tmp_path: Path,
+) -> None:
+    """Ignoring receipts must not weaken evidence required from real regions."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "regions.json").write_text(
+        json.dumps(
+            {
+                "regions": [
+                    {
+                        "name": "real-hover",
+                        "triggerType": "hover",
+                        "selector": ".real-hover",
+                    }
+                ],
+                "resolvedAutoCandidates": [
+                    {
+                        "triggerType": "hover",
+                        "selector": ".measured-static",
+                        "resolution": "absence-measured",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = _run_inventory_check(ref)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "capture-artifact-inventory.json").read_text())
+    assert artifact["regionsChecked"] == 1
+    assert artifact["missingArtifacts"] == [
+        {
+            "region": "real-hover",
+            "triggerType": "hover",
+            "reason": "missing artifacts manifest",
+        }
+    ]
+
+
 def test_capture_artifact_inventory_rejects_undecodable_swiper_raster(tmp_path: Path) -> None:
     """swiper-next is a real emitted triggerType (capture-swiper-artifacts.py).
     It was in neither trigger table, so its artifacts skipped raster decoding

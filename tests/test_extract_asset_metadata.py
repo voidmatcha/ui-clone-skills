@@ -176,6 +176,51 @@ def test_extract_asset_metadata_writes_canonical_step_2_5_artifacts(tmp_path: Pa
     )
 
 
+def test_extract_asset_metadata_captures_dom_section_owner() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "ownerSectionId" in script
+    assert "ownerSectionClass" in script
+    assert "...sectionOwner(img)" in script
+    assert "...sectionOwner(el)" in script
+
+
+def test_extract_asset_metadata_captures_dom_bound_css_and_poster_sources() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    for asset_type in (
+        "bg-image",
+        "css-mask-image",
+        "video-poster",
+        "pseudo-${pseudo.slice(2)}-content",
+    ):
+        assert asset_type in script
+    assert "style.backgroundImage" in script
+    assert "style.maskImage" in script
+    assert "style.webkitMaskImage" in script
+    assert "pseudoStyle.content" in script
+    assert "addComputedImages(el, pseudoStyle, rect, pseudo)" in script
+    assert "pseudoContent === 'none'" in script
+    assert "pseudoContent === 'normal'" in script
+    assert "entry.pseudo || ''" in script
+    assert "video.poster" in script
+    assert "cssProperty" in script
+    assert "computedValue" in script
+    assert "rect.width < 50" not in script
+
+
+def test_extract_asset_metadata_keeps_transparent_reveal_assets() -> None:
+    """Opacity-zero DOM assets remain candidates, with visibility recorded as evidence."""
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "hasLayoutBox(rect)" in script
+    assert "currentlyPainted" in script
+    assert "visibilityEvidence(img, style)" in script
+    assert "checkVisibility({checkOpacity: true, checkVisibilityCSS: true})" in script
+    assert "parseFloat(style.opacity || '1') > 0" not in script
+    assert "parseFloat(pseudoStyle.opacity || '1') <= 0" not in script
+
+
 def test_extract_asset_metadata_blocks_private_stylesheet_before_curl(
     tmp_path: Path,
 ) -> None:

@@ -17,7 +17,7 @@
   <a href="README.md">🇺🇸 English</a> | <a href="README.ko.md">🇰🇷 한국어</a> | <strong>🇯🇵 日本語</strong> | <a href="README.zh-cn.md">🇨🇳 简体中文</a>
 </p>
 
-<!-- README-CANONICAL-REVISION: sha256=abb78b7ead0f943d143a6eda35664c7b68c73332814aab6fd83e0726e63a8818; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
+<!-- README-CANONICAL-REVISION: sha256=2b51a5f567925721d64501c013522d7989c133da87aa55714e94bfc32d77cac7; bytes=exact-README.md-UTF-8; translation-quality=not-attested -->
 
 `ui-clone-skills` は、公開中のWebサイトを根拠に基づく React + Tailwind 実装へ変換します。レンダリングされたページをキャプチャし、実際の CSS とアセットをダウンロードし、レスポンシブスタイルと計算済みスタイルを読み取り、JavaScript バンドルからアニメーションのパラメータを復元したうえで、複数のビューポートとインタラクション状態にわたって結果を検証します。
 
@@ -167,7 +167,7 @@ Phase 1 が暫定的な参照証拠を生成した場合、同じ実行内で Ph
 
 ## ドキュメント
 
-三つのルーティングスキルはコンパクトに保たれ、各パイプラインステップで必要になったときにだけ、対象を絞った51個のサブドキュメントを読み込みます。まずタスクレベルのページから始め、正確なコマンドやゲートの挙動が必要になった時点で運用契約を開いてください。
+三つのルーティングスキルはコンパクトに保たれ、各パイプラインステップで必要になったときにだけ、対象を絞った59個のサブドキュメントを読み込みます。まずタスクレベルのページから始め、正確なコマンドやゲートの挙動が必要になった時点で運用契約を開いてください。
 
 - [インストールとホストのセットアップ](./README_detail/install.md)
 - [完全なリバースエンジニアリング・パイプライン](./README_detail/ui-reverse-engineering.md)

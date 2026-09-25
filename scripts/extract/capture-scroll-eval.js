@@ -1,15 +1,41 @@
 (async () => {
+  const resumeRunner = async (runner) => {
+    runner.beginChunk();
+    const next = await runner.iterator.next();
+    runner.sequence += 1;
+    if (!next.done) {
+      return {
+        continuationRequired: true,
+        captureEpoch: runner.epoch,
+        continuationSequence: runner.sequence,
+        phase: next.value && next.value.phase ? next.value.phase : "capture",
+      };
+    }
+    delete window.__uiCloneScrollCaptureRunner;
+    return next.value;
+  };
+  if (window.__uiCloneScrollCaptureRunner) {
+    return resumeRunner(window.__uiCloneScrollCaptureRunner);
+  }
+
   const PCTS = [0, 10, 25, 50, 75, 90, 100];
   // Keep the full sweep below agent-browser's 30-second IPC ceiling. Ninety
   // rendered steps remain finer than half a viewport on a 17k-pixel page;
   // the MutationObserver records changes between the seven persisted stops.
   const MAX_SCAN_STEPS = 90;
+  const MAX_TOTAL_SCAN_STEPS = MAX_SCAN_STEPS * 4;
+  const MAX_END_PROBES = 10;
+  const REQUIRED_STABLE_END_PROBES = 2;
+  const END_PROBE_DWELL_MS = 1200;
+  const CAPTURE_DEADLINE_MS = 22000;
   const MIN_SCAN_STEP_PX = 120;
   const startedAt = performance.now();
+  let chunkStartedAt = startedAt;
   const root = document.documentElement;
   const initialScrollHeight = root.scrollHeight;
+  let maxObservedScrollHeight = initialScrollHeight;
   const viewportHeight = window.innerHeight;
-  const maxScrollable = Math.max(0, initialScrollHeight - viewportHeight);
+  const initialMaxScrollable = Math.max(0, initialScrollHeight - viewportHeight);
 
   const lenisInstance = window.lenis
     || (typeof window.Lenis === "object" ? window.Lenis : null);
@@ -102,21 +128,27 @@
 
   const scanStepPx = Math.max(
     MIN_SCAN_STEP_PX,
-    Math.ceil(Math.max(1, maxScrollable) / MAX_SCAN_STEPS),
+    Math.ceil(Math.max(1, initialMaxScrollable) / MAX_SCAN_STEPS),
   );
+  let scanStepsUsed = 0;
+  const deadlineExceeded = () => performance.now() - chunkStartedAt >= CAPTURE_DEADLINE_MS;
   const sweepTo = async (targetY) => {
     const startY = readScrollY();
     const distance = targetY - startY;
     const steps = Math.max(1, Math.ceil(Math.abs(distance) / scanStepPx));
     for (let step = 1; step <= steps; step += 1) {
+      if (scanStepsUsed >= MAX_TOTAL_SCAN_STEPS || deadlineExceeded()) return false;
       performScroll(Math.round(startY + (distance * step) / steps));
+      scanStepsUsed += 1;
       await renderedFrame();
     }
+    return true;
   };
 
   const alignToTarget = async (targetY) => {
     const tolerance = Math.max(8, Math.min(40, Math.round(scanStepPx / 3)));
     for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (deadlineExceeded()) return false;
       await new Promise((resolve) => setTimeout(resolve, 100));
       if (Math.abs(readScrollY() - targetY) <= tolerance) return true;
       if (attempt === 9) performScroll(targetY);
@@ -161,6 +193,65 @@
     return sections;
   };
 
+  const endSentinel = () => {
+    const candidates = [];
+    for (const element of document.querySelectorAll(
+      "main, [role='main'], footer, [role='contentinfo'], article, section",
+    )) {
+      const isFooter = typeof element.matches === "function"
+        && element.matches("footer, [role='contentinfo']");
+      const excludedSelector = isFooter
+        ? "article, section, aside, nav, dialog, [role='dialog'], [role='complementary'], [role='navigation'], [aria-modal='true'], [aria-hidden='true']"
+        : "aside, nav, dialog, [role='dialog'], [role='complementary'], [role='navigation'], [aria-modal='true'], [aria-hidden='true']";
+      if (element.parentElement && typeof element.parentElement.closest === "function"
+          && element.parentElement.closest(excludedSelector)) continue;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      let excludedByAncestor = false;
+      for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+        const style = getComputedStyle(ancestor);
+        if (style.display === "none" || style.position === "fixed") {
+          excludedByAncestor = true;
+          break;
+        }
+        const isRootScroller = ancestor === document.scrollingElement
+          || ancestor === document.documentElement || ancestor === document.body;
+        if (!isRootScroller && ancestor !== element && /^(auto|scroll)$/.test(style.overflowY)
+            && ancestor.scrollHeight > ancestor.clientHeight + 2) {
+          excludedByAncestor = true;
+          break;
+        }
+      }
+      if (excludedByAncestor) continue;
+      candidates.push({
+        element,
+        rect,
+        absoluteBottom: rect.bottom + readScrollY(),
+      });
+    }
+    if (!candidates.length) return { required: false, reached: true, selector: null };
+    candidates.sort((left, right) => right.absoluteBottom - left.absoluteBottom);
+    const { element, rect, absoluteBottom } = candidates[0];
+    const clippedLandmarks = candidates
+      .filter((candidate) => candidate.absoluteBottom > root.scrollHeight + 2)
+      .map((candidate) => targetSelector(candidate.element));
+    const withinDocumentExtent = clippedLandmarks.length === 0;
+    return {
+      required: true,
+      // A valid site may place trailing content after its footer. Reaching or
+      // passing the footer is sufficient; requiring it to remain onscreen at
+      // the final bottom would reject that layout. A transformed/clipped
+      // footer beyond the document extent still fails closed.
+      reached: rect.top < viewportHeight && withinDocumentExtent,
+      selector: targetSelector(element),
+      top: Math.round(rect.top),
+      bottom: Math.round(rect.bottom),
+      absoluteBottom: Math.round(absoluteBottom),
+      withinDocumentExtent,
+      clippedLandmarks,
+    };
+  };
+
   const visualDigest = () => {
     const signals = [];
     for (const element of document.body ? document.body.querySelectorAll("*") : []) {
@@ -177,9 +268,9 @@
     return signals.join("|").slice(0, 200);
   };
 
-  const stableWait = async () => {
+  const stableWait = async (initialWaitMs = 500) => {
     await renderedFrame();
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, initialWaitMs));
     let previous = visualDigest();
     for (let poll = 0; poll < 3; poll += 1) {
       await new Promise((resolve) => setTimeout(resolve, 200));
@@ -272,62 +363,248 @@
     characterDataOldValue: true,
   });
 
-  const stops = [];
+  let stops = [];
+  let initialZeroStop = null;
   const alignmentFailures = [];
-  const isStatic = maxScrollable <= 0;
-  if (isStatic) {
-    stops.push({
-      pct: 0,
+  const endTraversal = [];
+  let isStatic = initialMaxScrollable <= 0;
+  let captureComplete = true;
+  let incompleteReason = null;
+  let settledEndScrollHeight = null;
+  let captureSequence = 0;
+
+  const snapshotAt = (pct, maxScrollable, traversalDirection = "forward") => {
+    captureSequence += 1;
+    return {
+      pct,
       scrollY: readScrollY(),
+      targetY: Math.round(maxScrollable * pct / 100),
+      maxScrollableAtCapture: maxScrollable,
+      observedScrollHeight: root.scrollHeight,
+      observedMaxScrollable: Math.max(0, root.scrollHeight - viewportHeight),
+      traversalDirection,
+      captureSequence,
       outerHTML: root.outerHTML,
       visibleSections: visibleSections(),
       compositeDigest: visualDigest(),
-    });
-  } else {
+    };
+  };
+
+  const ensureTargetAvailable = async function* (targetY, pct) {
+    const tolerance = Math.max(8, Math.min(40, Math.round(scanStepPx / 3)));
+    let unchangedProbes = 0;
+    for (let probe = 1; probe <= MAX_END_PROBES; probe += 1) {
+      const availableMax = Math.max(0, root.scrollHeight - viewportHeight);
+      if (availableMax + tolerance >= targetY) return { complete: true, reason: null };
+      activeScrollLeg = { fromPct: pct, toPct: pct };
+      const swept = await sweepTo(availableMax);
+      const aligned = swept && await alignToTarget(availableMax);
+      await stableWait(END_PROBE_DWELL_MS);
+      const grownMax = Math.max(0, root.scrollHeight - viewportHeight);
+      maxObservedScrollHeight = Math.max(maxObservedScrollHeight, root.scrollHeight);
+      yield { phase: "target-availability", pct, probe };
+      if (!swept || !aligned) {
+        return { complete: false, reason: "document-end-unreachable" };
+      }
+      unchangedProbes = grownMax > availableMax + tolerance ? 0 : unchangedProbes + 1;
+      if (unchangedProbes >= REQUIRED_STABLE_END_PROBES) {
+        return { complete: false, reason: "scroll-target-unavailable" };
+      }
+    }
+    return { complete: false, reason: "scroll-target-availability-did-not-stabilize" };
+  };
+
+  const captureStops = async function* (maxScrollable, percentages = PCTS) {
+    const captured = [];
     let previousPct = null;
-    for (const pct of PCTS) {
+    for (const pct of percentages) {
       activeScrollLeg = previousPct === null ? null : { fromPct: previousPct, toPct: pct };
       const targetY = Math.round(maxScrollable * pct / 100);
-      if (activeScrollLeg) await sweepTo(targetY);
-      else performScroll(targetY);
+      const available = yield* ensureTargetAvailable(targetY, pct);
+      if (!available.complete) {
+        activeScrollLeg = null;
+        return { captured, complete: false, reason: available.reason };
+      }
+      const swept = await sweepTo(targetY);
+      if (!swept) {
+        activeScrollLeg = null;
+        return { captured, complete: false, reason: "capture-budget-exhausted" };
+      }
       if (!(await alignToTarget(targetY))) {
         alignmentFailures.push({ pct, targetY, actualY: readScrollY() });
+        activeScrollLeg = null;
+        return { captured, complete: false, reason: "scroll-target-unreachable" };
       }
       await stableWait();
-      stops.push({
-        pct,
-        scrollY: readScrollY(),
-        outerHTML: root.outerHTML,
-        visibleSections: visibleSections(),
-        compositeDigest: visualDigest(),
-      });
+      maxObservedScrollHeight = Math.max(maxObservedScrollHeight, root.scrollHeight);
+      const direction = previousPct !== null && pct < previousPct ? "reverse" : "forward";
+      captured.push(snapshotAt(pct, maxScrollable, direction));
       activeScrollLeg = null;
       previousPct = pct;
+      yield { phase: "forward-snapshot", pct };
     }
-  }
-  observer.disconnect();
-
-  const finalScrollHeight = root.scrollHeight;
-  const scrollHeightDeltaPct = initialScrollHeight > 0
-    ? Math.round(((finalScrollHeight - initialScrollHeight) / initialScrollHeight) * 100)
-    : 0;
-  return {
-    stops,
-    domMutations: mutationTrace,
-    domMutationTraceTruncated: mutationTraceTruncated,
-    scanStepPx,
-    alignmentFailures,
-    durationMs: Math.round(performance.now() - startedAt),
-    scrollHeight: initialScrollHeight,
-    viewportHeight,
-    finalScrollHeight,
-    scrollHeightDeltaPct,
-    scrollHeightGrew: !isStatic && finalScrollHeight > initialScrollHeight,
-    infiniteScroll: !isStatic && finalScrollHeight > initialScrollHeight * 1.5,
-    scrollEngine,
-    scrollEngineReason,
-    scrollTransportProven,
-    scrollControlMethod,
-    static: isStatic,
+    return { captured, complete: true, reason: null };
   };
+
+  let totalEndProbeCount = 0;
+  const settleAtDocumentEnd = async function* () {
+    let stableProbes = 0;
+    let probesThisPass = 0;
+    let sentinel = { required: false, reached: true, selector: null };
+    while (probesThisPass < MAX_END_PROBES) {
+      if (deadlineExceeded()) {
+        return { complete: false, reason: "capture-deadline-exceeded", maxScrollable: 0 };
+      }
+      const targetY = Math.max(0, root.scrollHeight - viewportHeight);
+      activeScrollLeg = { fromPct: 100, toPct: 100 };
+      const swept = await sweepTo(targetY);
+      const aligned = swept && await alignToTarget(targetY);
+      await stableWait(END_PROBE_DWELL_MS);
+      activeScrollLeg = null;
+      const observedY = readScrollY();
+      const observedHeight = root.scrollHeight;
+      maxObservedScrollHeight = Math.max(maxObservedScrollHeight, observedHeight);
+      const observedMax = Math.max(0, observedHeight - viewportHeight);
+      sentinel = endSentinel();
+      const tolerance = Math.max(8, Math.min(40, Math.round(scanStepPx / 3)));
+      probesThisPass += 1;
+      totalEndProbeCount += 1;
+      endTraversal.push({
+        probe: totalEndProbeCount,
+        targetY,
+        observedY,
+        scrollHeight: observedHeight,
+        maxScrollable: observedMax,
+        aligned,
+        sentinel,
+      });
+      yield { phase: "end-probe", probe: totalEndProbeCount };
+      if (!swept) {
+        return { complete: false, reason: "capture-budget-exhausted", maxScrollable: observedMax };
+      }
+      if (!aligned || Math.abs(observedY - targetY) > tolerance) {
+        alignmentFailures.push({ pct: 100, targetY, actualY: observedY, phase: "end-probe" });
+        return { complete: false, reason: "document-end-unreachable", maxScrollable: observedMax };
+      }
+      if (Math.abs(observedMax - targetY) <= tolerance && sentinel.reached) stableProbes += 1;
+      else stableProbes = 0;
+      if (stableProbes >= REQUIRED_STABLE_END_PROBES) {
+        settledEndScrollHeight = observedHeight;
+        return {
+          complete: true,
+          reason: null,
+          maxScrollable: observedMax,
+          endStop: snapshotAt(100, observedMax, "forward-end"),
+        };
+      }
+    }
+    return {
+      complete: false,
+      reason: sentinel.required && !sentinel.reached
+        ? "document-end-sentinel-not-reached" : "document-end-did-not-stabilize",
+      maxScrollable: Math.max(0, root.scrollHeight - viewportHeight),
+    };
+  };
+
+  const resultPayload = () => {
+    observer.disconnect();
+    const endingScrollHeight = root.scrollHeight;
+    const finalScrollHeight = settledEndScrollHeight || endingScrollHeight;
+    const scrollHeightDeltaPct = initialScrollHeight > 0
+      ? Math.round(((finalScrollHeight - initialScrollHeight) / initialScrollHeight) * 100)
+      : 0;
+    return {
+      stops,
+      initialZeroStop,
+      domMutations: mutationTrace,
+      domMutationTraceTruncated: mutationTraceTruncated,
+      scanStepPx,
+      scanStepsUsed,
+      alignmentFailures,
+      captureComplete,
+      incompleteReason,
+      continuationRequired: false,
+      endTraversal,
+      recaptureCount: 0,
+      captureTraversal: "forward",
+      durationMs: Math.round(performance.now() - startedAt),
+      scrollHeight: initialScrollHeight,
+      viewportHeight,
+      finalScrollHeight,
+      endingScrollHeight,
+      settledEndScrollHeight,
+      maxObservedScrollHeight,
+      scrollHeightDeltaPct,
+      scrollHeightGrew: !isStatic && finalScrollHeight > initialScrollHeight,
+      potentialInfiniteScroll: !isStatic && !captureComplete
+        && maxObservedScrollHeight > initialScrollHeight * 1.5,
+      infiniteScroll: !isStatic && !captureComplete
+        && maxObservedScrollHeight > initialScrollHeight * 1.5,
+      scrollEngine,
+      scrollEngineReason,
+      scrollTransportProven,
+      scrollControlMethod,
+      inputListeners: Array.isArray(window.__uiCloneScrollInputListeners)
+        ? window.__uiCloneScrollInputListeners : [],
+      static: isStatic,
+    };
+  };
+
+  const runCapture = async function* () {
+    initialZeroStop = snapshotAt(0, initialMaxScrollable, "initial");
+    const end = yield* settleAtDocumentEnd();
+    if (!end.complete) {
+      captureComplete = false;
+      incompleteReason = end.reason;
+      stops = [initialZeroStop];
+      return resultPayload();
+    }
+    if (end.maxScrollable <= 0) {
+      stops = [initialZeroStop];
+      return resultPayload();
+    }
+    isStatic = false;
+    const finalMaxScrollable = end.maxScrollable;
+
+    activeScrollLeg = { fromPct: 100, toPct: 0 };
+    const resetSwept = await sweepTo(0);
+    const resetAligned = resetSwept && await alignToTarget(0);
+    await stableWait();
+    activeScrollLeg = null;
+    yield { phase: "reverse-reset" };
+    if (!resetSwept || !resetAligned) {
+      captureComplete = false;
+      incompleteReason = "reverse-reset-unreachable";
+      stops = [initialZeroStop, end.endStop];
+      return resultPayload();
+    }
+
+    const sequence = yield* captureStops(finalMaxScrollable);
+    stops = sequence.captured;
+    if (!sequence.complete) {
+      captureComplete = false;
+      incompleteReason = sequence.reason;
+      return resultPayload();
+    }
+
+    const tolerance = Math.max(8, Math.min(40, Math.round(scanStepPx / 3)));
+    const terminalSentinel = endSentinel();
+    const endingMax = Math.max(0, root.scrollHeight - viewportHeight);
+    if (Math.abs(endingMax - finalMaxScrollable) > tolerance
+        || Math.abs(readScrollY() - finalMaxScrollable) > tolerance
+        || !terminalSentinel.reached) {
+      captureComplete = false;
+      incompleteReason = "final-range-or-sentinel-drift";
+    }
+    return resultPayload();
+  };
+
+  const runner = {
+    iterator: runCapture(),
+    epoch: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    sequence: 0,
+    beginChunk: () => { chunkStartedAt = performance.now(); },
+  };
+  window.__uiCloneScrollCaptureRunner = runner;
+  return resumeRunner(runner);
 })()

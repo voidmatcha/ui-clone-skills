@@ -20,57 +20,49 @@ metadata:
 
 # Visual Debug
 
-Automated post-implementation visual comparison — original vs implementation. **Zero vision tokens** via AE/SSIM CLI tools.
+Diagnose an existing implementation against captured reference evidence with structural, AE, DSSIM, runtime, and transition checks.
 
-**Primary trigger:** Diagnose post-implementation mismatch between a reference and an implementation, then provide concrete repair guidance.
-**Non-goals:** Do not use this to build or regenerate the React component, orchestrate a full live URL clone, or perform baseline/reference capture; route build/clone work to `ui-reverse-engineering` and capture/reference work to `ui-capture`.
+## Boundary and return contract
 
-## Boundary and handoff
+- Use this skill when reference and implementation evidence already exist. Route missing baseline evidence to `ui-capture`; route implementation, regeneration, and full clone orchestration to `ui-reverse-engineering` or the active caller.
+- Diagnose and return the failing artifact, selector or region, likely root cause, recommended fix, and exact verification command. The caller owns source edits unless it explicitly delegated repair.
+- Read `brief/WORKER_BRIEF.md` or `evidence-pack.json` first when present, then only the summaries and named drill-down artifacts needed for the failing hotspot.
+- Before a repair loop, read [`../ui-reverse-engineering/iteration-discipline.md`](../ui-reverse-engineering/iteration-discipline.md). Attempt history and stop conditions survive delegation and compaction. Report checker defects with a reproducer unless shared-tool repair is already authorized; never edit an installed cache.
+- Matching text, heights, fired events, or a successful build does not prove appearance or trajectory parity. Compare background and foreground, media fit, and intermediate motion states.
 
-- **Direct invocation:** Use when reference/implementation evidence already exists and the user asks for mismatch, diff, diagnosis, comparison, or repair guidance.
-- **Routed invocation:** `ui-reverse-engineering` may route here after a failed visual diff, failed post-implementation gate, or completed-state mismatch request.
-- **Missing evidence:** If baseline/reference capture is missing, return to `ui-capture` first; if implementation or regeneration is needed, return to `ui-reverse-engineering` or the active caller pipeline.
-- **Return contract:** Send the caller concrete findings: failing artifact, mismatched selector/region, likely root cause, recommended fix, and verification command. `visual-debug` diagnoses and guides; the caller owns implementation, build, regeneration, and full clone orchestration.
-- **Worker capability:** A named diagnostic/reviewer role may be unavailable even when generic native workers work. Follow `ui-reverse-engineering/SKILL.md` host-neutral dispatch: use the same contract with a generic worker, and do not repeat a rejected role name. Preserve Phase E's delegated-context requirement.
-- **Read budget:** Read this entrypoint once, then locate the current diagnostic section by heading. Query failing rows/IDs from artifacts rather than dumping entire reports or rereading the whole skill after each check.
-- **Repair order:** Resolve known content/structure/runtime/geometry failures with targeted checks before another expensive section/motion sweep. A successful build does not clear a failed runtime check. Follow `../ui-reverse-engineering/iteration-discipline.md`; full canonical verification remains required after repair.
-- **Visible output:** Matching DOM text, section heights, or fired events does not prove appearance or trajectory parity. Check section background and visible foreground together, preserve media fit, and compare intermediate states inside the target's active scroll range before accepting a motion match.
-- **Evidence-pack first:** If `brief/WORKER_BRIEF.md` or `evidence-pack.json` exists under the ref dir, read the brief before raw diff/DOM/style artifacts. Use the pack as a compact selector/bbox/style/trigger index and open only the named drill-down paths needed for the failing hotspot.
+## Required invariants
 
-## When to use
+**Do not read ref/impl images for routine comparison.** Start with summaries and AE/SSIM tools. For a failing position, run `auto-diagnose.sh`; read a diff image only if automated diagnosis finds nothing. Phase E is the required exception and must run in a delegated context.
 
-- After implementing a section, before declaring "done"
-- When user says "it's different", "doesn't match"
-- After `ui-reverse-engineering` reports a failed visual diff or post-implementation gate
-- **Instead of** `Read`-ing screenshots for comparison
+Pin the reference during iteration. Dynamic sites otherwise compare against a moving target: after the first complete reference capture, use frozen reference crops (`RECATCH_REF=0`) until evidence is genuinely stale. After any implementation edit, produce fresh implementation evidence before judging the fix.
 
-**HARD RULE:** Never `Read` ref/impl images for comparison. For FAIL positions, use `auto-diagnose.sh` first (zero vision tokens). Only `Read` diff images as fallback if auto-diagnose finds nothing. Exception: Phase E reads ref+impl pairs, and Phase E **must run in a delegated subagent context** so its 44K vision tokens stay out of the main context (see Phase E section).
+When evidence contains `window.scrollTo`, `scrollYProgress`, `setTimeout`, velocity, a guard ref around scroll-stop logic, or ScrollTrigger pin/scrub, require scroll state-machine proof of `initial → active/expanded → settled/returned`; a single endpoint frame is insufficient.
 
-**Browser cleanup rule (MANDATORY at end of every run):** `agent-browser --session <name> close` for each session you opened. **Never** `close --all` because other agent-browser sessions may own active browsers. The detailed section near the end of this file may be clipped after auto-compaction; this one-liner is the survival copy.
+Do not weaken thresholds or mask unexplained regions to clear a failure. Classify each failure as implementation, reference/capture, checker, or unknown before editing.
 
-## Token rule
+Close every browser session you opened on success, failure, or interruption:
 
-Pipe large `eval` output to a file, then `Read` only what you need:
 ```bash
-agent-browser --session <s> eval "<script>" > tmp/ref/<name>.json
+agent-browser --session <session-name> close
 ```
-Never let large JSON print to stdout — it wastes tokens.
 
-## Dependencies — preflight (run once per session)
+Never use `close --all`; other agents may own sessions.
 
-`npx skills add` installs the SKILL files but skips system tooling. Run this check at session start; if anything is missing, halt and surface the bootstrap one-liner to the user (do **not** auto-execute a remote installer on their behalf).
+## Start once per session
+
+Check required tools. If anything is missing, stop and surface the bootstrap command; do not execute a remote installer automatically.
 
 ```bash
 miss=""
 for c in agent-browser ffmpeg dssim; do command -v "$c" >/dev/null 2>&1 || miss+=" $c"; done
 { command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; } || miss+=" imagemagick"
 if [ -n "$miss" ]; then
-  printf 'Missing system deps:%s\n\nFastest fix:\n  tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"\n\nOr install manually:\n  brew install ffmpeg imagemagick dssim   # macOS  (Linux: apt install ffmpeg imagemagick && cargo install dssim)\n  npm i -g agent-browser\n' "$miss"
+  printf 'Missing system deps:%s\nBootstrap:\n  tmp=$(mktemp) && curl -LsSf -o "$tmp" https://raw.githubusercontent.com/voidmatcha/ui-clone-skills/main/install.sh && bash "$tmp" && rm -f "$tmp"\n' "$miss"
   exit 1
 fi
 ```
 
-## Scripts
+Resolve scripts from the active plugin or checkout:
 
 ```bash
 SCRIPTS_DIR="${VISUAL_DEBUG_SCRIPTS_DIR:-}"
@@ -82,323 +74,30 @@ fi
 [ -n "$SCRIPTS_DIR" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 ```
 
-| Script | Purpose |
-|---|---|
-| `computed-diff.sh <session> <orig> <impl> <sel...>` | **Run first** — getComputedStyle comparison. Catches fontWeight/display/height root causes before pixel diff |
-| `batch-scroll.sh <orig> <impl> <session> [dir]` | Captures section-aligned scroll probes first (including sticky / pinned / scroll-transition phases); falls back to 0–100% percent probes with `SCROLL_CAPTURE_MODE=percent` |
-| `ae-compare.sh <ref.png> <impl.png> [diff.png]` | AE comparison → `AE=<n> STATUS=PASS|FAIL` |
-| `batch-compare.sh <dir> [threshold]` | Compare all pairs. Supports dynamic thresholds |
-| `dssim-compare.sh <dir> [threshold]` | Structural similarity (catches what AE misses) |
-| `layout-diff.sh <session> <orig> <impl>` | Section bounding box comparison |
-| `section-compare.sh <orig> <impl> <session> <dir>` | **Section-level comparison** — crops each section, AE + structure diff. Catches SVG-as-text, layout mismatches. **`<dir>` is required** — pass `"$(pwd)/tmp/ref/<component>"` |
-| `auto-diagnose.sh <session> <orig> <impl> <diff.png>` | **Auto-find mismatched elements** from AE diff image → elementFromPoint → computed-diff with severity |
-| `layout-health-check.sh <session> <orig> <impl> <dir>` | Section height/total height structural check before pixel diff |
-| `stray-absolute-check.sh <session> <impl-url> [w] [h]` | **Catches the "footer disappeared" bug class** — flags `position: absolute` elements with no positioned ancestor (offset resolves against `<body>`). Single URL, no ref needed. See `diagnosis.md` → Root Cause H. |
-| `tailwind-transform-conflict-check.sh <session> <impl-url> [w] [h] [scope]` | **Catches the "transform stacked twice" bug class** — flags elements where computed style has both a non-identity `transform:` (Tailwind v3 shorthand) AND a non-`none` `translate:`/`rotate:`/`scale:` (Tailwind v4 individual properties), which compose on top of each other and double the rendered offset. Set `REF_DIR=...` to write `tailwind-conflict.json` — `verification-plan.sh` includes this as a universal `post-implement` row. See `diagnosis.md` → Root Cause I. |
-| `breakpoint-collision-check.sh <session> <impl-url> [bps]` | **Catches the "broken at exactly 768" bug class** — captures impl at every Tailwind boundary ±1 (default 640/768/1024/1280/1536) and flags widths where `matchMedia(max-width)` and `matchMedia(min-width)` both match, body overflows in isolation, or root font-size jitters. Single URL, no ref needed. Set `REF_DIR=...` env to write `responsive/boundary-collisions.json` for the `boundary` gate. See `diagnosis.md` → Root Cause J. |
-| `font-parity-check.sh <session> <ref-url> <impl-url> <ref-dir>` | **Gates the asset-substitution decision** — extracts primary `font-family` from both ref and impl, writes `<ref-dir>/font-parity.json`. The `font-parity` gate enforces: parity:`match` → PASS; parity:`mismatch` → must be declared in `asset-substitution.json`. Catches the "100% sections FAIL forever" bug when commercial fonts are silently substituted. See `ui-reverse-engineering/asset-substitution.md`. |
-| `paid-features-detect.sh <ref-dir>` | **Early-detects paid font dependencies BEFORE generation** — static-greps `<ref-dir>/bundles/`, `css/`, `fonts.json`, `head.json`, `external-sdks.json` for paid font CDN hosts (Adobe Typekit, Monotype, Hoefler, Linotype, FONTPLUS / TypeSquare in Japan). Writes `<ref-dir>/paid-features.json` with `decision: null` for each finding. The `paid-features` gate (between `bundle` and `spec`) refuses to pass until every entry has `decision` set to one of `use` / `substitute` / `skip`. Catches the "100% sections FAIL forever" bug class when a paid web font silently falls back to the default sans-serif at impl time. The detector only flags dependency families listed in its current paid-host/plugin table; update that table when licensing changes. |
-| `reveal-trigger-check.sh <session> <impl-url> [w] [h]` | **Catches the "stuck reveal" bug class** — enumerates initially-hidden elements (opacity 0 / non-identity transform), scrolls each into view, fails any whose style never advances. Reports parent-chain with `overflow: hidden` ancestors so the IO+overflow:hidden bug class is named on first run instead of after many iterations of pixel-diffing. See `ui-reverse-engineering/transition-implementation.md` → IntersectionObserver placement for masked reveals. |
-| `hidden-children-check.sh <session> <impl-url> <ref-dir>` | **Catches the "ref screenshot painted as background while DOM hidden" cheat** — for each major section, scrolls into view, dispatches scroll, finishes all in-flight animations, then enumerates non-trivial direct children (with text OR visual descendants like img/svg/canvas/video). Fails when a section with area > 20000 has >= 2 such children AND every one of them is permanently hidden (display:none / visibility:hidden / opacity<=0.01 / rect<2x2). Distinct from `reveal-trigger-check.sh` — that targets "wired but never fires"; this targets "stays hidden forever because the background is doing the rendering". |
-| `blank-viewport-check.sh <session> <impl-url> <ref-dir>` | **Catches the "DOM exists but page is blank" bug class** — opens the impl and fails when `html`, `body`, or the app root remains `opacity:0`, `visibility:hidden`, or `display:none` while DOM/text exists, or when all text is effectively invisible after ancestor opacity checks. This specifically catches copied loader / forensic CSS such as `body{opacity:0}` when the original ready/unlock JS was not reproduced. |
-| `runtime-dom-parity-check.sh <session> <ref-url> <impl-url> <ref-dir>` | **Positive-parity gate** — runs analysis JS on both ref and impl pages, fails if impl deviates from ref along: (a) node count outside ±30%, (b) visible text nodes < max(10, sectionCount*2), (c) any single image / picture / video / background-image element covers > 90% of viewport, (d) ref has Lottie evidence but impl has zero Lottie containers mounted. Catches screenshot-overlay and single-canvas-paint cheats that all negative gates miss. |
-| `impl-url-guard.sh <ref-dir> <impl-url> [impl-root]` | **Stale-port guard** — for local impl URLs, verifies the listening process cwd equals canonical `.impl-root`/pipeline implRoot before any `agent-browser` compare. Blocks orphan dev servers serving an old clone on the requested port. |
-| `capacity-check.sh <ref-dir>` | **Verification capacity probe** — writes `capacity-report.json` with conservative browser wave-size guidance (`recommendedWaveSize`, `serialBackendRequired`, `leanResources`) for Team/ultrawork/browser-heavy verification. |
-| `capture-artifact-inventory-check.sh <ref-dir>` | **ui-capture artifact contract gate** — every `regions.json` entry with `triggerType` must enumerate existing `clip/ref/` or `transitions/ref/` artifacts, so generation cannot infer transition evidence from names alone. |
-| `asset-placement-check.sh <ref-dir> [impl-root]` | **Static section asset placement gate** — maps `visible-images.json.top` through `section-map.json` + `component-map.json` and fails when an asset is only referenced globally instead of by the component that renders its original section. |
-| `ref-screenshot-asset-check.sh <ref-dir> [impl-root]` | **Static screenshot-substitution anti-cheat** — scans impl tree for path substrings of the ref's capture dirs (`tmp/ref/`, `/sections/{ref,impl,diff}/`, `/static/{ref,impl}/`, `/scroll-video/`) AND for byte-identical (sha256) copies of any file under those dirs. Blocks the agent from placing captured ref screenshots as impl backgrounds / assets. |
-| `entry-coherence-check.sh <ref-dir> [impl-root]` | **Static stack-consolidation gate** — infers stack from `impl/package.json`. Vite+React requires `src/main.{jsx,tsx}`; Next App requires `app/page.{jsx,tsx}`. Fails on coexisting entries (src/main + app/page), mixed Vite+Next deps, raw ref markup pasted into index.html (>=5 layout content tags OR >=3 + 800 chars body text). |
-| `scaffold-residue-check.sh <ref-dir> [impl-root]` | **Orphan-component gate** — exported PascalCase components under `impl/src/` (excluding entry files main/App/index) must appear as JSX `<Name>` or `createElement(Name)` somewhere. >=3 orphans OR >=40% orphan ratio = scaffold residue cheat. |
-| `html-paste-check.sh <ref-dir> [impl-root]` | **Static entry-HTML theft gate** — three orthogonal signals on impl entry HTML (`index.html`, `src/index.html`, `app/page.tsx`, etc): (1) tag-multiset Jaccard >= 70% similarity to `dom-scaffold.json` (paste of ref body), (2) `<script src="...">` filename matches any `bundle-map.json` entry (hot-loading ref JS), (3) inline `<style>` block byte-similar (>= 70% difflib quick_ratio) to any `<ref>/bundles/*.css`. |
-| `css-mirror-check.sh <ref-dir> [impl-root]` | **Static CSS theft gate** — scans impl CSS for `@import url(...)` targeting a host/filename in `bundle-map.json`, byte-identical copies of `<ref>/bundles/*.css`, or impl CSS with >= 70% quick_ratio to a ref bundle. Per-section snippet reuse allowed under `impl/src/styles/from-ref/`. |
-| `required-media-coverage-check.sh <ref-dir> [impl-root]` | **Required video/Lottie coverage gate** — consumes `required-media.json` (produced by `scripts/extract/required-media.sh` at Step 6b-bis). Missing `required-media.json` is a FAIL because the media inventory was never proven. Every video URL and every Lottie path must (a) be downloaded to `impl/public/` AND (b) be referenced in impl source. If ref has Lottie URLs, `impl/package.json` must declare a Lottie runtime package (`lottie-web` / `lottie-react` / `@lottiefiles/*` / `@dotlottie/*` / `bodymovin`). Closes the div-soup-site blind spot where `visible-images.json` only catalogues `<img>`. |
-| `scaffold-warn-check.sh <ref-dir> [impl-root]` | **Subtree-not-found placeholder gate** — `scaffold-to-jsx.sh` emits `<section data-scaffold-warn="subtree-not-found-for-<name>" />` when it cannot resolve a section's subtree. Any of those placeholders shipping to impl = block-severity FAIL. |
-| `invalidation-check.sh <ref-dir>` | **Operator invalidation stamp** — `touch <ref-dir>/.invalidated` with a JSON `{reason, markedAt, markedBy}` body marks a past loop result as known-bad. Post-implement refuses to pass until the stamp is removed AND the underlying issue is fixed. Use this when a prior loop's ref must be retired but kept on disk for diagnosis. |
-| `svg-dom-parity-check.sh <session> <ref-url> <impl-url> <ref-dir>` | **Runtime SVG inventory parity gate** — walks ref + impl pages, enumerates per-section SVG inventory (inline SVG count, with-path count, `<img src$=".svg">`, `<use href>`, CSS bg url(...svg), pseudo-element bg url(...svg)). Fails when impl drops >=50% of ref's SVG inventory OR ships empty `<svg>` stubs where ref had geometry OR any per-section SVG presence is dropped. Closes the heavy-icon-site blind spot where logo / search / dropdown / footer SNS icons are CSS-background SVGs that `visible-images.json` never catalogued. |
-| `live-parity-sweep.sh <ref-url> <impl-url> <session> <ref-dir> [depths]` | **Dual-session runtime parity gate** — opens ref and impl in paired `agent-browser` sessions, scrolls both through matched depths, and records deterministic DOM/state findings. Blocks on missing/extra image files, visible synthetic+native pseudo duplication, broken images, missing fonts, and geometry/count drift hidden by dynamic section masks. Runs `impl-url-guard.sh` first and defaults `UI_CLONE_LIVE_CURRENT_MODE=pin` to pause common media/carousel/animation APIs before comparing; set `snapshot` for raw live behavior. |
-| `motion-coverage-check.sh <ref-dir> [impl-root]` | **Motion implementation presence gate** — scores ref-side motion evidence (bundle-map.json libs: gsap/framer/lenis/anime/lottie/popmotion/react-spring/motion; transition-spec.json transitions count; external-sdks motion SDKs) vs impl-side motion code (motion library imports, `useScroll`/`useTransform`/`useSpring`/`useInView` hooks, `IntersectionObserver` / `ScrollTimeline` / `requestAnimationFrame` calls, `gsap.to`/`gsap.timeline` calls, CSS `@keyframes` / `animation` / `transition` / `scroll-timeline` declarations). `motion` substring excludes `emotion` (CSS-in-JS) via package-boundary matching. Fails when ref score >= 3 and impl score == 0, or ref score >= 5 and impl score < 2. Catches the "ref has gsap, impl has plain CSS only" gap. |
-| `scroll-engine-parity-check.sh <ref-dir> [impl-root]` | **Scroll-engine CLASS parity gate** — distinct from motion-coverage which counts SOME motion code. This gate enforces that the SPECIFIC motion ENGINE class matches, including normalized evidence from `scroll-engine.json`. Ref classes detected: `gsap-scrolltrigger`, `lenis-smooth-scroll`, `scroll-pin`, `scroll-scrub`, `framer-motion`, `native-scroll-timeline`. Impl must satisfy each ref class with an equivalent (e.g. ref `scroll-pin` requires impl `gsap-scrolltrigger` OR `native-scroll-timeline` — `css-sticky` alone cannot scrub). Closes the "look-and-feel similar but transitions guessed" gap where impl uses bare IntersectionObserver/native scroll handlers + CSS transitions but ref uses gsap.scrollTrigger({pin, scrub}) — fundamentally different motion class. |
-| `forced-state-class-check.sh <ref-dir> [impl-root]` | **Dynamic final-state anti-cheat** — when ref evidence has scroll/intersection state classes, fails hardcoded `is-active` / `is-visible` / `is-show`, reveal-all loops, or `transition:none` / `opacity:1` / `transform:none` final-state patches, with or without `!important`. |
-| `lottie-scroll-scrub-check.sh <ref-dir> [impl-root] [ref-url impl-url session]` | **Scroll-scrubbed Lottie gate** — when ref connects Lottie/bodymovin to scroll progress, requires frame seeking (`goToAndStop`, `playSegments`, `currentFrame`, `totalFrames`, or equivalent), preserves named ref Lottie containers, and when URLs are supplied compares visible/active Lottie counts at 0/25/50/75/100% scroll. Autoplay/loop-only or one-container-for-many implementations fail. |
-| `swiper-runtime-check.sh <ref-dir> [impl-root]` | **Swiper runtime parity gate** — when ref uses Swiper-like rails, copied `swiper-wrapper` / `swiper-slide` classes without Swiper runtime or extracted sizing/translate logic fail. |
-| `monolithic-impl-check.sh <ref-dir> [impl-root]` | **Componentization gate** — flags when entry file (App.{jsx,tsx} / page.{jsx,tsx}) is >= 8KB AND component count < max(3, section-map.totalCount // 3). Catches the agent packing the entire UI into one file (defeats per-section iteration). Excludes entry files (main/App/index) from component count. Allows barrel re-exports under impl/src/styles/from-ref/. |
-| `transition-spec-coverage.sh <component-dir> <impl-src-dir>` | **Static gate: every spec entry has an impl artifact.** Parses `transition-spec.json`, greps the impl source for each entry's id / selector / type-derived hooks (RevealRise, useScrollTrigger, useScroll, etc.), FAILs if any entry has zero hits. Catches the "hover transitions matched while intersection entries were never wired" failure class. |
-| `transition-compare.sh <orig> <impl> <session> [dir]` | **Transition comparison** — idle/hover screenshots + computedStyle + timing diff per element. Pairing uses semantic identity (tag/text/href/aria/size) before selector equality so shared tracking/utility classes like `.nclick-target` or `.swiper-slide` cannot match the wrong element. |
-| `tree-diff.sh <session> <orig> <impl> [dir]` | **Exhaustive per-element CSS diff** — walks every visible impl element (≥ MIN_SIZE px), pairs with ref via `elementFromPoint`, runs computed-style diff per pair. Catches mismatches AE misses (wrong font that renders identically, same-box different-style). |
-| `layout-tree-diff.sh <session> <orig> <impl> [dir]` | **Geometry diff via signature-based pairing** — pairs impl ↔ ref by stable signature (text + tag + class hash + size class), reports geometry deltas (top/left/w/h) regardless of where elements moved. Catches what tree-diff misses (right element, wrong position). |
-| `hover-tree-diff.sh <session> <orig> <impl> [dir]` | **Per-element hover/transition diff** — for each hover-capable element pair, captures idle → CDP `:hover` → settled style. Diffs timing (property/duration/easing/delay) + idle→hover delta. Catches missing hover rules, wrong easing, different deltas, and impl-only hover motion (invented rotations/fades/disappearing elements). |
-| `keyframes-diff.sh <session> <orig> <impl> [dir]` | **`@keyframes` declaration diff** — extracts all keyframe rules from both pages, reports keyframes only on one side and same-name rules with different steps. Catches missing entrance animations, wrong timing curves baked into keyframes. |
-| `scroll-anim-temporal-diff.sh <session> <ref> <impl> <selector> [dir]` | **Phase/frequency diff for scroll-driven repeating animations** — samples each matched element's position at N scroll progress steps on both sides, classifies as single-frequency (traveling wave) vs per-row-frequency vs mixed. Catches the "wave family wrong" bug class that AE/SSIM can't see (animation pixels match in any frozen frame, perceived motion is completely different). **Advisory only — no gate.** Run manually when the impl "feels off" on scroll for repeating elements; the selector arg is required so it can't be auto-invoked. |
+Pipe large browser JSON to files; do not print it into the model context. Every `agent-browser` command needs `--session <name>`, and every JS eval must be an IIFE.
 
-**Reference selectors:** `common-selectors.md` — ready-to-use selector sets (typography, CSS reset canaries, Tailwind preflight issues, news/portal patterns, general e-commerce)
+## Choose the route
 
-## Cost ladder — cheapest detection first
+1. Read the smallest existing summary first: `sections/result.txt`, `pipeline-state.json`, `_summary.json`, `pixel-perfect-diff.json`, or the failing gate artifact.
+2. Run cheap structural checks before pixels: implementation chrome scan, `stray-absolute-check.sh`, relevant transition/spec coverage, reveal/breakpoint checks, then a narrow `computed-diff.sh`.
+3. Use `section-compare.sh` for routed post-generation verification and `batch-scroll.sh` plus `batch-compare.sh` for a standalone broad sweep. The section command requires the fourth ref-dir argument because the gate reads its `sections/result.txt`.
+4. Diagnose only failing rows with `auto-diagnose.sh`. Escalate unresolved failures in order to `tree-diff.sh`, `layout-tree-diff.sh`, `hover-tree-diff.sh`, or `keyframes-diff.sh` according to the symptom.
+5. Re-run the affected check and its dependency closure. Use scoped or standard verification during iteration; canonical closeout still requires the caller's full comprehensive verification.
 
-The diff tools below have a 100x cost spread (sub-second to multi-minute, plus token cost when their output gets read). The most common avoidable waste is jumping to L3/L4 when an L1/L2 check would have answered the same question. **Always start at L1 and stop as soon as a tier gives you the answer.**
+Read [tool-routing.md](tool-routing.md) only when you need exact commands, `ONLY_IF_CHANGED`, masking rules, or tool selection. Read [common-selectors.md](common-selectors.md) only for domain selector sets. Read [verification.md](verification.md) only for standalone full capture/verification mechanics. Read [comparison-fix.md](comparison-fix.md) for repair-loop detail and Phase E dispatch. Do not load all references up front.
 
-| Tier | Cost | What | Use when |
-|---|---|---|---|
-| **L1** | ≤1s, ~free | Read existing summary files: `tmp/ref/<c>/sections/result.txt`, `pipeline-state.json`, `_summary.json`, `pixel-perfect-diff.json` | A prior run already produced these — they answer "what FAILed" in 2KB instead of you re-reading 50KB per section |
-| **L2** | ≤5s, 1 page load | Structural checks: `stray-absolute-check.sh`, `transition-spec-coverage.sh`, `reveal-trigger-check.sh`, `layout-health-check.sh`, `computed-diff.sh` | Verifying transitions, checking for whole-class bugs (footer disappeared, reveal stuck, spec entry never wired) |
-| **L3** | 30–120s | Targeted runs: `auto-diagnose.sh` on a single FAIL `diff.png`, `computed-diff.sh` on a narrow selector list | Bug class is suspected universal — sample one before sweeping all |
-| **L4** | multi-minute | Full sweeps: full-page `section-compare.sh`, `transition-compare.sh`, `tree-diff.sh`, `hover-tree-diff.sh` | L1–L3 came back clean and you need exhaustive coverage |
-| **L5** | minutes + tokens | Subagent visual review (Phase E LLM gate) | All metric tools agree but you need semantic verification |
+## Three-axis completion
 
-**Read-summary-first rule (L1 specifics):** scripts that write per-section/per-element detail also write a summary. Read the summary, *then* drill into detail files only for entries marked FAIL.
+Every position requires all three axes:
 
-| Script | Summary (read first) | Detail (drill on FAIL only) |
+| Axis | Tool | Pass condition |
 |---|---|---|
-| `section-compare.sh` | `<dir>/sections/result.txt` (~2KB) | `<dir>/sections/<name>.json` (~50KB each) |
-| `live-parity-sweep.sh` | `<dir>/live-parity.json` (finding list + advisory depths) | `<dir>/live-parity/*.{raw,png,tsv}` when a finding names a depth/state |
-| `transition-compare.sh` | `<dir>/transitions/report.json` (per-element verdicts) | `<dir>/transitions/{ref,impl}-elements.json`, `hover-states.json` |
-| `tree-diff.sh` / `layout-tree-diff.sh` / `hover-tree-diff.sh` / `keyframes-diff.sh` | severity-sorted markdown (`<dir>/<script-name>.md`) | paired `<dir>/<script-name>.json` raw diff list |
-| Pipeline gates | `python -m ui_clone.pipeline ... status --json` (CLI wrapper: `node bin/ui-clone` / published `npx ui-clone-cli`) | individual gate artifacts |
+| Pixel | AE | AE per image ≤ 500 |
+| Perceptual | DSSIM / frame SSIM | SSIM per frame ≥ 0.995 |
+| Semantic | delegated Phase E review | PASS, or explicit approval of a known difference |
 
-Reading a 50KB per-section JSON when result.txt would have answered the question is the single most common token waste in this workflow. If you don't see a summary file, that's a sign no run has been done yet — go to L2/L3, don't manually grep raw artifacts.
+Computed-style comparison passes with 0 mismatches. AE=500 permits antialiasing variance; dynamic content may use AE=2000 only through the documented dynamic route. These thresholds are contracts and may change only with explicit user approval and recorded rationale.
 
-When borrowing ideas from a static design-evaluation harness, translate its
-"section mismatch ranking" into this summary-first flow. Avoid fixed
-y-coordinate bands or design-size assumptions in live-URL debugging; use
-`section-compare.sh`'s semantic section matching and severity-sorted summaries,
-then drill into only the failing sections.
+Phase E is mandatory for full verification and reviews every ref/impl position after AE and DSSIM. Delegate it to the host-native `visual-debug-reviewer` (a Codex native subagent where available); otherwise use a generic delegated worker with the same contract. Do not retry a rejected role name. Only the verdict table returns to the coordinator. A bounded diagnostic Phase E may inspect representative existing pairs early, but its noncanonical artifact cannot replace final all-position review. See [comparison-fix.md](comparison-fix.md#phase-e-llm-structural-review-mandatory-all-positions).
 
-## Pick the right diff tool
-
-Five computed-style/geometry diff tools exist; each answers a different question. Run the targeted tool first, then escalate if the answer is "nothing wrong" but AE still fails.
-
-| Question | Tool | Scope | Cost |
-|---|---|---|---|
-| Are CSS resets / structural canaries OK? (entry-point sanity) | `computed-diff.sh` | Selector list you provide | Cheap — first call always |
-| Did every transition-spec entry get wired into impl code at all? | `transition-spec-coverage.sh` | All entries in `transition-spec.json` vs grep of impl source | Cheap — first call when verifying transitions |
-| Hidden-init elements (opacity 0, transform offset) — do they ever trigger? | `reveal-trigger-check.sh` | Every initially-hidden element on the impl page | Cheap — second call when verifying transitions |
-| AE failed; which element on the diff image is wrong? | `auto-diagnose.sh` | Hotspots in the AE diff image | Cheap — second call |
-| AE keeps failing but auto-diagnose found nothing — wrong style on visually-similar render | `tree-diff.sh` | Every visible element (≥ MIN_SIZE), paired by `elementFromPoint` | Med |
-| Element is in the right place style-wise but at the wrong position | `layout-tree-diff.sh` | Every element, paired by signature (text+tag+class hash+size class) — robust to reflow | Med |
-| Hover / transition feels off (wrong easing, missing rule, different delta) | `hover-tree-diff.sh` | Every hover-capable pair, idle → CDP `:hover` → settled | High — many state captures |
-| Entrance / scroll animation timing is subtly off | `keyframes-diff.sh` | All `@keyframes` declarations from both pages | Low — declarations only |
-| Scroll-driven repeating animation "feels off" — irregular gaps where ref shows smooth interlock, or vice versa | `scroll-anim-temporal-diff.sh` | Per-element trajectory across N scroll progress samples (you provide the selector for the repeating set) | Med — N viewport scrolls × 2 sites |
-
-**Heuristics:**
-- `tree-diff` and `layout-tree-diff` are siblings, not redundant — first asks "is the style right on this element?", second asks "is this element in the right place?". Run `tree-diff` first; if it's clean and AE still fails, run `layout-tree-diff`.
-- `transition-compare.sh` is the predefined-set hover gate (Step 8c of `ui-reverse-engineering`); `hover-tree-diff.sh` is the impl-side exhaustive hover gate in comprehensive plans and remains a manual escalation elsewhere. Use it when `transition-compare` reports PASS but the impl still feels wrong, or when you suspect extra hover motion on elements the ref leaves static. If a site stamps one class on many controls, rely on the semantic pairing report (`matchKey` in `transitions/*-elements.json`) instead of forcing a generic selector match.
-- `transition-spec-coverage.sh` and `reveal-trigger-check.sh` are the **first two** transition gates, not escalations — run them before `transition-compare.sh`. Coverage catches "entry never wired", reveal-trigger catches "wired but stuck". `transition-compare.sh` only verifies idle→hover diffs, so it can pass while intersection/scroll-driven entries are completely broken.
-- **Scroll state-machine proof:** when bundle/spec evidence contains `window.scrollTo`, `scrollYProgress`, `setTimeout`, `velocity` / `getVelocity`, a guard ref around scroll-stop logic, or ScrollTrigger pin/scrub, do not accept a single endpoint frame. Require `initial → active/expanded → settled/returned` proof and run `scroll-state-machine-check.sh` before declaring the transition matched.
-- Don't run all five by default — they are slower and noisier than the standard `auto-diagnose` workflow.
-
-## Workflow
-
-### Step 0-pre: pass the chrome-hidden impl URL to every script
-
-Before running ANY compare script (`stray-absolute-check`, `section-compare`, `transition-compare`, `batch-compare`, `auto-diagnose`), confirm the impl shell is not painting fixed-position chrome that the ref doesn't have — dev banners, attribution / "made with X" badges, Vite/Next dev-overlay buttons, devtools widgets, locale switchers, env labels. Any element with `position: fixed` and a non-trivial bounding box will dominate AE in its corner *every frame*, turning a passing clone into FAIL while the diff image points at the chrome — not at any code you wrote.
-
-**Quick scan:**
-```bash
-agent-browser --session <s> open <impl-url>
-agent-browser --session <s> wait 1500   # let chrome (dev banners, badges) mount
-agent-browser --session <s> eval "
-(() => {
-  const fixed = [...document.querySelectorAll('*')].filter(el => {
-    const st = getComputedStyle(el);
-    if (st.position !== 'fixed') return false;
-    const r = el.getBoundingClientRect();
-    return r.width >= 40 && r.height >= 20;
-  }).map(el => ({ tag: el.tagName.toLowerCase(), id: el.id, cls: (el.className && el.className.toString) ? el.className.toString().slice(0,80) : '', w: el.getBoundingClientRect().width|0, h: el.getBoundingClientRect().height|0 }));
-  return JSON.stringify(fixed);
-})()
-" > tmp/fixed-scan.json
-```
-Pipe to a file (per the token rule) — chrome scans are small but writing through `Read` keeps the pattern uniform.
-
-If the scan returns elements that don't exist on the ref, the impl needs a hide-mechanism (query flag like `?embed=true`, env var like `NEXT_PUBLIC_HIDE_CHROME=1`, dev-only `NODE_ENV` guard, CSS `display:none` injected via a fixture stylesheet). Standardize on one and pass the *hidden* URL to every script. Document the flag in the impl repo's CLAUDE.md so it survives compaction.
-
-**Failure signature when you forget:** AE delta image shows a clean rectangular hotspot in one corner (top-right, bottom-right, etc.); `auto-diagnose.sh` reports the badge element as the only mismatch; section-compare passes for every section *except* the one that includes the chrome's vertical band. Fix is a query-flag swap, not a code change — verify before opening any source file.
-
-### Step 0: structural checks FIRST (before AE)
-
-**Always run structural checks before pixel comparison.** AE catches *that* something is wrong; structural checks catch *why* — and fix the root cause immediately without hunting through diff images.
-
-```bash
-SCRIPTS="$SCRIPTS_DIR"
-
-# 0a. Stray absolute positioning — catches the "footer disappeared" bug class.
-#     Run on EVERY viewport you care about; the bug often only manifests on shorter pages.
-bash "$SCRIPTS/stray-absolute-check.sh" <session>-stray <impl> 375 812
-bash "$SCRIPTS/stray-absolute-check.sh" <session>-stray <impl> 1280 800
-
-# 0a-bis. Stuck reveals — catches the IO+overflow:hidden bug class. Mandatory if
-#         the spec has any `intersection`/`inview` trigger entries.
-bash "$SCRIPTS/reveal-trigger-check.sh" <session>-reveal <impl> 1280 800
-
-# 0a-quater. Breakpoint collision — catches the "broken at exactly 768" bug class.
-#            Mandatory whenever impl mixes Tailwind responsive utilities AND a
-#            project-scoped @media (max-width: <bp>px) rule (root font-size,
-#            container padding, mobile-only stack). One run sweeps every Tailwind
-#            boundary ±1; cheap (single page load, ~15 viewport sets).
-bash "$SCRIPTS/breakpoint-collision-check.sh" <session>-bp <impl>
-
-# 0a-ter. Spec coverage — every transition-spec entry must have an impl artifact.
-#         Mandatory before per-trigger verification (transition-compare etc.) so
-#         entirely-missing entries are caught BEFORE you waste a hover sweep.
-bash "$SCRIPTS/transition-spec-coverage.sh" tmp/ref/<component> <impl-src-dir>
-
-# 0b. Broad sweep: CSS reset canaries + page structure
-bash "$SCRIPTS/computed-diff.sh" <session> <orig> <impl> \
-  "h1" "h2" "h3" "h4" \
-  "img" "button" "a" \
-  "body" "header" "main" "footer"
-
-# 0c. Domain-specific selectors from common-selectors.md
-# IGNORE_FONT_SIZE=1 to skip OS text-scaling false positives
-IGNORE_FONT_SIZE=1 bash "$SCRIPTS/computed-diff.sh" <session> <orig> <impl> \
-  "[class*=title]" "[class*=logo]" "[class*=search]" "[class*=nav]"
-```
-
-See `common-selectors.md` for ready-to-use selector sets by domain.
-
-### Full-page comparison (broad sweep)
-```
-0. Structural    stray-absolute-check.sh + computed-diff.sh (CSS reset canaries + page structure)
-1. Capture        batch-scroll.sh <orig> <impl> <session>
-2. AE diff        batch-compare.sh <dir>
-3. DSSIM          dssim-compare.sh <dir>
-4. Diagnose       auto-diagnose.sh <session> <orig> <impl> <diff.png>
-                  → auto-finds mismatched elements, runs computed-diff with severity
-                  → zero vision tokens. Only Read diff image if auto-diagnose finds nothing.
-5. Fix            Targeted code change (critical severity first)
-6. Re-compare     Repeat 0–3
-7. LLM review     Read ref+impl pairs for ALL positions (Phase E)
-8. Gate           All axes PASS → DONE
-```
-
-### Section-level comparison (precise — preferred for post-gen verification)
-```
-0. Structural    stray-absolute-check.sh + computed-diff.sh (CSS reset + section selectors)
-1. Section compare  section-compare.sh <orig> <impl> <session> "$(pwd)/tmp/ref/<component>"
-   → Per-section AE + severity (critical/major/minor) + structure diff
-   ⚠️  The 4th argument (ref dir path) is MANDATORY — the Stop gate reads result.txt from that
-       exact path. Omitting it writes result.txt to the wrong location and the gate never clears.
-2. Transition compare  transition-compare.sh <orig> <impl> <session>
-   → Per-element idle/hover style + timing diff
-3. Diagnose     For FAIL sections: auto-diagnose.sh <session> <orig> <impl> <diff.png>
-                → auto-finds mismatched elements within that section (zero vision tokens)
-4. Fix          Targeted code change (critical severity first, then major, skip minor until Phase E)
-5. Re-compare   Repeat 0–2
-6. Gate         All sections PASS + all transitions PASS → DONE
-```
-
-**Use section-level for ui-reverse-engineering Step 8b/8c.** Use full-page for standalone `/visual-debug` invocations.
-
-**`ONLY_IF_CHANGED=1` (skip if impl unchanged):** when re-running section-compare during iteration, set `ONLY_IF_CHANGED=1` + `IMPL_SRC_DIR=<path-to-impl-source>` to short-circuit if no `*.tsx`/`*.jsx`/`*.ts`/`*.js`/`*.css`/`*.scss` file has changed since the last run. The prior `sections/result.txt` stays in place (Stop gate passes against it).
-
-```bash
-ONLY_IF_CHANGED=1 IMPL_SRC_DIR=~/projects/foo/src \
-  bash $SCRIPTS/section-compare.sh <orig> <impl> <session> "$(pwd)/tmp/ref/<c>"
-```
-
-Hash is SHA-256 of (sorted paths + content) — mtime-resilient. Delete `<ref-dir>/sections/.last-impl-hash` to force a full run. Use this for the second/third/Nth re-run after a fix; skip it on the *first* run after extraction (no prior result.txt to reuse).
-
-## Escalation diagnostics (when the standard workflow misses the bug)
-
-The standard workflow (AE + DSSIM + `auto-diagnose.sh` + `computed-diff.sh`) catches most mismatches. When AE keeps reporting failures but `auto-diagnose` returns clean — escalate to the **tree-diff family**. These walk *every* element on the page rather than a fixed selector list, so they catch what targeted diagnostics miss.
-
-| Symptom | Escalate to | Why |
-|---|---|---|
-| AE fails repeatedly but `auto-diagnose` finds nothing | `tree-diff.sh` | Exhaustive computed-style diff — pairs every visible impl element with ref via `elementFromPoint`. Catches wrong fonts that render identically, same-box different-style overrides. |
-| Element appears at wrong position but `tree-diff` says style matches | `layout-tree-diff.sh` | Geometry diff via signature-based pairing — pairs by stable signature (text + tag + class hash + size class), reports `top/left/w/h` deltas regardless of where the element moved on screen. |
-| Hover/transition feels off but `transition-compare.sh` reports PASS | `hover-tree-diff.sh` | Per-element CDP `:hover` capture for *every* hover-capable pair (not just the predefined set). Diffs idle→hover delta + timing. |
-| Entrance/scroll animation runs but timing or curve is subtly different | `keyframes-diff.sh` | Diffs `@keyframes` declarations directly. Catches missing rules, wrong steps, wrong easing baked into the keyframe definition rather than the animation shorthand. |
-
-```bash
-bash "$SCRIPTS/tree-diff.sh"        <session> <orig> <impl>   # full-element style diff
-bash "$SCRIPTS/layout-tree-diff.sh" <session> <orig> <impl>   # geometry deltas
-bash "$SCRIPTS/hover-tree-diff.sh"  <session> <orig> <impl>   # hover style + timing
-bash "$SCRIPTS/keyframes-diff.sh"   <session> <orig> <impl>   # @keyframes declarations
-```
-
-These are diagnostic, not gate-blocking. Use them when `section-compare` / `transition-compare` keep failing without a clear cause — they produce a markdown report (severity-sorted) that names the culprit elements and properties. **Do not run all four by default** — they are slower and more expensive than the standard workflow.
-
-## Three-axis verification (ALL required)
-
-| Axis | Tool | Catches | Blind spot |
-|------|------|---------|------------|
-| **Pixel** | AE | Exact rendering diff | Lottie frame differences (false positive) |
-| **Perceptual** | DSSIM | Color/tone mismatch | Missing content on same-color bg |
-| **Semantic** | LLM (Phase E) | Missing sections, wrong content | Slow, costs tokens |
-
-A position is PASS only when **all three agree** (or LLM explicitly approves a known difference).
-
-### Phase E: LLM Review (MANDATORY)
-
-For early semantic diagnosis, delegate the bounded `reviewMode: "diagnostic"`
-route in `comparison-fix.md` using existing representative pairs. Its separate
-noncanonical artifact cannot replace the final all-position review below.
-
-NOTE: Quick comparison (Phases A-D) uses zero vision tokens via AE/SSIM diff. Phase E (LLM verification) is mandatory for full verification workflow and DOES use vision tokens for the final review.
-
-After AE + DSSIM, read every position's ref+impl pair. Judge PASS / PARTIAL / FAIL. Not optional — automated metrics can silently pass wrong results. ~44K tokens.
-
-**Always delegate Phase E to a subagent context.** In Claude Code-style hosts, prefer the plugin's `subagent_type: "ui-clone-skills:visual-debug-reviewer"` — it pins `model: opus` so vision verdict quality is consistent regardless of the parent agent's model. In Codex/OMX hosts, use the Codex native subagent `visual-debug-reviewer` backed by `.codex/agents/visual-debug-reviewer.toml`. As a fallback, `subagent_type: "general-purpose"` or an inline fallback works but may inherit the parent's model (lower-tier defaults can degrade Phase E judgment). Other hosts should use their equivalent delegated-worker mechanism with an opus-equivalent model. The 44K vision tokens stay in the subagent context, and only the verdict table (~500 tokens) returns. See `comparison-fix.md` Phase E section for the example invocation.
-
-## Thresholds
-
-| Metric | Pass | Fail |
-|---|---|---|
-| AE per image | ≤ 500 | > 500 |
-| SSIM per frame | ≥ 0.995 | < 0.995 |
-| Computed style diff | 0 mismatches | > 0 |
-
-AE=500 allows anti-aliasing variance. Bump to 2000 for dynamic content.
-
-## Dynamic content (canvas/video) — `EXCLUDE_DYNAMIC=1`
-
-RAF-driven canvases (Three.js shaders, particle fields) and `<video>` elements run on independent clocks in ref vs impl, so their per-frame pixel diff is unmatchable — they dominate AE without indicating a real defect.
-
-`section-compare.sh` accepts an opt-in mask:
-
-```bash
-EXCLUDE_DYNAMIC=1 bash section-compare.sh <orig> <impl> <session> "$(pwd)/tmp/ref/<component>"
-```
-
-When set, the script injects `visibility: hidden !important` for the masked selectors into both ref and impl screenshots — identical hide rule on both sides, so layout is preserved while the noisy region drops out of AE.
-
-| Var | Default | Effect |
-|---|---|---|
-| `EXCLUDE_DYNAMIC` | `0` | `1` enables masking |
-| `DYNAMIC_SELECTORS` | `canvas, video` | Override the default mask list |
-| `transition-spec.json` entries with `"dynamic": true` | — | Auto-augment the mask list with each entry's `target` selector |
-
-**Spec-driven (recommended):** add `"dynamic": true` to every `transition-spec.json` entry whose visual is RAF-driven (auto-timer canvas, looping shader, `<video>` autoplay). Then `EXCLUDE_DYNAMIC=1` masks them all without enumerating selectors at the call site.
-
-**Selector caveat:** Selectors must not contain quote characters of either kind. `"` would close the injected JS string and `'` would close the surrounding Python r-string. Use bare attribute matchers (e.g. `[data-canvas=hero]`) or class/id selectors (e.g. `.canvas-hero`, `#hero-canvas`). The script aborts if it sees `"` or `'`.
-
-## Full verification
-
-- `verification.md` — Phase A/B (capture) + D (pixel-perfect gate) + auxiliary checks
-- `comparison-fix.md` — Phase C (AE+DSSIM comparison, computed-style diagnosis, Phase E LLM review, Phase H self-healing loop)
-
-## Browser cleanup (MANDATORY)
-
-**Every skill run MUST end with browser cleanup — success, failure, or interruption.**
-
-```bash
-# Always close your own session(s) by name
-agent-browser --session <session-name> close
-```
-
-- Close every `--session <name>` you opened during the comparison
-- Run cleanup **before returning control to the user**, even on error/early exit
-- Unclosed sessions spawn Chrome Helper processes (GPU + Renderer) that persist indefinitely
-- **Never use `close --all`** because other agent-browser sessions may have active browsers. Only close sessions you own.
-
-**Bulk cleanup helper (multi-session sweeps):** if a long verification run accumulated many ad-hoc sessions under a common prefix, use `scripts/verify/cleanup-sessions.sh <prefix>` (dry-run with `--dry`) to close them all in one pass. Refuses prefixes shorter than 3 chars; never matches across other agent-browser sessions.
-
-## Integration
-
-`visual-debug` owns comparison and diagnosis only. After it identifies a fix target or a PASS/FAIL result, resume the caller's pipeline (`ui-reverse-engineering`, `ui-capture`, or standalone task) for implementation, regeneration, and the next gate.
-
-| Skill | Where |
-|---|---|
-| `ui-reverse-engineering` Step 8+9 | Full verification procedure |
-| `ui-reverse-engineering` Step T4 | Phase D for transition resting states |
-| `ui-capture` Phase 4A | Phase D before compare.html |
-| Standalone | batch-scroll + batch-compare on any two URLs |
+Return PASS only when all three axes agree and every required row is measured. `FAIL`, `INCOMPLETE`, `UNMEASURED`, stale evidence, or missing artifacts remain incomplete. Then resume the caller's pipeline for implementation and canonical closeout.

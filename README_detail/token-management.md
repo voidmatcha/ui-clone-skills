@@ -6,11 +6,18 @@ UI cloning sessions are token-intensive — DOM trees, computed styles, and JS b
 
 | Strategy | How |
 |---|---|
-| Zero vision tokens for verification | AE/SSIM CLI tools diff screenshots. LLM only reads a single diff image on FAIL |
-| Progressive-disclosure sub-docs | SKILL.md ~6K tokens. 51 sub-docs load only when their step runs |
+| Bounded visual inspection | AE/SSIM tools perform routine comparisons; image inspection is reserved for the required Phase E review |
+| Progressive-disclosure sub-docs | Entrypoints route to the current task's reference, not a read-all checklist. Run `python3 scripts/ci/review_checks.py skill-context` for current word/line counts; words are not model tokens |
 | Pipe-to-file rule | Large `eval` output goes to `tmp/ref/*.json`, then `Read`/`Grep` specific lines |
 | Single source of truth | `transition-spec.json` produced once — implementation reads it, never re-greps bundles |
 | Bash loop breaker | After 10+ consecutive Bash calls, stop and analyze before continuing |
+
+When maintaining skills, update the canonical rule or regression test for a bug
+instead of appending its incident history to `SKILL.md`. Keep a short invariant at
+the decision point and link detailed procedures only where their trigger applies.
+Review entrypoint counts together with the references required for the task;
+moving text into a mandatory reference does not reduce reading cost. The 5,000-word
+combined entrypoint budget is advisory, not a reason to remove required behavior.
 
 **Anthropic prompt cache TTL — `ENABLE_PROMPT_CACHING_1H=1`:**
 

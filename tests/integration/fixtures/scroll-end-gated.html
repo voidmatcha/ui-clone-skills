@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Delayed scroll gates</title>
+<style>
+  body { margin: 0; }
+  main { height: 5000px; }
+  footer { height: 200px; }
+  #reveal { position: fixed; top: 0; opacity: .2; }
+</style>
+<div id="cap">
+  <main><div id="reveal">Scroll reveal</div></main>
+  <footer>Document footer</footer>
+</div>
+<script>
+(() => {
+  const mode = new URLSearchParams(location.search).get('mode');
+  const cap = document.getElementById('cap');
+  const main = document.querySelector('main');
+  const footer = document.querySelector('footer');
+  let height = 1800;
+  let timer = 0;
+  if (mode === 'locked-no-footer') footer.remove();
+  if (mode === 'locked-opacity-footer') {
+    main.style.height = '1600px';
+    footer.style.opacity = '0';
+    height = 1700;
+  }
+  if (mode !== 'static') {
+    cap.style.maxHeight = `${height}px`;
+    cap.style.overflow = 'clip';
+  }
+  window.addEventListener('scroll', () => {
+    document.getElementById('reveal').style.opacity = scrollY > 100 ? '1' : '.2';
+    if (mode !== 'growing' || timer || !cap.style.maxHeight) return;
+    if (scrollY + innerHeight < height - 2) return;
+    timer = setTimeout(() => {
+      timer = 0;
+      height += 1200;
+      if (height >= 5000) {
+        cap.style.maxHeight = '';
+        cap.style.overflow = '';
+      } else {
+        cap.style.maxHeight = `${height}px`;
+      }
+    }, 1200);
+  });
+})();
+</script>
+</html>

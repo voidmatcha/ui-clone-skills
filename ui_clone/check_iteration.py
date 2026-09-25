@@ -80,6 +80,38 @@ def _read(path: Path) -> dict:
         return {}
 
 
+_TERMINAL_FULL_DISPATCH_STATUSES = {"completed", "failed", "setup-failed", "interrupted"}
+
+
+def _finish_full_dispatch(
+    ref: Path,
+    status: str,
+    failed_checks: list[str] | None = None,
+    *,
+    preserve_partial: bool = False,
+    expected_dispatch_id: str | None = None,
+) -> None:
+    """Record a terminal full-dispatch outcome without upgrading partial evidence."""
+    if status not in _TERMINAL_FULL_DISPATCH_STATUSES:
+        raise ValueError(f"Invalid full dispatch status: {status}")
+    path = ref / "iteration-receipt.json"
+    receipt = _read(path)
+    if expected_dispatch_id is not None and receipt.get("dispatchId") != expected_dispatch_id:
+        raise ValueError("Active full dispatch receipt belongs to a different run")
+    if preserve_partial and receipt.get("mode") == "iteration":
+        if receipt.get("status") != "partial":
+            raise ValueError("Invalid partial iteration receipt")
+        return
+    if receipt.get("mode") != "final" or receipt.get("status") != "running":
+        raise ValueError("Cannot finish without an active full dispatch receipt")
+    receipt["status"] = status
+    if failed_checks:
+        clean_checks = [item for item in failed_checks if isinstance(item, str) and item]
+        if clean_checks:
+            receipt["failedChecks"] = list(dict.fromkeys(clean_checks))
+    path.write_text(json.dumps(receipt) + "\n")
+
+
 def _read_artifact(path: Path) -> dict | None:
     """Read retry evidence, including the canonical visual comparison text formats.
 
@@ -105,12 +137,18 @@ def _read_artifact(path: Path) -> dict | None:
     # Match post_implement's visual-health semantics for a required result.
     # Retry receipts remain advisory and never replace the canonical gate.
     if directory == "sections" and name == "result.txt":
-        summary = re.search(
+        summaries = list(re.finditer(
             r"Result:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL"
             r"(?:,\s*\d+\s+SKIP)?(?:,\s*(\d+)\s+STRUCTURAL_ONLY)?",
             text,
+        ))
+        failed = any(int(summary[2]) > 0 for summary in summaries)
+        unmeasured = bool(re.search(r"\b[1-9]\d*\s+UNMEASURED\b|\bINCOMPLETE\b", text))
+        if unmeasured and not failed:
+            return {"status": "error", "reason": "capture measurement incomplete", "text": text}
+        passed = bool(summaries) and all(
+            int(summary[1]) > 0 and int(summary[2]) == 0 for summary in summaries
         )
-        passed = bool(summary and int(summary[1]) > 0 and int(summary[2]) == 0)
     else:
         summary = re.search(r"Transition compare:\s*(\d+)\s+PASS,\s*(\d+)\s+FAIL", text)
         measurement_rows = any(
@@ -197,13 +235,39 @@ def record_attempt(
 def main(args: list[str]) -> int:
     command, ref_arg, *rest = args
     ref = Path(ref_arg)
+    dispatch_id = None
+    if rest[:1] == ["--dispatch-id"]:
+        if len(rest) < 2 or not rest[1]:
+            raise ValueError("--dispatch-id requires a value")
+        dispatch_id, rest = rest[1], rest[2:]
     if command == "finish":
-        path = ref / "iteration-receipt.json"
-        receipt = _read(path)
-        if receipt.get("mode") != "final" or receipt.get("status") != "running":
-            raise ValueError("Cannot finish without an active full dispatch receipt")
-        receipt["status"] = "completed"
-        path.write_text(json.dumps(receipt) + "\n")
+        _finish_full_dispatch(ref, "completed", expected_dispatch_id=dispatch_id)
+        return 0
+    if command == "fail":
+        failed_checks = rest[0].split() if len(rest) == 1 else rest
+        _finish_full_dispatch(
+            ref,
+            "failed",
+            failed_checks,
+            preserve_partial=True,
+            expected_dispatch_id=dispatch_id,
+        )
+        return 0
+    if command == "setup-fail":
+        _finish_full_dispatch(
+            ref,
+            "setup-failed",
+            preserve_partial=True,
+            expected_dispatch_id=dispatch_id,
+        )
+        return 0
+    if command == "interrupt":
+        _finish_full_dispatch(
+            ref,
+            "interrupted",
+            preserve_partial=True,
+            expected_dispatch_id=dispatch_id,
+        )
         return 0
     if command == "select":
         dispatch = Path(rest[0])
@@ -214,17 +278,15 @@ def main(args: list[str]) -> int:
         if active:
             rows = select_rows(dispatch.read_text().splitlines(), requested, changed)
             dispatch.write_text("\n".join(rows) + "\n")
-        (ref / "iteration-receipt.json").write_text(
-            json.dumps(
-                {
-                    "schemaVersion": 1,
-                    "mode": "iteration" if active else "final",
-                    "canonical": False,
-                    "status": "partial" if active else "running",
-                }
-            )
-            + "\n"
-        )
+        receipt = {
+            "schemaVersion": 1,
+            "mode": "iteration" if active else "final",
+            "canonical": False,
+            "status": "partial" if active else "running",
+        }
+        if dispatch_id is not None:
+            receipt["dispatchId"] = dispatch_id
+        (ref / "iteration-receipt.json").write_text(json.dumps(receipt) + "\n")
         return 0
     cid, impl, script, ref_url, impl_url, *extra = rest
     try:

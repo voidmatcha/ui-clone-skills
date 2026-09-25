@@ -34,7 +34,19 @@ def test_partial_iteration_blocks_both_closeout_paths(tmp_path: Path) -> None:
     problem = quick_tier_blocker(tmp_path)
     assert problem is not None and "Partial iteration" in problem
     receipt.write_text('{"mode":"final","status":"running"}')
-    assert quick_tier_blocker(tmp_path) is not None
+    problem = quick_tier_blocker(tmp_path)
+    assert problem is not None and "still running" in problem
+    receipt.write_text('{"mode":"final","status":"interrupted"}')
+    problem = quick_tier_blocker(tmp_path)
+    assert problem is not None and "interrupted" in problem
+    receipt.write_text(
+        '{"mode":"final","status":"failed","failedChecks":["layout","motion"]}'
+    )
+    problem = quick_tier_blocker(tmp_path)
+    assert problem is not None and "layout, motion" in problem and "Partial" not in problem
+    receipt.write_text('{"mode":"final","status":"setup-failed"}')
+    problem = quick_tier_blocker(tmp_path)
+    assert problem is not None and "setup failed" in problem
     receipt.write_text('{"mode":"final","status":"completed"}')
     assert quick_tier_blocker(tmp_path) is None
     receipt.write_text('[]')

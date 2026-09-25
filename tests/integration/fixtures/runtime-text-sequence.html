@@ -9,6 +9,8 @@
       .closed-menu { transform: translateX(-3000px); }
       .vertical-secret { transform: translateY(-3000px); }
       .clipped-menu { width: 0; height: 0; overflow: hidden; }
+      .contents-overflow { display: contents; overflow: hidden; }
+      .contents-positioned { display: contents; position: absolute; }
       .transparent-color { color: transparent; }
       .transparent-fill { -webkit-text-fill-color: transparent; }
       .visible-explicit-fill {
@@ -33,6 +35,8 @@
     <nav class="closed-menu"><a href="#">Closed menu secret</a></nav>
     <aside class="vertical-secret">Vertical offcanvas secret</aside>
     <div class="clipped-menu"><button>Clipped menu secret</button></div>
+    <div class="contents-overflow"><p>Visible contents overflow copy</p></div>
+    <div class="contents-positioned"><p>Visible contents positioned copy</p></div>
     <p class="transparent-color">Transparent color secret</p>
     <p class="transparent-fill">Transparent fill secret</p>
     <p class="visible-explicit-fill">Visible explicit fill copy</p>

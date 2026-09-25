@@ -32,14 +32,67 @@
     "should_trigger": true
   },
   {
+    "query": "compare original vs clone — take screenshots of both and show me the differences",
+    "should_trigger": true,
+    "note": "Existing-implementation diff/diagnosis belongs to visual-debug; both sides are captured only to compare them."
+  },
+  {
+    "query": "verify visual match — capture the original and my implementation side by side",
+    "should_trigger": true
+  },
+  {
+    "query": "the hero section AE diff fails but I can't tell why from the diff image — run computed-diff to find the root cause",
+    "should_trigger": true
+  },
+  {
+    "query": "run section-level comparison for my clone at http://localhost:3000 vs https://example.com — I need per-section pass/fail",
+    "should_trigger": true
+  },
+  {
+    "query": "the SSIM score on the pricing section is 0.71 — which CSS properties differ between ref and impl?",
+    "should_trigger": true
+  },
+  {
+    "query": "my hover transition feels slower than the reference — compare the recorded transition frames and tell me what to change",
+    "should_trigger": true
+  },
+  {
+    "query": "generate a comparison page showing original vs clone screenshots and transition videos",
+    "should_trigger": true
+  },
+  {
+    "query": "the font weights look off after implementing the header — diff the computed styles against the reference and tell me how to fix it",
+    "should_trigger": true
+  },
+  {
     "query": "clone https://stripe.com into a React component",
     "should_trigger": false,
     "note": "This is ui-reverse-engineering — user wants to build, not compare"
   },
   {
+    "query": "reverse-engineer the footer from https://github.com — I need the exact column layout, link styles, and the responsive stacking behavior",
+    "should_trigger": false,
+    "note": "This is ui-reverse-engineering — extraction and code generation, no existing implementation to diagnose."
+  },
+  {
+    "query": "extract the hover animation timing from the pricing cards on https://vercel.com/pricing — I need the exact cubic-bezier and duration",
+    "should_trigger": false,
+    "note": "This is ui-reverse-engineering (transition extraction) — no implementation is being compared."
+  },
+  {
     "query": "capture the reference screenshots from this site",
     "should_trigger": false,
     "note": "This is ui-capture — user wants to capture, not compare existing impl"
+  },
+  {
+    "query": "take baseline screenshots of this reference site before I start cloning",
+    "should_trigger": false,
+    "note": "This is ui-capture — baseline capture before any implementation exists."
+  },
+  {
+    "query": "record the scroll transitions on https://linear.app so I can replicate them",
+    "should_trigger": false,
+    "note": "This is ui-capture — reference transition recording, not a diff against an implementation."
   },
   {
     "query": "fix the TypeScript error in my component",
@@ -52,5 +105,18 @@
   {
     "query": "write unit tests for my Button component",
     "should_trigger": false
+  },
+  {
+    "query": "can you help me center a div with flexbox?",
+    "should_trigger": false
+  },
+  {
+    "query": "run my playwright tests and tell me why they're failing",
+    "should_trigger": false
+  },
+  {
+    "query": "my CSS transition isn't working — the opacity change happens instantly without any animation. here's my component...",
+    "should_trigger": false,
+    "note": "Local CSS bug with no reference evidence to diff against — ordinary debugging, not visual-debug."
   }
 ]

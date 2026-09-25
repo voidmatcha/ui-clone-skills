@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .base import CheckResult
-from .reference import _has_real_detection_provenance, _region_entries
+from .reference import (
+    _has_real_detection_provenance,
+    _has_resolved_auto_absence_provenance,
+    _region_entries,
+)
 
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
@@ -418,6 +422,12 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
             interactions = wrapped
     if interactions:
         return results  # non-empty — fine
+    regions_raw = self._load_json("regions.json")
+    if (
+        isinstance(regions_raw, dict)
+        and _has_resolved_auto_absence_provenance(self, regions_raw)
+    ):
+        return results
     # Upstream evidence sources.
     upstream_signals: list[str] = []
     hover_rules = self._load_json("hover-css-rules.json")
@@ -431,7 +441,6 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
     # `{"regions": [...]}` wrapper emitted by _capture_artifacts.write_regions_json.
     # Accept both shapes so older and newer captures both surface hover/click
     # upstream signals.
-    regions_raw = self._load_json("regions.json")
     region_list: list[dict[str, Any]] = []
     if isinstance(regions_raw, list):
         region_list = regions_raw

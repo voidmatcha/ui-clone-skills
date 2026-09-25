@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from PIL import Image
 
 from ui_clone.gate import Gate
 
@@ -46,6 +48,7 @@ command_index = args.index("--session") + 2
 command = args[command_index]
 rest = args[command_index + 1:]
 if " ".join([command, *rest]) == os.environ.get("FAKE_SETUP_FAIL"):
+    print(os.environ.get("FAKE_SETUP_ERROR", "setup failed"), file=sys.stderr)
     sys.exit(1)
 state_path = Path(os.environ["FAKE_STATE"])
 try:
@@ -95,11 +98,25 @@ elif command == "eval":
         state[scroll_key] = float(moved.group(1))
         state_path.write_text(json.dumps(state), encoding="utf-8")
     scrolled = float(state.get(scroll_key, 0))
-    if "scrollHeight" in script:
-        print(json.dumps({"success": True, "data": {"origin": origin, "result": {"found": True, "maxScroll": 1000}}}))
+    if "maxScroll:" in script:
+        print(json.dumps({"success": True, "data": {"origin": origin, "result": {
+            "found": True, "scrollY": float(state.get(scroll_key, 0)),
+            "scrollHeight": 2000, "maxScroll": 1000, "viewportHeight": 1000,
+        }}}))
         sys.exit(0)
     found = ".missing" not in script
     matches = 1 if found else 0
+    gated = (
+        os.environ.get("FAKE_GATED_TARGET") == "1"
+        and "scrollIntoView" in script
+        and not state.get(session + ":adaptive-unlocked")
+    )
+    if gated:
+        found = False
+        matches = 1
+        state[scroll_key] = 1000
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        scrolled = 1000
     if os.environ.get("FAKE_AFFECTED_OUTSIDE") == "1" and "activation.contains(" in script:
         # The affected selector is rendered in the document, but not inside
         # the activated region: the observation target cannot be pinned.
@@ -129,6 +146,13 @@ elif command == "eval":
         "fullyVisible": os.environ.get("FAKE_OFFSCREEN") != "1",
         "viewportWidth": 200,
     }
+    if gated:
+        result.update({
+            "blockedBeyondExtent": True,
+            "beyondExtent": 1,
+            "maxBlockedBottom": 1800,
+            "scrollHeight": 1000,
+        })
     if found and "const tracked=" in script:
         active = state.get(session, False) and os.environ.get("FAKE_NO_CHANGE") != "1"
         descendant_style = (
@@ -162,6 +186,11 @@ elif command == "eval":
     print(json.dumps({"success": True, "data": {"origin": origin, "result": result}}))
 elif command == "hover":
     state[session] = bool(rest and rest[0] != "body")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+elif command == "scroll":
+    if os.environ.get("FAKE_GATED_NEVER_UNLOCK") != "1":
+        state[session + ":adaptive-unlocked"] = True
+    state[session + ":scroll"] = 1000
     state_path.write_text(json.dumps(state), encoding="utf-8")
 elif (
     command == "wait"
@@ -240,7 +269,11 @@ def _run(
     descendant_style: bool = False,
     affected_outside: bool = False,
     descendant_on_hover: bool = False,
+    gated_target: bool = False,
+    gated_never_unlock: bool = False,
     prior_artifacts: bool = False,
+    prior_artifact_bytes: bytes | None = None,
+    session: str = "capture",
     timeout: int = 20,
 ) -> tuple[subprocess.CompletedProcess[str], Path, list[list[str]]]:
     ref_dir = tmp_path / "ref"
@@ -253,7 +286,7 @@ def _run(
             for relative in artifacts.values():
                 path = ref_dir / str(relative)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"prior-artifact")
+                path.write_bytes(prior_artifact_bytes or b"prior-artifact")
     if transition_spec is not None:
         (ref_dir / "transition-spec.json").write_text(
             json.dumps(transition_spec),
@@ -314,11 +347,15 @@ def _run(
         env["FAKE_AFFECTED_OUTSIDE"] = "1"
     if descendant_on_hover:
         env["FAKE_DESCENDANT_ON_HOVER"] = "1"
+    if gated_target:
+        env["FAKE_GATED_TARGET"] = "1"
+    if gated_never_unlock:
+        env["FAKE_GATED_NEVER_UNLOCK"] = "1"
     args = [
         sys.executable,
         str(SCRIPT),
         "https://example.test",
-        "capture",
+        session,
         str(ref_dir),
     ]
     if reuse_session:
@@ -363,7 +400,11 @@ def _run_existing_ref(
         env=env,
         timeout=20,
     )
-    calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    calls = (
+        [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+        if calls_path.is_file()
+        else []
+    )
     return proc, calls
 
 
@@ -1251,6 +1292,68 @@ def test_hover_target_resolution_forces_instant_scroll() -> None:
     assert script.index("requestAnimationFrame") < script.index("document.elementFromPoint")
 
 
+def test_owned_capture_adaptively_reaches_target_beyond_document_extent(
+    tmp_path: Path,
+) -> None:
+    proc, ref_dir, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        gated_target=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["counts"]["captured"] == 1
+    assert summary["unsupported"] == []
+    assert summary["captured"][0]["observation"]["adaptiveScrollTraversal"] is True
+    assert any(call[2:] == ["scroll", "down", "600"] for call in calls)
+    assert any(call[2:] == ["wait", "1200"] for call in calls)
+
+
+def test_reused_capture_does_not_mutate_caller_with_adaptive_traversal(
+    tmp_path: Path,
+) -> None:
+    proc, ref_dir, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        gated_target=True,
+        reuse_session=True,
+    )
+
+    assert proc.returncode != 0
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["captured"] == []
+    assert summary["skipped"][0]["reason"] == (
+        "selector matches 1 elements but none are hoverable"
+    )
+    assert not any(call[2] == "scroll" for call in calls)
+
+
+def test_adaptive_traversal_stays_fail_closed_when_target_remains_blocked(
+    tmp_path: Path,
+) -> None:
+    proc, ref_dir, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        gated_target=True,
+        gated_never_unlock=True,
+    )
+
+    assert proc.returncode != 0
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["captured"] == []
+    assert summary["status"] == "fail"
+    assert summary["skipped"][0]["reason"] == (
+        "selector matches 1 elements but none are hoverable"
+    )
+    regions = json.loads((ref_dir / "regions.json").read_text())
+    assert regions["regions"] == [
+        {"name": "button", "triggerType": "hover", "selector": ".button"}
+    ]
+    scroll_calls = [call for call in calls if call[2] == "scroll"]
+    assert 1 <= len(scroll_calls) <= 3
+
+
 def test_hover_capture_recenters_marked_target_after_release_scroll_drift(
     tmp_path: Path,
 ) -> None:
@@ -1303,6 +1406,46 @@ def test_failed_recapture_preserves_prior_region_artifacts(tmp_path: Path) -> No
         assert (ref_dir / relative).read_bytes() == b"prior-artifact"
 
 
+def test_bridge_recapture_retires_identical_prior_hover_frames(tmp_path: Path) -> None:
+    """A fresh negative can retire only the bridge's own stale hover proof."""
+    artifacts = {
+        "idle": "clip/ref/00-card-idle.png",
+        "active": "clip/ref/00-card-active.png",
+    }
+    image = io.BytesIO()
+    Image.new("RGB", (2, 2), "red").save(image, format="PNG")
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "card", "triggerType": "hover", "selector": ".card", "artifacts": artifacts}],
+        region_source="scripts/extract/capture-region-artifacts.py",
+        transition_spec={
+            "source": "scripts/extract/capture-region-artifacts.py",
+            "placeholder": False,
+            "transitions": [
+                {
+                    "id": "00-card",
+                    "trigger": "hover",
+                    "target": ".card",
+                    "bundle_branch": "live-capture: agent-browser CDP hover",
+                    "reference_frames": list(artifacts.values()),
+                }
+            ],
+        },
+        no_change=True,
+        prior_artifacts=True,
+        prior_artifact_bytes=image.getvalue(),
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    regions = json.loads((ref_dir / "regions.json").read_text())
+    spec = json.loads((ref_dir / "transition-spec.json").read_text())
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert regions["regions"] == []
+    assert spec["transitions"] == []
+    assert summary["skipped"][0]["resolution"] == "absence-measured"
+    assert summary["autoSpec"] is True
+
+
 def test_identity_and_colour_notation_are_not_treated_as_change() -> None:
     """Raw string diffs invent transitions that do not exist.
 
@@ -1325,6 +1468,18 @@ def test_real_change_still_registers_after_normalisation() -> None:
     assert module._changed_properties(
         {"transform": "none", "opacity": "1"},
         {"transform": "matrix(1.1, 0, 0, 1.1, 0, 0)", "opacity": "1"},
+    ) == ["transform"]
+
+
+def test_transform_matrix_serialization_jitter_is_not_a_hover_change() -> None:
+    module = _load_capture_module()
+    assert module._changed_properties(
+        {"transform": "matrix(1.06999, 0, 0, 1.06999, 0, 0)"},
+        {"transform": "matrix(1.07, 0, 0, 1.07, 0, 0)"},
+    ) == []
+    assert module._changed_properties(
+        {"transform": "matrix(1.07, 0, 0, 1.07, 0, 0)"},
+        {"transform": "matrix(1.08, 0, 0, 1.08, 0, 0)"},
     ) == ["transform"]
 
 
@@ -1488,6 +1643,22 @@ def test_fresh_bridge_configures_capture_environment(
     assert calls[-1][2:] == ["close"]
 
 
+def test_fresh_bridge_bounds_long_derived_session_name(tmp_path: Path) -> None:
+    long_session = "feconf-fresh-audit-" + "한글세션" * 4
+    proc, ref_dir, calls = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        session=long_session,
+    )
+    assert proc.returncode == 0, proc.stderr
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    derived = summary["session"]
+    assert derived.startswith("ra-feconf-f-")
+    assert len(derived.encode("utf-8")) <= 24
+    assert calls and all(call[1] == derived for call in calls)
+    assert all(call[1] != long_session for call in calls)
+
+
 @pytest.mark.parametrize(
     "step", ["close", "get url", "set viewport 1440 900", "set media light", "wait 3500"]
 )
@@ -1503,6 +1674,25 @@ def test_bridge_setup_failure_does_not_capture(tmp_path: Path, step: str) -> Non
     summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
     assert summary["status"] == "fail"
     assert summary["captured"] == []
+
+
+def test_bridge_setup_failure_preserves_agent_browser_diagnostic(tmp_path: Path) -> None:
+    diagnostic = (
+        "Session name is too long. Socket path would be 104 bytes (max 103). "
+        "Use a shorter session name or socket directory."
+    )
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "button", "triggerType": "hover", "selector": ".button"}],
+        setup_fail="close",
+        browser_env={"FAKE_SETUP_ERROR": diagnostic},
+    )
+    assert proc.returncode == 2
+    assert diagnostic in proc.stderr
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["skipped"][0]["diagnostic"] == diagnostic
+    assert summary["skipped"][0]["returnCode"] == 1
+    assert summary["skipped"][0]["command"] == ["close"]
 
 
 @pytest.mark.parametrize(
@@ -1801,6 +1991,230 @@ def test_absent_descendant_with_unchanged_activation_is_still_retired(
     assert "not present in document" in row["reason"]
     assert "no observable change" in row["reason"]
     assert proc.returncode != 0
+
+
+def test_auto_inventory_with_only_measured_absences_completes_with_bound_receipt(
+    tmp_path: Path,
+) -> None:
+    """A fully measured auto false-positive is evidence, not an empty-probe failure."""
+    transition_spec = {
+        "schemaVersion": 1,
+        "source": "ui_clone.extraction_artifacts",
+        "placeholder": True,
+        "transitions": [
+            {
+                "id": "auto-hover-0",
+                "trigger": "hover",
+                "target": ".card",
+                "animation": {"type": "css-hover"},
+            }
+        ],
+    }
+    proc, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "auto-hover-0", "triggerType": "hover", "selector": ".card"}],
+        transition_spec=transition_spec,
+        hover_css_rules={"rules": [{"selector": ".card:hover", "activation": ".card"}]},
+        no_change=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert summary["status"] == "pass"
+    assert summary["autoSpec"] is True
+    assert summary["autoCandidateInputFingerprint"].startswith("sha256:")
+    assert len(summary["autoCandidateInputFingerprint"]) == 71
+    assert summary["counts"] == {
+        "attempted": 1,
+        "captured": 0,
+        "skipped": 1,
+        "unsupported": 0,
+        "notInstantiated": 0,
+    }
+    assert summary["skipped"][0]["candidateKey"] == {
+        "triggerType": "hover",
+        "selector": ".card",
+    }
+    assert (
+        summary["skipped"][0]["autoCandidateInputFingerprint"]
+        == summary["autoCandidateInputFingerprint"]
+    )
+
+    regions = json.loads((ref_dir / "regions.json").read_text())
+    assert regions["regions"] == []
+    assert regions["source"] == "scripts/extract/capture-region-artifacts.py"
+    assert regions["resolvedAutoCandidates"] == [
+        {"triggerType": "hover", "selector": ".card"}
+    ]
+    assert (
+        regions["autoCandidateInputFingerprint"]
+        == summary["autoCandidateInputFingerprint"]
+    )
+
+    retry_tmp = tmp_path / "same-input-retry"
+    retry_tmp.mkdir()
+    retry, calls = _run_existing_ref(retry_tmp, ref_dir)
+    assert retry.returncode == 0, retry.stderr
+    assert calls == []
+    retried_summary = json.loads(
+        (ref_dir / "capture-region-artifacts-summary.json").read_text()
+    )
+    assert retried_summary["reusedResolvedAutoCandidates"] is True
+    assert [row["selector"] for row in retried_summary["attempted"]] == [".card"]
+    assert retried_summary["counts"] == summary["counts"]
+
+
+def test_changed_auto_hover_inputs_invalidate_the_negative_region_receipt(
+    tmp_path: Path,
+) -> None:
+    """A prior negative must not suppress a candidate produced by changed inputs."""
+    auto_spec = {
+        "schemaVersion": 1,
+        "source": "ui_clone.extraction_artifacts",
+        "placeholder": True,
+        "transitions": [
+            {
+                "id": "auto-hover-0",
+                "trigger": "hover",
+                "target": ".old",
+                "animation": {"type": "css-hover"},
+            }
+        ],
+    }
+    first, ref_dir, _ = _run(
+        tmp_path,
+        [{"name": "auto-hover-0", "triggerType": "hover", "selector": ".old"}],
+        transition_spec=auto_spec,
+        hover_css_rules={"rules": [{"selector": ".old:hover", "activation": ".old"}]},
+        no_change=True,
+    )
+    assert first.returncode == 0, first.stderr
+
+    (ref_dir / "hover-css-rules.json").write_text(
+        json.dumps({"rules": [{"selector": ".new:hover", "activation": ".new"}]}),
+        encoding="utf-8",
+    )
+    changed_spec = {
+        **auto_spec,
+        "transitions": [
+            {
+                "id": "auto-hover-0",
+                "trigger": "hover",
+                "target": ".new",
+                "animation": {"type": "css-hover"},
+            }
+        ],
+    }
+    (ref_dir / "transition-spec.json").write_text(json.dumps(changed_spec), encoding="utf-8")
+
+    second_tmp = tmp_path / "second"
+    second_tmp.mkdir()
+    second, _ = _run_existing_ref(second_tmp, ref_dir)
+    assert second.returncode == 0, second.stderr
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert [row["selector"] for row in summary["attempted"]] == [".new"]
+    assert summary["counts"]["captured"] == 1
+
+
+def test_mixed_positive_retry_preserves_only_the_fresh_hover_negative(
+    tmp_path: Path,
+) -> None:
+    """Receipt metadata is carried as evidence and never traversed as a region."""
+    ref_dir = tmp_path / "ref"
+    _write_regions(
+        ref_dir,
+        [{"name": "positive", "triggerType": "hover", "selector": ".positive"}],
+        source="scripts/extract/capture-region-artifacts.py",
+    )
+    (ref_dir / "hover-css-rules.json").write_text(
+        json.dumps({"rules": [{"selector": ".positive:hover", "activation": ".positive"}]}),
+        encoding="utf-8",
+    )
+    (ref_dir / "transition-spec.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "source": "ui_clone.extraction_artifacts",
+                "placeholder": True,
+                "transitions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    module = _load_capture_module()
+    fingerprint = module._hover_candidate_input_fingerprint(ref_dir)
+    regions = json.loads((ref_dir / "regions.json").read_text())
+    regions["resolvedAutoCandidates"] = [
+        {"triggerType": "hover", "selector": ".negative"}
+    ]
+    regions["autoCandidateInputFingerprint"] = fingerprint
+    (ref_dir / "regions.json").write_text(json.dumps(regions), encoding="utf-8")
+    (ref_dir / "capture-region-artifacts-summary.json").write_text(
+        json.dumps(
+            {
+                "autoSpec": True,
+                "autoCandidateInputFingerprint": fingerprint,
+                "status": "pass",
+                "attempted": [
+                    {
+                        "region": "negative",
+                        "triggerType": "hover",
+                        "selector": ".negative",
+                    }
+                ],
+                "skipped": [
+                    {
+                        "region": "negative",
+                        "triggerType": "hover",
+                        "selector": ".negative",
+                        "reason": "hover produced no observable change",
+                        "resolution": "absence-measured",
+                        "candidateKey": {
+                            "triggerType": "hover",
+                            "selector": ".negative",
+                        },
+                        "autoCandidateInputFingerprint": fingerprint,
+                    }
+                ],
+                "captured": [],
+                "unsupported": [],
+                "counts": {
+                    "attempted": 1,
+                    "captured": 0,
+                    "skipped": 1,
+                    "unsupported": 0,
+                    "notInstantiated": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_tmp = tmp_path / "mixed-retry"
+    run_tmp.mkdir()
+    proc, _ = _run_existing_ref(run_tmp, ref_dir)
+    assert proc.returncode == 0, proc.stderr
+    summary = json.loads((ref_dir / "capture-region-artifacts-summary.json").read_text())
+    assert {row["selector"] for row in summary["attempted"]} == {
+        ".negative",
+        ".positive",
+    }
+    assert [row["selector"] for row in summary["captured"]] == [".positive"]
+    assert [row["selector"] for row in summary["skipped"]] == [".negative"]
+    output = json.loads((ref_dir / "regions.json").read_text())
+    assert output["resolvedAutoCandidates"] == [
+        {"triggerType": "hover", "selector": ".negative"}
+    ]
+
+    second_tmp = tmp_path / "mixed-second-retry"
+    second_tmp.mkdir()
+    second, _ = _run_existing_ref(second_tmp, ref_dir)
+    assert second.returncode == 0, second.stderr
+    second_summary = json.loads(
+        (ref_dir / "capture-region-artifacts-summary.json").read_text()
+    )
+    assert second_summary["reusedResolvedAutoCandidates"] is True
+    assert [row["selector"] for row in second_summary["skipped"]] == [".negative"]
 
 
 def test_scroll_without_observable_change_is_not_retired_as_measured_absence(

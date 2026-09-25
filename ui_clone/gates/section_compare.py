@@ -11,6 +11,13 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ui_clone.check_inputs import (
+    InputFingerprintUnavailable,
+    compute_check_input_hash,
+    newest_input_mtime,
+    sidecar_path,
+)
+
 from ..policies import canvas_replay as _canvas_replay
 from .base import (
     CheckResult,
@@ -20,6 +27,114 @@ from .base import (
 
 if TYPE_CHECKING:
     from .base import Gate  # noqa: F401
+
+
+def _section_result_freshness(self: Gate, result_file: Path) -> CheckResult | None:
+    """Fail when sections/result.txt does not attest current section inputs.
+
+    ``run-required-checks.sh`` already records the shared input hash sidecar for
+    the synthesized ``section-compare`` row. The standalone gate must consume the
+    same proof because ``pipeline verify`` calls this gate directly and otherwise
+    can stamp an old green result after implementation files changed.
+    """
+    impl_root = self._find_impl_root()
+    if impl_root is None:
+        # Standalone ref fixtures and old ad-hoc artifact inspections have no
+        # implementation context to fingerprint. Keep their historical behavior;
+        # canonical closeout paths set .impl-root / pipeline-state implRoot.
+        return None
+
+    label = "sections/result.txt freshness"
+    fix = (
+        "Run: scripts/verify/run-required-checks.sh <session> <ref-url> "
+        f"<impl-url> {self.ref_dir}"
+    )
+    sidecar = sidecar_path(self.ref_dir, "section-compare")
+    try:
+        stored_hash = sidecar.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        if sidecar.is_symlink():
+            return CheckResult(
+                label,
+                "fail",
+                f"section-compare — broken input-hash sidecar: {sidecar}",
+                fix=fix,
+                stale=True,
+            )
+        stored_hash = ""
+    except OSError as exc:
+        return CheckResult(
+            label,
+            "fail",
+            f"section-compare — input-hash sidecar unreadable ({exc})",
+            fix=fix,
+            stale=True,
+        )
+
+    if stored_hash:
+        try:
+            current_hash = compute_check_input_hash(
+                impl_root, self.ref_dir, "section-compare"
+            )
+        except InputFingerprintUnavailable as exc:
+            return CheckResult(
+                label,
+                "fail",
+                f"section-compare — input fingerprint unverifiable ({exc})",
+                fix=fix,
+                stale=True,
+            )
+        if current_hash is None:
+            return CheckResult(
+                label,
+                "fail",
+                "section-compare — input fingerprint is unregistered",
+                fix=fix,
+                stale=True,
+            )
+        if current_hash != stored_hash:
+            return CheckResult(
+                label,
+                "fail",
+                "section-compare — stale sections/result.txt. Declared inputs "
+                "changed since section-compare evidence was produced.",
+                fix=fix,
+                stale=True,
+            )
+        return None
+
+    newest = newest_input_mtime(impl_root, self.ref_dir, "section-compare")
+    if newest is None:
+        return CheckResult(
+            label,
+            "fail",
+            "section-compare — input fingerprint unavailable and no input-hash "
+            "sidecar exists, so sections/result.txt cannot be bound to the "
+            "active impl.",
+            fix=fix,
+            stale=True,
+        )
+    try:
+        result_mtime = result_file.stat().st_mtime
+    except OSError as exc:
+        return CheckResult(
+            label,
+            "fail",
+            f"section-compare — sections/result.txt stat failed ({exc})",
+            fix=fix,
+            stale=True,
+        )
+    if newest > result_mtime + 1.0:
+        return CheckResult(
+            label,
+            "fail",
+            "section-compare — stale sections/result.txt. Declared inputs are "
+            "newer than the section-compare evidence.",
+            fix=fix,
+            stale=True,
+        )
+    return None
+
 
 def _required_viewports(ref_dir: Path) -> list[str]:
     """Plan-declared viewport set, required when the site is responsive.
@@ -112,6 +227,10 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
 
     content = result_file.read_text(encoding="utf-8", errors="replace")
     lines = content.splitlines()
+
+    freshness = _section_result_freshness(self, result_file)
+    if freshness is not None:
+        results.append(freshness)
 
     # Multi-viewport enforcement: a responsive site verified at one viewport
     # hides every breakpoint-specific defect (mobile-swap sections never

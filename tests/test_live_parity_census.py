@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import subprocess
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -176,3 +181,226 @@ def test_live_parity_sweep_wires_accessibility_copy_census() -> None:
     assert "visibleBodyText" in script
     assert "find_accessibility_text_leaks" in script
     assert "visible-accessibility-copy-leak" in script
+
+
+def test_live_parity_sweep_requires_proven_reference_scroll_cap_normalization() -> None:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "live-parity-sweep.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "REF_SCROLL_CAP_SELECTOR" in script
+    assert "no-scroll-cap-candidate" in script
+    assert "height-growth-not-proven" in script
+    assert "ref-scroll-cap-normalization-unproven" in script
+    assert '"referenceNormalization": ref_normalization' in script
+
+
+def _svg_hashes(svg: str) -> tuple[str, str, list[str]]:
+    paint_attrs = {"fill", "stroke", "color", "stop-color", "flood-color", "lighting-color"}
+    root = ET.fromstring(svg)
+
+    def local(name: str) -> str:
+        return name.rsplit("}", 1)[-1]
+
+    def canonical(node: ET.Element, ignore_paint: bool) -> list:
+        attrs = sorted(
+            [
+                [local(name), re.sub(r"\s+", " ", value).strip()]
+                for name, value in node.attrib.items()
+                if local(name) != "xmlns"
+                and not (ignore_paint and local(name) in paint_attrs)
+            ],
+            key=lambda row: row[0],
+        )
+        return [local(node.tag), attrs, [canonical(child, ignore_paint) for child in node]]
+
+    def digest(value: list) -> str:
+        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+        return hashlib.sha256(raw).hexdigest()
+
+    paints = sorted({
+        value
+        for node in root.iter()
+        for name, value in node.attrib.items()
+        if local(name) in paint_attrs
+    })
+    return digest(canonical(root, True)), digest(canonical(root, False)), paints
+
+
+def _run_live_parity_with_svg_fixtures(
+    tmp_path: Path, *, matching_structure: bool, navigation: str = "ok"
+) -> tuple[subprocess.CompletedProcess[str], dict]:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "live-parity-sweep.sh"
+    )
+    out = tmp_path / "out"
+    resource_dir = out / "resources" / "ref.example"
+    resource_dir.mkdir(parents=True)
+    svg_template = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60" '
+        'viewBox="0 0 120 60"><path d="M0 0H120V60H0Z" fill="{paint}" '
+        'stroke="{paint}"/></svg>'
+    )
+    ref_svg = svg_template.format(paint="#F98B0F")
+    resource_svg = svg_template.format(paint="#FF5080")
+    impl_svg = (
+        svg_template.format(paint="#3DB3F8")
+        if matching_structure
+        else '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60">'
+             '<circle cx="30" cy="30" r="20" fill="#3DB3F8"/></svg>'
+    )
+    (resource_dir / "public-variant.svg").write_text(resource_svg, encoding="utf-8")
+    ref_structure, ref_full, ref_paints = _svg_hashes(ref_svg)
+    impl_structure, impl_full, impl_paints = _svg_hashes(impl_svg)
+    ref_key = "data:image/svg+xml,<svg-orange>"
+    impl_key = "snail-runtime.svg"
+
+    base = {
+        "scrollHeight": 1000,
+        "headerHeight": 80,
+        "imgCount": 1,
+        "brokenImgs": 0,
+        "fonts": ["sans"],
+        "accessibilityOnlyText": [],
+        "visibleBodyText": "same",
+        "oversizedLeafText": [],
+        "pseudoDuplicates": [],
+    }
+    ref_census = {
+        **base,
+        "imgFiles": [ref_key],
+        "svgAssets": [{
+            "file": ref_key, "count": 1, "kind": "data-svg",
+            "structureHash": ref_structure, "fullHash": ref_full, "paints": ref_paints,
+        }],
+    }
+    impl_census = {
+        **base,
+        "imgFiles": [impl_key],
+        "svgAssets": [{
+            "file": impl_key, "count": 1, "kind": "url-svg",
+            "structureHash": impl_structure, "fullHash": impl_full, "paints": impl_paints,
+        }],
+    }
+    ref_fixture = tmp_path / "ref-census.json"
+    impl_fixture = tmp_path / "impl-census.json"
+    ref_fixture.write_text(json.dumps(ref_census), encoding="utf-8")
+    impl_fixture.write_text(json.dumps(impl_census), encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    browser = bin_dir / "agent-browser"
+    browser.write_text(
+        """#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv
+command = args[3]
+if command == "open" and os.environ.get("NAVIGATION") == "failed":
+    raise SystemExit(1)
+if command in {"open", "set", "close"}:
+    raise SystemExit(0)
+if command == "screenshot":
+    pathlib.Path(args[4]).write_bytes(b"png")
+    raise SystemExit(0)
+if command == "eval":
+    source = args[4]
+    if "href: location.href" in source:
+        url = "https://ref.example" if args[2].endswith("-lp-ref") else "https://impl.example"
+        if os.environ.get("NAVIGATION") == "wrong-page":
+            url += "/old-page"
+        print(json.dumps(json.dumps({"href": url})))
+    elif "const requested" in source:
+        print('{"status":"absent","source":"auto-probe"}')
+    elif "scrollHeight:" in source:
+        fixture = os.environ["REF_CENSUS"] if args[2].endswith("-lp-ref") else os.environ["IMPL_CENSUS"]
+        print(pathlib.Path(fixture).read_text())
+    else:
+        print("{}")
+    raise SystemExit(0)
+raise SystemExit(2)
+""",
+        encoding="utf-8",
+    )
+    browser.chmod(0o755)
+    for name, body in {
+        "sleep": "#!/bin/sh\nexit 0\n",
+        "magick": "#!/bin/sh\nprintf '0\\n'\n",
+        "dssim": "#!/bin/sh\nprintf '0\\n'\n",
+    }.items():
+        command = bin_dir / name
+        command.write_text(body, encoding="utf-8")
+        command.chmod(0o755)
+
+    env = dict(
+        os.environ,
+        PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        REF_CENSUS=str(ref_fixture),
+        IMPL_CENSUS=str(impl_fixture),
+        NAVIGATION=navigation,
+    )
+    proc = subprocess.run(
+        [
+            "bash", str(script), "https://ref.example", "https://impl.example",
+            "svg-proof", str(out), "0",
+        ],
+        cwd=script.parents[3],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc, json.loads((out / "live-parity.json").read_text(encoding="utf-8"))
+
+
+def test_generated_data_svg_pairs_only_with_run_local_palette_variability(
+    tmp_path: Path,
+) -> None:
+    proc, report = _run_live_parity_with_svg_fixtures(
+        tmp_path, matching_structure=True
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert report["status"] == "pass"
+    assert report["findings"] == []
+    proof = report["equivalentImageVariants"][0]
+    assert proof["impl"]["file"] == "snail-runtime.svg"
+    assert proof["proof"]["kind"] == "run-local-reference-palette-variability"
+    assert proof["proof"]["resources"][0]["path"].endswith("public-variant.svg")
+
+
+def test_unmatched_data_svg_remains_blocking(tmp_path: Path) -> None:
+    proc, report = _run_live_parity_with_svg_fixtures(
+        tmp_path, matching_structure=False
+    )
+
+    assert proc.returncode == 1
+    assert report["status"] == "fail"
+    kinds = {row["kind"] for row in report["findings"]}
+    assert {"missing-images", "extra-images", "image-file-count-drift"} <= kinds
+    assert report["equivalentImageVariants"] == []
+
+
+def test_failed_navigation_cannot_reuse_live_old_page(tmp_path: Path) -> None:
+    proc, report = _run_live_parity_with_svg_fixtures(
+        tmp_path, matching_structure=True, navigation="failed"
+    )
+    assert proc.returncode != 0
+    assert report["status"] == "error"
+    assert report["reason"] == "navigation-unverified"
+
+
+def test_wrong_navigation_target_cannot_certify_parity(tmp_path: Path) -> None:
+    proc, report = _run_live_parity_with_svg_fixtures(
+        tmp_path, matching_structure=True, navigation="wrong-page"
+    )
+    assert proc.returncode != 0
+    assert report["status"] == "error"
+    assert "URL differs" in report["detail"]

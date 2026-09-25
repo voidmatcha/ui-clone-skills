@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -116,6 +117,67 @@ def _disable_smooth_scroll_js() -> str:
     )
 
 
+def _reference_runtime_normalization_js() -> str:
+    """Reapply opt-in reference state that a reload or page script can undo.
+
+    The shell wrapper applies these controls after opening the reference page,
+    but section capture can run in a separate calibration session and dynamic
+    pages can restore their inline scroll cap while the capture loop is active.
+    Keeping the normalization reference-only preserves the implementation as
+    the thing under test.
+    """
+    cap_selector = (os.environ.get("REF_SCROLL_CAP_SELECTOR") or "").strip()
+    reset_selector = (
+        os.environ.get("REF_RESET_SCROLLLEFT_SELECTOR") or ""
+    ).strip()
+    if not cap_selector and not reset_selector:
+        return "undefined"
+    return (
+        "(() => {"
+        f"const capSelector = {json.dumps(cap_selector)};"
+        f"const resetSelector = {json.dumps(reset_selector)};"
+        "let capCount = 0; let resetCount = 0;"
+        "if (capSelector) { try {"
+        "const nodes = document.querySelectorAll(capSelector);"
+        "nodes.forEach(el => el.style.setProperty('max-height','none','important'));"
+        "capCount = nodes.length;"
+        "} catch (_error) {} }"
+        "if (resetSelector) { try {"
+        "const nodes = document.querySelectorAll(resetSelector);"
+        "nodes.forEach(el => { el.scrollLeft = 0; });"
+        "resetCount = nodes.length;"
+        "} catch (_error) {} }"
+        "let residualCap = 0;"
+        "if (capSelector) { try {"
+        "residualCap = Array.from(document.querySelectorAll(capSelector)).filter(el => "
+        "el.style.getPropertyValue('max-height') !== 'none').length;"
+        "} catch (_error) { residualCap = -1; } }"
+        "return JSON.stringify({capCount, resetCount, residualCap, height: document.documentElement.scrollHeight});"
+        "})()"
+    )
+
+
+def _apply_reference_runtime_normalization(session: str) -> None:
+    js = _reference_runtime_normalization_js()
+    if js == "undefined":
+        return
+    if os.environ.get("SECTION_CAPTURE_REQUIRE_SCROLL_CAP_NORMALIZED") != "1":
+        _run_agent_eval(session, js)
+        return
+    result = _unwrap_eval_json(_run_agent_eval_text(session, js))
+    cap_selector = (os.environ.get("REF_SCROLL_CAP_SELECTOR") or "").strip()
+    if result is None:
+        raise RuntimeError("reference scroll-cap normalization returned no evidence")
+    if cap_selector and (
+        _as_float(result.get("capCount")) < 1
+        or _as_float(result.get("residualCap"), -1.0) != 0
+    ):
+        raise RuntimeError(
+            "reference scroll-cap normalization did not hold "
+            f"for selector {cap_selector!r}: {result}"
+        )
+
+
 
 def _fixed_overlay_toggle_js(active: bool) -> str:
     selectors = (
@@ -142,6 +204,30 @@ def _fixed_overlay_toggle_js(active: bool) -> str:
   style.textContent = {json.dumps(css)};
   document.head.appendChild(style);
 }})()
+"""
+
+
+def _canvas_underlay_js() -> str:
+    """Replace canvas pixels with a deterministic layer without changing stacking.
+
+    The black background fills transparent canvas pixels; brightness(0) makes
+    opaque pixels black. Keeping the element in its original stacking context
+    preserves DOM foreground painted above it. This is enabled only by the
+    section comparator and is applied symmetrically to ref and impl.
+    """
+    if os.environ.get("SECTION_CAPTURE_CANVAS_UNDERLAY") != "1":
+        return "undefined"
+    return """
+(() => {
+  let style = document.getElementById("__sc-canvas-underlay__");
+  if (!style) {
+    style = document.createElement("style");
+    style.id = "__sc-canvas-underlay__";
+    style.textContent = "canvas { visibility: visible !important; background: #202020 !important; filter: brightness(0) !important; opacity: 1 !important; mix-blend-mode: normal !important; }";
+    document.head.appendChild(style);
+  }
+  return document.querySelectorAll("canvas").length;
+})()
 """
 
 # Consent/privacy (CMP) overlay containers removed during the capture settle.
@@ -243,7 +329,7 @@ def _finish_js() -> str:
     hidden at the capture anchor (realfood pyramid `.food`: 63k AE of pure
     capture artifact). See tests/test_section_capture_finish_opacity.py.
     """
-    return r"""(() => { try { if (typeof document.getAnimations === "function") { document.getAnimations().forEach(a => { try { a.finish(); } catch(e){} }); } } catch(e){} try { var __ST = window.ScrollTrigger || window.__sc_st || (window.gsap && window.gsap.core && window.gsap.core.globals && window.gsap.core.globals().ScrollTrigger); if (__ST && typeof __ST.getAll === "function") { __ST.getAll().forEach(function(st){ try { if (st.animation && typeof st.animation.progress === "function") st.animation.progress(1, false); if (typeof st.disable === "function") st.disable(false, false); } catch(e){} }); } } catch(e){} try { var __gs = window.gsap || window.__sc_gsap; if (__gs && __gs.globalTimeline && typeof __gs.globalTimeline.getChildren === "function") { __gs.globalTimeline.getChildren(true, true, true).forEach(t => { try { if (typeof t.progress === "function") t.progress(1, false); } catch(e){} }); } } catch(e){} try { if (window.anime && Array.isArray(window.anime.running)) { window.anime.running.slice().forEach(a => { try { a.seek(a.duration); a.pause(); } catch(e){} }); } } catch(e){} try { if (window.lottie && typeof window.lottie.getRegisteredAnimations === "function") { window.lottie.getRegisteredAnimations().forEach(a => { try { const last = (typeof a.totalFrames === "number" ? a.totalFrames : 1) - 1; a.goToAndStop(Math.max(0, last), true); } catch(e){} }); } document.querySelectorAll("lottie-player, dotlottie-player").forEach(el => { try { if (typeof el.seek === "function") el.seek("100%"); if (typeof el.pause === "function") el.pause(); } catch(e){} }); } catch(e){} try { var snapped = 0; document.querySelectorAll("[style*=translate3d]").forEach(function(el){ try { var s = el.getAttribute("style") || ""; var m = s.match(/translate3d\(\s*(-?[0-9.]+)px\s*,\s*(-?[0-9.]+)px\s*,\s*0(?:px)?\s*\)/); if (!m) return; var ax = Math.abs(parseFloat(m[1])); var ay = Math.abs(parseFloat(m[2])); if (ax >= 10 || ay >= 10) return; var rawOp = (el.style.opacity || "").trim(); var op = parseFloat(rawOp === "" ? "1" : rawOp); if (!Number.isFinite(op) || op < 0.95) return; el.style.transform = "translate3d(0px, 0px, 0px)"; if (rawOp !== "" && op > 0.999) el.style.opacity = "1"; snapped++; } catch(e){} }); } catch(e){} return "finished"; })()"""
+    return r"""(() => { try { if (typeof document.getAnimations === "function") { document.getAnimations().forEach(a => { try { a.finish(); } catch(e){} }); } } catch(e){} try { var __ST = window.ScrollTrigger || window.__sc_st || (window.gsap && window.gsap.core && window.gsap.core.globals && window.gsap.core.globals().ScrollTrigger); if (__ST && typeof __ST.getAll === "function") { __ST.getAll().forEach(function(st){ try { if (st.animation && typeof st.animation.progress === "function") st.animation.progress(1, false); if (typeof st.disable === "function") st.disable(false, false); } catch(e){} }); } } catch(e){} try { var __gs = window.gsap || window.__sc_gsap; if (__gs && __gs.globalTimeline && typeof __gs.globalTimeline.getChildren === "function") { __gs.globalTimeline.getChildren(true, true, true).forEach(t => { try { if (typeof t.progress === "function") t.progress(1, false); } catch(e){} }); } } catch(e){} try { if (window.anime && Array.isArray(window.anime.running)) { window.anime.running.slice().forEach(a => { try { a.seek(a.duration); a.pause(); } catch(e){} }); } } catch(e){} try { if (window.lottie && typeof window.lottie.getRegisteredAnimations === "function") { window.lottie.getRegisteredAnimations().forEach(a => { try { const last = (typeof a.totalFrames === "number" ? a.totalFrames : 1) - 1; a.goToAndStop(Math.max(0, last), true); } catch(e){} }); } document.querySelectorAll("lottie-player, dotlottie-player").forEach(el => { try { if (typeof el.seek === "function") el.seek("100%"); if (typeof el.pause === "function") el.pause(); } catch(e){} }); } catch(e){} try { var snapped = 0; document.querySelectorAll("[style*=translate3d]").forEach(function(el){ try { var s = el.getAttribute("style") || ""; var re = /translate3d\(\s*(-?[0-9.]+)px\s*,\s*(-?[0-9.]+)px\s*,\s*0(?:px)?\s*\)/; var transformSource = (el.style.transform || "").trim(); if (!transformSource) { var tm = s.match(/(?:^|;)\s*transform\s*:\s*([^;]+)/i); transformSource = tm ? tm[1].trim() : ""; } var m = (transformSource || s).match(re); if (!m) return; var ax = Math.abs(parseFloat(m[1])); var ay = Math.abs(parseFloat(m[2])); if (ax >= 10 || ay >= 10) return; var rawOp = (el.style.opacity || "").trim(); var op = parseFloat(rawOp === "" ? "1" : rawOp); if (!Number.isFinite(op) || op < 0.95) return; el.style.transform = (transformSource || m[0]).replace(re, "translate3d(0px, 0px, 0px)"); if (rawOp !== "" && op > 0.999) el.style.opacity = "1"; snapped++; } catch(e){} }); } catch(e){} return "finished"; })()"""
 
 
 def _settle_js() -> str:
@@ -338,7 +424,24 @@ def _run_agent_eval_text(session: str, js: str) -> str:
 
 
 def _run_screenshot(session: str, output_path: Path) -> None:
-    _run_agent_browser(["agent-browser", "--session", session, "screenshot", str(output_path)])
+    last_error = ""
+    for attempt in range(3):
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        result = _run_agent_browser(
+            ["agent-browser", "--session", session, "screenshot", str(output_path)]
+        )
+        height = _canvas_height(output_path)
+        if result.returncode == 0 and height > 2:
+            return
+        last_error = (
+            f"attempt={attempt + 1} exit={result.returncode} height={height:g} "
+            f"stderr={(result.stderr or '').strip()[-300:]}"
+        )
+        time.sleep(0.15)
+    raise RuntimeError(f"section screenshot invalid after 3 attempts: {last_error}")
 
 
 def _duration_to_seconds(dur: object) -> float | None:
@@ -637,9 +740,11 @@ def _live_section_rect_js(identity: dict[str, object], expected_top: float) -> s
             "tag": identity.get("tag") or identity.get("tagName"),
             "className": identity.get("className") or identity.get("classes"),
             "text": identity.get("text") or identity.get("fingerprint") or identity.get("name"),
+            "selector": identity.get("selector"),
             "expectedTop": expected_top,
         }
     )
+    canvas_underlay = os.environ.get("SECTION_CAPTURE_CANVAS_UNDERLAY") == "1"
     return f"""(() => {{
   const identity = {payload};
   const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
@@ -649,6 +754,12 @@ def _live_section_rect_js(identity: dict[str, object], expected_top: float) -> s
   const needle = norm(identity.text).toLowerCase().slice(0, 160);
   const selector = tag ? tag : "*";
   const nodes = Array.from(document.querySelectorAll(selector));
+  let selectedNodes = [];
+  if (identity.selector) {{
+    try {{ selectedNodes = Array.from(document.querySelectorAll(identity.selector)); }} catch (_error) {{}}
+  }}
+  const uniqueSemanticTag = new Set(["main", "header", "footer", "nav", "article"]);
+  const uniqueSemanticMatch = uniqueSemanticTag.has(tag) && nodes.length === 1;
   const candidates = [];
   for (const node of nodes) {{
     const rect = node.getBoundingClientRect();
@@ -656,29 +767,139 @@ def _live_section_rect_js(identity: dict[str, object], expected_top: float) -> s
     const nodeId = norm(node.id);
     const classList = Array.from(node.classList || []);
     const idMatch = !!id && nodeId === id;
-    const classMatch = classes.length > 0 && classes.every((cls) => classList.includes(cls));
+    const classMatch = classes.length > 0 && classes.every((cls) =>
+      classList.includes(cls) || (
+        cls.length >= 6 && classList.some((actual) => actual.startsWith(cls))
+      )
+    );
     const textMatch = !!needle && norm(node.textContent).toLowerCase().includes(needle);
-    if (!idMatch && !classMatch && !textMatch) continue;
+    const selectorMatch = selectedNodes.includes(node);
+    if (!selectorMatch && !idMatch && !classMatch && !textMatch && !uniqueSemanticMatch) continue;
     let score = 0;
+    if (selectorMatch) score += 200;
     if (idMatch) score += 100;
     if (classMatch) score += 50 + classes.length;
     if (textMatch) score += 20;
     if (tag && node.tagName.toLowerCase() === tag) score += 5;
+    if (uniqueSemanticMatch) score += 1;
+    const nodePosition = getComputedStyle(node).position;
+    let bottomSticky = false;
+    let stickyEndScrollY = null;
+    for (let owner = node; owner && owner !== document.documentElement; owner = owner.parentElement) {{
+      const ownerStyle = getComputedStyle(owner);
+      if (ownerStyle.position === "sticky" && ownerStyle.bottom !== "auto") {{
+        bottomSticky = true;
+        const ownerRect = owner.getBoundingClientRect();
+        const containingBlock = owner.parentElement;
+        const containingRect = containingBlock && containingBlock.getBoundingClientRect();
+        const stuckToViewportBottom = Math.abs(ownerRect.bottom - window.innerHeight) <= 1;
+        if (containingRect && stuckToViewportBottom) {{
+          const stickyEndDocumentTop = containingRect.bottom + window.scrollY - ownerRect.height;
+          const targetY = stickyEndDocumentTop - ownerRect.top;
+          if (targetY > window.scrollY + 1) stickyEndScrollY = targetY;
+        }}
+        break;
+      }}
+    }}
+    const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+    const samplePoints = [0.1, 0.3, 0.5, 0.7, 0.9].map((ratio) => [
+      x,
+      Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height * ratio))
+    ]);
+    const hitVisibleSamples = samplePoints.filter(([sampleX, sampleY]) =>
+      document.elementsFromPoint(sampleX, sampleY).some(
+        (hit) => hit === node || node.contains(hit)
+      )
+    ).length;
+    const hitVisible = hitVisibleSamples === samplePoints.length;
     const documentTop = rect.top + window.scrollY;
     candidates.push({{
+      node,
       top: rect.top,
       left: rect.left,
       width: rect.width,
       height: rect.height,
       documentTop,
+      bottomSticky,
+      stickyEndScrollY,
+      hitVisible,
+      hitVisibleSamples,
+      position: nodePosition,
       score,
       distance: Math.abs(documentTop - Number(identity.expectedTop || 0))
     }});
   }}
   candidates.sort((a, b) => (b.score - a.score) || (a.distance - b.distance));
   const best = candidates[0] || null;
+  if (best) {{
+    const bestNode = best.node;
+    delete best.node;
+    if ({str(canvas_underlay).lower()}) {{
+      const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      const sectionRect = bestNode.getBoundingClientRect();
+      const canvases = Array.from(document.querySelectorAll("canvas")).filter((canvas) => {{
+        const style = getComputedStyle(canvas);
+        const rect = canvas.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0 && overlaps(rect, sectionRect);
+      }});
+      const foregroundRects = [];
+      const walker = document.createTreeWalker(bestNode, NodeFilter.SHOW_TEXT);
+      for (let textNode = walker.nextNode(); textNode; textNode = walker.nextNode()) {{
+        if (!norm(textNode.nodeValue)) continue;
+        const owner = textNode.parentElement;
+        if (!owner || owner.closest("canvas, video, iframe")) continue;
+        const style = getComputedStyle(owner);
+        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) <= 0) continue;
+        const range = document.createRange();
+        range.selectNodeContents(textNode);
+        for (const rect of range.getClientRects()) {{
+          if (rect.width <= 1 || rect.height <= 1 || !overlaps(rect, sectionRect)) continue;
+          const left = Math.max(0, rect.left, sectionRect.left);
+          const top = Math.max(0, rect.top, sectionRect.top);
+          const right = Math.min(window.innerWidth, rect.right, sectionRect.right);
+          const bottom = Math.min(window.innerHeight, rect.bottom, sectionRect.bottom);
+          if (right <= left || bottom <= top) continue;
+          const x = (left + right) / 2;
+          const y = (top + bottom) / 2;
+          const hit = document.elementFromPoint(x, y);
+          const foregroundHit = !!hit && (owner === hit || owner.contains(hit) || hit.contains(owner));
+          const canvasBehind = canvases.some((canvas) => {{
+            const canvasRect = canvas.getBoundingClientRect();
+            return x >= canvasRect.left && x <= canvasRect.right && y >= canvasRect.top && y <= canvasRect.bottom;
+          }});
+          if (foregroundHit && canvasBehind) foregroundRects.push({{left, top, right, bottom}});
+        }}
+      }}
+      if (foregroundRects.length) {{
+        const pad = 8;
+        const left = Math.max(0, sectionRect.left, Math.min(...foregroundRects.map(r => r.left)) - pad);
+        const top = Math.max(0, sectionRect.top, Math.min(...foregroundRects.map(r => r.top)) - pad);
+        const right = Math.min(window.innerWidth, sectionRect.right, Math.max(...foregroundRects.map(r => r.right)) + pad);
+        const bottom = Math.min(window.innerHeight, sectionRect.bottom, Math.max(...foregroundRects.map(r => r.bottom)) + pad);
+        if (right > left && bottom > top) {{
+          best.foregroundRoi = {{left, top, width: right - left, height: bottom - top}};
+          best.foregroundRectCount = foregroundRects.length;
+          best.underlayCanvasCount = canvases.length;
+        }}
+      }}
+    }}
+  }}
   return JSON.stringify(best);
 }})()"""
+
+
+def _rect_from_capture(raw: object) -> dict[str, float] | None:
+    if not isinstance(raw, dict):
+        return None
+    rect = {
+        "top": _as_float(raw.get("top")),
+        "left": _as_float(raw.get("left")),
+        "width": _as_float(raw.get("width")),
+        "height": _as_float(raw.get("height")),
+    }
+    if rect["width"] <= 0 or rect["height"] <= 0:
+        return None
+    return rect
 
 
 def _resolve_live_section_rect(
@@ -697,13 +918,31 @@ def _resolve_live_section_rect(
     height = _as_float(data.get("height"))
     if width <= 0 or height <= 0:
         return None
-    return {
+    result: dict[str, object] = {
         "top": _as_float(data.get("top")),
         "left": _as_float(data.get("left")),
         "width": width,
         "height": height,
         "documentTop": _as_float(data.get("documentTop")),
     }
+    for key in ("bottomSticky", "hitVisible"):
+        if isinstance(data.get(key), bool):
+            result[key] = data[key]
+    if isinstance(data.get("position"), str):
+        result["position"] = data["position"]
+    foreground_roi = data.get("foregroundRoi")
+    if isinstance(foreground_roi, dict):
+        roi = _rect_from_capture(foreground_roi)
+        if roi is not None:
+            result["foregroundRoi"] = roi
+    for key in ("foregroundRectCount", "underlayCanvasCount"):
+        if _is_number(data.get(key)):
+            result[key] = int(_as_float(data[key]))
+    if _is_number(data.get("hitVisibleSamples")):
+        result["hitVisibleSamples"] = int(data["hitVisibleSamples"])
+    if _is_number(data.get("stickyEndScrollY")):
+        result["stickyEndScrollY"] = _as_float(data["stickyEndScrollY"])
+    return result
 
 
 def _capture_one(
@@ -720,6 +959,7 @@ def _capture_one(
     wait_scroll_settle: float,
     identity: dict[str, object] | None = None,
     forced_scroll_y: float | None = None,
+    forced_foreground_roi: dict[str, float] | None = None,
 ) -> dict[str, Any] | None:
     top = _as_float(rect.get("top"))
     height = _as_float(rect.get("height"))
@@ -728,6 +968,12 @@ def _capture_one(
     # maxScroll (the request would clamp there anyway, and end-of-page
     # reveal latches only mount once the page is actually at the end).
     factor = _as_float(os.environ.get("SECTION_CAPTURE_BOTTOM_ANCHOR_FACTOR"), 1.5)
+    is_reference = side.startswith("ref") or (
+        side == "impl"
+        and os.environ.get("SECTION_CAPTURE_IMPL_IS_REFERENCE") == "1"
+    )
+    if is_reference:
+        _apply_reference_runtime_normalization(session)
     metrics = _scroll_metrics(session, scroller_selector)
     if forced_scroll_y is not None:
         # batch-13 ITEM 1 — CAPTURE DETERMINISM. Reuse the EXACT scroll position
@@ -755,6 +1001,8 @@ def _capture_one(
     def _settle_and_shoot(
         target_y: float, output_path: Path
     ) -> tuple[dict[str, Any] | None, float, dict[str, Any]]:
+        if is_reference:
+            _apply_reference_runtime_normalization(session)
         # Kill Lenis/smooth-scroll first so the forced scroll is not reverted to
         # actualY=0 during settle (specific regression cross-impl scroll-mapping class).
         _run_agent_eval(session, _disable_smooth_scroll_js())
@@ -762,6 +1010,7 @@ def _capture_one(
         _run_agent_eval(session, _fixed_overlay_toggle_js(target_y > 0))
         time.sleep(0.1)
         _run_agent_eval(session, pause_js)
+        _run_agent_eval(session, _canvas_underlay_js())
         conf: dict[str, Any] | None = None
         if not skip_finish:
             _run_agent_eval(session, finish_js)
@@ -771,6 +1020,10 @@ def _capture_one(
         expect_w_raw = (os.environ.get("SECTION_CAPTURE_VIEW_W") or "").strip()
         if expect_w_raw.isdigit():
             _ensure_viewport(session, int(expect_w_raw))
+        if is_reference:
+            # Page-owned scroll handlers can restore the cap during settle.
+            # Reapply it before measuring actualY and resolving the live rect.
+            _apply_reference_runtime_normalization(session)
         # Clip from the ACTUAL position after the viewport assertion. A viewport
         # repair can itself reflow the page and clamp scrollY, so measuring
         # before `_ensure_viewport` would pair a fresh live rect with stale
@@ -788,7 +1041,35 @@ def _capture_one(
         if live_rect is not None:
             crop_meta["liveCropRect"] = live_rect
             crop_meta["cropDriftPx"] = crop_top - planned_crop_top
+            for key in ("bottomSticky", "hitVisible"):
+                if isinstance(live_rect.get(key), bool):
+                    crop_meta[key] = live_rect[key]
+            if isinstance(live_rect.get("position"), str):
+                crop_meta["position"] = live_rect["position"]
+            own_foreground_roi = _rect_from_capture(live_rect.get("foregroundRoi"))
+            if own_foreground_roi is not None:
+                crop_meta["foregroundRoi"] = own_foreground_roi
+            for key in ("foregroundRectCount", "underlayCanvasCount"):
+                if _is_number(live_rect.get(key)):
+                    crop_meta[key] = int(_as_float(live_rect[key]))
+            if _is_number(live_rect.get("hitVisibleSamples")):
+                crop_meta["hitVisibleSamples"] = int(
+                    _as_float(live_rect["hitVisibleSamples"])
+                )
+            if _is_number(live_rect.get("stickyEndScrollY")):
+                crop_meta["stickyEndScrollY"] = _as_float(
+                    live_rect["stickyEndScrollY"]
+                )
+        roi_path = section_dir / "foreground-roi" / side / f"{name}.png"
+        roi_path.unlink(missing_ok=True)
         _run_screenshot(session, output_path)
+        own_roi = _rect_from_capture(crop_meta.get("foregroundRoi"))
+        roi_to_use = forced_foreground_roi or own_roi
+        if roi_to_use is not None:
+            roi_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(output_path, roi_path)
+            _run_crop(roi_path, dict(roi_to_use), roi_to_use["top"])
+            crop_meta["foregroundRoiUsed"] = roi_to_use
         _run_crop(output_path, crop_rect, crop_top)
         return conf, actual_y, crop_meta
 
@@ -801,6 +1082,109 @@ def _capture_one(
     meta["actualY"] = actual_y
     if pinned:
         meta["bottomAnchored"] = True
+
+    # A bottom-sticky section can occupy a viewport-shaped rect long before its
+    # content is actually exposed: page content with a higher stacking context
+    # paints over it until the sticky containing block reaches its end. Hit
+    # testing cannot prove paint ownership because pointer-events:none overlays
+    # are omitted from elementsFromPoint. Instead, use the live sticky owner's
+    # containing-block end position. Ordinary top-sticky elements, bottom-sticky
+    # elements already at their end position, and unresolved identities retain
+    # their old path.
+    sticky_end_pinned = False
+    sticky_end_scroll_y = crop_meta.get("stickyEndScrollY")
+    if (
+        forced_scroll_y is None
+        and not pinned
+        and metrics is not None
+        and crop_meta.get("liveRectResolved") is True
+        and crop_meta.get("bottomSticky") is True
+        and _is_number(sticky_end_scroll_y)
+    ):
+        max_scroll = max(0.0, metrics["sh"] - metrics["vh"])
+        flow_scroll = min(max_scroll, max(0.0, _as_float(sticky_end_scroll_y)))
+        if actual_y < flow_scroll - 1.0:
+            retry_conf, retry_y, crop_meta = _settle_and_shoot(flow_scroll, output_path)
+            meta = dict(retry_conf or {})
+            meta.update(crop_meta)
+            meta["actualY"] = retry_y
+            meta["bottomAnchored"] = True
+            meta["stickyEndRecapture"] = True
+            pinned = True
+            sticky_end_pinned = True
+
+    # A content-bearing section can be correctly identified yet visually empty
+    # at its first anchor: fixed chrome may reveal only after scrolling, and a
+    # tall section may keep its visible children around the middle of its flow
+    # box. Seek a measurable state on the reference and persist that exact
+    # scrollY for the implementation capture. This changes capture position,
+    # never thresholds or verdicts; if no candidate carries signal, restore the
+    # original frame so the existing UNMEASURED guard remains fail-closed.
+    if (
+        forced_scroll_y is None
+        and not pinned
+        and metrics is not None
+        and crop_meta.get("liveRectResolved") is True
+    ):
+        flat_max = int(
+            _as_float(os.environ.get("SECTION_CAPTURE_FLAT_RETRY_MAX_COLORS"), 4.0)
+        )
+        initial_unique = crop_unique_colors(output_path)
+        initial_blank = _crop_is_blank(output_path)
+        initial_content_free = initial_blank or (
+            initial_unique is not None and initial_unique <= flat_max
+        )
+        if initial_content_free:
+            max_scroll = max(0.0, metrics["sh"] - metrics["vh"])
+            position = str(crop_meta.get("position") or "")
+            if position == "fixed":
+                raw_targets = [metrics["vh"] * 0.75, metrics["vh"] * 1.5]
+            else:
+                raw_targets = [
+                    top + height * ratio - metrics["vh"] / 2.0
+                    for ratio in (0.25, 0.5, 0.75)
+                ]
+            targets: list[float] = []
+            for candidate in raw_targets:
+                target = min(max_scroll, max(0.0, candidate))
+                if abs(target - actual_y) <= 1.0 or any(
+                    abs(target - prior) <= 1.0 for prior in targets
+                ):
+                    continue
+                targets.append(target)
+
+            original_y = actual_y
+            recovered = False
+            for target in targets:
+                retry_conf, retry_y, retry_meta = _settle_and_shoot(
+                    target, output_path
+                )
+                retry_unique = crop_unique_colors(output_path)
+                retry_blank = _crop_is_blank(output_path)
+                if not retry_blank and (
+                    retry_unique is None or retry_unique > flat_max
+                ):
+                    meta = dict(retry_conf or {})
+                    meta.update(retry_meta)
+                    meta["actualY"] = retry_y
+                    meta["signalRecovery"] = True
+                    meta["signalRecoveryTarget"] = target
+                    if initial_unique is not None:
+                        meta["signalRecoveryUniqueBefore"] = initial_unique
+                    if retry_unique is not None:
+                        meta["signalRecoveryUniqueAfter"] = retry_unique
+                    actual_y = retry_y
+                    crop_meta = retry_meta
+                    recovered = True
+                    break
+            if targets and not recovered:
+                restore_conf, restore_y, restore_meta = _settle_and_shoot(
+                    original_y, output_path
+                )
+                meta = dict(restore_conf or {})
+                meta.update(restore_meta)
+                meta["actualY"] = restore_y
+                crop_meta = restore_meta
 
     # Content-free retry: a crop that quantizes to a handful of colors on a
     # section that has content means the capture window missed the content
@@ -831,7 +1215,12 @@ def _capture_one(
     # (top < maxScroll), re-shoot TOP-ALIGNED so the content is captured, and
     # record the position so the frozen impl + calib passes reuse it (keeping all
     # three crops on the same band). Ref pass only (forced impl reuses the result).
-    if forced_scroll_y is None and pinned and metrics is not None:
+    if (
+        forced_scroll_y is None
+        and pinned
+        and not sticky_end_pinned
+        and metrics is not None
+    ):
         max_scroll = max(0.0, metrics["sh"] - metrics["vh"])
         flat_max = int(_as_float(os.environ.get("SECTION_CAPTURE_FLAT_RETRY_MAX_COLORS"), 4.0))
         uniq = crop_unique_colors(output_path)
@@ -889,6 +1278,7 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
     # recomputed (divergent) one. Falls back to per-side computation when the
     # manifest is absent.
     positions_path = section_dir / "ref-scroll-positions.json"
+    foreground_rois_path = section_dir / "ref-foreground-rois.json"
     forced_positions: dict[str, float] = {}
     if reuse_frozen_ref and positions_path.is_file():
         try:
@@ -903,8 +1293,67 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
             forced_positions = {}
     ref_positions: dict[str, float] = {}
     impl_positions: dict[str, float] = {}
+    forced_foreground_rois: dict[str, dict[str, float]] = {}
+    if reuse_frozen_ref and foreground_rois_path.is_file():
+        try:
+            raw_rois = json.loads(foreground_rois_path.read_text(encoding="utf-8"))
+            if isinstance(raw_rois, dict):
+                for key, value in raw_rois.items():
+                    loaded_roi = _rect_from_capture(value)
+                    if loaded_roi is not None:
+                        forced_foreground_rois[str(key)] = loaded_roi
+        except (OSError, json.JSONDecodeError):
+            forced_foreground_rois = {}
+    ref_foreground_rois: dict[str, dict[str, float]] = {}
+    impl_foreground_rois: dict[str, dict[str, float]] = {}
 
     confidence_map: dict[str, dict[str, Any]] = {}
+    # One section's screenshot failure (agent-browser exit != 0 or a <=2px
+    # canvas after 3 attempts) must not abort the whole capture: the caller
+    # runs under `set -euo pipefail` and every other section would lose its
+    # crops. Record the failure per section/side instead; section-compare.sh
+    # reports the missing crop as UNMEASURED (capture failed) from this sidecar.
+    capture_failures: dict[str, dict[str, str]] = {}
+    capture_failures_path = section_dir / "capture-failures.json"
+    if reuse_frozen_ref and capture_failures_path.is_file():
+        # The frozen pass does not re-shoot the reference; keep the ref-side
+        # failures recorded by the pass that produced the frozen crops so the
+        # missing ref crop is still reported as a capture failure.
+        try:
+            prior = json.loads(capture_failures_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            prior = {}
+        if isinstance(prior, dict):
+            for key, sides in prior.items():
+                if isinstance(sides, dict) and isinstance(sides.get("ref"), str):
+                    capture_failures[str(key)] = {"ref": sides["ref"]}
+
+    def _capture_side(side: str, name: str, **kwargs: Any) -> dict[str, Any] | None:
+        try:
+            return _capture_one(
+                section_dir=section_dir,
+                side=side,
+                name=name,
+                pause_js=pause_js,
+                finish_js=finish_js,
+                skip_finish=skip_finish,
+                wait_scroll_settle=wait_scroll_settle,
+                **kwargs,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            # Drop any partial/invalid crop so downstream sees a MISSING crop,
+            # never a stub image that could pass a vacuous comparison.
+            (section_dir / side / f"{name}.png").unlink(missing_ok=True)
+            (section_dir / "foreground-roi" / side / f"{name}.png").unlink(missing_ok=True)
+            capture_failures.setdefault(name, {})[side] = message
+            confidence_map.setdefault(name, {})[side] = {
+                "captureFailed": True,
+                "captureError": message,
+            }
+            sys.stdout.write(f"  ✗ {name} ({side}): capture failed — {message}\n")
+            sys.stdout.flush()
+            return None
 
     for match in matches:
         name = safe_section_name(match.get("name"))
@@ -914,17 +1363,12 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
         if isinstance(ref, dict) and not reuse_frozen_ref:
             rect = ref.get("rect")
             if isinstance(rect, dict):
-                conf = _capture_one(
+                conf = _capture_side(
+                    "ref",
+                    name,
                     session=session_ref,
-                    section_dir=section_dir,
-                    side="ref",
-                    name=name,
                     rect=rect,
                     scroller_selector=ref_scroller,
-                    pause_js=pause_js,
-                    finish_js=finish_js,
-                    skip_finish=skip_finish,
-                    wait_scroll_settle=wait_scroll_settle,
                     identity=ref,
                 )
                 if conf is not None:
@@ -932,23 +1376,35 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
                     _ay = conf.get("actualY")
                     if _is_number(_ay):
                         ref_positions[name] = float(_ay)
+                    _roi = _rect_from_capture(conf.get("foregroundRoiUsed"))
+                    if _roi is not None:
+                        ref_foreground_rois[name] = _roi
 
-        if isinstance(impl, dict):
+        if isinstance(impl, dict) and name not in capture_failures:
             rect = impl.get("rect")
             if isinstance(rect, dict):
-                conf = _capture_one(
+                conf = _capture_side(
+                    "impl",
+                    name,
                     session=session_impl,
-                    section_dir=section_dir,
-                    side="impl",
-                    name=name,
                     rect=rect,
                     scroller_selector=impl_scroller,
-                    pause_js=pause_js,
-                    finish_js=finish_js,
-                    skip_finish=skip_finish,
-                    wait_scroll_settle=wait_scroll_settle,
                     identity=impl,
-                    forced_scroll_y=(forced_positions.get(name) if reuse_frozen_ref else None),
+                    # The live reference may have moved away from the planned
+                    # anchor to recover a content-bearing frame. Pair the
+                    # implementation with that exact frame in this pass too;
+                    # otherwise a recovered reference is compared with the
+                    # implementation's original blank anchor.
+                    forced_scroll_y=(
+                        forced_positions.get(name)
+                        if reuse_frozen_ref
+                        else ref_positions.get(name)
+                    ),
+                    forced_foreground_roi=(
+                        forced_foreground_rois.get(name)
+                        if reuse_frozen_ref
+                        else ref_foreground_rois.get(name)
+                    ),
                 )
                 if conf is not None:
                     confidence_map.setdefault(name, {})["impl"] = conf
@@ -956,21 +1412,40 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
                         _ay = conf.get("actualY")
                         if _is_number(_ay):
                             impl_positions[name] = float(_ay)
+                    _roi = _rect_from_capture(conf.get("foregroundRoiUsed"))
+                    if _roi is not None:
+                        impl_foreground_rois[name] = _roi
 
+        if name in capture_failures:
+            continue
         sys.stdout.write(f"  ✓ {name}\n")
         sys.stdout.flush()
 
+    # Always rewrite the sidecar so a stale failure list from an earlier run
+    # cannot mark a section that captured cleanly this time.
+    (section_dir / "capture-failures.json").write_text(
+        json.dumps(capture_failures, indent=2) + "\n", encoding="utf-8"
+    )
+
     # Persist the ref scroll positions so a later frozen-mode impl capture lands
     # on the same scroll-scrub frame (batch-13 ITEM 1 capture determinism).
-    if ref_positions:
+    # Empty results are current evidence too. Retaining an earlier manifest
+    # would force a later frozen capture to reuse obsolete coordinates.
+    if not reuse_frozen_ref:
         positions_path.write_text(
             json.dumps(ref_positions, indent=2) + "\n", encoding="utf-8"
         )
-    if impl_positions:
-        (section_dir / "impl-scroll-positions.json").write_text(
-            json.dumps(impl_positions, indent=2) + "\n",
-            encoding="utf-8",
+    (section_dir / "impl-scroll-positions.json").write_text(
+        json.dumps(impl_positions, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if not reuse_frozen_ref:
+        foreground_rois_path.write_text(
+            json.dumps(ref_foreground_rois, indent=2) + "\n", encoding="utf-8"
         )
+    (section_dir / "impl-foreground-rois.json").write_text(
+        json.dumps(impl_foreground_rois, indent=2) + "\n", encoding="utf-8"
+    )
 
     # ── batch-13 ITEM 1: reference self-calibration frame (ref-calib) ──
     # A SECOND reference frame per section captured in a SEPARATE, independent
@@ -1006,19 +1481,27 @@ def capture_matched_sections(matches: list[dict[str, Any]]) -> int:
             rect = ref.get("rect")
             if not isinstance(rect, dict):
                 continue
-            _capture_one(
-                session=calib_session,
-                section_dir=section_dir,
-                side="ref-calib",
-                name=name,
-                rect=rect,
-                scroller_selector=ref_scroller,
-                pause_js=pause_js,
-                finish_js=finish_js,
-                skip_finish=skip_finish,
-                wait_scroll_settle=wait_scroll_settle,
-                identity=ref,
-            )
+            try:
+                _capture_one(
+                    session=calib_session,
+                    section_dir=section_dir,
+                    side="ref-calib",
+                    name=name,
+                    rect=rect,
+                    scroller_selector=ref_scroller,
+                    pause_js=pause_js,
+                    finish_js=finish_js,
+                    skip_finish=skip_finish,
+                    wait_scroll_settle=wait_scroll_settle,
+                    identity=ref,
+                )
+            except RuntimeError as exc:
+                # A missing calib crop only disables dynamic classification for
+                # this section (strict AE stays in force); never abort the run.
+                (section_dir / "ref-calib" / f"{name}.png").unlink(missing_ok=True)
+                sys.stdout.write(f"  ✗ calib {name}: capture failed — {exc}\n")
+                sys.stdout.flush()
+                continue
             sys.stdout.write(f"  ◇ calib {name}\n")
             sys.stdout.flush()
         _run_agent_browser(

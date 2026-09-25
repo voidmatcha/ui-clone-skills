@@ -20,6 +20,7 @@ def _write_success_fake_browser(
     bin_dir: Path,
     calls: Path,
     final_url: str = "https://example.test/",
+    bootstrap_fails_once: bool = False,
 ) -> None:
     parsed_url = urlsplit(final_url)
     final_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
@@ -28,8 +29,9 @@ def _write_success_fake_browser(
         f"""#!/usr/bin/env bash
 set -euo pipefail
 CALLS={calls}
-printf '%s|%s|%s\\n' "$*" "${{AGENT_BROWSER_COLOR_SCHEME+set}}:${{AGENT_BROWSER_COLOR_SCHEME-}}" "${{AGENT_BROWSER_NAMESPACE+set}}:${{AGENT_BROWSER_NAMESPACE-}}" >> "$CALLS.identity"
-printf '%s\\n' "$*" >> "$CALLS"
+original_args="$*"
+printf '%s|%s|%s\\n' "$original_args" "${{AGENT_BROWSER_COLOR_SCHEME+set}}:${{AGENT_BROWSER_COLOR_SCHEME-}}" "${{AGENT_BROWSER_NAMESPACE+set}}:${{AGENT_BROWSER_NAMESPACE-}}" >> "$CALLS.identity"
+printf '%s\\n' "$original_args" >> "$CALLS"
 is_json=0
 for arg in "$@"; do
   [ "$arg" = "--json" ] && is_json=1
@@ -60,7 +62,15 @@ PY_STATE
     fi
     exit 0
     ;;
-  get|set|wait|close)
+  get)
+    if [ "{1 if bootstrap_fails_once else 0}" -eq 1 ] && [ "$original_args" = "--session capture-test get url" ] && [ ! -e "{bin_dir / 'bootstrap-failed'}" ]; then
+      touch "{bin_dir / 'bootstrap-failed'}"
+      echo "Could not configure browser: Failed to connect: No such file or directory (os error 2)" >&2
+      exit 7
+    fi
+    exit 0
+    ;;
+  set|wait|close)
     exit 0
     ;;
   eval)
@@ -182,6 +192,30 @@ def test_capture_sh_records_redirect_from_navigation_response(tmp_path: Path) ->
     assert receipt["namespace"]
 
 
+def test_capture_sh_retries_transient_bootstrap_and_clears_stale_error(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    _write_success_fake_browser(bin_dir, calls, bootstrap_fails_once=True)
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    (ref_dir / "capture-error.json").write_text(
+        json.dumps({"status": "stale", "stage": "old-run"}),
+        encoding="utf-8",
+    )
+
+    result = _run_capture(ref_dir, bin_dir)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "page bootstrap transport not ready; retrying (1/3)" in result.stderr
+    assert calls.read_text(encoding="utf-8").splitlines().count(
+        "--session capture-test get url"
+    ) == 2
+    assert not (ref_dir / "capture-error.json").exists()
+
+
 def test_capture_sh_collects_pre_generation_state_contracts(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -204,7 +238,12 @@ def test_capture_sh_collects_pre_generation_state_contracts(tmp_path: Path) -> N
         if line.startswith("--session capture-test-states ")
     ]
     assert any(args[-1] == "close" and args[2] == "--init-script" for args in state_calls)
-    assert "--session capture-test-scroll close" in logged
+    scroll_calls = [
+        shlex.split(line)
+        for line in logged.splitlines()
+        if line.startswith("--session capture-test-scroll ")
+    ]
+    assert any(args[-1] == "close" and args[2] == "--init-script" for args in scroll_calls)
     assert "--session capture-test-hover close" in logged
 
 
@@ -396,7 +435,7 @@ def test_ui_capture_skill_uses_pipeline_as_external_cwd_default() -> None:
     assert "Standalone success is terminal" in skill
     success_contract = skill.index("**Standalone success is terminal.**")
     assert success_contract < manual
-    assert "Do not run\nthe Phase 1/2 commands below" in skill
+    assert "Do not run the manual Phase 1/2 commands" in " ".join(skill.split())
     assert "open another agent-browser session" in skill
     assert "Do not append `| tail`, `| tee`, or\nanother pipeline" in skill
     assert "turn a failed capture into exit 0" in skill
@@ -469,7 +508,7 @@ def test_recording_restores_media_without_navigating_active_recorder(
     )
     source = source.replace("      stop)\n", '      stop)\n        rm -f "${CALLS}.recording"\n', 1)
     source = source.replace(
-        "  get|set|wait|close)\n",
+        "  set|wait|close)\n",
         f"""  set)
     if [ "$1" = "media" ]; then
       if [ -f "${{CALLS}}.recording" ]; then {"exit 73" if fail_media else ":"}; fi
@@ -478,7 +517,7 @@ def test_recording_restores_media_without_navigating_active_recorder(
     if [ "$1" = "viewport" ]; then printf '%s %s' "$2" "$3" > "${{CALLS}}.viewport"; fi
     exit 0
     ;;
-  get|wait|close)
+      wait|close)
 """,
         1,
     )

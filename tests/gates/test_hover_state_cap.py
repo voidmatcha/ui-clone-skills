@@ -311,6 +311,35 @@ def test_placeholder_spec_does_not_bypass_the_cap(tmp_path: Path) -> None:
     assert "# spec obligations:" not in result
 
 
+def test_resolved_candidate_receipt_is_not_scheduled_as_hover_region(
+    tmp_path: Path,
+) -> None:
+    """Receipt metadata must not become a speculative hover target."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "regions.json").write_text(
+        json.dumps(
+            {
+                "regions": [],
+                "resolvedAutoCandidates": [
+                    {"triggerType": "hover", "selector": ".measured-static"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref / "verification-plan.json").write_text(
+        json.dumps({"signals": {"hasHover": True}}),
+        encoding="utf-8",
+    )
+
+    scheduled, result, code = _run_gate(tmp_path, ref)
+
+    assert code == 1
+    assert scheduled == []
+    assert "no hover targets resolvable" in result
+
+
 def test_spec_obligations_do_not_suppress_the_no_resolvable_target_fail(tmp_path: Path) -> None:
     """hasHover=true + nothing resolvable + a real transition-spec.json → FAIL.
 

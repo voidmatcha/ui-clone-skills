@@ -24,11 +24,14 @@ channels the sampler records at every state:
                          deferred `` -> `is-loading` -> `loaded`). Tokens that
                          are only ADDED (`lenis`, `is-ready`) mark setup
                          finishing, which pages without any splash do too.
-* domLength            - no sample moved the DOM by more than 20% against the
-                         running baseline (a loading shell replaced by content).
+* visibleStructure     - no material replacement of rendered structure inside
+                         the viewport (a loading shell replaced by content).
+                         Whole-document length remains a legacy fallback only.
 
 Plus the capture itself: attached before navigation (nothing before the first
-sample was missed) and ended at its own settle, not the wall-clock cap.
+sample was missed) and its splash-relevant channels reached their own settle.
+The broader evidence recorder may continue to its wall-clock cap for periodic
+motion without weakening that lifecycle result.
 
 What it does NOT rest on: the number of samples. A page whose entry
 choreography walks through many class states has looked for a splash just as
@@ -208,10 +211,33 @@ def root_classes_removed(states: list[dict[str, Any]]) -> tuple[str, ...]:
 
 
 def structural_shift(states: list[dict[str, Any]]) -> bool:
-    """Whether any sample moved domLength > STRUCTURAL_SHIFT against a running
-    baseline that resets on each shift - the sampler's `structuralDelta` rule."""
+    """Whether visible page structure materially changed during capture.
+
+    Current sampler output carries an explicit viewport-scoped structure
+    channel. This excludes offscreen SSR pruning and other whole-document
+    churn that cannot be a visible loading-shell replacement. Older artifacts
+    lack that channel, so retain their historical domLength fallback.
+    """
     if not states:
         return False
+    has_visible_channel = any("visibleStructure" in state for state in states)
+    if has_visible_channel:
+        visible = [state.get("visibleStructure") for state in states]
+        valid = all(
+            isinstance(value, dict)
+            and isinstance(value.get("changed"), bool)
+            and isinstance(value.get("hash"), str)
+            and bool(value.get("hash"))
+            and isinstance(value.get("count"), int)
+            and value.get("count", -1) >= 0
+            for value in visible
+        )
+        if not valid:
+            # A partial current-generation channel cannot prove absence. Older
+            # artifacts have no visibleStructure key at all and use the legacy
+            # domLength fallback below.
+            return True
+        return any(value["changed"] for value in visible if isinstance(value, dict))
     baseline = _num(states[0].get("domLength"))
     for state in states[1:]:
         length = _num(state.get("domLength"))

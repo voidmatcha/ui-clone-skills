@@ -52,9 +52,23 @@ VIEW_H="${4:-${VIEW_H:-900}}"
 SCOPE="${5:-*}"
 WAIT_MS="${WAIT_MS:-3000}"
 REF_DIR="${REF_DIR:-}"
+REFERENCE_URL="${REF_URL:-}"
+if [ -z "$REFERENCE_URL" ] && [ -n "$REF_DIR" ] && [ -f "$REF_DIR/head.json" ]; then
+  REFERENCE_URL=$(node - "$REF_DIR/head.json" <<'NODE'
+const fs = require('fs');
+try {
+  const head = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+  process.stdout.write(String(head.url || head.sourceUrl || ''));
+} catch (_) {
+  process.stdout.write('');
+}
+NODE
+)
+fi
 
 cleanup() {
   agent-browser --session "$SESSION" close 2>/dev/null
+  agent-browser --session "$SESSION-ref" close 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -97,6 +111,9 @@ PROBE_JS=$(cat <<'JS'
       translate: cs.translate,
       rotate: cs.rotate,
       scale: cs.scale,
+      matchKey: el.id
+        ? '#' + el.id
+        : el.tagName.toLowerCase() + '.' + Array.from(el.classList || []).sort().join('.'),
     });
   }
   return JSON.stringify(out);
@@ -123,12 +140,71 @@ if [ -z "$DATA" ]; then
   exit 2
 fi
 
+REFERENCE_MATCHES='[]'
+if [ "$DATA" != "[]" ] && [ "$DATA" != "null" ] && [ -n "$REFERENCE_URL" ]; then
+  REF_SESSION="$SESSION-ref"
+  agent-browser --session "$REF_SESSION" set viewport "$VIEW_W" "$VIEW_H" >/dev/null 2>&1
+  if agent-browser --session "$REF_SESSION" navigate "$REFERENCE_URL" >/dev/null 2>&1; then
+    sleep $((WAIT_MS / 1000))
+    REF_RAW=$(agent-browser --session "$REF_SESSION" eval "$PROBE_JS" 2>"$EVAL_ERR")
+    REF_EVAL_STATUS=$?
+    if [ "$REF_EVAL_STATUS" -eq 0 ]; then
+      REF_DATA=$(echo "$REF_RAW" | sed 's/^\"//;s/\"$//' | sed 's/\\\"/\"/g')
+      COMPARISON_FILE=$(mktemp "${TMPDIR:-/tmp}/tailwind-conflict-compare.XXXXXX")
+      node - "$DATA" "$REF_DATA" > "$COMPARISON_FILE" <<'NODE'
+const impl = JSON.parse(process.argv[2]);
+const ref = JSON.parse(process.argv[3]);
+
+function transformBasis(value) {
+  const match2d = /^matrix\(([^)]+)\)$/.exec(value || '');
+  if (match2d) return match2d[1].split(',').slice(0, 4).map(Number).map(n => n.toFixed(5)).join(',');
+  const match3d = /^matrix3d\(([^)]+)\)$/.exec(value || '');
+  if (match3d) {
+    const values = match3d[1].split(',').map(Number);
+    return values.filter((_, index) => ![12, 13, 14].includes(index)).map(n => n.toFixed(5)).join(',');
+  }
+  return value || '';
+}
+
+function sameComposition(a, b) {
+  return a.matchKey && a.matchKey === b.matchKey &&
+    a.translate === b.translate && a.rotate === b.rotate && a.scale === b.scale &&
+    transformBasis(a.transform) === transformBasis(b.transform);
+}
+
+const matches = [];
+const conflicts = impl.filter(candidate => {
+  const reference = ref.find(item => sameComposition(candidate, item));
+  if (!reference) return true;
+  matches.push({impl: candidate, ref: reference});
+  return false;
+});
+process.stdout.write(JSON.stringify({conflicts, matches}));
+NODE
+      COMPARISON=$(cat "$COMPARISON_FILE")
+      rm -f "$COMPARISON_FILE"
+      DATA=$(node -e 'process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).conflicts))' "$COMPARISON")
+      REFERENCE_MATCHES=$(node -e 'process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).matches))' "$COMPARISON")
+    fi
+  fi
+fi
+
 if [ "$DATA" = "[]" ] || [ "$DATA" = "null" ]; then
   echo "✅ No Tailwind v3↔v4 transform conflicts found."
   if [ -n "$REF_DIR" ] && [ -d "$REF_DIR" ]; then
-    SCOPE_JSON=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$SCOPE")
-    printf '{"status":"pass","conflictCount":0,"scope":%s,"conflicts":[]}\n' "$SCOPE_JSON" \
-      > "$REF_DIR/tailwind-conflict.json"
+    node - "$REF_DIR/tailwind-conflict.json" "$SCOPE" "$REFERENCE_URL" "$REFERENCE_MATCHES" <<'NODE'
+const fs = require('fs');
+const matches = JSON.parse(process.argv[5]);
+fs.writeFileSync(process.argv[2], JSON.stringify({
+  status: 'pass',
+  conflictCount: 0,
+  scope: process.argv[3],
+  referenceUrl: process.argv[4] || null,
+  referenceMatchCount: matches.length,
+  referenceMatches: matches,
+  conflicts: [],
+}, null, 2) + '\n');
+NODE
   fi
   exit 0
 fi
@@ -146,6 +222,8 @@ node -e "
 const data = JSON.parse(process.argv[1]);
 const refDir = process.argv[2];
 const scope = process.argv[3];
+const referenceUrl = process.argv[4] || null;
+const referenceMatches = JSON.parse(process.argv[5]);
 console.log('| # | tag | class/id | transform | translate | rotate | scale |');
 console.log('|---|-----|----------|-----------|-----------|--------|-------|');
 data.forEach((s, i) => {
@@ -170,9 +248,12 @@ if (refDir) {
       status: 'fail',
       conflictCount: data.length,
       scope,
+      referenceUrl,
+      referenceMatchCount: referenceMatches.length,
+      referenceMatches,
       conflicts: data,
     }, null, 2) + '\n'
   );
 }
 process.exit(1);
-" "$DATA" "${REF_DIR:-}" "$SCOPE"
+" "$DATA" "${REF_DIR:-}" "$SCOPE" "$REFERENCE_URL" "$REFERENCE_MATCHES"

@@ -21,9 +21,15 @@ Do not deviate. If the file doesn't cover a case, return with a `needsGuidance: 
 
 ## Mandatory per-iteration verify cycle (option D)
 
-After EVERY single scoped fix (one Edit/Write per iteration), run `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/section-compare.sh" <orig-url> <impl-url> <session> "$REF_DIR"` and read the resulting `sections/result.txt`. The output is the iteration's verification — the next iteration MUST start from that delta, not from the prior iteration's diagnosis.
+After every scoped fix, run the failed check and its affected dependencies. For a
+pixel mismatch, run `bash "$PLUGIN_ROOT/skills/visual-debug/scripts/section-compare.sh" <orig-url> <impl-url> <session> "$REF_DIR"` and read `sections/result.txt`.
+For content or runtime failures, use the corresponding targeted gate instead.
+The next iteration starts from that result, not the prior diagnosis.
 
-Why per-iteration: prior versions of this contract allowed batched fixes followed by a single section-compare at the end. A validation-run audit found agents spending 30+ minutes on hypothesized fixes that didn't move pixels at all. Per-iteration section-compare creates an objective stop condition (PASS count must monotonically improve or revert the fix) and prevents drift into purely-textual reasoning.
+Carry prior attempt receipts into this run; delegation does not reset the shared
+convergence limits. Return checker/reference failures to the coordinator with
+evidence. Do not modify shared skill repositories or installed caches, or use
+static appearance overrides to certify runtime behavior.
 
 Token budget: section-compare `result.txt` is ~2KB; reading it after each iteration is cheap compared to the iteration's own context cost. Skip `Read`ing per-section JSONs unless `result.txt` flags a specific section as FAIL.
 

@@ -624,6 +624,94 @@ def _hover_descendant_measurement_declared(entry: dict) -> bool:
     )
 
 
+_HOVER_PROPERTY_FIELDS = {
+    "opacity": "opacity",
+    "transform": "transform",
+    "color": "color",
+    "background": "backgroundColor",
+    "backgroundcolor": "backgroundColor",
+    "bordercolor": "borderColor",
+    "outlinecolor": "outlineColor",
+    "textdecorationcolor": "textDecorationColor",
+    "boxshadow": "boxShadow",
+    "filter": "filter",
+    "backgroundimage": "backgroundImage",
+    "fontweight": "fontWeight",
+    "width": "width",
+    "height": "height",
+}
+
+
+def _declared_hover_fields(entry: dict) -> list[str]:
+    """Return measurable computed-style fields declared by a hover spec."""
+    anim = entry.get("animation")
+    if not isinstance(anim, dict):
+        return []
+    raw = anim.get("changedProperties")
+    values = raw if isinstance(raw, list) else [anim.get("property", "")]
+    fields: list[str] = []
+    for value in values:
+        for token in re.split(r"[,\s]+", str(value or "")):
+            key = re.sub(r"[-_]", "", token.strip().lower())
+            field = _HOVER_PROPERTY_FIELDS.get(key)
+            if field and field not in fields:
+                fields.append(field)
+    return fields
+
+
+def _affected_field_changed(field: str, before: dict, after: dict) -> bool:
+    if field == "opacity":
+        return _opacity_changed(before, after)
+    if field == "transform":
+        return _transform_changed(before, after)
+    if field in {"width", "height"}:
+        b, a = _f(before.get(field)), _f(after.get(field))
+        return b is not None and a is not None and abs(a - b) > _HEIGHT_EPS
+    b, a = before.get(field), after.get(field)
+    return b is not None and a is not None and str(b) != str(a)
+
+
+def _affected_hover_fired(
+    entry: dict, before: dict, after: dict
+) -> tuple[bool, str]:
+    selector = str(entry.get("affectedTarget") or "").strip()
+    before_affected = before.get("affected")
+    after_affected = after.get("affected")
+    if not isinstance(before_affected, dict):
+        return False, f"affectedTarget {selector!r}: before snapshot missing"
+    if not isinstance(after_affected, dict):
+        return False, f"affectedTarget {selector!r}: after snapshot missing"
+    for phase, snapshot in (("before", before_affected), ("after", after_affected)):
+        if snapshot.get("selector") != selector or not snapshot.get("selectorValid", True):
+            return False, f"affectedTarget {selector!r}: {phase} selector mismatch"
+        if int(snapshot.get("matched") or 0) <= 0:
+            return False, f"affectedTarget {selector!r}: {phase} matched 0 descendants"
+
+    before_nodes = before_affected.get("nodes") or []
+    after_nodes = after_affected.get("nodes") or []
+    if not isinstance(before_nodes, list) or not isinstance(after_nodes, list):
+        return False, f"affectedTarget {selector!r}: invalid descendant snapshots"
+    fields = _declared_hover_fields(entry)
+    if not fields:
+        return False, f"affectedTarget {selector!r}: no declared visual properties"
+
+    changed = []
+    for field in fields:
+        if any(
+            isinstance(b, dict)
+            and isinstance(a, dict)
+            and _affected_field_changed(field, b, a)
+            for b, a in zip(before_nodes, after_nodes)
+        ):
+            changed.append(field)
+    observed = (
+        f"affectedTarget {selector!r}: "
+        f"matched {len(before_nodes)}->{len(after_nodes)}, "
+        f"declared fields changed={changed}"
+    )
+    return bool(changed), observed
+
+
 def _child_height_grew(before: dict, after: dict) -> bool:
     """Fix M (loop-e2e-6): bar-grow reveals animate descendant heights 0->Npx
     with no opacity/transform delta. Growth must start from ~0 (a bar at
@@ -1077,6 +1165,12 @@ def decide(
         res["observed"] = "element not found for target selector"
         return res
 
+    driver_error = str(obs.get("driverError") or "").strip()
+    if driver_error:
+        res["status"] = "fail"
+        res["observed"] = f"trigger drive failed: {driver_error}"
+        return res
+
     before = obs.get("before") or {}
     after = obs.get("after") or {}
     samples = obs.get("samples") or []
@@ -1330,6 +1424,11 @@ def decide(
         if _is_reset_only_hover(entry):
             res["observed"] = "known-skip: reset-only hover rule has no runtime delta"
             res["status"] = "known-skip"
+            return res
+        if str(entry.get("affectedTarget") or "").strip():
+            fired, observed = _affected_hover_fired(entry, before, after)
+            res["observed"] = observed
+            res["status"] = "pass" if fired else "fail"
             return res
         # Deliberately NOT _top_moved (mirrors the reveal branch below): the
         # PHASE1 baseline is snapped at scroll-top and the real-pointer pass

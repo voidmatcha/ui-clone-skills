@@ -657,6 +657,56 @@ def test_transition_proof_reads_scroll_completion_artifact(tmp_path: Path) -> No
     assert any("scroll-completion.json" in r for r in artifact["reasons"])
 
 
+@pytest.mark.parametrize(
+    ("scroll_completion", "expected_returncode"),
+    [
+        ({"schemaVersion": 1, "status": "pass"}, 1),
+        ({
+            "schemaVersion": 1,
+            "status": "pass",
+            "viewports": [{
+                "w": 1280,
+                "h": 800,
+                "candidates": 0,
+                "endpoint": {
+                    "scrollY": 0,
+                    "maxScroll": 0,
+                    "scrollHeight": 800,
+                    "viewportHeight": 800,
+                    "remaining": 0,
+                    "clippedLandmarks": [],
+                    "reached": True,
+                },
+            }],
+        }, 0),
+    ],
+)
+def test_transition_proof_requires_measured_scroll_endpoint(
+    tmp_path: Path,
+    scroll_completion: dict,
+    expected_returncode: int,
+) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "requiredChecks": [{
+            "id": "scroll-end-completion",
+            "produces": "scroll-completion.json",
+        }],
+    }))
+    (ref / "scroll-completion.json").write_text(json.dumps(scroll_completion))
+
+    script = _project_root() / "skills/visual-debug" / "scripts" / "transition-proof-rollup.sh"
+    proc = subprocess.run(
+        ["bash", str(script), str(ref)], capture_output=True, text=True, timeout=10,
+    )
+
+    assert proc.returncode == expected_returncode, proc.stdout + proc.stderr
+    artifact = json.loads((ref / "transition-proof.json").read_text())
+    scroll = next(c for c in artifact["components"] if c["artifact"] == "scroll-completion.json")
+    assert scroll["valid"] is (expected_returncode == 0)
+
+
 def test_transition_trajectory_supports_structural_motion_mode() -> None:
     """Structural-only section comparison needs selector-level motion proof."""
     script = _project_root() / "skills" / "visual-debug" / "scripts" / "transition-trajectory-compare.sh"
@@ -1886,7 +1936,7 @@ def test_transition_proof_skips_video_hover_for_reset_only_known_skip(tmp_path: 
         "animatedElements": [{"id": "auto-hover-0", "selector": "a", "trigger": "hover"}],
     }), encoding="utf-8")
     (ref / "keyframes-diff.json").write_text(json.dumps({"only_ref": [], "shared_diffs": []}), encoding="utf-8")
-    (ref / "scroll-completion.json").write_text(json.dumps({"status": "pass"}), encoding="utf-8")
+    (ref / "scroll-completion.json").write_text(json.dumps({"status": "skip"}), encoding="utf-8")
     (transitions / "result.txt").write_text("1 PASS, 0 FAIL\n", encoding="utf-8")
     (transitions / "video-motion-result.txt").write_text(
         "trajectory pre-filter FAILED\n# video-motion-compare: COMPLETE\n", encoding="utf-8")

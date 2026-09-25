@@ -62,6 +62,100 @@ def _affected_selector(tmp_path: Path, spec: dict, activation: str = ACTIVATION)
     return proc.stdout.strip(), proc.returncode
 
 
+def _write_fresh_negative_receipt(ref_dir: Path, activation: str = ACTIVATION) -> None:
+    """Write the complete freshness-bound receipt emitted by the capture bridge."""
+    from ui_clone.extraction_artifacts import _hover_candidate_input_fingerprint
+
+    inputs = {
+        "structure.json": {"tag": "body", "children": []},
+        "states/hover/summary.json": {"changedCount": 0},
+        "states/hover/manifest.json": {"entries": []},
+    }
+    for relative, payload in inputs.items():
+        path = ref_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    fingerprint = _hover_candidate_input_fingerprint(ref_dir)
+    key = {"triggerType": "hover", "selector": activation}
+    (ref_dir / "regions.json").write_text(
+        json.dumps(
+            {
+                "source": "scripts/extract/capture-region-artifacts.py",
+                "derivedFrom": [
+                    "hover-css-rules.json",
+                    "structure.json",
+                    "states/hover/summary.json",
+                    "states/hover/manifest.json",
+                ],
+                "regions": [],
+                "resolvedAutoCandidates": [key],
+                "autoCandidateInputFingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ref_dir / "capture-region-artifacts-summary.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "autoSpec": True,
+                "autoCandidateInputFingerprint": fingerprint,
+                "attempted": [{"region": "auto-hover-0", **key}],
+                "captured": [],
+                "skipped": [
+                    {
+                        "region": "auto-hover-0",
+                        **key,
+                        "resolution": "absence-measured",
+                        "candidateKey": key,
+                        "autoCandidateInputFingerprint": fingerprint,
+                    }
+                ],
+                "unsupported": [],
+                "counts": {
+                    "attempted": 1,
+                    "captured": 0,
+                    "skipped": 1,
+                    "unsupported": 0,
+                    "notInstantiated": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _affected_selector_with_receipt(
+    tmp_path: Path,
+    spec: dict,
+    *,
+    stale: bool = False,
+) -> tuple[str, int]:
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "transition-spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    hover_css = ref_dir / "hover-css-rules.json"
+    hover_css.write_text(json.dumps(HOVER_CSS), encoding="utf-8")
+    _write_fresh_negative_receipt(ref_dir)
+    if stale:
+        (ref_dir / "structure.json").write_text(
+            json.dumps({"tag": "body", "children": [{"tag": "a"}]}),
+            encoding="utf-8",
+        )
+    proc = subprocess.run(
+        ["bash", "-c", _function_source() + '\naffected_selector_for_hover "$1"', "_", ACTIVATION],
+        env={
+            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+            "REF_DIR": str(ref_dir),
+            "HOVER_CSS": str(hover_css),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.stdout.strip(), proc.returncode
+
+
 def test_affected_target_absent_suppresses_hover_css_rederivation(tmp_path: Path) -> None:
     """The measured-absent descendant must not be re-derived from hover-css-rules."""
     spec = {
@@ -100,5 +194,38 @@ def test_no_spec_verdict_still_falls_back_to_hover_css_rules(tmp_path: Path) -> 
     """Control: an entry that says nothing about the descendant keeps the fallback."""
     spec = {"transitions": [{"id": "hover-nav-link", "trigger": "hover", "target": ACTIVATION}]}
     stdout, code = _affected_selector(tmp_path, spec)
+    assert code == 0
+    assert stdout == DESCENDANT
+
+
+def test_fresh_measured_negative_receipt_suppresses_descendant_rederivation(
+    tmp_path: Path,
+) -> None:
+    stdout, code = _affected_selector_with_receipt(tmp_path, {"transitions": []})
+    assert code == 0
+    assert stdout == ""
+
+
+def test_stale_measured_negative_receipt_does_not_suppress_descendant(
+    tmp_path: Path,
+) -> None:
+    stdout, code = _affected_selector_with_receipt(
+        tmp_path,
+        {"transitions": []},
+        stale=True,
+    )
+    assert code == 0
+    assert stdout == DESCENDANT
+
+
+def test_negative_receipt_does_not_waive_positive_transition(
+    tmp_path: Path,
+) -> None:
+    spec = {
+        "transitions": [
+            {"id": "hover-nav-link", "trigger": "hover", "target": ACTIVATION}
+        ]
+    }
+    stdout, code = _affected_selector_with_receipt(tmp_path, spec)
     assert code == 0
     assert stdout == DESCENDANT

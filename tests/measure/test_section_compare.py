@@ -1025,6 +1025,7 @@ def test_section_capture_runs_commands_as_argv(monkeypatch: pytest.MonkeyPatch, 
 
     monkeypatch.setattr(section_capture.subprocess, "run", fake_run)
     monkeypatch.setattr(section_capture.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(section_capture, "_canvas_height", lambda _path: 900.0)
     monkeypatch.setenv("SECTION_CAPTURE_DIR", str(tmp_path))
     monkeypatch.setenv("SECTION_CAPTURE_SESSION_REF", "ref-session")
     monkeypatch.setenv("SECTION_CAPTURE_SESSION_IMPL", "impl-session")

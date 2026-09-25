@@ -153,52 +153,30 @@ agent-browser --session <s> eval "
 
 **Save output to** `tmp/ref/<component>/head.json`
 
-### Collect visible images
+### Collect DOM-bound image assets
 
-Collect URLs of images actually rendered on screen (`height > 0`):
-
-```bash
-agent-browser --session <s> eval "
-(() => {
-  const images = [];
-  document.querySelectorAll('img').forEach(img => {
-    const r = img.getBoundingClientRect();
-    if (r.height > 0 && img.src && img.src.startsWith('https://')) {
-      const cn = typeof img.className === 'string' ? img.className : img.className?.baseVal || '';
-      images.push({ type: 'image', src: img.src, element: img.tagName.toLowerCase() + (cn.trim().split(' ')[0] ? '.' + cn.trim().split(' ')[0] : '') });
-    }
-  });
-  return JSON.stringify(images, null, 2);
-})()
-"
-```
-
-Also collect CSS `background-image` — many sites use these for hero images, section backgrounds, and card images:
+Use the canonical producer instead of a separate image-only browser snippet:
 
 ```bash
-agent-browser --session <s> eval "
-(() => {
-  const bgImages = [];
-  document.querySelectorAll('*').forEach(el => {
-    const bg = getComputedStyle(el).backgroundImage;
-    if (bg && bg !== 'none' && bg.includes('url(')) {
-      const r = el.getBoundingClientRect();
-      if (r.width > 50 && r.height > 50) {
-        const url = bg.match(/url\(['\"]?([^'\"\\)]+)['\"]?\)/)?.[1] || '';
-        if (url.startsWith('http')) {
-          bgImages.push({ type: 'bg-image', src: url, element: el.tagName.toLowerCase(), width: Math.round(r.width), height: Math.round(r.height) });
-        }
-      }
-    }
-  });
-  return JSON.stringify(bgImages, null, 2);
-})()
-"
+bash "$PLUGIN_ROOT/scripts/extract/extract-asset-metadata.sh" \
+  <session> "$(pwd)/tmp/ref/<component>" <url>
 ```
 
-**Merge both arrays and save to** `tmp/ref/<component>/visible-images.json`
+`visible-images.json` inventories DOM-bound images with layout boxes, including
+small CSS backgrounds, masks, video posters, and generated pseudo-element images.
+Initially transparent reveal/hover assets remain candidates; `currentlyPainted`
+and the computed visibility fields describe their observed state separately.
+DOM section ownership takes precedence over geometric overlap when assigning an
+asset to a section. Do not replace this inventory with a list of `<img>` URLs or
+infer ownership from the smallest overlapping section.
 
-> If no `<img>` tags AND no CSS `background-image` found (site uses 100% SVG/Lottie/Canvas), save `[{"note": "No images found — site uses SVG/Lottie/Canvas only", "images": []}]` so the pipeline gate passes.
+The inventory describes the captured state, not every possible interaction.
+For a missing asset, inspect the relevant scroll/hover/click state and its computed
+style before extending the inventory. A URL found only in an upstream repository
+or dormant bundle expression is a discovery candidate, not proof that the deployed
+page renders it. Match source revision to the deployed bundle before treating a
+source difference as capture loss. An empty inventory must come from the producer;
+do not hand-write an empty artifact to satisfy the gate.
 
 ### Collect inline SVGs (logos, icons, brandmarks)
 

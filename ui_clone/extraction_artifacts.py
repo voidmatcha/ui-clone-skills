@@ -10,6 +10,7 @@ sentinels/summaries so gates distinguish "observed none" from "skipped".
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -621,7 +622,14 @@ _MOTION_LIB_PATTERNS: dict[str, str] = {
         r"|motion\.(?:div|span|section|article|aside|nav|header|footer|main|ul|ol"
         r"|li|a|p|h[1-6]|img|button|form|label|svg|path|g|circle|rect|tr|td|table)\b"
     ),
-    "lenis": r"\bLenis\b|lenis",
+    "lenis": (
+        r"@studio-freight/lenis(?:/[\w./-]+)?"
+        r"|(?:from\s+|require\s*\(\s*|import\s*\(\s*)['\"]"
+        r"(?:lenis|@studio-freight/lenis)(?:/[^'\"]*)?['\"]"
+        r"|new\s+Lenis\s*\("
+        r"|\b(?:window\s*\.\s*)?_{0,2}lenis\s*\.\s*"
+        r"(?:raf|scrollTo|on|off|start|stop|destroy|resize)\s*\("
+    ),
     "anime": r"anime\.js|\banime\s*\(",
     "webflow-ix2": (
         r"Webflow\s*\.\s*require\s*\(\s*['\"]ix2['\"]"
@@ -651,6 +659,25 @@ _MOTION_USAGE_PATTERNS: dict[str, str] = {
     "anime": r"\banime\s*\(|anime\s*\.\s*timeline\s*\(",
     "webflow-ix2": r"Webflow\s*\.\s*require\s*\(\s*['\"]ix2['\"]|data-w-id",
 }
+
+_LENIS_MINIFIED_STATE_PATTERN = r"\blenis-(?:smooth|stopped|locked|scrolling)\b"
+_LENIS_MINIFIED_OPTION_PATTERN = (
+    r"\b(?:smoothWheel|syncTouch|wheelMultiplier|touchMultiplier|virtualScroll)\b"
+)
+
+
+def _motion_lib_match_count(lib: str, pattern: str, text: str) -> int:
+    matches = len(re.findall(pattern, text, flags=re.IGNORECASE))
+    if lib != "lenis" or matches:
+        return matches
+    # Minified Lenis distributions can rename the constructor, but retain both
+    # their runtime state classes and public option names. Test each signature
+    # once rather than using whole-bundle lookaheads, which become quadratic on
+    # large chunks. A teardown-only `lenis-scrolling` cleanup lacks the option
+    # signature and therefore remains a non-match.
+    has_state = re.search(_LENIS_MINIFIED_STATE_PATTERN, text, flags=re.IGNORECASE)
+    has_option = re.search(_LENIS_MINIFIED_OPTION_PATTERN, text, flags=re.IGNORECASE)
+    return 1 if has_state and has_option else 0
 
 
 def _utc_now() -> str:
@@ -995,6 +1022,75 @@ def _hover_rule_inventory(ref_dir: Path) -> tuple[list[_JSON], bool]:
     return _dedupe_hover_rules(_hover_rules_from_css(ref_dir)), False
 
 
+_HOVER_CANDIDATE_INPUTS = (
+    "hover-css-rules.json",
+    "structure.json",
+    "states/hover/summary.json",
+    "states/hover/manifest.json",
+)
+
+
+def _hover_candidate_input_fingerprint(ref_dir: Path) -> str:
+    """Hash the immutable inputs that define auto hover candidates.
+
+    Missing inputs are part of the fingerprint. This lets a measured negative
+    survive another finalizer pass, while any fresh CSS, DOM, viewport/state,
+    or hover capture invalidates that receipt.
+    """
+    digest = hashlib.sha256()
+    for relative in _HOVER_CANDIDATE_INPUTS:
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        path = ref_dir / relative
+        try:
+            payload = path.read_bytes()
+        except FileNotFoundError:
+            digest.update(b"missing\0")
+        except OSError:
+            return ""
+        else:
+            digest.update(b"present\0")
+            digest.update(payload)
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _resolved_auto_hover_candidates(
+    ref_dir: Path,
+    existing: object,
+) -> set[tuple[str, str]]:
+    """Return exact measured-negative auto candidates for current inputs."""
+    if not isinstance(existing, dict) or not (
+        existing.get("source") == "ui_clone.extraction_artifacts"
+        and existing.get("placeholder") is True
+    ):
+        return set()
+    summary = _load_json(ref_dir / "capture-region-artifacts-summary.json")
+    if not isinstance(summary, dict) or summary.get("autoSpec") is not True:
+        return set()
+    fingerprint = _hover_candidate_input_fingerprint(ref_dir)
+    if not fingerprint or summary.get("autoCandidateInputFingerprint") != fingerprint:
+        return set()
+    skipped = summary.get("skipped")
+    if not isinstance(skipped, list):
+        return set()
+
+    resolved: set[tuple[str, str]] = set()
+    for item in skipped:
+        if not isinstance(item, dict) or item.get("resolution") != "absence-measured":
+            continue
+        if item.get("autoCandidateInputFingerprint") != fingerprint:
+            continue
+        candidate = item.get("candidateKey")
+        if not isinstance(candidate, dict):
+            continue
+        trigger = str(candidate.get("triggerType") or "").strip().lower()
+        selector = " ".join(str(candidate.get("selector") or "").split())
+        if trigger == "hover" and _is_valid_selector(selector):
+            resolved.add((trigger, selector))
+    return resolved
+
+
 def _finalize_interactions(ref_dir: Path, actions: dict[str, str]) -> None:
     hover_rules, has_live_hover = _hover_rule_inventory(ref_dir)
     interactions = [{
@@ -1160,7 +1256,7 @@ def _finalize_bundles(ref_dir: Path, actions: dict[str, str]) -> None:
     for name, text in texts:
         libs: list[str] = []
         for lib, pattern in _MOTION_LIB_PATTERNS.items():
-            matches = len(re.findall(pattern, text, flags=re.IGNORECASE))
+            matches = _motion_lib_match_count(lib, pattern, text)
             if matches:
                 libs.append(lib)
                 sdk_counts[lib] = sdk_counts.get(lib, 0) + matches
@@ -1423,6 +1519,7 @@ def _finalize_transition_spec(ref_dir: Path, actions: dict[str, str]) -> None:
     ):
         return
     rules, has_live_hover = _hover_rule_inventory(ref_dir)
+    resolved_auto_hover = _resolved_auto_hover_candidates(ref_dir, existing)
     source_chunk = _first_css_source(ref_dir)
     frames = _transition_reference_frames(ref_dir)
 
@@ -1452,6 +1549,8 @@ def _finalize_transition_spec(ref_dir: Path, actions: dict[str, str]) -> None:
             target = _hover_activation_selector(rule)
             if not _is_valid_selector(target):
                 continue
+            if ("hover", target) in resolved_auto_hover:
+                continue
             chunk = _hover_rule_source_chunk(ref_dir, rule)
             transitions.append(_entry(
                 len(transitions), "hover", str(target),
@@ -1459,16 +1558,17 @@ def _finalize_transition_spec(ref_dir: Path, actions: dict[str, str]) -> None:
                 chunk,
             ))
 
-    # One stub per detected motion signal class so the floor reflects the
-    # site's motion inventory — these are DRAFT pointers for Step 5d, and
-    # the whole payload stays tagged placeholder either way: a floor is
-    # not a spec, and gate_spec refuses placeholder specs on motion sites.
+    # Draft pointers for signal classes that can seed concrete extraction work.
+    # `hasScrollStateMachine` is deliberately absent: its broad source-token
+    # classifier only schedules a runtime checker (which self-skips when inert),
+    # so it cannot honestly manufacture a body-targeted transition here.
+    # The whole payload stays tagged placeholder either way: a floor is not a
+    # spec, and gate_spec refuses placeholder specs on motion sites.
     plan = _load_json(ref_dir / "verification-plan.json") or {}
     signals = plan.get("signals") if isinstance(plan, dict) else {}
     signals = signals if isinstance(signals, dict) else {}
     signal_stubs = (
         ("hasScrollScrub", "scroll-scrub", {"type": "scroll-scrub", "mechanism": "unresolved — mine bundle-extraction.json per Step 5d"}),
-        ("hasScrollStateMachine", "scroll-state-machine", {"type": "scroll-state-machine", "mechanism": "unresolved — mine bundle-extraction.json per Step 5d"}),
         (
             "hasSwiper",
             "swiper",
@@ -1542,7 +1642,7 @@ def _finalize_transition_spec(ref_dir: Path, actions: dict[str, str]) -> None:
                 source_chunk,
             ))
 
-    if not transitions:
+    if not transitions and not resolved_auto_hover:
         transitions.append(_entry(
             0, "page-load", fallback_target,
             {"type": "settled-load", "duration": "0s", "easing": "linear"},
@@ -1560,6 +1660,10 @@ def _finalize_transition_spec(ref_dir: Path, actions: dict[str, str]) -> None:
             *([] if has_live_hover else _css_file_rels(ref_dir)),
         ],
     }
+    if resolved_auto_hover and isinstance(existing, dict):
+        skipped = existing.get("skipped")
+        if isinstance(skipped, list):
+            payload["skipped"] = skipped
     _write_json(ref_dir / "transition-spec.json", payload)
     actions["transition-spec.json"] = "derived transition spec from CSS/DOM evidence"
 

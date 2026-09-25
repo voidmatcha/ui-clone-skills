@@ -9,6 +9,11 @@ import pathlib
 import re
 import sys
 from collections.abc import Callable
+from urllib.parse import unquote
+
+PUBLIC_SKILLS = ("ui-capture", "ui-reverse-engineering", "visual-debug")
+PUBLIC_SKILL_WORD_ADVISORY = 5_000
+INTERNAL_SKILLS = {"benchmark"}
 
 
 def _report_errors(errors: list[str]) -> int:
@@ -18,12 +23,12 @@ def _report_errors(errors: list[str]) -> int:
 
 
 def check_public_skills() -> int:
-    expected = {"ui-reverse-engineering", "ui-capture", "visual-debug"}
+    expected = set(PUBLIC_SKILLS)
     # Internal-only skills (maintainer tooling). Allowed on the development
     # filesystem under skills/ but MUST NOT be registered in Claude's public
     # manifest, referenced from Codex defaultPrompt, or copied into the Codex
     # install projection's public skills directory.
-    internal_skills = {"benchmark"}
+    internal_skills = INTERNAL_SKILLS
     errors: list[str] = []
 
     claude = json.loads(pathlib.Path(".claude-plugin/plugin.json").read_text())
@@ -100,6 +105,71 @@ def check_public_skills() -> int:
         if f"skills/{skill}" in install_text and "maintainer-only" not in install_text:
             errors.append(f"install.sh may copy internal skill into Codex projection: {skill}")
 
+    return _report_errors(errors)
+
+
+def report_public_skill_sizes() -> int:
+    """Report entrypoint context size without turning the budget into a gate."""
+    errors: list[str] = []
+    total_words = 0
+    total_lines = 0
+    for skill in PUBLIC_SKILLS:
+        path = pathlib.Path("skills", skill, "SKILL.md")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"{path}: cannot read: {exc}")
+            continue
+        words = len(re.findall(r"\S+", text))
+        lines = len(text.splitlines())
+        total_words += words
+        total_lines += lines
+        print(f"{skill}: {words} words, {lines} lines")
+
+    if errors:
+        return _report_errors(errors)
+
+    print(f"TOTAL: {total_words} words, {total_lines} lines")
+    if total_words > PUBLIC_SKILL_WORD_ADVISORY:
+        print(
+            "WARNING: public skill entrypoints total "
+            f"{total_words} words (advisory {PUBLIC_SKILL_WORD_ADVISORY})"
+        )
+    return 0
+
+
+def _local_markdown_targets(text: str) -> list[str]:
+    """Extract literal relative Markdown document links from Markdown syntax."""
+    targets: list[str] = []
+    inline = re.compile(r"!?\[[^\]]*\]\(\s*(<[^>]+>|[^\s)]+)")
+    references = re.compile(r"^\s*\[[^\]]+\]:\s*(<[^>]+>|\S+)", re.M)
+    for match in (*inline.finditer(text), *references.finditer(text)):
+        target = match.group(1).strip("<>")
+        path_part = unquote(target.split("#", 1)[0].split("?", 1)[0])
+        if not path_part.lower().endswith(".md"):
+            continue
+        if path_part.startswith(("/", "\\", "$")) or re.match(
+            r"^[a-z][a-z0-9+.-]*:", path_part, re.I
+        ):
+            continue
+        targets.append(path_part)
+    return targets
+
+
+def check_public_skill_links() -> int:
+    """Validate literal local Markdown links in the three public entrypoints."""
+    errors: list[str] = []
+    for skill in PUBLIC_SKILLS:
+        source = pathlib.Path("skills", skill, "SKILL.md")
+        try:
+            text = source.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"{source}: cannot read: {exc}")
+            continue
+        for target in sorted(set(_local_markdown_targets(text))):
+            resolved = source.parent / target
+            if not resolved.is_file():
+                errors.append(f"{source}: broken local Markdown link: {target}")
     return _report_errors(errors)
 
 
@@ -233,7 +303,9 @@ def count_subprocess_without_timeout() -> int:
 
 COMMANDS: dict[str, Callable[[], int]] = {
     "count-subprocess-without-timeout": count_subprocess_without_timeout,
+    "public-skill-links": check_public_skill_links,
     "public-skills": check_public_skills,
+    "skill-context": report_public_skill_sizes,
     "trigger-boundaries": check_trigger_boundaries,
     "trigger-fixtures": check_trigger_fixtures,
     "find-hangul": find_hangul,

@@ -41,6 +41,7 @@ same-size edit crossed the threshold.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import sys
@@ -186,6 +187,13 @@ REF_ASSET_SUB: tuple[str, ...] = ("asset-substitution.json",)
 # absence is fingerprintable too.
 REF_SPLASH_CERTIFICATE: tuple[str, ...] = ("states/splash/contract.json",)
 OPTIONAL_INPUT_GLOBS: frozenset[str] = frozenset(REF_ASSET_SUB + REF_SPLASH_CERTIFICATE)
+SECTION_CAPTURE_POLICY = "section-capture-policy.json"
+SECTION_CAPTURE_ENV_KEYS = (
+    "AGENT_BROWSER_INIT_SCRIPTS",
+    "AGENT_BROWSER_ARGS",
+    "EXCLUDE_DYNAMIC",
+    "SECTION_REFERENCE_CACHE",
+)
 # Rollup constituents: the per-measurement artifacts each rollup aggregates
 # (from runtime-proof-rollup.sh / transition-proof-rollup.sh), plus the plan
 # that defines which missing artifacts are required. Excludes each rollup's own
@@ -263,7 +271,7 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     # ── pure CSS / style ──
     "css-mirror": _ci(CSS, ("bundle-map.json", "bundles/*.css", "css/*.css")),
     "keyframes-diff": _ci(CSS),
-    "tailwind-transform-conflict": _ci(CSS),
+    "tailwind-transform-conflict": _ci(CSS, ("head.json",)),
     # ── package-only ──
     "bundle-impl-coverage": _ci(PKG, REF_BUNDLE),
     # library-usage reads impl JS imports + package.json against ref bundle/SDK
@@ -377,7 +385,10 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     # tests/gates/test_check_inputs_lockstep.py for the matching test carve-out.
     "section-compare": _ci(
         SRC + PUBLIC + ENTRY,
-        ("section-map.json",) + REF_SPEC + REF_ASSET_SUB + ("required-media.json",),
+        ("section-map.json",)
+        + REF_SPEC
+        + REF_ASSET_SUB
+        + ("required-media.json", SECTION_CAPTURE_POLICY),
     ),
     "blank-viewport": _ci(SRC + PUBLIC + ENTRY),
     # Live browser probe of the served preview (ref side probes REF_URL, reads
@@ -412,7 +423,11 @@ CHECK_INPUTS: dict[str, CheckInputs] = {
     "transition-compare": _ci(SRC, REF_SPEC),
     "transition-trajectory": _ci(SRC, REF_SPEC + REF_ASSET_SUB),
     "hover-state-compare": _ci(
-        SRC, REF_SPEC + REF_ASSET_SUB + ("regions.json", "hover-css-rules.json")
+        SRC, REF_SPEC + REF_ASSET_SUB + (
+            "regions.json", "hover-css-rules.json", "structure.json",
+            "states/hover/summary.json", "states/hover/manifest.json",
+            "capture-region-artifacts-summary.json",
+        )
     ),
     "hover-tree-diff": _ci(SRC, REF_SPEC),
     "click-state-compare": _ci(SRC, REF_SPEC + ("regions.json",)),
@@ -513,6 +528,83 @@ def _expand_braces(pattern: str) -> list[str]:
 
 class InputFingerprintUnavailable(OSError):
     """A declared input side cannot be proven complete and readable."""
+
+
+def load_section_capture_policy(ref_dir: str | Path) -> dict[str, str]:
+    """Load the optional, section-only deterministic capture environment."""
+    root = Path(ref_dir).resolve()
+    policy_path = root / SECTION_CAPTURE_POLICY
+    if not policy_path.exists():
+        return {}
+    try:
+        data = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InputFingerprintUnavailable(
+            f"invalid {SECTION_CAPTURE_POLICY}: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise InputFingerprintUnavailable(f"{SECTION_CAPTURE_POLICY} must be an object")
+    allowed_top = {"schemaVersion", "staticOnly", "environment"}
+    unknown_top = sorted(set(data) - allowed_top)
+    if unknown_top:
+        raise InputFingerprintUnavailable(
+            f"{SECTION_CAPTURE_POLICY} has unknown fields: {', '.join(unknown_top)}"
+        )
+    if data.get("schemaVersion") != 1 or data.get("staticOnly") is not True:
+        raise InputFingerprintUnavailable(
+            f"{SECTION_CAPTURE_POLICY} requires schemaVersion 1 and staticOnly true"
+        )
+    environment = data.get("environment")
+    if not isinstance(environment, dict) or not environment:
+        raise InputFingerprintUnavailable(
+            f"{SECTION_CAPTURE_POLICY}.environment must be a non-empty object"
+        )
+    unknown_env = sorted(set(environment) - set(SECTION_CAPTURE_ENV_KEYS))
+    if unknown_env:
+        raise InputFingerprintUnavailable(
+            f"{SECTION_CAPTURE_POLICY} has unsupported environment keys: "
+            + ", ".join(unknown_env)
+        )
+
+    normalized: dict[str, str] = {}
+    for key in SECTION_CAPTURE_ENV_KEYS:
+        if key not in environment:
+            continue
+        value = environment[key]
+        if not isinstance(value, str) or not value or any(ch.isspace() for ch in value):
+            raise InputFingerprintUnavailable(
+                f"{SECTION_CAPTURE_POLICY} value for {key} must be a non-empty token"
+            )
+        if key in {"EXCLUDE_DYNAMIC", "SECTION_REFERENCE_CACHE"} and value not in {"0", "1"}:
+            raise InputFingerprintUnavailable(
+                f"{SECTION_CAPTURE_POLICY} value for {key} must be 0 or 1"
+            )
+        if key == "AGENT_BROWSER_INIT_SCRIPTS":
+            candidate = Path(value)
+            if candidate.is_absolute():
+                raise InputFingerprintUnavailable(
+                    f"{SECTION_CAPTURE_POLICY} init script must be relative to the ref directory"
+                )
+            resolved = (root / candidate).resolve()
+            try:
+                resolved.relative_to(root)
+            except ValueError as exc:
+                raise InputFingerprintUnavailable(
+                    f"{SECTION_CAPTURE_POLICY} init script escapes the ref directory"
+                ) from exc
+            if not resolved.is_file():
+                raise InputFingerprintUnavailable(
+                    f"{SECTION_CAPTURE_POLICY} init script does not exist: {value}"
+                )
+            value = str(resolved)
+        normalized[key] = value
+    return normalized
+
+
+def _section_capture_policy_script(ref_dir: str | Path) -> Path | None:
+    policy = load_section_capture_policy(ref_dir)
+    value = policy.get("AGENT_BROWSER_INIT_SCRIPTS")
+    return Path(value) if value else None
 
 
 def _iter_files(root: Path, globs: tuple[str, ...]) -> list[tuple[str, Path]]:
@@ -650,6 +742,12 @@ def compute_check_input_hash(
     if spec.ref:
         for rel, p in _declared_side_files(ref_dir, spec.ref, "reference"):
             entries.append((f"ref/{rel}", p))
+    if check_id == "section-compare" and ref_dir is not None:
+        policy_script = _section_capture_policy_script(ref_dir)
+        if policy_script is not None:
+            entries.append(
+                (f"ref/{policy_script.relative_to(Path(ref_dir).resolve())}", policy_script)
+            )
     entries.sort(key=lambda kv: kv[0])
     h = hashlib.sha256()
     for key, p in entries:
@@ -696,6 +794,12 @@ def newest_input_mtime(
             if spec.ref
             else []
         )
+        if check_id == "section-compare" and ref_dir is not None:
+            policy_script = _section_capture_policy_script(ref_dir)
+            if policy_script is not None:
+                ref_files.append(
+                    (str(policy_script.relative_to(Path(ref_dir).resolve())), policy_script)
+                )
         for _rel, p in (*impl_files, *ref_files):
             try:
                 newest = max(newest, p.stat().st_mtime)

@@ -69,6 +69,8 @@ def test_runtime_text_excludes_closed_menus_and_captures_lazy_middle_section(
     )
     assert "Closed menu secret" not in blocks
     assert "Clipped menu secret" not in blocks
+    assert "Visible contents overflow copy" in blocks
+    assert "Visible contents positioned copy" in blocks
     assert "Vertical offcanvas secret" not in blocks
     assert "Transparent color secret" not in blocks
     assert "Transparent fill secret" not in blocks

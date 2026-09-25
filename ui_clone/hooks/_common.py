@@ -1045,8 +1045,8 @@ def run_gate(ref_dir: Path, gate_name: str) -> dict[str, object]:
     }
 
 
-def quick_tier_blocker(ref_dir: Path) -> str | None:
-    """Return a closeout blocker when verification-plan.json is tier=quick.
+def quick_tier_blocker_details(ref_dir: Path) -> tuple[str, str] | None:
+    """Return a closeout blocker and machine-readable recovery action.
 
     Shared by BOTH closeout paths — canonical (pipeline verify ->
     verify-stamp.json) and structural (check-converged.sh ->
@@ -1060,13 +1060,60 @@ def quick_tier_blocker(ref_dir: Path) -> str | None:
         try:
             receipt = json.loads(receipt_path.read_text())
         except (OSError, ValueError):
-            return "Invalid iteration receipt; run the full required-check dispatcher"
-        if (
-            not isinstance(receipt, dict)
-            or receipt.get("mode") != "final"
-            or receipt.get("status") != "completed"
-        ):
-            return "Partial iteration cannot close out; run the full required-check dispatcher"
+            return (
+                "Invalid iteration receipt; run the full required-check dispatcher",
+                "rerun_full_required_checks",
+            )
+        if not isinstance(receipt, dict):
+            return (
+                "Invalid iteration receipt; run the full required-check dispatcher",
+                "rerun_full_required_checks",
+            )
+        mode = receipt.get("mode")
+        status = receipt.get("status")
+        if mode == "iteration":
+            return (
+                "Partial iteration cannot close out; run the full required-check dispatcher",
+                "run_full_required_checks",
+            )
+        if mode != "final":
+            return (
+                "Invalid iteration receipt; run the full required-check dispatcher",
+                "rerun_full_required_checks",
+            )
+        if status == "failed":
+            failed = receipt.get("failedChecks")
+            suffix = ""
+            if isinstance(failed, list) and failed:
+                names = ", ".join(str(item) for item in failed if isinstance(item, str))
+                suffix = f" ({names})" if names else ""
+            return (
+                f"Full required-check dispatcher completed with failing checks{suffix}; "
+                "fix the reported failures, then rerun the full required-check dispatcher",
+                "fix_failed_required_checks",
+            )
+        if status == "setup-failed":
+            return (
+                "Full required-check dispatcher setup failed; inspect its output, repair the "
+                "setup error, then rerun it",
+                "repair_required_check_setup",
+            )
+        if status == "interrupted":
+            return (
+                "Full required-check dispatcher was interrupted; rerun it before closeout",
+                "rerun_full_required_checks",
+            )
+        if status == "running":
+            return (
+                "Full required-check dispatcher is still running or exited before recording a "
+                "terminal result; wait for it or rerun it before closeout",
+                "wait_for_or_rerun_required_checks",
+            )
+        if status != "completed":
+            return (
+                "Invalid iteration receipt; run the full required-check dispatcher",
+                "rerun_full_required_checks",
+            )
     plan_path = Path(ref_dir) / "verification-plan.json"
     if not plan_path.is_file():
         return None
@@ -1078,12 +1125,21 @@ def quick_tier_blocker(ref_dir: Path) -> str | None:
     if tier != "quick":
         return None
     return (
-        "verification-plan.json is tier=quick. Quick plans are for inner "
-        "iteration only — closeout requires tier=standard or "
-        "tier=comprehensive so browser scroll/live parity checks can run. "
-        "Regenerate the plan with: UI_CLONE_VERIFY_TIER=standard bash "
-        "skills/visual-debug/scripts/verification-plan.sh <ref-dir>"
+        (
+            "verification-plan.json is tier=quick. Quick plans are for inner "
+            "iteration only — closeout requires tier=standard or "
+            "tier=comprehensive so browser scroll/live parity checks can run. "
+            "Regenerate the plan with: UI_CLONE_VERIFY_TIER=standard bash "
+            "skills/visual-debug/scripts/verification-plan.sh <ref-dir>"
+        ),
+        "regenerate_verification_plan",
     )
+
+
+def quick_tier_blocker(ref_dir: Path) -> str | None:
+    """Return the human-readable closeout blocker for hooks and text output."""
+    details = quick_tier_blocker_details(ref_dir)
+    return details[0] if details is not None else None
 
 
 # ── Off-pipeline clone detection (omx postmortem) ─────────────────────────

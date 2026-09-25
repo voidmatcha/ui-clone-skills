@@ -802,6 +802,30 @@
         "wrapper and content selectors extracted from bundle",
         "Bundle analysis is read-only — no code execution"
       ]
+    },
+    {
+      "id": 57,
+      "prompt": "Recreate https://example.com in a fresh tab without bias. Do not consult its original repository or reuse our previous implementation.",
+      "expected_output": "A fresh reconstruction plan preserving the exact user-authorized evidence boundary.",
+      "files": [],
+      "expectations": [
+        "Do not consult the upstream repository or earlier implementation.",
+        "Continue normal live DOM/CSS/asset/motion extraction and verification.",
+        "Do not impose screenshot-only restrictions or disable clone skills.",
+        "Distinguish the user constraint from coordinator assumptions in any handoff."
+      ]
+    },
+    {
+      "id": 58,
+      "prompt": "For this experiment, reconstruct https://example.com using screenshots only. Do not extract DOM, CSS, scripts, or original assets.",
+      "expected_output": "A fresh reconstruction plan preserving the exact user-authorized evidence boundary.",
+      "files": [],
+      "expectations": [
+        "Honor the explicit screenshot-only constraint for this experiment.",
+        "Do not invoke incompatible extraction steps.",
+        "Report that this experiment does not establish normal pipeline completion.",
+        "Do not copy these restrictions to unrelated future tasks."
+      ]
     }
   ]
 }

@@ -21,14 +21,17 @@
 # Method:
 #   For each VIEWPORTS entry:
 #     1. Navigate, wait settle.
-#     2. Identify candidates: elements whose opacity OR transform changes
+#     2. Traverse delayed scroll gates until the document end is stable;
+#        clipped document footers or continuing growth are inconclusive.
+#     3. Identify candidates: elements whose opacity OR transform changes
 #        between scrollTop=0 and scrollTop=maxScroll-300. These are the
 #        scroll-driven elements on this page.
-#     3. Sample each candidate's style at [maxScroll-150, maxScroll-50, maxScroll].
+#     4. Sample each candidate's style at [maxScroll-150, maxScroll-50, maxScroll].
 #        Settled iff delta(maxScroll-50, maxScroll) is tiny on every axis.
-#     4. Repeat the last two positions without scrolling. Time-dependent
+#     5. Repeat the last two positions without scrolling. Time-dependent
 #        changes make the probe inconclusive (exit 2), never a settled pass.
-#     5. Any remaining candidate not settled at any viewport → FAIL.
+#     6. Recheck actual end position and document height after sampling;
+#        a stale endpoint cannot PASS. Unsettled candidates → FAIL.
 #
 # Usage:
 #   bash scroll-end-completion-check.sh <session> <impl-url> <ref-dir>
@@ -72,6 +75,7 @@ if ! command -v agent-browser >/dev/null 2>&1; then
   exit 2
 fi
 
+# shellcheck disable=SC2329 # Invoked through the EXIT trap.
 cleanup() {
   agent-browser --session "$SESSION" close 2>/dev/null
 }
@@ -156,15 +160,78 @@ for VP in "${VPS[@]}"; do
       return out;
     }
 
-    const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-    if (maxScroll < 200) {
-      return JSON.stringify({ skipped: 'page-too-short', maxScroll, candidates: 0 });
+    const liveMax = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const endpointState = () => {
+      const maxScroll = liveMax();
+      // A document-sized clip can masquerade as page-bottom while substantive
+      // page content is still outside its scrollable extent. A footer alone is
+      // not a reliable sentinel: some pages omit it, and reveal animations can
+      // keep it at opacity:0 until the unreachable end is crossed. Include
+      // semantic document regions, while excluding intentionally off-canvas UI
+      // such as dialogs, sidebars, navs, and aria-hidden decorations.
+      const clippedLandmarks = [...document.querySelectorAll(
+        'main, [role=main], footer, [role=contentinfo], article, section'
+      )]
+        .filter(el => {
+          const isFooter = el.matches('footer, [role=contentinfo]');
+          const excludedContainer = isFooter
+            ? el.parentElement?.closest('article, section, aside, nav, dialog, [role=dialog], [role=complementary], [role=navigation], [aria-modal=true], [aria-hidden=true]')
+            : el.parentElement?.closest('aside, nav, dialog, [role=dialog], [role=complementary], [role=navigation], [aria-modal=true], [aria-hidden=true]');
+          if (excludedContainer || el.matches('[aria-hidden=true]')) return false;
+          for (let parent = el; parent; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            // display:none has no authored geometry to recover. Visibility and
+            // opacity may be the stuck scroll reveal itself, so they must not
+            // erase the landmark from endpoint evidence.
+            if (style.display === 'none') return false;
+            // Fixed panels use viewport coordinates and may intentionally be
+            // taller than the viewport; they do not describe document extent.
+            if (style.position === 'fixed') return false;
+            // Content below the document fold is legitimate when it belongs
+            // to an authored nested scroller. overflow:hidden/clip remains a
+            // sentinel because that is the page-cap failure under test. The
+            // root scrolling element (and its body/html aliases) is the page,
+            // not a nested-scroller exemption.
+            const isRootScroller = parent === document.scrollingElement
+              || parent === document.documentElement || parent === document.body;
+            if (!isRootScroller && parent !== el && /^(auto|scroll)$/.test(style.overflowY)
+                && parent.scrollHeight > parent.clientHeight + 2) return false;
+          }
+          return el.getBoundingClientRect().bottom + window.scrollY > document.documentElement.scrollHeight + 2;
+        }).map(selectorOf);
+      return { scrollY: window.scrollY, maxScroll, scrollHeight: document.documentElement.scrollHeight,
+        viewportHeight: window.innerHeight, remaining: Math.max(0, maxScroll - window.scrollY), clippedLandmarks };
+    };
+    async function reachEnd() {
+      let stable = 0;
+      let endpoint;
+      // Let authored scroll gates finish before issuing another scroll event.
+      // Bound the traversal: infinite growth or a locked footer is inconclusive.
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const before = liveMax();
+        window.scrollTo({ top: before, behavior: 'instant' });
+        await sleep(Math.max(SETTLE, 1500));
+        endpoint = endpointState();
+        stable = Math.abs(endpoint.maxScroll - before) <= 2 && endpoint.remaining <= 2
+          && endpoint.clippedLandmarks.length === 0 ? stable + 1 : 0;
+        if (stable >= 2) return { ...endpoint, reached: true, attempts: attempt + 1 };
+      }
+      return { ...endpoint, reached: false, reason: 'document-end-not-established', attempts: 8 };
     }
 
     // Step 1: snapshot at top.
     window.scrollTo({ top: 0, behavior: 'instant' });
     await sleep(SETTLE);
     const top = snapshotAll();
+
+    const traversal = await reachEnd();
+    const maxScroll = liveMax();
+    if (!traversal.reached) {
+      return JSON.stringify({ maxScroll, candidates: 0, stuck: [], endpoint: traversal });
+    }
+    if (maxScroll < 200) {
+      return JSON.stringify({ skipped: 'page-too-short', maxScroll, candidates: 0, endpoint: traversal });
+    }
 
     // Step 2: snapshot near bottom (gives us the set of scroll-changing elements).
     window.scrollTo({ top: Math.max(0, maxScroll - 300), behavior: 'instant' });
@@ -189,7 +256,7 @@ for VP in "${VPS[@]}"; do
 
     if (candidates.length === 0) {
       document.querySelectorAll('[data-scrollprobe]').forEach(e => e.removeAttribute('data-scrollprobe'));
-      return JSON.stringify({ maxScroll, candidates: 0, stuck: [] });
+      return JSON.stringify({ maxScroll, candidates: 0, stuck: [], endpoint: await reachEnd() });
     }
 
     // Step 3: sample at three near-end positions. Settled iff delta between
@@ -214,7 +281,6 @@ for VP in "${VPS[@]}"; do
     // INSIDE the stale minus50..max window and flags ref-faithful behavior as
     // stuck. Recompute the live bottom before each sample so all three
     // samples sit at the true end of the document.
-    const liveMax = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     // One full-depth pre-pass so growth has already happened before sampling.
     window.scrollTo({ top: liveMax(), behavior: 'instant' });
     await sleep(SETTLE);
@@ -240,6 +306,18 @@ for VP in "${VPS[@]}"; do
     // identical-length window instead of composing two quarter-strength
     // measurements.
     const controlAtMaxFull = await sampleAt(window.scrollY);
+    // Sampling revisits near-bottom positions and can trigger another delayed
+    // content gate. Re-establish a stable endpoint after those interactions;
+    // an immediate read can race a timer and certify the stale bottom. If the
+    // extent changed after the samples were taken, fail closed because those
+    // samples no longer describe the actual endpoint.
+    const finalTraversal = await reachEnd();
+    const extentUnchanged = Math.abs(finalTraversal.maxScroll - maxScroll) <= 2;
+    const endpoint = {
+      ...finalTraversal,
+      reached: finalTraversal.reached && extentUnchanged,
+      ...(extentUnchanged ? {} : { reason: 'document-changed-after-sampling' }),
+    };
 
     const stuck = [];
     const temporalMotion = [];
@@ -315,6 +393,7 @@ for VP in "${VPS[@]}"; do
 
     return JSON.stringify({
       maxScroll,
+      endpoint,
       candidates: candidates.length,
       stuck,
       temporalMotion,
@@ -343,6 +422,7 @@ for VP in "${VPS[@]}"; do
       w: Number(process.argv[2]),
       h: Number(process.argv[3]),
       maxScroll: d.maxScroll || 0,
+      endpoint: d.endpoint || null,
       candidates: d.candidates || 0,
       stuck: d.stuck || [],
       temporalMotion: d.temporalMotion || [],
@@ -379,10 +459,15 @@ for VP in "${VPS[@]}"; do
     const d = JSON.parse(process.argv[1]);
     process.stdout.write(String((d.temporalMotion || []).filter((t) => t.confirmedTimeOnly).length));
   " "$DATA")
+  END_REACHED=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).endpoint?.reached === true))" "$DATA")
   if [ "$CONFIRMED_TIME_ONLY_COUNT" -gt 0 ]; then
     echo "   ℹ️  ${CONFIRMED_TIME_ONLY_COUNT} target(s) have confirmed time-only motion (not scroll-attributable) — excluded from the settle check"
   fi
-  if [ "$UNMEASURABLE_COUNT" -gt 0 ]; then
+  if [ "$END_REACHED" != "true" ]; then
+    GLOBAL_STATUS=1
+    PROBE_ERROR=1
+    echo "   ❌ document end was not established at ${W}x${H} — scroll completion is inconclusive"
+  elif [ "$UNMEASURABLE_COUNT" -gt 0 ]; then
     GLOBAL_STATUS=1
     PROBE_ERROR=1
     echo "   ❌ ${UNMEASURABLE_COUNT} target(s) vanished mid-probe — scroll completion is inconclusive"
@@ -419,6 +504,11 @@ else
   echo "❌ Scroll-end completion: FAIL"
   echo "   Output: $OUT"
   echo ""
+  if [ "$PROBE_ERROR" -eq 1 ]; then
+    echo "   Inspect endpoint and unmeasurableTargets in the artifact. Establish"
+    echo "   the real document end before diagnosing animation offsets; a scroll"
+    echo "   cap, delayed content growth, or an interrupted probe is not a settled pass."
+  else
   echo "   Common cause: scroll-scrub offset endpoint is geometrically unreachable"
   echo "   on tall viewports (e.g. 'start center' for a footer-bound element)."
   echo "   Fix: anchor the end offset to the target's BOTTOM, not its top —"
@@ -427,6 +517,7 @@ else
   echo "        finish before scroll progress reaches literal 1.0."
   echo "   See: skills/ui-reverse-engineering/transition-implementation.md →"
   echo "        'Viewport-aware scroll-scrub offsets'"
+  fi
 fi
 
 # exit 2 distinguishes a probe error (timeout/crash or time contamination)

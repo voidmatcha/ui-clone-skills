@@ -92,6 +92,7 @@ LOCK_DIR="$REF_DIR/.run-required-checks.lock"
 LOCK_TOKEN="$$-$RUN_UUID"
 LOCK_HELD=0
 DISPATCH_FILE="$REF_DIR/.run-required-checks-dispatch.${LOCK_TOKEN}.txt"
+RECEIPT_STARTED=0
 
 # shellcheck disable=SC2329 # Invoked via trap.
 cleanup_browser_sessions() {
@@ -110,6 +111,16 @@ release_dispatch_lock() {
 }
 
 cleanup_run() {
+  _run_exit=$?
+  if [ "$RECEIPT_STARTED" = "1" ] && [ "$_run_exit" -ne 0 ]; then
+    # Preserve a specific failed/setup-failed outcome when one was recorded.
+    # An unexpected exit or signal otherwise turns the active full receipt into
+    # an explicit interrupted outcome instead of leaving an ambiguous running
+    # receipt behind. Partial iteration receipts are never upgraded here.
+    PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration interrupt "$REF_DIR" \
+      --dispatch-id "$LOCK_TOKEN" \
+      >/dev/null 2>&1 || true
+  fi
   # EXIT cleanup cannot change an already-decided verdict. Keep it bounded and
   # best-effort; row-boundary cleanup below is the fail-closed control point.
   cleanup_browser_sessions >/dev/null 2>&1 || true
@@ -297,13 +308,15 @@ TOTAL=0; PASS=0; FAIL=0; WARN=0; SKIP=0; STALE=0
 # Build the list of (id, script, produces, args-mode) tuples from the plan.
 # args-mode is determined by the script basename — kept small and
 # explicit so adding a new gate means updating this table.
-if ! "$PYTHON_BIN" "$REPO_ROOT/scripts/verify/build_required_dispatch.py" "$PLAN" "$REF_DIR" "$REPO_ROOT" "$IMPL_ROOT" "$IMPL_SRC" "$IMPL_PUBLIC" "$REF_URL" "$IMPL_URL" "$SESSION" > "$DISPATCH_FILE"; then
+if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" "$REPO_ROOT/scripts/verify/build_required_dispatch.py" "$PLAN" "$REF_DIR" "$REPO_ROOT" "$IMPL_ROOT" "$IMPL_SRC" "$IMPL_PUBLIC" "$REF_URL" "$IMPL_URL" "$SESSION" > "$DISPATCH_FILE"; then
   echo "Required-check dependency resolution failed; no checks dispatched." >&2
   "$PYTHON_BIN" -c 'import json, pathlib, sys; (pathlib.Path(sys.argv[1]) / "iteration-receipt.json").write_text(json.dumps({"schemaVersion": 1, "mode": "final", "status": "setup-failed", "canonical": False}) + "\n")' "$REF_DIR"
   exit 2
 fi
 
-if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration select "$REF_DIR" "$DISPATCH_FILE"; then
+RECEIPT_STARTED=1
+if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration select "$REF_DIR" \
+  --dispatch-id "$LOCK_TOKEN" "$DISPATCH_FILE"; then
   echo "Invalid iteration selection; no checks dispatched." >&2
   exit 2
 fi
@@ -796,11 +809,16 @@ echo "  skipped:    $SKIP (unknown signature or missing script — wire into SIG
 echo "  stale:      $STALE (re-dispatched because impl source moved)"
 echo
 if [ "$SETUP_FAILURE" = "1" ]; then
+  PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration setup-fail "$REF_DIR" \
+    --dispatch-id "$LOCK_TOKEN" \
+    >/dev/null 2>&1 || true
   echo -e "${RED}DISPATCHER_SETUP_FAILED — a required-check signature, script, or owned browser cleanup failed. Inspect the preceding error before re-running.${NC}"
   exit 2
 fi
 
 if [ "$FAIL" -gt 0 ]; then
+  PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration fail "$REF_DIR" \
+    --dispatch-id "$LOCK_TOKEN" "$FAILED_IDS"
   echo -e "${RED}CHECKS_FAILED count=$FAIL — this is NOT a dispatcher break.${NC}"
   echo -e "${RED}Run \`uv run --project \"\$PLUGIN_ROOT\" --no-dev --frozen python -m ui_clone.gate $REF_DIR post-implement\` for the canonical verdict and per-check fix commands.${NC}"
   exit 1
@@ -829,7 +847,8 @@ if [ "$_iteration_mode" = "iteration" ]; then
   echo "ITERATION_CHECKS_FINISHED — selected checks only; run full dispatch before canonical completion."
 else
   if [ "${UI_CLONE_DISPATCH_DRY:-0}" != "1" ]; then
-    if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration finish "$REF_DIR"; then
+    if ! PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -m ui_clone.check_iteration finish "$REF_DIR" \
+      --dispatch-id "$LOCK_TOKEN"; then
       exit 2
     fi
   fi

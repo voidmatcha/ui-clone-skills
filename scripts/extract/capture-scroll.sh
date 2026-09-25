@@ -63,8 +63,20 @@ fi
 
 OUTDIR="${REF_DIR}/${STATES_PREFIX:-states}/scroll"
 mkdir -p "$(dirname "$OUTDIR")"
+# Invalidate the canonical corpus before capture starts. A transport failure
+# must not leave a previous successful summary where downstream gates can
+# mistake it for evidence from this run.
+python3 - "$OUTDIR" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+shutil.rmtree(Path(sys.argv[1]), ignore_errors=True)
+PY
 RESPONSE_TMP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/extract/capture-browser-bootstrap.sh
+source "$SCRIPT_DIR/capture-browser-bootstrap.sh"
 ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
 NAVIGATION_RECEIPT="$REF_DIR/capture-scroll-navigation.json"
 if [ "$REUSE_SESSION" = "true" ]; then
@@ -98,6 +110,16 @@ if [ "$REUSE_SESSION" = "false" ]; then
   AGENT_BROWSER_DEFAULT_TIMEOUT="$EVAL_TIMEOUT_MS"
   export AGENT_BROWSER_DEFAULT_TIMEOUT
 fi
+
+# Keep launch-affecting options identical across an owned session. Adding the
+# init script only at open recreates the browser and loses viewport emulation.
+scroll-agent-browser() {
+  if [ "$REUSE_SESSION" = "false" ]; then
+    agent-browser --session "$SCROLL_SESSION" --init-script "$INIT_JS_FILE" "$@"
+  else
+    agent-browser --session "$SCROLL_SESSION" "$@"
+  fi
+}
 
 derived_ready_wait_ms() {
   local splash_summary="${REF_DIR}/${STATES_PREFIX:-states}/splash/summary.json"
@@ -141,7 +163,7 @@ PY
 wait_for_derived_readiness() {
   local wait_ms
   wait_ms="$(derived_ready_wait_ms)"
-  if ! agent-browser --session "$SCROLL_SESSION" wait "$wait_ms" >/dev/null 2>&1; then
+  if ! scroll-agent-browser wait "$wait_ms" >/dev/null 2>&1; then
     echo "capture-scroll: agent-browser wait failed (session=$SCROLL_SESSION waitMs=$wait_ms)" >&2
     exit 2
   fi
@@ -149,22 +171,28 @@ wait_for_derived_readiness() {
 
 open_derived_page() {
   local open_output
-  agent-browser --session "$SCROLL_SESSION" close >/dev/null 2>&1 || true
+  local init_output
+  local viewport_output
+  local media_output
+  scroll-agent-browser close >/dev/null 2>&1 || true
   # Materialize the persistent page before applying emulation settings. The
   # first cold command can otherwise target a transient launch page.
-  if ! agent-browser --session "$SCROLL_SESSION" get url >/dev/null 2>&1; then
+  if ! init_output="$(capture_browser_bootstrap "capture-scroll" scroll-agent-browser 2>&1)"; then
     echo "capture-scroll: agent-browser page initialization failed (session=$SCROLL_SESSION)" >&2
+    printf '%s\n' "$init_output" >&2
     return 1
   fi
-  if ! agent-browser --session "$SCROLL_SESSION" set viewport 1440 900 >/dev/null 2>&1; then
+  if ! viewport_output="$(scroll-agent-browser set viewport 1440 900 2>&1)"; then
     echo "capture-scroll: agent-browser viewport failed (session=$SCROLL_SESSION)" >&2
+    printf '%s\n' "$viewport_output" >&2
     return 1
   fi
-  if ! agent-browser --session "$SCROLL_SESSION" set media "$CAPTURE_COLOR_SCHEME" >/dev/null 2>&1; then
+  if ! media_output="$(scroll-agent-browser set media "$CAPTURE_COLOR_SCHEME" 2>&1)"; then
     echo "capture-scroll: agent-browser color scheme failed (session=$SCROLL_SESSION)" >&2
+    printf '%s\n' "$media_output" >&2
     return 1
   fi
-  if ! open_output="$(agent-browser --session "$SCROLL_SESSION" --init-script "$INIT_JS_FILE" open "$URL" --json)"; then
+  if ! open_output="$(scroll-agent-browser open "$URL" --json)"; then
     echo "capture-scroll: agent-browser open failed for $URL (session=$SCROLL_SESSION)" >&2
     printf '%s\n' "$open_output" >&2
     return 1
@@ -177,7 +205,7 @@ open_derived_page() {
 cleanup() {
   rm -f "${RESPONSE_TMP:-}"
   if [ "$REUSE_SESSION" = "false" ]; then
-    agent-browser --session "$SCROLL_SESSION" close >/dev/null 2>&1 || true
+    scroll-agent-browser close >/dev/null 2>&1 || true
   fi
 }
 
@@ -190,7 +218,7 @@ if [ "$REUSE_SESSION" = "false" ]; then
   fi
   wait_for_derived_readiness
 else
-  if ! agent-browser --session "$SCROLL_SESSION" set media "$CAPTURE_COLOR_SCHEME" >/dev/null 2>&1; then
+  if ! scroll-agent-browser set media "$CAPTURE_COLOR_SCHEME" >/dev/null 2>&1; then
     echo "capture-scroll: agent-browser color scheme failed (session=$SCROLL_SESSION)" >&2
     exit 2
   fi
@@ -202,11 +230,85 @@ fi
 
 RESPONSE_RAW=""
 EVAL_OK="false"
+response_requires_continuation() {
+  python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)
+    if isinstance(value, dict) and isinstance(value.get("data"), dict):
+        value = value["data"].get("result", value)
+    if isinstance(value, str):
+        value = json.loads(value)
+    if isinstance(value, dict) and "result" in value:
+        value = value["result"]
+        if isinstance(value, str):
+            value = json.loads(value)
+    raise SystemExit(0 if isinstance(value, dict) and value.get("continuationRequired") is True else 1)
+except (json.JSONDecodeError, TypeError, ValueError):
+    raise SystemExit(1)
+'
+}
+
+response_continuation_receipt() {
+  python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+if isinstance(value, dict) and isinstance(value.get("data"), dict):
+    value = value["data"].get("result", value)
+if isinstance(value, str):
+    value = json.loads(value)
+if isinstance(value, dict) and "result" in value:
+    value = value["result"]
+    if isinstance(value, str):
+        value = json.loads(value)
+if not isinstance(value, dict):
+    raise SystemExit(2)
+print("{}\t{}".format(value.get("captureEpoch", ""), value.get("continuationSequence", "")))
+'
+}
+
 for attempt in $(seq 1 "$EVAL_ATTEMPTS"); do
-  if RESPONSE_RAW="$(agent-browser --session "$SCROLL_SESSION" eval --json --stdin < "$EVAL_JS_FILE" 2>&1)"; then
+  if RESPONSE_RAW="$(scroll-agent-browser eval --json --stdin < "$EVAL_JS_FILE" 2>&1)"; then
     if printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$SCROLL_SESSION" --navigation "$NAVIGATION_RECEIPT"; then
-      EVAL_OK="true"
-      break
+      RESULT_VALID="true"
+      CONTINUATION_COUNT=0
+      CONTINUATION_EPOCH=""
+      while printf '%s' "$RESPONSE_RAW" | response_requires_continuation; do
+        CONTINUATION_COUNT=$((CONTINUATION_COUNT + 1))
+        if [ "$CONTINUATION_COUNT" -gt 32 ]; then
+          echo "capture-scroll: continuation limit exceeded (session=$SCROLL_SESSION)" >&2
+          RESULT_VALID="false"
+          break
+        fi
+        CONTINUATION_RECEIPT="$(printf '%s' "$RESPONSE_RAW" | response_continuation_receipt)"
+        RECEIPT_EPOCH="${CONTINUATION_RECEIPT%%$'\t'*}"
+        RECEIPT_SEQUENCE="${CONTINUATION_RECEIPT#*$'\t'}"
+        if [ -z "$RECEIPT_EPOCH" ] || [ "$RECEIPT_SEQUENCE" != "$CONTINUATION_COUNT" ]; then
+          echo "capture-scroll: invalid continuation receipt (session=$SCROLL_SESSION receipt=$CONTINUATION_RECEIPT)" >&2
+          RESULT_VALID="false"
+          break
+        fi
+        if [ -n "$CONTINUATION_EPOCH" ] && [ "$RECEIPT_EPOCH" != "$CONTINUATION_EPOCH" ]; then
+          echo "capture-scroll: continuation epoch changed (session=$SCROLL_SESSION)" >&2
+          RESULT_VALID="false"
+          break
+        fi
+        CONTINUATION_EPOCH="$RECEIPT_EPOCH"
+        if ! RESPONSE_RAW="$(scroll-agent-browser eval --json --stdin < "$EVAL_JS_FILE" 2>&1)"; then
+          echo "capture-scroll: continuation eval failed (session=$SCROLL_SESSION chunk=$CONTINUATION_COUNT)" >&2
+          echo "$RESPONSE_RAW" >&2
+          RESULT_VALID="false"
+          break
+        fi
+        if ! printf '%s' "$RESPONSE_RAW" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$SCROLL_SESSION" --navigation "$NAVIGATION_RECEIPT"; then
+          RESULT_VALID="false"
+          break
+        fi
+      done
+      if [ "$RESULT_VALID" = "true" ]; then
+        EVAL_OK="true"
+        break
+      fi
     fi
   fi
 
@@ -226,6 +328,25 @@ for attempt in $(seq 1 "$EVAL_ATTEMPTS"); do
 done
 
 if [ "$EVAL_OK" != "true" ]; then
+  python3 - "$REF_DIR/capture-scroll-error.json" "$RESPONSE_RAW" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "schemaVersion": 1,
+            "status": "error",
+            "reason": "eval-failed",
+            "detail": sys.argv[2][-2000:],
+        },
+        ensure_ascii=False,
+        indent=2,
+    ),
+    encoding="utf-8",
+)
+PY
   echo "capture-scroll: agent-browser eval failed after ${EVAL_ATTEMPTS} attempt(s) (session=$SCROLL_SESSION)" >&2
   exit 3
 fi
@@ -235,7 +356,7 @@ fi
 # block reads via argv. Also handles multi-MB DOM blobs (7 stops × ~500KB).
 RESPONSE_TMP="$(mktemp -t capture-scroll-resp.XXXX)"
 printf '%s' "$RESPONSE_RAW" > "$RESPONSE_TMP"
-python3 - "$OUTDIR" "$RESPONSE_TMP" <<'PY'
+python3 - "$OUTDIR" "$RESPONSE_TMP" "$REF_DIR" <<'PY'
 import atexit
 import json
 import shutil
@@ -245,6 +366,7 @@ from pathlib import Path
 
 outdir = Path(sys.argv[1])
 raw = Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
+ref_dir = Path(sys.argv[3])
 
 try:
     parsed = json.loads(raw)
@@ -289,37 +411,82 @@ summary = {
     "scrollHeightDeltaPct": parsed.get("scrollHeightDeltaPct", 0),
     "scrollHeightGrew": parsed.get("scrollHeightGrew", False),
     "infiniteScroll": parsed.get("infiniteScroll", False),
+    "potentialInfiniteScroll": parsed.get(
+        "potentialInfiniteScroll", parsed.get("infiniteScroll", False)
+    ),
     "scrollEngine": parsed.get("scrollEngine", "native"),
     "scrollEngineReason": parsed.get("scrollEngineReason", "not reported"),
     "scrollTransportProven": parsed.get("scrollTransportProven", True),
     "scrollControlMethod": parsed.get("scrollControlMethod", "not reported"),
+    "inputListeners": parsed.get("inputListeners", []),
     "static": parsed.get("static", False),
     "domMutationCount": len(parsed.get("domMutations", [])),
     "domMutationTraceTruncated": parsed.get("domMutationTraceTruncated", False),
     "scanStepPx": parsed.get("scanStepPx", 0),
+    "scanStepsUsed": parsed.get("scanStepsUsed", 0),
     "alignmentFailures": parsed.get("alignmentFailures", []),
+    "captureComplete": parsed.get("captureComplete", True),
+    "incompleteReason": parsed.get("incompleteReason"),
+    "endTraversal": parsed.get("endTraversal", []),
+    "recaptureCount": parsed.get("recaptureCount", 0),
+    "captureTraversal": parsed.get("captureTraversal", "forward"),
+    "endingScrollHeight": parsed.get("endingScrollHeight", parsed.get("finalScrollHeight", 0)),
+    "settledEndScrollHeight": parsed.get("settledEndScrollHeight"),
+    "maxObservedScrollHeight": parsed.get("maxObservedScrollHeight", parsed.get("finalScrollHeight", 0)),
     "schemaVersion": 2,
 }
 
-if not summary["scrollTransportProven"]:
-    print(
-        "capture-scroll: scroll transport is unproven: "
-        f"{summary['scrollEngine']} ({summary['scrollEngineReason']})",
-        file=sys.stderr,
+failure_path = ref_dir / "capture-scroll-error.json"
+
+
+def reject_capture(reason, message):
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    # A failed refresh must not leave a previous successful scroll corpus at
+    # the canonical path where downstream gates could consume it as current.
+    shutil.rmtree(outdir, ignore_errors=True)
+    failure_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "error",
+                "reason": reason,
+                "summary": summary,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
+    print(message, file=sys.stderr)
     sys.exit(3)
 
+if not summary["scrollTransportProven"]:
+    reject_capture(
+        "scroll-transport-unproven",
+        "capture-scroll: scroll transport is unproven: "
+        f"{summary['scrollEngine']} ({summary['scrollEngineReason']})",
+    )
+
+if not summary["captureComplete"]:
+    reject_capture(
+        summary["incompleteReason"] or "adaptive-traversal-incomplete",
+        "capture-scroll: adaptive traversal incomplete: "
+        f"{summary['incompleteReason'] or 'unknown reason'}; "
+        f"endTraversal={json.dumps(summary['endTraversal'], ensure_ascii=False)}",
+    )
+
 if summary["alignmentFailures"]:
-    print(
+    reject_capture(
+        "scroll-target-alignment-failed",
         "capture-scroll: failed to align one or more scroll stops: "
         + json.dumps(summary["alignmentFailures"], ensure_ascii=False),
-        file=sys.stderr,
     )
-    sys.exit(3)
 
 if not isinstance(stops, list) or not stops:
     print("capture-scroll: stops must be a non-empty list", file=sys.stderr)
     sys.exit(3)
+
+failure_path.unlink(missing_ok=True)
 
 staging = Path(tempfile.mkdtemp(prefix=f".{outdir.name}.tmp-", dir=outdir.parent))
 atexit.register(shutil.rmtree, staging, ignore_errors=True)
@@ -353,6 +520,12 @@ for s in stops:
         json.dumps({
             "pct": pct,
             "scrollY": s.get("scrollY", 0),
+            "targetY": s.get("targetY"),
+            "maxScrollableAtCapture": s.get("maxScrollableAtCapture"),
+            "observedScrollHeight": s.get("observedScrollHeight"),
+            "observedMaxScrollable": s.get("observedMaxScrollable"),
+            "traversalDirection": s.get("traversalDirection", "unknown"),
+            "captureSequence": s.get("captureSequence"),
             "outerHTML": html,
             "visibleSections": s.get("visibleSections", []),
         }, ensure_ascii=False),

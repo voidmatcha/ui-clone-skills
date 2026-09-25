@@ -1577,6 +1577,96 @@ def test_spec_selectors_accept_captured_transient_dom(tmp_path: Path) -> None:
     assert not _check_spec_selectors_present_in_dom(Gate(tmp_path), spec)
 
 
+def _scroll_capture_fixture(ref: Path) -> dict:
+    (ref / "structure.json").write_text(json.dumps({"tag": "body", "class": "page"}))
+    scroll = ref / "states" / "scroll"
+    scroll.mkdir(parents=True)
+    (scroll / "summary.json").write_text(json.dumps({"checked": True, "static": False}))
+    (scroll / "trajectory.json").write_text(
+        json.dumps([
+            {"pct": 0, "scrollY": 0},
+            {"pct": 25, "scrollY": 500},
+        ])
+    )
+    (scroll / "0pct.json").write_text(json.dumps({
+        "pct": 0,
+        "scrollY": 0,
+        "outerHTML": '<html><body class="page"></body></html>',
+    }))
+    (scroll / "25pct.json").write_text(json.dumps({
+        "pct": 25,
+        "scrollY": 500,
+        "outerHTML": '<html><body><header class="mounted"><a id="join">Join</a></header></body></html>',
+    }))
+    return {"transitions": [{"id": "scroll-mount", "target": ".mounted #join"}]}
+
+
+def test_spec_selectors_accept_captured_scroll_only_dom(tmp_path: Path) -> None:
+    from ui_clone.gates.spec import _check_spec_selectors_present_in_dom
+
+    spec = _scroll_capture_fixture(tmp_path)
+    assert not _check_spec_selectors_present_in_dom(Gate(tmp_path), spec)
+
+
+def test_spec_selectors_reject_missing_or_cross_snapshot_scroll_targets(tmp_path: Path) -> None:
+    from ui_clone.gates.spec import _check_spec_selectors_present_in_dom
+
+    spec = _scroll_capture_fixture(tmp_path)
+    spec["transitions"].extend([
+        {"id": "missing", "target": ".nonexistent"},
+        {"id": "split", "target": ".page #join"},
+    ])
+    failures = _check_spec_selectors_present_in_dom(Gate(tmp_path), spec)
+    assert len(failures) == 1
+    assert "missing" in failures[0].message
+    assert "split" in failures[0].message
+    assert "scroll-mount" not in failures[0].message
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unchecked",
+        "mismatched-pct",
+        "mismatched-scroll",
+        "malformed",
+        "escape",
+        "manifest-only",
+    ],
+)
+def test_spec_selectors_reject_invalid_scroll_capture(tmp_path: Path, mutation: str) -> None:
+    from ui_clone.gates.spec import _check_spec_selectors_present_in_dom
+
+    spec = _scroll_capture_fixture(tmp_path)
+    scroll = tmp_path / "states" / "scroll"
+    if mutation == "unchecked":
+        (scroll / "summary.json").write_text(json.dumps({"checked": False}))
+    elif mutation == "mismatched-pct":
+        data = json.loads((scroll / "25pct.json").read_text())
+        data["pct"] = 50
+        (scroll / "25pct.json").write_text(json.dumps(data))
+    elif mutation == "mismatched-scroll":
+        data = json.loads((scroll / "25pct.json").read_text())
+        data["scrollY"] = 499
+        (scroll / "25pct.json").write_text(json.dumps(data))
+    elif mutation == "malformed":
+        (scroll / "25pct.json").write_text("{")
+    elif mutation == "escape":
+        snapshot = scroll / "25pct.json"
+        outside = tmp_path.parent / f"{tmp_path.name}-outside-scroll.json"
+        snapshot.rename(outside)
+        snapshot.symlink_to(outside)
+    elif mutation == "manifest-only":
+        (scroll / "25pct.json").unlink()
+        (tmp_path / "state-structure-spec.json").write_text(json.dumps({
+            "events": [{"target": ".mounted #join"}],
+        }))
+    assert any(
+        result.status == "fail"
+        for result in _check_spec_selectors_present_in_dom(Gate(tmp_path), spec)
+    )
+
+
 @pytest.mark.parametrize('mutation', ['missing', 'unchecked', 'unrecorded', 'escape', 'script', 'declaration', 'split', 'timestamp', 'settled-time', 'template', 'malformed'])
 def test_spec_selectors_reject_unsupported_transient_dom(tmp_path: Path, mutation: str) -> None:
     from ui_clone.gates.spec import _check_spec_selectors_present_in_dom

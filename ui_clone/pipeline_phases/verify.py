@@ -23,7 +23,7 @@ from ui_clone.hooks._common import RED as _RED
 from ui_clone.hooks._common import _clear_gate_skip
 from ui_clone.hooks._common import deferred_checks_blocker as _deferred_checks_blocker
 from ui_clone.hooks._common import gate_skip_blocker as _gate_skip_blocker
-from ui_clone.hooks._common import quick_tier_blocker as _quick_tier_blocker
+from ui_clone.hooks._common import quick_tier_blocker_details as _quick_tier_blocker_details
 from ui_clone.pipeline_logs import (
     _as_text,
     completed_process_output,
@@ -398,14 +398,15 @@ def execute_verify(pipeline: Pipeline, json_output: bool = False) -> int:
             print(f"{_RED}{message}{_NC}")
         return 1
 
-    tier_blocker = _quick_tier_blocker(pipeline.ref_dir)
+    tier_blocker = _quick_tier_blocker_details(pipeline.ref_dir)
     if tier_blocker is not None:
+        blocker_reason, blocker_action = tier_blocker
         if json_output:
             print(json.dumps({
                 "schemaVersion": 1,
                 "status": "failed",
-                "reason": tier_blocker,
-                "next_action": "regenerate_verification_plan",
+                "reason": blocker_reason,
+                "next_action": blocker_action,
                 "verify_stamp": {
                     "path": str(pipeline.ref_dir / "verify-stamp.json"),
                     "created": False,
@@ -413,7 +414,7 @@ def execute_verify(pipeline: Pipeline, json_output: bool = False) -> int:
                 },
             }, ensure_ascii=False, indent=2))
         else:
-            print(f"{_RED}verify: {tier_blocker}{_NC}")
+            print(f"{_RED}verify: {blocker_reason}{_NC}")
         return 1
 
     deferred_blocker = _deferred_checks_blocker(pipeline.ref_dir)

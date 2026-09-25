@@ -28,7 +28,7 @@
 #
 # Output:
 #   <ref_dir>/states/splash/trajectory.json   — array of {ts_ms, hash, bodyClass, htmlClass, compositeDigest, full: bool}
-#   <ref_dir>/states/splash/summary.json      — {checked, durationMs, polls, timedOut, reason}
+#   <ref_dir>/states/splash/summary.json      — {checked, durationMs, polls, timedOut, splashTimedOut, reason}
 #   <ref_dir>/states/splash/0ms.json          — full outerHTML at t=0
 #   <ref_dir>/states/splash/settled.json      — full outerHTML at end-of-loop
 #   <ref_dir>/states/splash/<NNN>ms.json      — full outerHTML when structural mutation > 20%
@@ -75,6 +75,8 @@ mkdir -p "$OUTDIR"
 INIT_SCRIPT=""
 RESPONSE_TMP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/extract/capture-browser-bootstrap.sh
+source "$SCRIPT_DIR/capture-browser-bootstrap.sh"
 ORIGIN_VALIDATOR="$SCRIPT_DIR/validate-agent-browser-origin.py"
 NAVIGATION_RECEIPT="$REF_DIR/capture-states-navigation.json"
 if [ "$REUSE_SESSION" = "true" ]; then
@@ -115,6 +117,12 @@ EVAL_JS='(async () => {
   const startedAt = performance.now();
   let lastHash = null;
   let lastChangeAt = startedAt;
+  let lastSplashHash = null;
+  let lastSplashChangeAt = startedAt;
+  let splashSettledAt = null;
+  let visibleStructureBaseline = null;
+  let materialVisualBaseline = null;
+  let visibleStructureEpoch = 0;
 
   const cssEscape = (value) => {
     const raw = String(value || "");
@@ -375,6 +383,117 @@ EVAL_JS='(async () => {
     return top.join("|");
   };
 
+  // Splash settlement must not depend on timer-driven transforms, media time,
+  // animation counts, or offscreen hydration pruning. It still needs a
+  // structural channel for an in-viewport loading shell that is replaced
+  // without an overlay or root-class lifecycle. Record stable DOM identities
+  // for rendered elements intersecting the viewport. Layout geometry and
+  // transient motion styles are excluded; stable image, poster, background,
+  // mask, and SVG geometry identities remain observable.
+  const effectivelyRendered = (el, ownStyle) => {
+    let opacity = 1;
+    let cur = el;
+    while (cur && cur.nodeType === Node.ELEMENT_NODE) {
+      const cs = cur === el ? ownStyle : getComputedStyle(cur);
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+      const ownOpacity = Number.parseFloat(cs.opacity || "1");
+      opacity *= Number.isFinite(ownOpacity) ? ownOpacity : 1;
+      if (opacity <= 0.05) return false;
+      cur = cur.parentElement;
+    }
+    return true;
+  };
+
+  const stableVisualIdentity = (el, cs) => {
+    const tag = el.localName || "";
+    const parts = [];
+    const attr = (name) => String(el.getAttribute(name) || "");
+    if (tag === "img") {
+      parts.push(`img:${String(el.currentSrc || attr("src"))}:${attr("srcset")}`);
+    } else if (tag === "video") {
+      parts.push(`video-poster:${attr("poster")}`);
+    }
+    // Animation ownership does not prove that an asset change is unrelated
+    // to loading. Keep visual replacements observable, even on animated nodes.
+    for (const [name, value] of [
+      ["background", cs.backgroundImage],
+      ["mask", cs.maskImage],
+      ["webkit-mask", cs.webkitMaskImage],
+    ]) {
+      const normalized = String(value || "");
+      if (normalized && normalized !== "none") parts.push(`${name}:${normalized}`);
+    }
+    const svgGeometry = new Set([
+      "svg", "path", "use", "image", "polygon", "polyline", "circle",
+      "ellipse", "line", "rect",
+    ]);
+    if (svgGeometry.has(tag)) {
+      const geometryAttrs = [
+        "viewBox", "d", "points", "href", "xlink:href", "pathLength",
+        "width", "height", "cx", "cy", "r", "rx", "ry",
+      ];
+      const geometry = geometryAttrs
+        .map((name) => [name, attr(name)])
+        .filter((entry) => entry[1])
+        .map((entry) => `${entry[0]}=${entry[1]}`)
+        .join(",");
+      if (geometry) parts.push(`${tag}:${geometry}`);
+    }
+    return parts.join("|").slice(0, 2048);
+  };
+
+  const visibleStructureLabels = () => {
+    const labels = [];
+    const materialVisuals = new Map();
+    for (const el of eachRenderedElement(document.body)) {
+      try {
+        const r = el.getBoundingClientRect();
+        if (r.right <= 0 || r.left >= window.innerWidth || r.bottom <= 0 || r.top >= window.innerHeight) continue;
+        const cs = getComputedStyle(el);
+        if (!effectivelyRendered(el, cs)) continue;
+        const selector = selectorFor(el);
+        if (selector) {
+          const childNodes = Array.from(el.childNodes || []);
+          const directText = childNodes
+            .filter((node) => node.nodeType === Node.TEXT_NODE)
+            .map((node) => String(node.textContent || ""))
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 120);
+          const visualIdentity = stableVisualIdentity(el, cs);
+          labels.push(`${selector}|${directText}|${visualIdentity}`);
+          const visibleWidth = Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
+          const visibleHeight = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+          const coverage = (visibleWidth * visibleHeight) /
+            Math.max(window.innerWidth * window.innerHeight, 1);
+          if (visualIdentity && coverage >= COVERING_RECORD_FLOOR) {
+            materialVisuals.set(selector, visualIdentity);
+          }
+        }
+      } catch (e) {}
+    }
+    return { labels: Array.from(new Set(labels)).sort(), materialVisuals };
+  };
+
+  const materialVisualChanged = (before, after) => {
+    if (!before) return false;
+    const keys = new Set([...before.keys(), ...after.keys()]);
+    for (const key of keys) {
+      if ((before.get(key) || "") !== (after.get(key) || "")) return true;
+    }
+    return false;
+  };
+
+  const structureDelta = (before, after) => {
+    if (!before) return 0;
+    if (before.size === 0) return after.size === 0 ? 0 : 1;
+    let changed = 0;
+    for (const label of before) if (!after.has(label)) changed++;
+    for (const label of after) if (!before.has(label)) changed++;
+    return changed / Math.max(before.size, after.size, 1);
+  };
+
   const cheapHash = (str) => {
     let h = 5381;
     for (let i = 0; i < str.length; i++) h = ((h << 5) + h) + str.charCodeAt(i);
@@ -400,6 +519,21 @@ EVAL_JS='(async () => {
       .sort();
     const animations = animationEvidence();
     const media = mediaFingerprint();
+    const visibleSnapshot = visibleStructureLabels();
+    const visibleLabels = visibleSnapshot.labels;
+    const visibleSet = new Set(visibleLabels);
+    let visibleStructureChanged = false;
+    if (visibleStructureBaseline === null) {
+      visibleStructureBaseline = visibleSet;
+    } else if (
+      structureDelta(visibleStructureBaseline, visibleSet) > 0.2 ||
+      materialVisualChanged(materialVisualBaseline, visibleSnapshot.materialVisuals)
+    ) {
+      visibleStructureChanged = true;
+      visibleStructureEpoch++;
+      visibleStructureBaseline = visibleSet;
+    }
+    materialVisualBaseline = visibleSnapshot.materialVisuals;
     const composite = [
       html.className || "",
       body.className || "",
@@ -413,14 +547,30 @@ EVAL_JS='(async () => {
       (body.outerHTML || "").length,
       fingerprintTopElements(),
     ].join("|");
+    const splashComposite = [
+      html.className || "",
+      body.className || "",
+      getComputedStyle(html).overflow,
+      body.style ? getComputedStyle(body).overflow : "",
+      JSON.stringify(overlay),
+      coveringIdentities.join(","),
+      visibleStructureEpoch,
+    ].join("|");
     return {
       hash: cheapHash(composite),
       compositeDigest: composite.slice(0, 200),
+      splashHash: cheapHash(splashComposite),
+      splashDigest: splashComposite.slice(0, 200),
       bodyClass: body.className || "",
       htmlClass: html.className || "",
       domLength: (body.outerHTML || "").length,
       overlay,
       covering: survey.covering,
+      visibleStructure: {
+        hash: String(cheapHash(visibleLabels.join("|"))),
+        count: visibleLabels.length,
+        changed: visibleStructureChanged,
+      },
       animationEvidence: animations,
       motionEvidence: {
         changed: false,
@@ -443,9 +593,12 @@ EVAL_JS='(async () => {
     bodyClass: initial.bodyClass,
     htmlClass: initial.htmlClass,
     compositeDigest: initial.compositeDigest,
+    splashHash: initial.splashHash,
+    splashDigest: initial.splashDigest,
     domLength: initial.domLength,
     overlay: initial.overlay,
     covering: initial.covering,
+    visibleStructure: initial.visibleStructure,
     animationEvidence: initial.animationEvidence,
     motionEvidence: initial.motionEvidence,
     mediaFingerprint: initial.mediaFingerprint,
@@ -453,11 +606,13 @@ EVAL_JS='(async () => {
     bookend: "0ms",
   });
   lastHash = initial.hash;
+  lastSplashHash = initial.splashHash;
   let baselineDomLength = initial.domLength;
   const initialOverlayIdentity = initial.overlay.identity || initial.overlay.selector;
   const awaitingInitialOverlayExit = Boolean(
     initial.overlay.visible && initial.overlay.coverage >= 0.75
   );
+  let initialOverlayExitObserved = false;
   // A page that visibly starts behind a fullscreen overlay gets the longest
   // evidence window because real loaders are often gated on media/font
   // readiness and can cross 5s under cold-cache or network variance. Exit as
@@ -475,14 +630,12 @@ EVAL_JS='(async () => {
   // innovation: 5000ms timed out with motionEvidence ["media",
   // "active-animation"]; 10000ms settles at ~6.3s with `stable-2s`.
   //
-  // This does NOT change what `authoritativeNegative` rests on. That
-  // certificate is derived by ui_clone.splash_contract from what the samples
-  // recorded (overlay probe, covering-element lifecycle, root-class removal,
-  // structural DOM shift) and from the run ending at its own settle; a longer
-  // ceiling only gives a page more room to reach that settle. A page that
-  // never goes quiet (autoplaying video moves currentTime every poll; an
-  // infinite animation on a large above-the-fold element) still times out,
-  // is still uncertified, and now spends the full 10s doing so.
+  // `authoritativeNegative` now rests on a separate splash settle clock. The
+  // full evidence hash may keep changing for autoplay media or an infinite
+  // animation and run to this ceiling; that no longer makes an otherwise
+  // stable splash probe inconclusive. Overlay lifecycle, covering identities,
+  // root classes, scroll lock, and material viewport-structure replacement
+  // still reset the splash clock and fail closed when they do not settle.
   const captureLimitMs = awaitingInitialOverlayExit ? 15000 : 10000;
 
   while ((performance.now() - startedAt) < captureLimitMs) {
@@ -495,7 +648,10 @@ EVAL_JS='(async () => {
         !cur.overlay.visible || currentOverlayIdentity !== initialOverlayIdentity
       )
     );
-    if (cur.hash !== lastHash) {
+    if (initialOverlayExited) initialOverlayExitObserved = true;
+    const evidenceChanged = cur.hash !== lastHash;
+    const splashChanged = cur.splashHash !== lastSplashHash;
+    if (evidenceChanged || splashChanged) {
       const structuralDelta = Math.abs(cur.domLength - baselineDomLength) / Math.max(baselineDomLength, 1);
       const includeFullHTML = structuralDelta > 0.2;  // >20% delta
       states.push({
@@ -504,9 +660,12 @@ EVAL_JS='(async () => {
         bodyClass: cur.bodyClass,
         htmlClass: cur.htmlClass,
         compositeDigest: cur.compositeDigest,
+        splashHash: cur.splashHash,
+        splashDigest: cur.splashDigest,
         domLength: cur.domLength,
         overlay: cur.overlay,
         covering: cur.covering,
+        visibleStructure: cur.visibleStructure,
         animationEvidence: cur.animationEvidence,
         motionEvidence: {
           changed: true,
@@ -517,9 +676,24 @@ EVAL_JS='(async () => {
         structuralDelta: includeFullHTML,
       });
       lastHash = cur.hash;
-      lastChangeAt = now;
+      if (evidenceChanged) lastChangeAt = now;
+      if (splashChanged) {
+        lastSplashHash = cur.splashHash;
+        lastSplashChangeAt = now;
+        splashSettledAt = null;
+      }
       if (includeFullHTML) baselineDomLength = cur.domLength;
-    } else if (!awaitingInitialOverlayExit && (now - lastChangeAt) >= 2000) {
+    }
+    if (
+      !awaitingInitialOverlayExit && splashSettledAt === null &&
+      (now - lastSplashChangeAt) >= 2000
+    ) {
+      splashSettledAt = now;
+    }
+    if (
+      !awaitingInitialOverlayExit && splashSettledAt !== null &&
+      (now - lastChangeAt) >= 2000
+    ) {
       break;
     }
     if (initialOverlayExited) break;
@@ -527,15 +701,30 @@ EVAL_JS='(async () => {
 
   // Settled state — always full
   const final = computeState();
+  const finalOverlayIdentity = final.overlay.identity || final.overlay.selector;
+  if (
+    awaitingInitialOverlayExit &&
+    (!final.overlay.visible || finalOverlayIdentity !== initialOverlayIdentity)
+  ) {
+    initialOverlayExitObserved = true;
+  }
+  if (final.splashHash !== lastSplashHash) {
+    lastSplashHash = final.splashHash;
+    lastSplashChangeAt = performance.now();
+    splashSettledAt = null;
+  }
   const finalEntry = {
     ts_ms: Math.round(performance.now() - startedAt),
     hash: final.hash,
     bodyClass: final.bodyClass,
     htmlClass: final.htmlClass,
     compositeDigest: final.compositeDigest,
+    splashHash: final.splashHash,
+    splashDigest: final.splashDigest,
     domLength: final.domLength,
     overlay: final.overlay,
     covering: final.covering,
+    visibleStructure: final.visibleStructure,
     animationEvidence: final.animationEvidence,
     motionEvidence: {
       changed: states.length > 1,
@@ -560,11 +749,16 @@ EVAL_JS='(async () => {
   }
 
   const elapsed = performance.now() - startedAt;
+  const splashTimedOut = awaitingInitialOverlayExit
+    ? !initialOverlayExitObserved
+    : splashSettledAt === null;
   return {
     states,
     durationMs: Math.round(elapsed),
     polls: states.length,
     timedOut: elapsed >= captureLimitMs,
+    splashTimedOut,
+    splashSettledMs: splashSettledAt === null ? null : Math.round(splashSettledAt - startedAt),
     reason: states.length <= 1 ? "no-change" :
             elapsed >= captureLimitMs ? "wall-clock-cap" :
             "stable-2s",
@@ -618,7 +812,7 @@ if [ "$REUSE_SESSION" = "false" ]; then
   state-agent-browser close >/dev/null 2>&1 || true
   # Materialize the persistent page before applying emulation settings. The
   # first cold command can otherwise target a transient launch page.
-  if ! state-agent-browser get url >/dev/null; then
+  if ! capture_browser_bootstrap "capture-states" state-agent-browser >/dev/null; then
     echo "capture-states: agent-browser page initialization failed (session=$STATES_SESSION)" >&2
     exit 2
   fi
@@ -635,6 +829,7 @@ if [ "$REUSE_SESSION" = "false" ]; then
   fi
   if ! OPEN_OUTPUT="$(state-agent-browser open "$URL" --json)"; then
     echo "capture-states: agent-browser open failed for $URL (session=$STATES_SESSION)" >&2
+    printf '%s\n' "$OPEN_OUTPUT" >&2
     exit 2
   fi
   if ! printf '%s' "$OPEN_OUTPUT" | python3 "$ORIGIN_VALIDATOR" "$URL" --session "$STATES_SESSION" --navigation "$NAVIGATION_RECEIPT" --record; then
@@ -720,6 +915,8 @@ summary = {
     "durationMs": parsed.get("durationMs", 0),
     "polls": parsed.get("polls", len(states)),
     "timedOut": parsed.get("timedOut", False),
+    "splashTimedOut": parsed.get("splashTimedOut", parsed.get("timedOut", False)),
+    "splashSettledMs": parsed.get("splashSettledMs"),
     "reason": parsed.get("reason", "unknown"),
     "schemaVersion": 1,
 }
@@ -860,7 +1057,8 @@ def _splash_contract(states, capture_mode, summary):
         else None
     )
     detected = bool(len(states) > 1 and first_visible and exit_observation)
-    timed_out = bool(summary.get("timedOut"))
+    timed_out = bool(summary.get("splashTimedOut", summary.get("timedOut")))
+    evidence_timed_out = bool(summary.get("timedOut"))
     reason = summary.get("reason")
     # "This page has no splash" is certified from what every sample recorded
     # (overlay probe, covering-element lifecycle, html/body class removal,
@@ -889,6 +1087,8 @@ def _splash_contract(states, capture_mode, summary):
         "capture": {
             "stateCount": len(states),
             "timedOut": timed_out,
+            "evidenceTimedOut": evidence_timed_out,
+            "splashSettledMs": summary.get("splashSettledMs"),
             "reason": reason,
             "absenceEvidence": evidence.to_contract(),
             "authoritativeNegative": authoritative_negative,

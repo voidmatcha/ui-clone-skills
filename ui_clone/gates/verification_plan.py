@@ -1343,15 +1343,21 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
             )
         ]
 
-    schema_version = plan.get("schemaVersion")
     vp_fix = "Run: bash skills/visual-debug/scripts/verification-plan.sh <ref-dir>"
+    if not isinstance(plan, dict):
+        return [CheckResult(
+            "verification-plan.json", "fail",
+            "verification-plan.json — expected a JSON object; required checks cannot be read.",
+            fix=vp_fix,
+        )]
+    schema_version = plan.get("schemaVersion")
     if "schemaVersion" not in plan:
         # Hand-written / hallucinated verification-plan.json (e.g. agent
         # inventing {component, checks} keys instead of running
         # verification-plan.sh) used to slip through as a silent warn —
         # making every declared required check unenforceable. Hard-fail
         # when no version is declared so the agent must actually run the
-        # script. (Known future versions still degrade gracefully below.)
+        # script. Unsupported versions also fail closed below.
         return [
             CheckResult(
                 "verification-plan.json",
@@ -1361,12 +1367,14 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
                 fix=vp_fix,
             )
         ]
-    if schema_version != 1:
+    if type(schema_version) is not int or schema_version != 1:
         return [
             CheckResult(
                 "verification-plan.json",
-                "warn",
-                f"verification-plan.json — schemaVersion {schema_version!r} not supported; ignoring",
+                "fail",
+                f"verification-plan.json — schemaVersion {schema_version!r} not supported; "
+                "required checks cannot be enforced. Regenerate the plan.",
+                fix=vp_fix,
             )
         ]
 
@@ -1380,7 +1388,7 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
                 fix=vp_fix,
             )
         ]
-    checks = plan.get("requiredChecks") or []
+    checks = plan.get("requiredChecks")
     if not isinstance(checks, list):
         return [
             CheckResult(

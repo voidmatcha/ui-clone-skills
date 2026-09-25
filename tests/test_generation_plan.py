@@ -989,6 +989,68 @@ def test_generation_plan_preserves_runtime_source_id_and_emits_exact_match_wire(
     ]
 
 
+def test_generation_plan_emits_valid_multiclass_component_selector(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "multiclass-selector"
+    ref.mkdir(parents=True)
+    (ref / "section-map.json").write_text(
+        json.dumps(
+            {
+                "sections": [
+                    {
+                        "tag": "section",
+                        "className": "relative bg-surface md:block w-1/2",
+                        "height": 720,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    assert plan["componentList"][0]["selector"] == (
+        "section.relative.bg-surface.md\\:block.w-1\\/2"
+    )
+
+
+def test_generation_plan_preserves_captured_component_selector(
+    tmp_path: Path,
+) -> None:
+    ref = tmp_path / "ref" / "captured-selector"
+    ref.mkdir(parents=True)
+    (ref / "section-map.json").write_text(
+        json.dumps(
+            {
+                "sections": [
+                    {
+                        "tag": "section",
+                        "id": "hero",
+                        "className": "relative bg-surface",
+                        "captureSelector": "main > section:nth-of-type(2)",
+                        "height": 720,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["bash", str(_project_root() / "scripts/extract/generation-plan.sh"), str(ref)],
+        check=True,
+    )
+
+    plan = json.loads((ref / "generation-plan.json").read_text(encoding="utf-8"))
+    assert plan["componentList"][0]["selector"] == "main > section:nth-of-type(2)"
+
+
 def test_generation_plan_does_not_guess_runtime_wire_for_unmatched_selector(
     tmp_path: Path,
 ) -> None:

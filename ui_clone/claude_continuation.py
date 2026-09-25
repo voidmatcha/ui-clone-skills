@@ -50,6 +50,8 @@ _UUID_RE = re.compile(
 )
 _FINAL_STATES = {STATE_COMPLETE, STATE_TERMINAL, STATE_UNSUPPORTED}
 _SCHEDULER_STATES = {STATE_ARMING, STATE_ARMED, STATE_CANCELING}
+_TRANSCRIPT_TAIL_LIMIT = 16 * 1024 * 1024
+_CRONCREATE_DENIAL_REASON = "CronCreate permission denied by host auto mode"
 
 
 class ContinuationError(ValueError):
@@ -564,6 +566,127 @@ def cron_create_input(receipt: Mapping[str, Any]) -> dict[str, object]:
         "recurring": False,
         "durable": False,
     }
+
+
+def _bounded_transcript_records(path: Path) -> Iterator[Mapping[str, Any]]:
+    """Yield parseable records from a bounded tail of a Claude JSONL transcript.
+
+    Stop hooks run repeatedly, and real transcripts can be hundreds of MB. A
+    failed scheduler call is adjacent to the next Stop, so a bounded tail is
+    sufficient without making every Stop rescan the whole session. If one JSONL
+    record itself exceeds the cap, the partial first record is discarded and
+    detection fails closed to the ordinary arming state.
+    """
+    try:
+        size = path.stat().st_size
+        offset = max(0, size - _TRANSCRIPT_TAIL_LIMIT)
+        with path.open("rb") as stream:
+            stream.seek(offset)
+            if offset:
+                stream.readline()
+            for raw_line in stream:
+                try:
+                    value = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(value, Mapping):
+                    yield value
+    except (OSError, ValueError):
+        return
+
+
+def _record_content(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    message = record.get("message")
+    if not isinstance(message, Mapping):
+        return []
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [item for item in content if isinstance(item, Mapping)]
+
+
+def _denial_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(
+            str(item.get("text", ""))
+            for item in value
+            if isinstance(item, Mapping)
+        )
+    return ""
+
+
+def _timestamp_at_or_after(value: object, minimum: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        floor = dt.datetime.fromisoformat(minimum.replace("Z", "+00:00"))
+        return parsed >= floor
+    except (TypeError, ValueError):
+        return False
+
+
+def croncreate_denial_reason(
+    transcript_path: object,
+    receipt: Mapping[str, Any],
+) -> str | None:
+    """Return a stable reason for a linked denial of this receipt's exact create.
+
+    Claude Code does not currently deliver auto-mode tool denials to the
+    PostToolUse hook. The Stop payload does include the session transcript path,
+    so correlate an exact CronCreate tool_use with its error tool_result. Never
+    infer denial from assistant prose, thinking, an unrelated lease, or an
+    unlinked permission error.
+    """
+    if not isinstance(transcript_path, str | os.PathLike) or not str(transcript_path):
+        return None
+    if receipt.get("state") != STATE_ARMING:
+        return None
+    try:
+        expected_input = cron_create_input(receipt)
+    except ContinuationError:
+        return None
+    created_at = receipt.get("createdAt")
+    if not isinstance(created_at, str):
+        return None
+
+    exact_tool_ids: set[str] = set()
+    for record in _bounded_transcript_records(Path(transcript_path)):
+        if not _timestamp_at_or_after(record.get("timestamp"), created_at):
+            continue
+        record_type = record.get("type")
+        for item in _record_content(record):
+            if (
+                record_type == "assistant"
+                and item.get("type") == "tool_use"
+                and item.get("name") == "CronCreate"
+                and item.get("input") == expected_input
+                and isinstance(item.get("id"), str)
+            ):
+                exact_tool_ids.add(str(item["id"]))
+                continue
+            if (
+                record_type != "user"
+                or item.get("type") != "tool_result"
+                or item.get("is_error") is not True
+                or item.get("tool_use_id") not in exact_tool_ids
+            ):
+                continue
+            lowered = _denial_text(item.get("content")).lower()
+            if "permission for this action was denied" in lowered or (
+                "permission denied" in lowered and "unauthorized persistence" in lowered
+            ):
+                return _CRONCREATE_DENIAL_REASON
+    return None
+
+
+def is_croncreate_denied(receipt: Mapping[str, Any]) -> bool:
+    return (
+        receipt.get("state") == STATE_UNSUPPORTED
+        and receipt.get("reason") == _CRONCREATE_DENIAL_REASON
+    )
 
 
 def accept_wake(project: Path, session_id: str, prompt: str) -> dict[str, Any]:

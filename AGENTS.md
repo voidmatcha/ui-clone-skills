@@ -43,6 +43,16 @@ CLAUDE.md          Thin Claude Code entrypoint that imports this file
 
 Default stays `comprehensive` so existing callers and CI keep their current safety guarantees. Drop to `quick`/`standard` only when iterating against a single signal class and you want a faster feedback loop.
 
+## Run-based skill maintenance
+
+When asked to improve this skill from existing clone runs, treat those runs as
+read-only evidence by default. Preserve their captures, logs, failures, and code;
+fix shared producers/checkers/instructions here with focused regression fixtures.
+Do not resume clone agents, rewrite site implementations, or start another full
+capture/verification campaign unless the user requests that work. Separate
+checker defects, invalid measurements, and implementation defects in the report;
+a checker regression passing does not establish that the original clone is done.
+
 ## Rules
 
 ### Language

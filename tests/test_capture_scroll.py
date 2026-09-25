@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "extract" / "capture-scroll.sh"
@@ -88,7 +90,11 @@ def _eval_payload(stops: list[dict], duration_ms: int = 3500,
                   static: bool = False,
                   dom_mutations: list[dict] | None = None,
                   scan_step_px: int = 120,
-                  alignment_failures: list[dict] | None = None) -> str:
+                  alignment_failures: list[dict] | None = None,
+                  capture_complete: bool = True,
+                  incomplete_reason: str | None = None,
+                  end_traversal: list[dict] | None = None,
+                  input_listeners: list[dict[str, object]] | None = None) -> str:
     """Return a JSON-as-stdout payload matching the script's expected shape."""
     final = final_scroll_height if final_scroll_height is not None else scroll_height
     delta_pct = (
@@ -100,6 +106,10 @@ def _eval_payload(stops: list[dict], duration_ms: int = 3500,
         "domMutationTraceTruncated": False,
         "scanStepPx": scan_step_px,
         "alignmentFailures": alignment_failures or [],
+        "captureComplete": capture_complete,
+        "incompleteReason": incomplete_reason,
+        "endTraversal": end_traversal or [],
+        "inputListeners": input_listeners or [],
         "durationMs": duration_ms,
         "scrollHeight": scroll_height,
         "viewportHeight": viewport_height,
@@ -228,6 +238,24 @@ def test_scroll_dom_mutations_are_preserved_with_scroll_range(tmp_path: Path) ->
     assert summary["scanStepPx"] == 120
 
 
+def test_scroll_input_listener_evidence_is_preserved(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    listeners: list[dict[str, object]] = [
+        {"target": "window", "type": "keydown", "declaredPassive": None},
+        {"target": "document", "type": "touchmove", "declaredPassive": False},
+    ]
+    bin_dir = _make_fake_agent_browser(
+        tmp_path,
+        _eval_payload([_stop(0, 0)], input_listeners=listeners),
+    )
+    proc = _run_capture_scroll(ref_dir, bin_dir)
+    assert proc.returncode == 0, proc.stderr
+    summary = json.loads(
+        (ref_dir / "states" / "scroll" / "summary.json").read_text()
+    )
+    assert summary["inputListeners"] == listeners
+
+
 def test_scroll_eval_uses_bounded_fine_grained_sweep() -> None:
     """Mutation thresholds need intermediate scroll frames, not seven teleports."""
     script = EVAL_SCRIPT.read_text(encoding="utf-8")
@@ -235,11 +263,209 @@ def test_scroll_eval_uses_bounded_fine_grained_sweep() -> None:
     assert "MIN_SCAN_STEP_PX = 120" in script
     assert "await sweepTo(targetY)" in script
     assert "await alignToTarget(targetY)" in script
+    assert "settleAtDocumentEnd" in script
+    assert "REQUIRED_STABLE_END_PROBES = 2" in script
     assert "new MutationObserver" in script
     assert "renderedFrame" in script
     wrapper = SCRIPT.read_text(encoding="utf-8")
     assert 'CAPTURE_SCROLL_TIMEOUT_MS:-25000' in wrapper
     assert "AGENT_BROWSER_NAMESPACE" in wrapper
+
+
+def _run_scroll_eval_fixture(mode: str) -> dict[str, Any]:
+    """Execute the browser program against a small, site-neutral DOM model."""
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node is required to execute capture-scroll-eval.js")
+    assert node is not None
+    source = EVAL_SCRIPT.read_text(encoding="utf-8")
+    harness = f"""
+const mode = {json.dumps(mode)};
+let height = mode === "delayed-growth" ? 5000
+  : mode === "static-delayed-growth" ? 1000 : 8000;
+let scrollY = 0;
+const root = {{
+  get scrollHeight() {{ return height; }},
+  outerHTML: "<html><body><main></main></body></html>",
+  classList: {{ contains: () => false }},
+  querySelectorAll: () => [],
+}};
+const footer = {{
+  nodeType: 1, tagName: "FOOTER", id: "", className: "", dataset: {{}},
+  parentElement: null, matches: (selector) => selector.includes("footer"),
+  getBoundingClientRect: () => ({{ top: 2000, bottom: 2200, width: 800, height: 200 }}),
+}};
+const main = {{
+  nodeType: 1, tagName: "MAIN", id: "", className: "", dataset: {{}},
+  parentElement: null, matches: () => false,
+  getBoundingClientRect: () => mode === "footerless-unreachable"
+    ? ({{ top: 2000, bottom: 2200, width: 800, height: 200 }})
+    : ({{ top: -scrollY, bottom: height - scrollY, width: 800, height }}),
+}};
+globalThis.performance = {{ now: (() => {{ let n = 0; return () => ++n; }})() }};
+globalThis.document = {{
+  documentElement: root,
+  body: {{ querySelectorAll: () => [] }},
+  scrollingElement: root,
+  querySelectorAll: (selector) => mode === "sentinel-unreachable"
+    && selector.includes("footer") ? [footer]
+    : (mode === "footerless-unreachable" || mode === "valid-long-main")
+      && selector.includes("main") ? [main] : [],
+}};
+globalThis.window = {{
+  innerHeight: 1000,
+  get scrollY() {{ return scrollY; }},
+  scrollTo(arg1, arg2) {{
+    const target = typeof arg1 === "object" ? arg1.top : arg2;
+    if (mode === "delayed-growth" && target >= 4000) height = 8000;
+    const browserCap = mode === "unreachable-end" ? 3000 : height - 1000;
+    scrollY = Math.max(0, Math.min(target, browserCap));
+  }},
+}};
+globalThis.MutationObserver = class {{ observe() {{}} disconnect() {{}} }};
+globalThis.CSS = {{ escape: (value) => String(value) }};
+globalThis.getComputedStyle = () => ({{
+  color: "", opacity: "1", transform: "none", visibility: "visible",
+}});
+globalThis.requestAnimationFrame = (callback) => callback();
+globalThis.setTimeout = (callback, delay) => {{
+  if (mode === "static-delayed-growth" && delay >= 1200) height = 5000;
+  callback();
+  return 1;
+}};
+(async () => {{
+  let result = await ({source});
+  for (let continuation = 0; result.continuationRequired && continuation < 32; continuation += 1) {{
+    result = await ({source});
+  }}
+  process.stdout.write(JSON.stringify(result));
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+    proc = subprocess.run(
+        [node, "-e", harness], capture_output=True, text=True, timeout=10
+    )
+    assert proc.returncode == 0, proc.stderr
+    parsed = json.loads(proc.stdout)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_scroll_eval_recaptures_percent_stops_after_delayed_height_growth() -> None:
+    result = _run_scroll_eval_fixture("delayed-growth")
+    assert result["captureComplete"] is True
+    assert result["recaptureCount"] == 0
+    assert result["finalScrollHeight"] == 8000
+    assert result["infiniteScroll"] is False
+    assert result["potentialInfiniteScroll"] is False
+    assert [stop["pct"] for stop in result["stops"]] == [0, 10, 25, 50, 75, 90, 100]
+    assert result["stops"][-1]["scrollY"] == 7000
+    assert result["stops"][-1]["maxScrollableAtCapture"] == 7000
+    assert result["captureTraversal"] == "forward"
+    assert result["stops"][0]["traversalDirection"] == "forward"
+    assert result["stops"][1]["traversalDirection"] == "forward"
+    assert result["stops"][-1]["traversalDirection"] == "forward"
+    assert len(result["endTraversal"]) >= 2
+
+
+def test_scroll_eval_does_not_misclassify_delayed_growth_as_static() -> None:
+    result = _run_scroll_eval_fixture("static-delayed-growth")
+    assert result["captureComplete"] is True
+    assert result["static"] is False
+    assert result["finalScrollHeight"] == 5000
+    assert [stop["pct"] for stop in result["stops"]] == [0, 10, 25, 50, 75, 90, 100]
+    assert result["stops"][-1]["scrollY"] == 4000
+
+
+def test_scroll_eval_marks_permanently_unreachable_end_incomplete() -> None:
+    result = _run_scroll_eval_fixture("unreachable-end")
+    assert result["captureComplete"] is False
+    assert result["incompleteReason"] == "document-end-unreachable"
+    assert result["alignmentFailures"]
+
+
+def test_scroll_eval_requires_semantic_end_sentinel_when_present() -> None:
+    result = _run_scroll_eval_fixture("sentinel-unreachable")
+    assert result["captureComplete"] is False
+    assert result["incompleteReason"] == "document-end-sentinel-not-reached"
+    assert result["endTraversal"][-1]["sentinel"]["selector"] == "footer"
+
+
+def test_scroll_eval_rejects_footerless_clipped_semantic_landmark() -> None:
+    result = _run_scroll_eval_fixture("footerless-unreachable")
+    assert result["captureComplete"] is False
+    assert result["incompleteReason"] == "document-end-sentinel-not-reached"
+    assert result["endTraversal"][-1]["sentinel"]["clippedLandmarks"] == ["main"]
+
+
+def test_scroll_eval_accepts_valid_footerless_long_main() -> None:
+    result = _run_scroll_eval_fixture("valid-long-main")
+    assert result["captureComplete"] is True
+    assert result["endTraversal"][-1]["sentinel"]["selector"] == "main"
+    assert result["endTraversal"][-1]["sentinel"]["clippedLandmarks"] == []
+
+
+def test_wrapper_rejects_incomplete_adaptive_traversal(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    stale_scroll_dir = ref_dir / "states" / "scroll"
+    stale_scroll_dir.mkdir(parents=True)
+    (stale_scroll_dir / "summary.json").write_text('{"checked": true}')
+    payload = _eval_payload(
+        [_stop(0, 0)],
+        capture_complete=False,
+        incomplete_reason="document-end-did-not-stabilize",
+        end_traversal=[{"probe": 10, "targetY": 9000, "observedY": 9000}],
+    )
+    bin_dir = _make_fake_agent_browser(tmp_path, payload)
+    proc = _run_capture_scroll(ref_dir, bin_dir)
+    assert proc.returncode == 3
+    assert "adaptive traversal incomplete" in proc.stderr
+    assert "document-end-did-not-stabilize" in proc.stderr
+    assert not (ref_dir / "states" / "scroll").exists()
+    error = json.loads((ref_dir / "capture-scroll-error.json").read_text())
+    assert error["reason"] == "document-end-did-not-stabilize"
+    assert error["summary"]["endTraversal"] == [
+        {"probe": 10, "targetY": 9000, "observedY": 9000}
+    ]
+
+
+def test_wrapper_completes_bounded_continuation_in_same_session(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "ref"
+    first = json.loads(_eval_payload([]).replace("'\\''", "'"))
+    first["continuationRequired"] = True
+    first["captureEpoch"] = "test-epoch"
+    first["continuationSequence"] = 1
+    final = _eval_payload([_stop(0, 0)], static=True)
+    first_payload = json.dumps(first).replace("'", "'\\''")
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    counter = tmp_path / "eval-count"
+    counter.write_text("0")
+    fake = bin_dir / "agent-browser"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        f"echo \"$@\" >> '{tmp_path / 'calls.log'}'\n"
+        "shift 2\n"
+        'while [ "$1" = "--init-script" ]; do shift 2; done\n'
+        'if [ "$1" = "eval" ]; then\n'
+        f"  count=$(cat '{counter}')\n"
+        '  if [ "$count" = "0" ]; then\n'
+        f"    echo 1 > '{counter}'\n"
+        f"    echo '{first_payload}'\n"
+        "  else\n"
+        f"    echo '{final}'\n"
+        "  fi\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    fake.chmod(0o755)
+
+    proc = _run_capture_scroll(ref_dir, bin_dir)
+
+    assert proc.returncode == 0, proc.stderr
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert sum(" eval " in f" {line} " for line in calls) == 2
+    assert (ref_dir / "states" / "scroll" / "summary.json").is_file()
 
 
 def test_alignment_failure_fails_closed(tmp_path: Path) -> None:
@@ -403,7 +629,7 @@ def test_eval_channel_failure_reopens_and_retries(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text().splitlines()
     assert sum(" open " in f" {line} " for line in calls) == 2
     assert not any("open about:blank" in line for line in calls)
-    assert calls.count("--session sess1-scroll set viewport 1440 900") == 2
+    assert sum(line.endswith(" set viewport 1440 900") for line in calls) == 2
     assert sum(" eval " in f" {line} " for line in calls) == 2
     snap_0 = json.loads((ref_dir / "states" / "scroll" / "0pct.json").read_text())
     assert "ok" in snap_0["outerHTML"]
@@ -420,7 +646,9 @@ def test_derived_session_used_by_default(tmp_path: Path) -> None:
     assert proc.returncode == 0
     calls = (tmp_path / "calls.log").read_text()
     assert "sess1-scroll" in calls
-    assert "--session sess1-scroll close" in calls
+    assert any(line.endswith(" close") for line in calls.splitlines())
+    init_flag = f"--init-script {REPO_ROOT / 'scripts/extract/capture-scroll-init.js'}"
+    assert all(init_flag in line for line in calls.splitlines())
     # Caller's bare session "sess1" should NOT appear on its own (only
     # embedded as a prefix of "sess1-scroll").
     bare_session_lines = [
@@ -448,18 +676,21 @@ def test_derived_session_wait_uses_splash_summary_duration(tmp_path: Path) -> No
 
     assert proc.returncode == 0, proc.stderr
     calls = (tmp_path / "calls.log").read_text().splitlines()
-    assert "--session sess1-scroll wait 3500" in calls
-    close_index = calls.index("--session sess1-scroll close")
-    viewport_index = calls.index("--session sess1-scroll set viewport 1440 900")
+    wait_call = next(line for line in calls if line.endswith(" wait 3500"))
+    assert wait_call
+    close_index = next(i for i, line in enumerate(calls) if line.endswith(" close"))
+    viewport_index = next(
+        i for i, line in enumerate(calls) if line.endswith(" set viewport 1440 900")
+    )
     open_index = next(
         i for i, line in enumerate(calls)
         if line.endswith(" open https://example.test --json")
-        and line.startswith("--session sess1-scroll ")
+        and "--session sess1-scroll " in line
     )
-    wait_index = calls.index("--session sess1-scroll wait 3500")
+    wait_index = calls.index(wait_call)
     eval_index = next(
         i for i, line in enumerate(calls)
-        if line.startswith("--session sess1-scroll eval ")
+        if "--session sess1-scroll " in line and " eval " in f" {line} "
     )
     assert close_index < viewport_index < open_index < wait_index < eval_index
 

@@ -4,7 +4,7 @@
 >
 > **Quick comparison?** Use `batch-scroll.sh` + `batch-compare.sh` from the parent SKILL.md instead. This document is the **full multi-phase verification procedure** with capture, comparison, self-healing, and completion gate.
 
-> **Security note:** Screenshots and DOM snapshots may contain sensitive data visible on the page (auth tokens in DOM attributes, form inputs, user info). Clean up `tmp/ref/` after extraction: `rm -rf tmp/ref/<component>`
+> **Evidence handling:** Screenshots and DOM snapshots may contain sensitive page data. Keep them local and preserve `tmp/ref/<component>` for verification and handoff. Remove evidence only when cleanup is explicitly requested and its scope is clear.
 
 **Reference recordings are captured ONCE from the original site. Never re-visit the original site after initial capture.**
 
@@ -429,12 +429,9 @@ Both must pass. "Approximately identical" = FAIL.
 
 ---
 
-**Post-completion cleanup:**
-```bash
-# Remove extracted data — may contain sensitive info from the target site
-rm -rf tmp/ref/<component>
-```
-> Screenshots, DOM snapshots, and video frames may contain auth tokens, PII, or session data visible on the target page. Always clean up after verification is complete.
+**Post-completion evidence:** Preserve reference recordings, snapshots, comparison
+results, and completion artifacts for review and handoff. If cleanup is explicitly
+requested, remove only the named run's evidence; do not delete unrelated runs.
 
 ## Section-Aligned Comparison (MANDATORY)
 

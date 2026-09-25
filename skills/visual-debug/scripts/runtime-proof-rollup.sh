@@ -46,8 +46,10 @@ REF_DIR="${1:?Usage: runtime-proof-rollup.sh <ref-dir>}"
 [ -d "$REF_DIR" ] || { echo "ref-dir not found: $REF_DIR" >&2; exit 2; }
 
 OUT="$REF_DIR/runtime-proof.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-python3 - "$REF_DIR" "$OUT" <<'PY'
+python3 - "$REF_DIR" "$OUT" "$REPO_ROOT" <<'PY'
 from __future__ import annotations
 
 import json
@@ -56,6 +58,11 @@ from pathlib import Path
 
 ref_dir = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
+repo_root = Path(sys.argv[3])
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+from ui_clone.scroll_completion import validate_scroll_completion
 
 # Each entry: (artifact-filename, tier, measurement-validator).
 # The measurement validator returns (ok: bool, note: str) given the
@@ -190,13 +197,34 @@ def splash_lifecycle_measure(d: dict) -> tuple[bool, str]:
             "pass but lifecycle samples are empty "
             f"(ref={len(ref_samples)} impl={len(impl_samples)})"
         )
-    # A pass here is a mount/exit proof on both sides, and nothing else. The
-    # check never passes a reference its probe saw no overlay on
+    # A pass here is either mount/exit proof on both sides or a matched
+    # persistent page-surface proof on both sides. The latter covers fixed
+    # base-layer hero stages that the lifecycle probe deliberately keeps
+    # visible so it can distinguish them from temporary splashes. The check
+    # never passes a reference its probe saw no overlay on
     # (`ref-overlay-absent` is a FAIL that names the reference); a pass that
     # claims otherwise, whatever its `reason` says and whatever
     # states/splash/contract.json certifies, does not roll up.
-    for side in ("ref", "impl"):
-        analysis = d.get(side) or {}
+    analyses = {side: d.get(side) or {} for side in ("ref", "impl")}
+    persistent = {
+        side: bool(
+            analysis.get("mounted")
+            and not analysis.get("exited")
+            and analysis.get("persistentPageSurface") is True
+        )
+        for side, analysis in analyses.items()
+    }
+    if any(persistent.values()):
+        if all(persistent.values()):
+            return True, (
+                f"refSamples={len(ref_samples)} implSamples={len(impl_samples)} "
+                "matched persistent page surfaces"
+            )
+        return False, (
+            "pass but persistent page-surface proof is not matched on both sides "
+            f"(ref={persistent['ref']} impl={persistent['impl']})"
+        )
+    for side, analysis in analyses.items():
         if not analysis.get("mounted") or not analysis.get("exited"):
             return False, (
                 f"pass but {side} lifecycle analysis lacks mounted+exited proof"
@@ -223,20 +251,7 @@ def generic_pass(d: dict) -> tuple[bool, str]:
     return False, f"status={status}"
 
 def scroll_end_measure(d: dict) -> tuple[bool, str]:
-    if d.get("status") == "skip":
-        return True, "skipped"
-    if d.get("status") != "pass":
-        return False, f"status={d.get('status')}"
-    # Vacuous-pass signals: zero candidates probed OR zero scroll range
-    candidates = int(d.get("candidates", -1))
-    max_scroll = int(d.get("maxScroll", -1))
-    if candidates == 0 or max_scroll == 0:
-        return False, (
-            f"vacuous pass: candidates={candidates} maxScroll={max_scroll} "
-            "— gate reports pass but probed nothing; check that the ref signal "
-            "is real and that the impl page actually has scroll content"
-        )
-    return True, f"candidates={candidates} maxScroll={max_scroll}"
+    return validate_scroll_completion(d)
 
 def reveal_trigger_measure(d: dict) -> tuple[bool, str]:
     if d.get("status") == "skip":

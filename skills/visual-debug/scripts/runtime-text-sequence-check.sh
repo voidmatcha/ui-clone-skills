@@ -292,6 +292,7 @@ ANALYSIS_JS='(() => {
       ) return true;
       const rect = current.getBoundingClientRect();
       if (
+        style.display !== "contents" &&
         rect.width <= 1 &&
         rect.height <= 1 &&
         (style.overflow === "hidden" || style.position === "absolute")
@@ -343,7 +344,10 @@ ANALYSIS_JS='(() => {
       while (ancestor && ancestor !== document.documentElement) {
         const style = getComputedStyle(ancestor);
         const clippedAxes = clipsDescendants(style);
-        if (clippedAxes.horizontal || clippedAxes.vertical) {
+        if (
+          style.display !== "contents" &&
+          (clippedAxes.horizontal || clippedAxes.vertical)
+        ) {
           const clipRect = ancestor.getBoundingClientRect();
           const intersectsClip = rects.some((rect) => (
             (!clippedAxes.horizontal || overlapsHorizontally(rect, clipRect)) &&

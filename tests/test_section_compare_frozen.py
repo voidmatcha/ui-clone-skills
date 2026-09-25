@@ -13,6 +13,27 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def test_frozen_ref_selfpasses_mark_impl_path_as_reference() -> None:
+    script = (
+        _project_root()
+        / "skills"
+        / "visual-debug"
+        / "scripts"
+        / "section-compare-frozen.sh"
+    ).read_text(encoding="utf-8")
+
+    pass1 = script[script.index("# ── PASS 1:"):script.index("# PASS 1 compares")]
+    calibration = script[
+        script.index("# ── PASS 2A:"):script.index("# Snapshot the pass-2A")
+    ]
+    measurement = script[script.index("# ── PASS 2B:"):]
+    for selfpass in (pass1, calibration):
+        assert "SECTION_CAPTURE_IMPL_IS_REFERENCE=1" in selfpass
+        assert "SECTION_CAPTURE_REQUIRE_SCROLL_CAP_NORMALIZED=1" in selfpass
+    assert "SECTION_CAPTURE_IMPL_IS_REFERENCE=1" not in measurement
+    assert "SECTION_CAPTURE_REQUIRE_SCROLL_CAP_NORMALIZED=1" not in measurement
+
+
 def test_frozen_wrapper_retries_pass1_with_fresh_session(tmp_path: Path) -> None:
     """A poisoned browser session can make pass 1 exit before ref crops exist.
 
