@@ -5,12 +5,14 @@ pre_bash hook denies running an agent-written script that names evidence."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
 import pytest
 
 from ui_clone import scoped_check, scoped_ledger, scoped_producers
+from ui_clone.hooks.pre_bash_rules import agent_script
 from ui_clone.hooks.pre_bash_rules.agent_script import _agent_script_target
 from ui_clone.scoped_provenance import REPO_ROOT, file_sha256
 
@@ -440,6 +442,205 @@ def test_agent_script_guard_exemptions(tmp_path: Path) -> None:
     forge = tmp_path / "forge.sh"
     forge.write_text("echo x > tmp/ref/hero/pixel-perfect-diff.json\n", encoding="utf-8")
     assert _agent_script_target(f"bash {forge}", REPO_ROOT, REPO_ROOT) is None
+
+
+_CHECKOUT_TREES = ("ui_clone", "scripts", "skills", "hooks", "bin")
+_RESIDUE = shutil.ignore_patterns(
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".git",
+    ".DS_Store",
+)
+# generation-plan.sh names generation-plan.json, so a non-exempt verdict denies it.
+_ENTRY = Path("scripts/extract/generation-plan.sh")
+
+
+def _full_checkout(dest: Path) -> Path:
+    for tree in _CHECKOUT_TREES:
+        if (REPO_ROOT / tree).is_dir():
+            shutil.copytree(REPO_ROOT / tree, dest / tree, ignore=_RESIDUE, symlinks=True)
+    return dest
+
+
+@pytest.fixture
+def isolated_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    for key in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "UI_CLONE_ROOT"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    project = tmp_path / "project"
+    project.mkdir()
+    return project
+
+
+def test_shipped_script_from_identical_full_checkout_is_exempt(
+    tmp_path: Path, isolated_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Skill snippets resolve scripts through the install marker (a dev
+    # checkout) while the hook runs from the host's installed copy.
+    project = isolated_project
+    # The copied trees are seconds old; let the verdict cache treat them as settled.
+    monkeypatch.setattr(agent_script, "_CACHE_FRESH_MARGIN_NS", -(10**18))
+    checkout = _full_checkout(tmp_path / "dev-checkout")
+    cmd = f"bash {checkout / _ENTRY} tmp/ref/hero"
+    assert _agent_script_target(cmd, project, project) is None
+    # Runtime residue does not break the match; the warm call reuses the cache.
+    (checkout / "ui_clone" / "__pycache__").mkdir(exist_ok=True)
+    (checkout / "ui_clone" / "__pycache__" / "x.cpython-313.pyc").write_bytes(b"\0")
+    assert _agent_script_target(cmd, project, project) is None
+    cache_file = tmp_path / "cache" / "ui-clone-skills" / "shipped-checkouts.json"
+    assert [e["identical"] for e in json.loads(cache_file.read_text()).values()] == [True]
+
+    # Any later write changes the fingerprint: the cached "identical" is not reused.
+    with (checkout / _ENTRY).open("a", encoding="utf-8") as fh:
+        fh.write("echo '{}' > tmp/ref/hero/generation-plan.json\n")
+    assert _agent_script_target(cmd, project, project) is not None
+    assert [e["identical"] for e in json.loads(cache_file.read_text()).values()] == [False]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        # capture-replay-track.sh runs this sibling from its own tree
+        "scripts/extract/capture-replay-track.mjs",
+        # shipped scripts put their checkout root on PYTHONPATH
+        "ui_clone/state.py",
+    ],
+)
+def test_fake_or_edited_checkout_is_not_exempt(
+    tmp_path: Path, isolated_project: Path, edit: str
+) -> None:
+    project = isolated_project
+
+    # Marker files + a byte-identical entry script is not a trusted checkout.
+    fake = tmp_path / "fake-checkout"
+    for part in (Path("ui_clone/__init__.py"), Path("hooks/shim.sh"), _ENTRY):
+        (fake / part).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / part, fake / part)
+    assert _agent_script_target(f"bash {fake / _ENTRY} x", project, project) is not None
+
+    # A full checkout with one edited sibling / module: trusted before, denied after.
+    checkout = _full_checkout(tmp_path / "edited-checkout")
+    cmd = f"bash {checkout / _ENTRY} x"
+    assert _agent_script_target(cmd, project, project) is None
+    with (checkout / edit).open("a", encoding="utf-8") as fh:
+        fh.write("\n// edited\n" if edit.endswith(".mjs") else "\n# edited\n")
+    assert _agent_script_target(cmd, project, project) is not None
+
+    # An extra code file the install does not ship is also a mismatch.
+    extra = _full_checkout(tmp_path / "extra-checkout")
+    (extra / "scripts" / "extract" / "zz-extra.mjs").write_text("export {}\n", encoding="utf-8")
+    assert _agent_script_target(f"bash {extra / _ENTRY} x", project, project) is not None
+
+    # Without the plugin layout the copy is just an agent script.
+    loose = tmp_path / "loose" / _ENTRY
+    loose.parent.mkdir(parents=True)
+    shutil.copyfile(REPO_ROOT / _ENTRY, loose)
+    assert _agent_script_target(f"bash {loose} tmp/ref/hero", project, project) is not None
+
+
+def _public_skills() -> list[str]:
+    """install.sh CODEX_PUBLIC_SKILLS: the only skills the install projection
+    stages (internal ones such as skills/benchmark are never installed)."""
+    text = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    m = re.search(r'^CODEX_PUBLIC_SKILLS="([^"]+)"', text, re.MULTILINE)
+    assert m is not None
+    return m.group(1).split()
+
+
+def _install_projection(dest: Path) -> Path:
+    """The installed plugin tree as install.sh stages it: every shipped tree,
+    skills/ holding exactly the public skills."""
+    for tree in _CHECKOUT_TREES:
+        if tree == "skills" or not (REPO_ROOT / tree).is_dir():
+            continue
+        shutil.copytree(REPO_ROOT / tree, dest / tree, ignore=_RESIDUE, symlinks=True)
+    for skill in _public_skills():
+        shutil.copytree(
+            REPO_ROOT / "skills" / skill, dest / "skills" / skill, ignore=_RESIDUE, symlinks=True
+        )
+    return dest
+
+
+def test_dev_checkout_with_internal_skills_matches_the_real_install(
+    tmp_path: Path, isolated_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dev checkout carries internal skills (skills/benchmark) the install
+    # omits; the shipped generation-plan.sh must still run from it.
+    project = isolated_project
+    installed = _install_projection(tmp_path / "installed")
+    monkeypatch.setattr(agent_script, "REPO_ROOT", installed)
+    checkout = _full_checkout(tmp_path / "dev-checkout")
+    internal = sorted(
+        p.name for p in (checkout / "skills").iterdir() if p.name not in _public_skills()
+    )
+    assert internal, "fixture must mirror a checkout with internal skills"
+    cmd = f"bash {checkout / _ENTRY} tmp/ref/hero"
+    assert _agent_script_target(cmd, project, project) is None
+    # A script inside an unshipped skill tree is never exempt.
+    forge = checkout / "skills" / internal[0] / "forge.sh"
+    forge.write_text("echo x > tmp/ref/hero/generation-plan.json\n", encoding="utf-8")
+    assert _agent_script_target(f"bash {forge}", project, project) is not None
+    # An edited shipped file still denies.
+    with (checkout / "ui_clone" / "state.py").open("a", encoding="utf-8") as fh:
+        fh.write("\n# edited\n")
+    assert _agent_script_target(cmd, project, project) is not None
+
+
+def test_cached_verdict_needs_files_older_than_the_margin(
+    tmp_path: Path, isolated_project: Path
+) -> None:
+    # On a 1-second-mtime filesystem a same-second, same-size rewrite keeps the
+    # stat fingerprint; a verdict cached that close to the files is not reused.
+    project = isolated_project
+    checkout = _full_checkout(tmp_path / "coarse-checkout")
+    cmd = f"bash {checkout / _ENTRY} x"
+    assert _agent_script_target(cmd, project, project) is None
+    cache_file = tmp_path / "cache" / "ui-clone-skills" / "shipped-checkouts.json"
+    # Freshly written trees: no verdict is stored at all.
+    assert not cache_file.exists() or json.loads(cache_file.read_text()) == {}
+    # A same-size edit, then an "identical" entry for the new fingerprint
+    # stamped within the margin: it is ignored and the full compare denies.
+    target = checkout / "ui_clone" / "state.py"
+    data = bytearray(target.read_bytes())
+    data[-1:] = b"#" if data[-1:] != b"#" else b"\n"
+    target.write_bytes(bytes(data))
+    installed_root = REPO_ROOT.resolve()
+    installed = agent_script._tree_listing(installed_root)
+    candidate = agent_script._tree_listing(checkout, agent_script._skill_names(installed_root))
+    assert installed is not None and candidate is not None
+    newest = max(max(m, c) for _r, _s, m, c in candidate + installed)
+    entry = {
+        "fingerprint": agent_script._fingerprint(candidate, installed),
+        "identical": True,
+        "checkedAtNs": newest + 1_000_000_000,
+    }
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(json.dumps({f"{checkout}\0{installed_root}": entry}), encoding="utf-8")
+    assert _agent_script_target(cmd, project, project) is not None
+
+
+def test_agent_script_calling_the_decision_recorder_is_caught(tmp_path: Path) -> None:
+    script = tmp_path / "d.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "from ui_clone.clonability import record_decision\n"
+        "record_decision(Path('tmp/ref/hero'), 'bot-challenge', 'proceed', 'ok',\n"
+        "                provenance={'source': 'user-terminal'})\n",
+        encoding="utf-8",
+    )
+    assert _agent_script_target("python3 d.py", tmp_path, tmp_path) == ("d.py", "record_decision")
+    script.write_text(
+        "import ui_clone.clonability as c\nc.apply_prompt_decisions('.', 's', 'x')\n",
+        encoding="utf-8",
+    )
+    assert _agent_script_target("python3 d.py", tmp_path, tmp_path) is not None
 
 
 def _pre_bash(root: Path, cmd: str) -> str:
