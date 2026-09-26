@@ -89,6 +89,7 @@ Prefer the in-checkout forms — `python -m ui_clone.*` or `node bin/ui-clone ..
 ### Version sync
 - Six files carry the version and `scripts/ci/pre-push-security.sh` blocks the push unless **all six** match: `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`, `pyproject.toml`, `package.json`, `ui_clone/__init__.py`. Bump them together — the enumeration here is the one agents follow, so a short list guarantees a blocker.
 - Claude caches the plugin per version (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`), so a content change shipped without a version bump installs as stale.
+- Until pushed, the version is exactly one release step above origin's (`git fetch origin` and read `origin/main`'s `package.json` first). If it already is, do not bump again: add the change to that version's CHANGELOG section and reinstall with `./install.sh --no-deps`, which replaces a stale same-version cache. `pre-push-guard.sh` blocks a version more than one step ahead.
 - `scripts/hooks/pre-push-guard.sh` enforces this automatically
 
 ### Token management

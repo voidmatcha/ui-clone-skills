@@ -609,8 +609,11 @@ install_claude_plugin() {
     act "Refreshing installed Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
     # `plugin update`, never uninstall+install: uninstall rewrites
     # enabledPlugins in ~/.claude/settings.json, and a failure between the two
-    # steps leaves no plugin where a stale one stood.
-    if claude plugin update "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+    # steps leaves no plugin where a stale one stood. `--scope user` because a
+    # bare update run from a project with its own local install refreshes that
+    # install and leaves the user-scope one at the old version. A same-version
+    # cache with stale bytes is replaced by verify_claude_plugin_delivery.
+    if claude plugin update "$PLUGIN_NAME@$MARKETPLACE_NAME" --scope user >/dev/null 2>&1; then
       ok "Claude plugin refreshed from $CLAUDE_PLUGIN_SRC"
       ensure_claude_plugin_enabled
       disable_competing_claude_installs

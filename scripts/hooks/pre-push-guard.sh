@@ -14,9 +14,10 @@
 #    - Version sync: 6 versioned files (.claude-plugin/plugin.json,
 #      .claude-plugin/marketplace.json, .codex-plugin/plugin.json,
 #      package.json, pyproject.toml, ui_clone/__init__.py) must all match.
-#    - Version-bump enforcement: the matching version must also differ from
-#      whatever version is recorded as installed on THIS machine (Claude/
-#      Codex plugin caches are version-keyed; see the check itself, below).
+#    - Version-bump enforcement: when content differs from the upstream
+#      branch, the version must be exactly one release step above upstream's
+#      (next patch, minor, or major). Local reinstalls keep that one version;
+#      install.sh replaces a same-version cache whose content differs.
 #    - skills/ + CHANGELOG/manifest coupling: if skills/ changed,
 #      CHANGELOG.md and the 3 plugin manifests must be bumped together.
 #
@@ -35,10 +36,6 @@
 #   UI_RE_SKIP_RELEASE_CHECKS=1 git push  # skip release-discipline tier
 #                                          (still useful when patching
 #                                          the release flow itself)
-#
-# Testing: UI_CLONE_INSTALLED_PLUGINS_JSON=<path> overrides the
-# installed_plugins.json path the version-bump-enforcement check reads
-# (default ~/.claude/plugins/installed_plugins.json).
 
 input=$(cat)
 # Extract tool_input.command via JSON parsing rather than a raw-text grep
@@ -362,21 +359,13 @@ print(m.group(1) if m else '')
   # already recorded as installed on this machine — the live cache silently
   # stays stale even though the marketplace source updated.
   #
-  # Two independent version sources are checked, either one blocking:
-  #   1. $_version_bump_base's CURRENT (pre-push) manifest version — the
-  #      deterministic ground truth for "is this push actually a new
-  #      release": no local machine state involved, so it can't go stale.
-  #      This is the PRIMARY check (follow-up review, MAJOR:
-  #      the local-only check below silently stopped enforcing anything on
-  #      this very machine once installed_plugins.json fell behind — e.g.
-  #      post-push-refresh.sh's wipe+reinstall is a no-op whenever
-  #      INSTALL_DIR is a symlink INTO this checkout, per its own header
-  #      comment — and there would be no way to tell from the local machine
-  #      alone that the guard had gone silent).
-  #   2. This machine's installed_plugins.json — a best-effort LOCAL nudge,
-  #      kept as a secondary signal for the common case where the local
-  #      cache IS being kept current; skipped silently if unavailable/
-  #      unparseable (never something CI machines need).
+  # The ground truth is $_version_bump_base's CURRENT (pre-push) manifest
+  # version, never this machine's install record: an unpushed release is
+  # installed and re-installed locally at one version (upstream + 1 step)
+  # until it is pushed, and install.sh replaces a same-version cache whose
+  # content differs. Blocking on "already installed here" made every local
+  # reinstall demand another bump, so versions ran several steps ahead of
+  # upstream. The version must be exactly the next patch, minor, or major.
   local current_version _version_bump_has_diff
   current_version="$plugin_v"
   _version_bump_has_diff=0
@@ -395,7 +384,7 @@ print(m.group(1) if m else '')
   }
 
   if [ "$_version_bump_has_diff" = "1" ]; then
-    local origin_version deployed_version _installed_plugins_json
+    local origin_version _next_step
     origin_version=$(git show "$_version_bump_base:.claude-plugin/plugin.json" 2>/dev/null \
       | python3 -c "
 import json, sys
@@ -408,35 +397,28 @@ except Exception:
       _block_unbumped_version "$current_version is already the version live on $_version_bump_base"
     fi
 
-    _installed_plugins_json="${UI_CLONE_INSTALLED_PLUGINS_JSON:-$HOME/.claude/plugins/installed_plugins.json}"
-    # Path passed as argv, not interpolated into the python source text — a
-    # path containing a single quote would otherwise break out of a `'...'`
-    # string literal (follow-up review).
-    # The installed-plugins key is `<plugin>@<marketplace>`; the marketplace
-    # suffix comes from this checkout's .claude-plugin/marketplace.json
-    # `name` (a fork registered under its own marketplace name), with the
-    # canonical upstream name as the fallback.
-    deployed_version=$(python3 -c "
-import json, os, sys
-marketplace = 'voidmatcha'
-try:
-    name = json.load(open(os.path.join(sys.argv[2], '.claude-plugin', 'marketplace.json'))).get('name')
-    if isinstance(name, str) and name.strip():
-        marketplace = name.strip()
-except Exception:
-    pass
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-for entry in d.get('plugins', {}).get('ui-clone-skills@' + marketplace) or []:
-    v = entry.get('version')
-    if v:
-        print(v)
-        break
-" "$_installed_plugins_json" "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" 2>/dev/null)
-    if [ -n "$deployed_version" ] && [ "$deployed_version" = "$current_version" ]; then
-      _block_unbumped_version "$current_version is already installed on this machine"
+    _next_step=$(python3 -c "
+import sys
+def parse(v):
+    parts = v.split('.')
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+base, cur = parse(sys.argv[1]), parse(sys.argv[2])
+if base is None or cur is None:
+    print('unknown')
+else:
+    nxt = {(base[0], base[1], base[2] + 1), (base[0], base[1] + 1, 0), (base[0] + 1, 0, 0)}
+    print('ok' if cur in nxt else 'skip')
+" "$origin_version" "$current_version" 2>/dev/null)
+    if [ "$_next_step" = "skip" ]; then
+      echo "⚠️ Version $current_version is not one release step above $origin_version on $_version_bump_base ($_branch_label)." >&2
+      echo "Until it is pushed, a release stays at upstream + 1 (next patch, minor, or major): add to that" >&2
+      echo "version's CHANGELOG section and reinstall locally (install.sh replaces a stale same-version cache)." >&2
+      echo "Set the 6 version files to the next release after $origin_version (see AGENTS.md 'Version sync')." >&2
+      echo "Bypass (emergency only): UI_RE_SKIP_RELEASE_CHECKS=1 git push" >&2
+      echo "decision: block" >&2
+      exit 2
     fi
   fi
 

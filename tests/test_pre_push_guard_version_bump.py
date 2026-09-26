@@ -1,12 +1,11 @@
 """Version-bump enforcement in scripts/hooks/pre-push-guard.sh (release tier).
 
-Local-install-verify follow-up (2026-09-10): both Claude Code's and Codex's
-plugin caches are version-keyed. post-push-refresh.sh re-runs install.sh after
-every push, but `claude plugin update` / `codex plugin add` are no-ops when
-the manifest version matches a version already recorded as installed on this
-machine -- the live cache silently stays stale even though origin updated.
-pre-push-guard.sh now blocks a release-branch push that reuses a version
-already installed on this machine when there is real content to push.
+Both Claude Code's and Codex's plugin caches are version-keyed, so a
+release-branch push with real content must carry a new version. The version
+is checked against upstream only: it must be exactly one release step above
+upstream's (next patch, minor, or major). This machine's install record is not
+consulted -- an unpushed release is reinstalled locally at that one version,
+and install.sh replaces a stale same-version cache.
 
 These tests run the hook against an ISOLATED throwaway git repo (not this
 repo), so scripts/ci/pre-push-security.sh and ci-local.sh (Tier 1) are absent
@@ -152,22 +151,41 @@ def test_push_with_git_global_options_is_still_guarded(tmp_path: Path, form: str
     assert "decision: block" in proc.stderr
 
 
-def test_blocks_unbumped_version_already_installed_locally_only(tmp_path: Path) -> None:
-    # Isolate the SECONDARY (local-only) check: origin already reflects a
-    # different (older) version than current, so the primary origin-based
-    # check does not fire, but this machine's installed_plugins.json still
-    # matches the current version (e.g. a stale local cache from an earlier
-    # identical attempt).
-    work = _make_repo_pushed_at(tmp_path, "0.9.0")
-    _write_versions(work, "1.0.0")
+def test_allows_next_version_already_installed_locally(tmp_path: Path) -> None:
+    # An unpushed release is installed and reinstalled locally at origin + 1;
+    # this machine's install record must not demand another bump.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    _write_versions(work, "1.0.1")
     _git(work, "add", "-A")
-    _git(work, "commit", "-q", "-m", "bump relative to origin, real content change")
-    installed = _installed(tmp_path, "1.0.0")
+    _git(work, "commit", "-q", "-m", "next patch, already installed here")
+    installed = _installed(tmp_path, "1.0.1")
 
     proc = _run_guard(work, installed)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("version", ["1.1.0", "2.0.0"])
+def test_allows_next_minor_or_major(tmp_path: Path, version: str) -> None:
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    _write_versions(work, version)
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "next minor or major")
+
+    proc = _run_guard(work, None)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("version", ["1.0.2", "1.2.0", "1.1.1", "3.0.0"])
+def test_blocks_version_more_than_one_step_above_origin(tmp_path: Path, version: str) -> None:
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    _write_versions(work, version)
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "skipped a release")
+
+    proc = _run_guard(work, None)
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "decision: block" in proc.stderr
-    assert "already installed on this machine" in proc.stderr
+    assert "not one release step above 1.0.0" in proc.stderr
 
 
 def test_allows_push_when_version_was_bumped(tmp_path: Path) -> None:
