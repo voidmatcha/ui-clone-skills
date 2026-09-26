@@ -99,7 +99,11 @@ them to a captured row.
 
 Only attach wires the detected library supports — never invent a hook from a library that wasn't installed.
 Runtime wire sourceId+selector must match the same `scrollLinkedStyles[]` row in
-`animation-runtime-dump.json`. Motion wires may cite only gate-approved
+`animation-runtime-dump.json`; a `transition-spec.json` wire's `selector` must
+equal that row's `target` (or `selector`). Copy the row's value verbatim: one
+selector string per wire, never a comma-joined list, a longer or shorter
+variant, or a note such as `(x4 rows)`. When one motion covers several rows,
+emit one wire per row. Motion wires may cite only gate-approved
 forensic artifacts such as `animation-runtime-dump.json`,
 `transition-spec.json`, `bundle-extraction.json`, `animations-detected.json`,
 `scroll-engine.json`, `sticky-elements.json`, `scroll-state-machine.json`,

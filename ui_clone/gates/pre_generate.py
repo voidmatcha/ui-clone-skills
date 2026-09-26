@@ -152,6 +152,38 @@ def _transition_spec_matches_wire(artifact: Any, source_id: str, selector: str) 
     )
 
 
+def _expected_row_selectors(artifact: Any, list_key: str, source_id: str) -> list[str]:
+    """Selectors the rows carrying `source_id` actually record, so a mismatch
+    message can name the value the wire must copy."""
+    rows = artifact.get(list_key) if isinstance(artifact, dict) else None
+    if not isinstance(rows, list):
+        return []
+    found: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if source_id not in (row.get("id"), row.get("sourceId")):
+            continue
+        for key in ("target", "selector"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip() and value not in found:
+                found.append(value)
+    return found
+
+
+def _row_mismatch_reason(
+    base: str, artifact: Any, list_key: str, source_id: str, selector: str
+) -> str:
+    expected = _expected_row_selectors(artifact, list_key, source_id)
+    if not expected:
+        return f"{base} (no row has sourceId '{source_id}')"
+    shown = " | ".join(f"'{value}'" for value in expected[:3])
+    return (
+        f"{base} (selector '{selector[:80]}' must equal the row's own selector {shown} "
+        "exactly; one wire per row, no joined lists or notes)"
+    )
+
+
 def _motion_wire_reason(ref_dir: Path, wire: Any) -> str | None:
     if isinstance(wire, str):
         return "ungrounded motion prose" if _MOTION_WIRE_RE.search(wire) else None
@@ -188,14 +220,20 @@ def _motion_wire_reason(ref_dir: Path, wire: Any) -> str | None:
         return "sourceArtifact invalid JSON"
     if source_artifact == "animation-runtime-dump.json":
         if not _runtime_dump_matches_wire(artifact, source_id, selector):
-            return "sourceId/selector absent from same runtime row"
+            return _row_mismatch_reason(
+                "sourceId/selector absent from same runtime row",
+                artifact, "scrollLinkedStyles", source_id, selector,
+            )
         return None
     # transition-spec already has a compact transition list with target/selector,
     # so require same-row id+selector. Other allowlisted extraction artifacts do
     # not share one stable schema, and remain exact-scalar provenance checks.
     if source_artifact == "transition-spec.json":
         if not _transition_spec_matches_wire(artifact, source_id, selector):
-            return "sourceId/selector absent from same transition row"
+            return _row_mismatch_reason(
+                "sourceId/selector absent from same transition row",
+                artifact, "transitions", source_id, selector,
+            )
         return None
     if not _contains_exact_scalar(artifact, source_id):
         return "sourceId absent from sourceArtifact"

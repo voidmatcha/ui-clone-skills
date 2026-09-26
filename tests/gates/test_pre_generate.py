@@ -2078,3 +2078,32 @@ def test_pre_generate_backstop_silent_without_signature_effects(tmp_path: Path) 
         r for r in results
         if r.status == "fail" and "signature-effects-coverage" in r.label
     ]
+
+
+def test_wire_row_mismatch_names_the_row_selector_to_copy(tmp_path: Path) -> None:
+    from ui_clone.gates.pre_generate import _motion_wire_reason
+
+    (tmp_path / "transition-spec.json").write_text(
+        json.dumps({"transitions": [{"id": "panel-reveal", "target": "div.border-t.border-gray-700"}]}),
+        encoding="utf-8",
+    )
+    wire = {
+        "kind": "motion",
+        "library": "framer-motion",
+        "hooks": ["whileInView"],
+        "trigger": "viewport-enter",
+        "selector": "div.text-center, div.border-t.border-gray-700 (x4 rows)",
+        "sourceArtifact": "transition-spec.json",
+        "sourceId": "panel-reveal",
+    }
+    reason = _motion_wire_reason(tmp_path, wire)
+    assert reason is not None
+    assert "absent from same transition row" in reason
+    assert "'div.border-t.border-gray-700'" in reason
+
+    wire["sourceId"] = "missing-row"
+    assert "no row has sourceId 'missing-row'" in (_motion_wire_reason(tmp_path, wire) or "")
+
+    wire["sourceId"] = "panel-reveal"
+    wire["selector"] = "div.border-t.border-gray-700"
+    assert _motion_wire_reason(tmp_path, wire) is None
