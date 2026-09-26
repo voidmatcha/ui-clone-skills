@@ -422,6 +422,31 @@ exit 64
     assert payload["summary"]["scroll_video_ref_videos"] == 0
 
 
+def test_capture_sh_error_names_failing_page_height_stage(tmp_path: Path) -> None:
+    # The page-height steps used to run as `X=$(run_capture_step ...)`; the
+    # subshell's CAPTURE_STAGE update was lost, so capture-error.json blamed
+    # the previous stage ("initial-wait").
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    _write_success_fake_browser(bin_dir, calls)
+    fake = bin_dir / "agent-browser"
+    source = fake.read_text()
+    source = source.replace(
+        "    else\n      echo '\"5000\"'\n",
+        "    else\n      echo 'page height eval exploded' >&2\n      exit 9\n",
+        1,
+    )
+    assert "exit 9" in source
+    fake.write_text(source)
+    ref_dir = tmp_path / "ref"
+    result = _run_capture(ref_dir, bin_dir)
+    assert result.returncode == 9, result.stderr
+    error = json.loads((ref_dir / "capture-error.json").read_text())
+    assert error["stage"] == "page-height:eval"
+    assert "eval" in error["command"]
+
+
 def test_ui_capture_skill_uses_pipeline_as_external_cwd_default() -> None:
     skill = (_project_root() / "skills" / "ui-capture" / "SKILL.md").read_text(encoding="utf-8")
     deterministic = skill.index("## Deterministic default")

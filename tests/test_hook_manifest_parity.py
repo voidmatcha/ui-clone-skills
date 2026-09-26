@@ -358,6 +358,33 @@ def test_every_command_invokes_hooks_shim() -> None:
             )
 
 
+def _strip_host_specific(cmd: str) -> str:
+    """Normalize the parts allowed to differ: root-env lookup order and the
+    UI_CLONE_HOOK_HOST value."""
+    cmd = re.sub(r'^_R="[^;]*";\s*', "", cmd)
+    return re.sub(r"UI_CLONE_HOOK_HOST=\w+", "UI_CLONE_HOOK_HOST=<host>", cmd)
+
+
+def test_every_shim_command_has_identical_exit_semantics_across_hosts() -> None:
+    # The shim itself always exits 0 (outcomes are stdout JSON), so the only
+    # non-zero status a manifest command can produce is the wrapper's own —
+    # e.g. exit 127 when the recorded plugin root no longer exists. Both hosts
+    # must swallow that identically instead of one host failing the event.
+    for path in (CLAUDE, CODEX):
+        for cmd in _commands(_load(path)):
+            assert cmd.rstrip().endswith("|| true; fi"), (
+                f"{path.name}: shim command must end with `|| true; fi`: {cmd}"
+            )
+    claude = {_module_for(c): _strip_host_specific(c) for c in _commands(_load(CLAUDE))}
+    codex = {_module_for(c): _strip_host_specific(c) for c in _commands(_load(CODEX))}
+    for module, cmd in codex.items():
+        assert module in claude, f"codex-only shim route: {module}"
+        assert cmd == claude[module], (
+            f"hooks.json vs codex-hooks.json command drift for {module}:\n"
+            f"  claude: {claude[module]}\n  codex:  {cmd}"
+        )
+
+
 def test_every_command_routes_to_an_importable_ui_clone_hooks_module() -> None:
     # _module_for only matches a module IMMEDIATELY after the shim path, so this
     # doubles as the shim-contract check (module is the first positional arg).

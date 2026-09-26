@@ -45,7 +45,9 @@ except Exception:
 if not isinstance(d, dict):
     sys.exit(1)
 command = d.get("tool_input", {}).get("command", "") if isinstance(d.get("tool_input"), dict) else ""
-if not isinstance(command, str) or not re.search(r"git\s+push", command):
+# `git (global-opts)* push`: also `git -C <dir> push`, `git --no-pager push`.
+GIT_PUSH = r"\bgit(?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?|-\w+))*\s+push\b"
+if not isinstance(command, str) or not re.search(GIT_PUSH, command):
     print("not-push")
     sys.exit(0)
 # exit_code shape is confirmed for Claude Code (top-level "exit_code"); Codex
@@ -62,7 +64,7 @@ print("push-ok" if exit_code == 0 else "push-unconfirmed")
 
 if [ -z "$_verdict" ]; then
   command=$(echo "$input" | grep -o '"command":"[^"]*"' | head -1 | sed 's/"command":"//;s/"$//')
-  if ! echo "$command" | grep -qE 'git\s+push'; then
+  if ! printf '%s\n' "$command" | grep -qE '(^|[^[:alnum:]_-])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[[:alnum:]-]+(=[^[:space:]]+)?|-[[:alpha:]]+))*[[:space:]]+push([^[:alnum:]_-]|$)'; then
     _verdict="not-push"
   elif echo "$input" | grep -q '"exit_code":0'; then
     _verdict="push-ok"
@@ -151,8 +153,34 @@ _resolve_repo_slug() {
 _claude_installed_json="${UI_CLONE_INSTALLED_PLUGINS_JSON:-$HOME/.claude/plugins/installed_plugins.json}"
 _version_before=$(_read_installed_version "$_claude_installed_json" "$REPO_ROOT")
 
+_download_ok=0
+_install_sh=""
 if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ]; then
   INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/ui-clone-skills}"
+
+  # Wait briefly for the remote to settle so the curl fetch sees the pushed sha.
+  # GitHub raw cache TTL is short but non-zero; 2s avoids occasional stale reads.
+  sleep 2
+
+  # Install source: see the repo-slug helpers above for the resolution order.
+  _repo_url="${UI_CLONE_REPO:-$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)}"
+  _repo_slug=$(_resolve_repo_slug "$_repo_url")
+  INSTALL_SH_URL="${UI_CLONE_INSTALL_SH_URL:-https://raw.githubusercontent.com/${_repo_slug}/${UI_CLONE_REPO_BRANCH:-main}/install.sh}"
+
+  # Download install.sh BEFORE wiping anything: a network/404/truncated fetch
+  # must leave the existing install intact instead of an empty INSTALL_DIR.
+  _install_sh=$(mktemp "${TMPDIR:-/tmp}/ui-clone-install-XXXXXX") || _install_sh=""
+  if [ -n "$_install_sh" ] \
+     && curl -LsSf "$INSTALL_SH_URL" -o "$_install_sh" \
+     && [ -s "$_install_sh" ] \
+     && bash -n "$_install_sh" 2>/dev/null; then
+    _download_ok=1
+  else
+    echo "🔴 post-push-refresh: failed to download a valid install.sh from $INSTALL_SH_URL — existing install at $INSTALL_DIR left untouched (check network / GitHub / UI_CLONE_INSTALL_SH_URL)" >&2
+  fi
+fi
+
+if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ] && [ "$_download_ok" = "1" ]; then
   # Defensive: never wipe the maintainer's working repo even if INSTALL_DIR was
   # mis-set to it. Compare resolved paths to be safe against symlinks.
   RESOLVED_INSTALL=$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P || echo "$INSTALL_DIR")
@@ -179,19 +207,16 @@ if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ]; then
     esac
   fi
 
-  # Wait briefly for the remote to settle so the curl fetch sees the pushed sha.
-  # GitHub raw cache TTL is short but non-zero; 2s avoids occasional stale reads.
-  sleep 2
-
-  # Install source: see the repo-slug helpers above for the resolution order.
-  _repo_url="${UI_CLONE_REPO:-$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)}"
-  _repo_slug=$(_resolve_repo_slug "$_repo_url")
-  INSTALL_SH_URL="${UI_CLONE_INSTALL_SH_URL:-https://raw.githubusercontent.com/${_repo_slug}/${UI_CLONE_REPO_BRANCH:-main}/install.sh}"
-
-  curl -LsSf "$INSTALL_SH_URL" \
-    | INSTALL_DIR="$INSTALL_DIR" bash -s -- --no-deps 2>&1 \
-    | sed 's/^/[post-push-refresh] /' || \
-    echo "⚠️ post-push-refresh: curl install failed — check network / GitHub" >&2
+  # Feed the script on stdin (not as a file argument) so install.sh takes its
+  # curl-pipe bootstrap path (clone INSTALL_DIR, re-exec the on-disk copy)
+  # exactly as a real user's `curl | bash` does. Judge the installer by ITS
+  # exit status, not the trailing sed's.
+  INSTALL_DIR="$INSTALL_DIR" bash -s -- --no-deps < "$_install_sh" 2>&1 \
+    | sed 's/^/[post-push-refresh] /'
+  _install_rc=${PIPESTATUS[0]}
+  if [ "$_install_rc" -ne 0 ]; then
+    echo "🔴 post-push-refresh: install.sh FAILED (exit $_install_rc) — $INSTALL_DIR may be missing or partial; rerun: curl -LsSf $INSTALL_SH_URL | bash -s -- --no-deps" >&2
+  fi
 
   _version_after=$(_read_installed_version "$_claude_installed_json" "$REPO_ROOT")
   if [ -n "$_version_after" ] && [ "$_version_before" != "$_version_after" ]; then
@@ -209,6 +234,7 @@ if [ "${UI_CLONE_SKIP_POST_PUSH_REFRESH:-0}" != "1" ]; then
     echo "" >&2
   fi
 fi
+[ -n "${_install_sh:-}" ] && rm -f "$_install_sh"
 
 # Run automated review regardless of refresh outcome — catches lint/doc regressions
 # in the just-pushed working tree.

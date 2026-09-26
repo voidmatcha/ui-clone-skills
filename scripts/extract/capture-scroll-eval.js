@@ -25,6 +25,7 @@
   const MAX_SCAN_STEPS = 90;
   const MAX_TOTAL_SCAN_STEPS = MAX_SCAN_STEPS * 4;
   const MAX_END_PROBES = 10;
+  const MAX_SHRINK_REPROBES = 3;
   const REQUIRED_STABLE_END_PROBES = 2;
   const END_PROBE_DWELL_MS = 1200;
   const CAPTURE_DEADLINE_MS = 22000;
@@ -450,6 +451,7 @@
   const settleAtDocumentEnd = async function* () {
     let stableProbes = 0;
     let probesThisPass = 0;
+    let shrinkReprobes = 0;
     let sentinel = { required: false, reached: true, selector: null };
     while (probesThisPass < MAX_END_PROBES) {
       if (deadlineExceeded()) {
@@ -481,6 +483,39 @@
       yield { phase: "end-probe", probe: totalEndProbeCount };
       if (!swept) {
         return { complete: false, reason: "capture-budget-exhausted", maxScrollable: observedMax };
+      }
+      // The document shrank while sweeping; the browser clamped scroll to the new
+      // end, so the end was reached. Only a small shrink relative to the largest
+      // extent observed so far is a legitimate settle (lazy placeholder/footer
+      // resize). A large drop (scroll-lock modal, content torn down, route swap)
+      // means earlier stops no longer describe this document, so fail closed.
+      // Limit: 5% of the peak scroll range, capped at half a viewport, never
+      // below 2x the alignment tolerance. Re-probes are also capped so a page
+      // that keeps shrinking cannot consume the whole probe budget silently.
+      const shrankToEnd = observedMax + tolerance < targetY
+        && Math.abs(observedY - observedMax) <= tolerance;
+      if (shrankToEnd) {
+        const peakMax = Math.max(0, maxObservedScrollHeight - viewportHeight);
+        const shrinkPx = peakMax - observedMax;
+        const shrinkLimit = Math.max(
+          tolerance * 2,
+          Math.min(Math.round(viewportHeight / 2), Math.round(peakMax * 0.05)),
+        );
+        shrinkReprobes += 1;
+        if (shrinkPx > shrinkLimit || shrinkReprobes > MAX_SHRINK_REPROBES) {
+          alignmentFailures.push({
+            pct: 100,
+            targetY,
+            actualY: observedY,
+            phase: "end-probe-collapse",
+            peakMaxScrollable: peakMax,
+            shrinkPx,
+            shrinkLimit,
+          });
+          return { complete: false, reason: "document-collapsed", maxScrollable: observedMax };
+        }
+        stableProbes = 0;
+        continue;
       }
       if (!aligned || Math.abs(observedY - targetY) > tolerance) {
         alignmentFailures.push({ pct: 100, targetY, actualY: observedY, phase: "end-probe" });

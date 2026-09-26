@@ -138,6 +138,25 @@ run_capture_step() {
   CAPTURE_MESSAGE=""
 }
 
+# run_capture_step_into <var> <stage> <artifact> <cmd...>
+# Like run_capture_step, but stores the step's stdout in <var>. Use this
+# instead of `X=$(run_capture_step ...)`: a command substitution runs the
+# step in a subshell, so its CAPTURE_STAGE/COMMAND updates are lost and the
+# parent's ERR trap would report the PREVIOUS stage in capture-error.json.
+# Here the stage is set in the parent shell and only the command itself runs
+# in the substitution. (Not `set -E`: that would also fire the trap inside
+# the subshell and then again in the parent with the stale stage.)
+run_capture_step_into() {
+  local __capture_var="$1" __capture_out
+  CAPTURE_STAGE="$2"
+  CAPTURE_ARTIFACT="$3"
+  shift 3
+  CAPTURE_COMMAND="$(format_command "$@")"
+  CAPTURE_MESSAGE=""
+  __capture_out="$("$@")" || return "$?"
+  printf -v "$__capture_var" '%s' "$__capture_out"
+}
+
 bootstrap_page() {
   CAPTURE_COMMAND="$(format_command agent-browser --session "$CAPTURE_SESSION" get url)"
   local output status
@@ -278,9 +297,11 @@ run_capture_step "initial-wait" "" agent-browser --session "$CAPTURE_SESSION" wa
 # Page height for evenly-spaced scroll screenshots. The Python helper
 # handles the agent-browser double-encode + non-numeric fallback so we
 # never divide by zero downstream.
-PAGE_H_RAW=$(run_capture_step "page-height:eval" "" agent-browser --session "$CAPTURE_SESSION" eval \
-  "(() => document.documentElement.scrollHeight)()")
-PAGE_H=$(run_capture_step "page-height:parse" "" python3 "$ARTIFACTS_PY" parse-height "$PAGE_H_RAW")
+PAGE_H_RAW=""
+PAGE_H=""
+run_capture_step_into PAGE_H_RAW "page-height:eval" "" agent-browser --session "$CAPTURE_SESSION" eval \
+  "(() => document.documentElement.scrollHeight)()"
+run_capture_step_into PAGE_H "page-height:parse" "" python3 "$ARTIFACTS_PY" parse-height "$PAGE_H_RAW"
 
 # 5 screenshots at evenly-spaced scroll positions. Absolute path to dodge
 # the cwd-leaks-between-commands footgun the skill calls out.

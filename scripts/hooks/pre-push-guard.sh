@@ -55,10 +55,33 @@ try:
 except Exception:
     sys.exit(1)
 ' 2>/dev/null) || hook_command=""
+# `git (global-opts)* push`: also catches `git -C <dir> push`,
+# `git -c k=v push`, `git --no-pager push`, `git --git-dir=<d> push`.
+GIT_PUSH_ERE='(^|[^[:alnum:]_-])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[[:alnum:]-]+(=[^[:space:]]+)?|-[[:alpha:]]+))*[[:space:]]+push([^[:alnum:]_-]|$)'
 if [ -n "$hook_command" ]; then
-  echo "$hook_command" | grep -qE '\bgit[[:space:]]+push\b' || exit 0
+  printf '%s\n' "$hook_command" | grep -qE "$GIT_PUSH_ERE" || exit 0
 else
-  echo "$input" | grep -qE '"command":\s*"[^"]*git[[:space:]]+push' || exit 0
+  echo "$input" | grep -qE '"command":[[:space:]]*"[^"]*git([[:space:]]+-[^"[:space:]]+([[:space:]]+[^"[:space:]-][^"[:space:]]*)?)*[[:space:]]+push' || exit 0
+fi
+
+# `git -C <dir> push` pushes <dir>'s repo, not the hook cwd's: check that one.
+_push_dir=$(GUARD_INPUT="$input" python3 -c '
+import json, os, re, sys
+try:
+    cmd = json.loads(os.environ.get("GUARD_INPUT", "{}")).get("tool_input", {}).get("command", "")
+except Exception:
+    sys.exit(0)
+m = re.search(r"\bgit((?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?|-\w+))*)\s+push\b", cmd)
+if not m:
+    sys.exit(0)
+d = ""
+for c in re.findall(r"-C\s+(\S+)", m.group(1)):
+    c = c.strip("\"'"'"'")
+    d = c if os.path.isabs(c) or not d else os.path.join(d, c)
+print(d)
+' 2>/dev/null) || _push_dir=""
+if [ -n "$_push_dir" ]; then
+  cd "$_push_dir" 2>/dev/null || exit 0
 fi
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
@@ -90,14 +113,15 @@ except Exception:
 # --all / --mirror touches every branch — treat as a release push. No single
 # well-defined source branch either; the bash side falls back to the
 # checked-out branch for this case (see _resolve_release_refs).
-if re.search(r"\bgit\s+push\b.*(?:--all|--mirror)\b", cmd):
+GIT_PUSH = r"\bgit(?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?|-\w+))*\s+push"
+if re.search(GIT_PUSH + r"\b.*(?:--all|--mirror)\b", cmd):
     print("ALL")
     print("")
     print("")
     sys.exit(0)
 
 # Match: git push <flags...> <remote> [<refspec>]
-m = re.search(r"\bgit\s+push\s+((?:-\S+\s+)*)(\S+)(?:\s+(\S+))?", cmd)
+m = re.search(GIT_PUSH + r"\s+((?:-\S+\s+)*)(\S+)(?:\s+(\S+))?", cmd)
 if not m or m.group(2).startswith("-"):
     sys.exit(0)
 refspec = (m.group(3) or "").strip()

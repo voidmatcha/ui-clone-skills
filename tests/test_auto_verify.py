@@ -160,3 +160,44 @@ exit 0
         stamp = json.loads((ref / "visual-debug-stamp.json").read_text())
         assert stamp["passed"] is (not (state_exit or required_exit))
         assert not stamp.get("provisional")
+
+
+def test_auto_verify_fallback_fails_missing_impl_and_zero_compared(tmp_path: Path) -> None:
+    """Fallback AE loop: missing impl captures fail; nothing compared never passes."""
+    import shutil
+
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts" / "verify"
+    scripts.mkdir(parents=True)
+    shutil.copy(_project_root() / "scripts/verify/auto-verify.sh", scripts)
+    _write_executable(scripts / "run-required-checks.sh", "#!/usr/bin/env bash\nexit 0\n")
+    visual = tmp_path / "visual"
+    visual.mkdir()
+    # Would PASS every pair; batch-compare.sh is absent so the fallback runs.
+    _write_executable(visual / "ae-compare.sh", "#!/usr/bin/env bash\necho 'AE=0 STATUS=PASS'\n")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "curl", "#!/usr/bin/env bash\nprintf 200\n")
+    # Never writes impl screenshots.
+    _write_executable(fake_bin / "agent-browser", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(fake_bin / "sleep", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
+    env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+               VISUAL_DEBUG_SCRIPTS_DIR=str(visual))
+
+    for with_refs, marker in [(True, "impl screenshot missing"),
+                              (False, "No screenshots compared")]:
+        ref = tmp_path / ("ref-with" if with_refs else "ref-empty")
+        (ref / "static" / "ref").mkdir(parents=True)
+        if with_refs:
+            (ref / "static" / "ref" / "0pct.png").write_bytes(b"png")
+        proc = subprocess.run(
+            ["bash", str(scripts / "auto-verify.sh"), "test", "https://ref.test/",
+             "https://impl.test/", str(ref)],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert marker in proc.stdout, proc.stdout + proc.stderr
+        assert "screenshots PASS" not in proc.stdout
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        stamp = json.loads((ref / "visual-debug-stamp.json").read_text())
+        assert stamp["passed"] is False

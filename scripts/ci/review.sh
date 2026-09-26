@@ -47,12 +47,15 @@ section "Tests"
 if [ "${UI_CLONE_REVIEW_SKIP_TESTS:-}" = "1" ]; then
   ok "pytest: skipped (caller already ran)"
 elif command -v uv >/dev/null 2>&1; then
-  TEST_OUT=$(uv run python -m pytest tests/ -q 2>&1)
-  if echo "$TEST_OUT" | grep -q "passed"; then
+  # Judge by pytest's exit status, not by the word "passed" appearing in the
+  # summary ("3 failed, 900 passed" also contains it).
+  TEST_RC=0
+  TEST_OUT=$(uv run python -m pytest tests/ -q 2>&1) || TEST_RC=$?
+  if [ "$TEST_RC" -eq 0 ] && echo "$TEST_OUT" | grep -qE '[0-9]+ passed'; then
     PASS_COUNT=$(echo "$TEST_OUT" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
     ok "pytest: $PASS_COUNT passed"
   else
-    err "pytest failures detected"
+    err "pytest failures detected (exit $TEST_RC)"
     [ "$QUIET" = "0" ] && echo "$TEST_OUT" | tail -10 >&2
   fi
 else

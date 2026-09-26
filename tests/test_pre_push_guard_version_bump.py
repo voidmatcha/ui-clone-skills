@@ -71,7 +71,12 @@ def _make_repo_pushed_at(tmp_path: Path, version: str) -> Path:
     return work
 
 
-def _run_guard(work: Path, installed_plugins_json: Path | None) -> subprocess.CompletedProcess[str]:
+def _run_guard(
+    work: Path,
+    installed_plugins_json: Path | None,
+    command: str = "git push origin main",
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = {**os.environ}
     if installed_plugins_json is not None:
         env["UI_CLONE_INSTALLED_PLUGINS_JSON"] = str(installed_plugins_json)
@@ -82,10 +87,10 @@ def _run_guard(work: Path, installed_plugins_json: Path | None) -> subprocess.Co
     # Compact (no spaces after separators) — matches the real Claude Code
     # PreToolUse hook payload shape the guard's `grep -qE '"command":"...'`
     # match requires.
-    stdin = json.dumps({"tool_input": {"command": "git push origin main"}}, separators=(",", ":"))
+    stdin = json.dumps({"tool_input": {"command": command}}, separators=(",", ":"))
     return subprocess.run(
         ["bash", str(GUARD)],
-        cwd=work,
+        cwd=cwd or work,
         input=stdin,
         env=env,
         capture_output=True,
@@ -126,6 +131,25 @@ def test_blocks_unbumped_version_still_live_on_origin(tmp_path: Path) -> None:
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "decision: block" in proc.stderr
     assert "already the version live on origin/main" in proc.stderr
+
+
+@pytest.mark.parametrize("form", ["dash_c", "no_pager"])
+def test_push_with_git_global_options_is_still_guarded(tmp_path: Path, form: str) -> None:
+    # `git -C <dir> push` / `git --no-pager push` used to bypass the guard: the
+    # detection regex required `git` immediately followed by `push`. -C must
+    # also retarget the checked repo (hook cwd here is NOT a git repo).
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump")
+    if form == "dash_c":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        proc = _run_guard(work, None, f"git -C {work} push origin main", cwd=outside)
+    else:
+        proc = _run_guard(work, None, "git --no-pager push origin main")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "decision: block" in proc.stderr
 
 
 def test_blocks_unbumped_version_already_installed_locally_only(tmp_path: Path) -> None:

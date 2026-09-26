@@ -59,6 +59,24 @@ def test_multiline_command_with_push_on_a_later_line_is_still_detected() -> None
     assert _verdict(payload) == "push-ok"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C /repo push origin main",
+        "git --no-pager push",
+        "git -c core.sshCommand=ssh push -u origin x",
+        "git --git-dir=/repo/.git push",
+    ],
+)
+def test_push_with_git_global_options_is_detected(command: str) -> None:
+    assert _verdict({"tool_input": {"command": command}, "exit_code": 0}) == "push-ok"
+
+
+@pytest.mark.parametrize("command", ["git log push", "git pushx", "echo gitpush"])
+def test_push_lookalikes_are_not_push(command: str) -> None:
+    assert _verdict({"tool_input": {"command": command}, "exit_code": 0}) == "not-push"
+
+
 def test_non_push_command_is_not_push() -> None:
     assert _verdict({"tool_input": {"command": "ls -la"}, "exit_code": 0}) == "not-push"
 

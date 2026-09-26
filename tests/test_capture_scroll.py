@@ -319,6 +319,9 @@ globalThis.window = {{
   scrollTo(arg1, arg2) {{
     const target = typeof arg1 === "object" ? arg1.top : arg2;
     if (mode === "delayed-growth" && target >= 4000) height = 8000;
+    if (mode === "shrinking-end" && target >= 7000 && height === 8000) height = 7950;
+    if (mode === "collapse-end" && target >= 7000 && height === 8000) height = 1000;
+    if (mode === "shrink-half" && target >= 7000 && height === 8000) height = 4000;
     const browserCap = mode === "unreachable-end" ? 3000 : height - 1000;
     scrollY = Math.max(0, Math.min(target, browserCap));
   }},
@@ -382,6 +385,20 @@ def test_scroll_eval_marks_permanently_unreachable_end_incomplete() -> None:
     assert result["captureComplete"] is False
     assert result["incompleteReason"] == "document-end-unreachable"
     assert result["alignmentFailures"]
+
+
+def test_scroll_eval_tolerates_document_shrinking_during_end_probe() -> None:
+    result = _run_scroll_eval_fixture("shrinking-end")
+    assert result["captureComplete"] is True
+    assert not result["alignmentFailures"]
+
+
+def test_scroll_eval_rejects_document_collapse_during_end_probe() -> None:
+    for mode in ("collapse-end", "shrink-half"):
+        result = _run_scroll_eval_fixture(mode)
+        assert result["captureComplete"] is False, mode
+        assert result["incompleteReason"] == "document-collapsed", mode
+        assert result["alignmentFailures"][-1]["phase"] == "end-probe-collapse", mode
 
 
 def test_scroll_eval_requires_semantic_end_sentinel_when_present() -> None:

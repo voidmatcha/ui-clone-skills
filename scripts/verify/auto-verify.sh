@@ -297,22 +297,30 @@ else
       FAIL_COUNT=0
       for ref_img in "$VERIFY_SHOT_DIR"/ref/*.png; do
         fname=$(basename "$ref_img")
+        [ -f "$ref_img" ] || continue  # unmatched glob: no ref screenshots
         impl_img="$VERIFY_SHOT_DIR/impl/$fname"
-        if [ -f "$impl_img" ]; then
-          result=$(bash "$VISUAL_DEBUG_SCRIPTS/ae-compare.sh" "$ref_img" "$impl_img" "$VERIFY_SHOT_DIR/diff/$fname" 2>/dev/null)
-          status=$(echo "$result" | grep -o 'STATUS=[A-Z]*' | cut -d= -f2)
-          ae=$(echo "$result" | grep -o 'AE=[0-9]*' | cut -d= -f2)
-          if [ "$status" = "PASS" ]; then
-            echo -e "  ${GREEN}✓${NC} $fname AE=$ae"
-            PASS_COUNT=$((PASS_COUNT + 1))
-          else
-            echo -e "  ${RED}✗${NC} $fname AE=$ae"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-          fi
+        if [ ! -f "$impl_img" ]; then
+          # A missing impl capture is a failed comparison, never a skip.
+          echo -e "  ${RED}✗${NC} $fname impl screenshot missing"
+          FAIL_COUNT=$((FAIL_COUNT + 1))
+          continue
+        fi
+        result=$(bash "$VISUAL_DEBUG_SCRIPTS/ae-compare.sh" "$ref_img" "$impl_img" "$VERIFY_SHOT_DIR/diff/$fname" 2>/dev/null)
+        status=$(echo "$result" | grep -o 'STATUS=[A-Z]*' | cut -d= -f2)
+        ae=$(echo "$result" | grep -o 'AE=[0-9A-Z]*' | cut -d= -f2)
+        if [ "$status" = "PASS" ]; then
+          echo -e "  ${GREEN}✓${NC} $fname AE=$ae"
+          PASS_COUNT=$((PASS_COUNT + 1))
+        else
+          echo -e "  ${RED}✗${NC} $fname AE=${ae:-NA} STATUS=${status:-ERROR}"
+          FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
       done
       TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
-      if [ "$FAIL_COUNT" -gt 0 ]; then
+      if [ $((PASS_COUNT + FAIL_COUNT)) -eq 0 ]; then
+        echo -e "  ${RED}No screenshots compared (no ref captures under $VERIFY_SHOT_DIR/ref)${NC}"
+        TOTAL_FAIL=$((TOTAL_FAIL + 1))
+      elif [ "$FAIL_COUNT" -gt 0 ]; then
         echo -e "  ${RED}$FAIL_COUNT/$((PASS_COUNT + FAIL_COUNT)) screenshots FAIL${NC}"
         TOTAL_FAIL=$((TOTAL_FAIL + 1))
       else
