@@ -2,6 +2,140 @@
 
 ## [Unreleased]
 
+## [0.8.15] - 2026-09-25
+
+### Added
+
+- Step 5c-d clonability risk report: `python -m ui_clone.clonability
+  <ref-dir>` reads existing capture and extraction artifacts (no browser) and
+  writes `clonability-report.json` with evidence-backed risks (intro overlay
+  with its measured exit, WebGL or large canvas, hero or heavy video,
+  scroll-linked and in-view motion volume, paid fonts, third-party iframes as
+  cautions; bot challenge and recorded `unclonable_reasons` as blockers), each
+  with impact and a mitigation. Risk ids derive from the evidence, and a
+  decision carries across re-runs only while id and evidence match. The agent
+  relays the summary right after capture and stops only on a blocker; before
+  generation the Stop hook releases that turn and names what to send. Only the
+  user decides: a Claude prompt line `ui-clone decide <risk-id> proceed|stop
+  <note>` (quoted, empty/placeholder, or conflicting lines are not recorded) or
+  `--decide` in their own terminal. The CLI refuses `--decide` under agent-host
+  environment markers (Claude Code `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT`, Codex
+  `CODEX_THREAD_ID`/`CODEX_CI`/`CODEX_SANDBOX*`), so a `script`-faked TTY does
+  not pass; agent Bash is denied any `--dec…` form (continuations joined) and
+  any clearing of those markers next to a clonability call, abbreviations are
+  off, and agent scripts may not call the recorder. The Phase-2 driver runs it, `pre-generate` requires it current
+  (its inputs include the recorded `unclonable_reasons`) with every blocker
+  decided by the user (warn-only only for a run that passed `pre-generate`
+  before any report was recorded in `pipeline-state.json`), Bash
+  overwrites/deletes of the report (glob forms included) are denied, the
+  generation-planner carries the cautions into `clonabilityMitigations[]`,
+  which Step 7 follows, and `runtime-dom-parity-check.sh` /
+  `hover-fallback-probe.sh` wait the measured intro exit before sampling. A live run found an intro overlay,
+  a WebGL canvas, and reveal-heavy motion only at closeout.
+
+### Fixed
+
+- A `pre-generate` wire-grounding failure names the selector the source row
+  records (or that no row has the `sourceId`), and `enrichment.md` requires
+  copying the row's `target`/`selector` verbatim with one wire per row. A live
+  run stalled at `generation-plan enrichment` because the planner joined
+  several selectors into one wire and the message said only "absent".
+- The agent-script guard no longer blocks the plugin's own scripts when a
+  skill runs them from the install-marker checkout (`./install.sh --no-deps`)
+  while the hook runs from the host's installed copy. A script is exempt only
+  when its whole checkout's shipped code (`ui_clone/`, `scripts/`, `skills/`,
+  `hooks/`, `bin/`, runtime residue aside) is byte-identical to the installed
+  plugin with no extra files, since shipped scripts load siblings and
+  `ui_clone` from their own tree; skill trees the install omits (internal
+  skills such as `benchmark`) are left out of the compare and never exempt.
+  The verdict is cached under `~/.cache/ui-clone-skills/` by a stat
+  fingerprint and reused only for files at least 2s older than it. An edited sibling or
+  module, a partial copy, or a loose copy is still denied, so repointing the
+  marker does not widen trust.
+- `install.sh` refreshes the user-scope Claude install (`plugin update
+  --scope user`); run from a project with its own local install, a bare update
+  refreshed only that one and left the user scope on the old version. A
+  refresh no longer runs `plugin enable`, so a user-scope disable (the plugin
+  enabled only in clone projects) survives reinstalls instead of loading the
+  hooks into every session again. The stale-cache recovery (evict, then
+  `plugin install`, which enables) restores a user-scope disable afterwards.
+- Hooks run only for the session that owns a ui-clone run, so the plugin can
+  stay enabled globally. Invoking a skill (prompt, `Skill` call, or a
+  `python -m ui_clone.pipeline` shell call) records
+  `tmp/.ui-re-sessions/<sha256(session_id)>`; `hooks/shim.sh` starts Python
+  only for that session while `tmp/ref/*/` run state exists, for a session
+  already recorded on a ref dir, for the session's own external-browse crumb
+  or continuation receipt, and for any `agent-browser open http…` command (the
+  off-pipeline detector). Other sessions in the same folder exit in the shell.
+  A payload without a `session_id` keeps the folder-based activation. `pre_bash`
+  now guards the ownership records like the other enforcement state. A
+  PreToolUse shell command (`command` or Codex `cmd`, string or argv array)
+  claims when any segment runs a ui-clone command — `-m ui_clone[.pipeline|
+  .gate|.goal|.state|.scoped_check|.scoped_diff]`, `node bin/ui-clone`/
+  `ui-clone` with a run subcommand or URL, or a visual-debug script — through
+  `uv run --project`, `bash -lc`, `sudo`, `xargs`, loops and similar wrappers,
+  so Codex runs are enforced. A segment led by a non-executing command (echo,
+  printf, grep-family, cat-family, sed/awk, jq, read-only git, `bash -n`, a
+  comment) does not claim, nor do descriptions or tool output; a false claim
+  only turns enforcement on, so ambiguous text claims. After `/clear` or in a new
+  session the WIP resume notice appears again and asks the agent to re-invoke
+  the skill (no auto-claim), and a user's `ui-clone decide` prompt reaches the
+  recorder from any session. The external-browse pre-filter is linear-time, so
+  large payloads no longer stall the hook.
+- `install.sh` no longer enables the plugin when `claude plugin list` fails,
+  installs at user scope when only a project/local install exists, and honors
+  `CLAUDE_CONFIG_DIR` (as does post-push-refresh). The push hooks skip the
+  separate value of `--work-tree`/`--git-dir`/`--namespace`/`-C`/`-c` when
+  finding `push`, expand `~`/`$VAR` in `-C` (a relative one against a leading
+  `cd <dir> &&`), and block rather than skip every
+  check when that directory cannot be entered or python3 is missing.
+- The pre-push version check compares against upstream only: an unpushed
+  release stays exactly one step above upstream (next patch, minor, or major)
+  across local reinstalls, and a version further ahead is blocked. The old
+  "already installed on this machine" block made every local reinstall demand
+  another bump.
+- Gates no longer pass on artifacts that only claim success. Block-severity
+  verification-plan rows reject a self-declared `skip`/`warn` unless it matches
+  what the producer emits; a `.json` artifact that does not parse to an object
+  fails instead of being scanned as text; a block row without `produces` fails.
+  List-root `regions.json` is checked like the object form, malformed
+  `transition-spec.json` fails the `spec` gate, `bundles/` needs at least one
+  `*.js`, and list-root plans or non-numeric counts return fail rows instead of
+  tracebacks.
+- Hooks fail closed in more cases. The Stop hook runs the current gate before
+  generation even when an impl root exists; a non-object `verify-stamp.json`
+  blocks; `Gate.run` records state-file corruption as `state-corruption`
+  instead of silently resetting the cursor. The declaration and section-compare
+  guards check every active ref, match quoted script paths and
+  `uv run python -m ui_clone.measure section-compare`, and recognize git global
+  options and shell wrappers (`git -C dir push`, `{ git push; }`, `nohup`,
+  backticks). The Bash write guard covers `>|` and `cp`/`install`/`rsync`/`mv`/`ln`
+  destinations, the static-mirror guard covers any `impl/**.html` download, and
+  the scaffold guard covers `npx -y`, `pnpm`/`yarn dlx`, `bunx`, and
+  `git clone URL impl`. Phase 2 aborts when a producer script is missing.
+- `capture-scroll-eval.js` accepts a small document shrink during the end
+  probe (the browser clamps to the new end) but reports `document-collapsed`
+  when the page collapses, so a scroll-lock or re-render cannot ship a
+  truncated capture as complete.
+- `ae-compare.sh` prints `AE=NA STATUS=ERROR` and exits 2 when ImageMagick
+  fails instead of reporting `AE=0 STATUS=PASS`, and normalizes quantum-scaled
+  AE; the `auto-verify.sh` fallback counts missing impl screenshots as failures
+  and never passes with zero comparisons.
+- `review.sh` judges pytest by exit status; `post-push-refresh.sh` validates the
+  downloaded installer before replacing the install dir and warns on failure;
+  push detection matches `git -C`/`-c`/`--no-pager` forms; `capture.sh` names
+  the failing stage in `capture-error.json`; Codex hook commands end with
+  `|| true` like the Claude manifest, with a manifest parity test.
+- Docs: `hydration-check.sh` takes the ref dir as its third argument, runnable
+  `agent-browser` commands carry `--session`, one-line evals use IIFEs, "Step
+  5e" means only capture verification, `bundle-analysis.md` routes through
+  5c-b/5c-c, and artifacts no gate reads are no longer labelled gates.
+
+### Removed
+
+- Unused `scripts/verify/lib/roi_video_registration.py` and
+  `scripts/extract/_ast_extract.py` (with its only test).
+
 ## [0.8.14] - 2026-09-25
 
 ### Changed
