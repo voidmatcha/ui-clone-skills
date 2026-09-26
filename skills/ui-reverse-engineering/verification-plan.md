@@ -240,4 +240,4 @@ gate_section_compare:
 
 ---
 
-After this step, return to `pipeline-execution.md` Step 5e (capture verification). The `verification-plan.json` you just wrote is consumed by `gate_spec` (refuses to pass without it) and by `gate_post_implement` (enforces each `requiredChecks[]` entry).
+After this step, return to `pipeline-execution.md` Step 5e (capture verification; procedure in `transition-spec-rules.md` §5). The `verification-plan.json` you just wrote is consumed by `gate_spec` (refuses to pass without it) and by `gate_post_implement` (enforces each `requiredChecks[]` entry).

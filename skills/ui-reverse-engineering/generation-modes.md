@@ -104,9 +104,9 @@ export function HeroSection() {
 
 Verify after generation:
 ```bash
-agent-browser --session <s> eval "document.querySelector('main').children.length" \
+agent-browser --session <s> eval "(() => document.querySelector('main').children.length)()" \
   --on <ref-url> > /tmp/ref-children.txt
-agent-browser --session <s> eval "document.querySelector('main').children.length" \
+agent-browser --session <s> eval "(() => document.querySelector('main').children.length)()" \
   --on <impl-url> > /tmp/impl-children.txt
 diff /tmp/ref-children.txt /tmp/impl-children.txt   # must be identical
 ```

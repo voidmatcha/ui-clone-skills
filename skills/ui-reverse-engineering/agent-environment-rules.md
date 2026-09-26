@@ -80,7 +80,7 @@ Run `agent-browser --help` once at session start to confirm verb syntax.
 
 Common mistakes from prior sessions:
 
-- `agent-browser scrollTo 0 500` — **no such verb.** Use `agent-browser --session <s> eval "window.scrollTo(0, 500)"` or `agent-browser scroll down 500`.
+- `agent-browser scrollTo 0 500` — **no such verb.** Use `agent-browser --session <s> eval "(() => window.scrollTo(0, 500))()"` or `agent-browser --session <s> scroll down 500`.
 - The valid scroll verbs are `scroll <dir> [px]`, `scrollintoview <sel>`, `mouse wheel <dy> [dx]` — there is no `scrollTo`.
 
 Unknown verbs typically exit with an error rather than silently no-op, but the error is easy to miss in long Bash chains; check exit codes when in doubt.

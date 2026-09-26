@@ -323,11 +323,11 @@ Combine all 3 tiers:
 | `scroll-engine.json` type | Method | Why |
 |---|---|---|
 | `native` or missing | `window.scrollTo(0, pos)` | Standard scroll |
-| `lenis-native` / `@beyond/react` | `agent-browser scroll down N` (wheel events) | Lenis intercepts `scrollTo` but responds to wheel |
+| `lenis-native` / `@beyond/react` | `agent-browser --session <project> scroll down N` (wheel events) | Lenis intercepts `scrollTo` but responds to wheel |
 | `lenis-wrapper` / `locomotive` | `lenis.scrollTo(pos)` or `container.scrollTop = pos` | Transform-based scroll, native scroll disabled |
 | `gsap-scrollsmoother` | `ScrollSmoother.scrollTo(pos)` | GSAP wrapper |
 
-⛔ **`window.scrollTo` does NOT work on many modern sites.** With any custom scroll library, use `agent-browser scroll down` (wheel simulation) — it triggers the actual engine regardless of implementation.
+⛔ **`window.scrollTo` does NOT work on many modern sites.** With any custom scroll library, use `agent-browser --session <project> scroll down <px>` (wheel simulation) — it triggers the actual engine regardless of implementation.
 
 ```bash
 # Scroll to top — use wheel events, not scrollTo

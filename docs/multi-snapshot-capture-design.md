@@ -15,7 +15,7 @@
 ## Problem
 
 Before the A/B/C integration, the capture pipeline
-(`scripts/extract/extract-dom.sh`, `scripts/extract/capture.sh`) took a
+(`skills/visual-debug/scripts/extract-dom.sh`, `scripts/extract/capture.sh`) took a
 **single DOM snapshot** at one "settled" moment after `agent-browser open`.
 juanmora ref dir evidence:
 

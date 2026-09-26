@@ -427,7 +427,7 @@ grep -iE 'ignore previous|you are now|system prompt|<script|javascript:|data:tex
 
 ---
 
-## Step 5e: Classify Drag/Swipe Effects
+### Classify drag/swipe effects
 
 | Effect type | Detection | Implementation |
 |---|---|---|

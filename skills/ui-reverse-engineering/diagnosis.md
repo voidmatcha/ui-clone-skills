@@ -49,13 +49,13 @@ and a project-scoped `@media (max-width: <bp>px)` rule?
 bash "$SCRIPTS/computed-diff.sh" <session> <orig> <impl> ".section" ".section > *" ".section > * > *"
 
 # 2. Verify child order
-agent-browser --session <ref> eval "[...document.querySelector('.inner').children].map(c => c.className)"
+agent-browser --session <ref> eval "(() => [...document.querySelector('.inner').children].map(c => c.className))()"
 
 # 3. Verify wrapper presence
-agent-browser --session <ref> eval "document.querySelector('.section').children[0].className"
+agent-browser --session <ref> eval "(() => document.querySelector('.section').children[0].className)()"
 
 # 4. Check inner class namespace (Swiper, carousels)
-agent-browser --session <ref> eval "document.querySelector('.swiper-slide').innerHTML"
+agent-browser --session <ref> eval "(() => document.querySelector('.swiper-slide').innerHTML)()"
 ```
 
 **Common patterns:**
@@ -64,7 +64,7 @@ agent-browser --session <ref> eval "document.querySelector('.swiper-slide').inne
 - Swiper slide inner class namespace mismatch (`ReviewList_*` vs `ReviewItem_*`) → all inner elements unstyled even though CSS is loaded
 - Portal elements in wrong container (modal, dropdown outside target)
 
-**Fix:** Always `agent-browser --session <ref> eval "document.querySelector('.target').outerHTML"` on ref BEFORE writing any JSX. Screenshot ref for structural reference. Never infer DOM order from screenshots.
+**Fix:** Always `agent-browser --session <ref> eval "(() => document.querySelector('.target').outerHTML)()"` on ref BEFORE writing any JSX. Screenshot ref for structural reference. Never infer DOM order from screenshots.
 
 ---
 
@@ -129,11 +129,11 @@ bash "$SCRIPTS/computed-diff.sh" <session> <orig> <impl> ".section" ".section > 
 **Diagnosis:**
 ```bash
 # 1. Verify tag name and inner structure
-agent-browser --session <ref> eval "document.querySelector('.btn_area').innerHTML"
-agent-browser --session <ref> eval "document.querySelector('.btn_lang').tagName"
+agent-browser --session <ref> eval "(() => document.querySelector('.btn_area').innerHTML)()"
+agent-browser --session <ref> eval "(() => document.querySelector('.btn_lang').tagName)()"
 
 # 2. Check computed appearance (is it a styled native element?)
-agent-browser --session <ref> eval "getComputedStyle(document.querySelector('.btn_lang')).appearance"
+agent-browser --session <ref> eval "(() => getComputedStyle(document.querySelector('.btn_lang')).appearance)()"
 
 # 3. Test if interaction fires
 agent-browser --session <impl> eval \
@@ -146,7 +146,7 @@ agent-browser --session <impl> eval \
 - Hover JS event listener not firing: missing `mouseenter` dispatch; `mouseover` event wrong
 - SVG rotation double-applied: CSS already rotates `.slider_prev svg { transform: rotate(180deg) }`, JSX adds another → 360° total (both arrows look identical)
 
-**Fix:** Always verify tag name. Check ref HTML: `agent-browser --session <ref> eval "document.querySelector('.selector').outerHTML"`. Grep CSS for existing transforms before adding inline: `grep "\.slider_prev.*transform\|rotate" *.css`.
+**Fix:** Always verify tag name. Check ref HTML: `agent-browser --session <ref> eval "(() => document.querySelector('.selector').outerHTML)()"`. Grep CSS for existing transforms before adding inline: `grep "\.slider_prev.*transform\|rotate" *.css`.
 
 ---
 
@@ -161,7 +161,7 @@ agent-browser --session <impl> eval \
   "getComputedStyle(document.querySelector('.target')).transitionDuration + ' ' + getComputedStyle(document.querySelector('.target')).transitionTimingFunction"
 
 # 2. Are WAAPI animations registered?
-agent-browser --session <impl> eval "document.querySelector('.target').getAnimations().length"
+agent-browser --session <impl> eval "(() => document.querySelector('.target').getAnimations().length)()"
 
 # 3. What library drives it?
 grep -E "gsap|Lenis|ScrollTrigger|requestAnimationFrame|transition" tmp/ref/<c>/bundles/*.js | head -20

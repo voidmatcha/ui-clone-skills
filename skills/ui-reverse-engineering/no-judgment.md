@@ -16,10 +16,10 @@ Read this when you feel a temptation to shortcut. Find your thought in the table
 | "The transition is sound-only, no visual change" | Record hover video. CSS `:hover` in inline `<style>` may apply 3D transforms invisible to bundle search. |
 | "The image URLs look right" | `curl -I <url>` every CDN URL. Images with `naturalWidth: 0` show alt text only — user won't report until they see it. |
 | "I implemented this by reasoning — it's probably right" | Screenshot ref + impl at the exact trigger point before moving on. 30 seconds now, 30 minutes saved. |
-| "This looks like a button, so I used `<button>`" | `agent-browser --session <s> eval "document.querySelector('.btn_area').innerHTML"`. Styled `<select appearance:none>` + absolute SVG chevron is indistinguishable from custom button. |
-| "`scroll-engine.json` shows 'native' so I used addEventListener" | Verify: `agent-browser --session <s> eval "typeof window.lenis !== 'undefined' || typeof locomotiveScroll !== 'undefined'"`. Site may still use custom scroll. |
-| "The reference has the same items as I implemented" | `agent-browser --session <s> eval "document.querySelectorAll('.card, .point-items, .item').length"` on ref. Items may be added post-launch. |
-| "I know what this section looks like" | `agent-browser --session <s> eval "document.querySelector('.section-class').outerHTML"` on ref BEFORE any impl. Then `section-compare.sh` after. No exceptions. |
+| "This looks like a button, so I used `<button>`" | `agent-browser --session <s> eval "(() => document.querySelector('.btn_area').innerHTML)()"`. Styled `<select appearance:none>` + absolute SVG chevron is indistinguishable from custom button. |
+| "`scroll-engine.json` shows 'native' so I used addEventListener" | Verify: `agent-browser --session <s> eval "(() => typeof window.lenis !== 'undefined' || typeof locomotiveScroll !== 'undefined')()"`. Site may still use custom scroll. |
+| "The reference has the same items as I implemented" | `agent-browser --session <s> eval "(() => document.querySelectorAll('.card, .point-items, .item').length)()"` on ref. Items may be added post-launch. |
+| "I know what this section looks like" | `agent-browser --session <s> eval "(() => document.querySelector('.section-class').outerHTML)()"` on ref BEFORE any impl. Then `section-compare.sh` after. No exceptions. |
 | "Header should hide on scroll-down — that's standard UX" | Scroll ref to a deep position (`window.scrollTo(0, 4000)` or via the custom scroll wrapper), wait 500ms, then check `getComputedStyle(headerEl).transform`. If `none`, do NOT add hide-on-scroll — ref doesn't have it. |
 | "em-conversion failed so I'll use 16px as 1em" | Stop generation and recover the base from CSS (`html/body font-size`, root variables, or `sizing-expressions.json`). If CSS is unavailable, measure it with a browser/screenshot probe before writing code. Never commit a guessed base or a TODO marker. |
 | "The gate only checks file existence, so I'll assemble the JSON myself" | Stop. Add or fix `artifact-provenance.json` with real browser/script evidence paths. `manual`/`guess` provenance blocks `pre-generate`; rerun the extraction step instead. |
@@ -42,7 +42,7 @@ Read this when you feel a temptation to shortcut. Find your thought in the table
 | Temptation | Required action |
 |---|---|
 | "This heading is just text with a font" | Check `svg-text-elements.json`. It may be an SVG `<path>` — font recreation produces wrong kerning, weight, glyph shape. |
-| "DOM section wrapper probably isn't needed" | `agent-browser --session <s> eval "document.querySelector('.section').children[0].className"` — CSS sets margin/padding ON the wrapper. |
+| "DOM section wrapper probably isn't needed" | `agent-browser --session <s> eval "(() => document.querySelector('.section').children[0].className)()"` — CSS sets margin/padding ON the wrapper. |
 | "CTA order is title→mascot by visual reading" | `[...document.querySelector('.inner').children].map(c => c.className)` — DOM order ≠ visual order when CSS positions elements. |
 | "The image isn't centering but `text-align: center` is set" | `getComputedStyle(img).display` — host CSS may set `img { display: block }`. Fix: `margin: 0 auto` on `<img>`. |
 | "I added the CSS transform for the prev arrow in JSX" | Grep CSS for `.slider_prev svg { transform }` first. Adding JSX rotate when CSS already rotates = 360° total. |
@@ -81,5 +81,5 @@ Read this when you feel a temptation to shortcut. Find your thought in the table
 | "The scroll animation works — I used RAF" | RAF is correct for progress-based transforms (parallax). Wrong for CSS class-toggle transitions (card stack). RAF cancels the CSS transition every frame. |
 | "I'll use a placeholder" | No placeholders. Extract real asset or leave unimplemented. |
 | "The scraped HTML has correct initial state" | GSAP-baked inline styles (`visibility:hidden`, `opacity:0`) are animation init states, NOT defaults. Reset them. |
-| "I'll verify the CSS change via curl on the compiled chunk" | ⛔ NEVER. Next.js HMR may not have recompiled yet — `curl` on chunk URLs returns stale cached content. Always use `agent-browser --session <s> eval "getComputedStyle(document.querySelector('.target')).propertyName"` to verify CSS changes in a live browser. |
+| "I'll verify the CSS change via curl on the compiled chunk" | ⛔ NEVER. Next.js HMR may not have recompiled yet — `curl` on chunk URLs returns stale cached content. Always use `agent-browser --session <s> eval "(() => getComputedStyle(document.querySelector('.target')).propertyName)()"` to verify CSS changes in a live browser. |
 | "I'll use Puppeteer MCP / Playwright MCP for this" | ⛔ NEVER. All browser automation MUST use `agent-browser` CLI via Bash. Puppeteer/Playwright MCP tools are prohibited — they bypass session management and conflict with `agent-browser` sessions. This rule survives context compaction. |

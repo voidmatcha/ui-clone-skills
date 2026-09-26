@@ -177,7 +177,7 @@ agent-browser --session <s> eval "(async () => {
 
 ## Scroll library parameter extraction
 
-**Custom scroll definition:** A site uses custom scroll when bundle analysis (Step 5c-a) detects: `new Lenis`, `ScrollSmoother.create`, `locomotive-scroll`, or `data-scroll` patterns in any JS chunk. Native browser `scrollBehavior: 'smooth'` or CSS `scroll-behavior: smooth` is NOT custom scroll. If in doubt, run: `agent-browser --session <s> eval "typeof window.lenis !== 'undefined' || typeof locomotiveScroll !== 'undefined'"`.
+**Custom scroll definition:** A site uses custom scroll when bundle analysis (Step 5c-a) detects: `new Lenis`, `ScrollSmoother.create`, `locomotive-scroll`, or `data-scroll` patterns in any JS chunk. Native browser `scrollBehavior: 'smooth'` or CSS `scroll-behavior: smooth` is NOT custom scroll. If in doubt, run: `agent-browser --session <s> eval "(() => typeof window.lenis !== 'undefined' || typeof locomotiveScroll !== 'undefined')()"`.
 
 When `interaction-detection.md` detects a JS scroll library (Lenis, GSAP ScrollSmoother, Locomotive), extract configuration parameters from the bundle.
 

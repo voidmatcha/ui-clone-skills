@@ -2,7 +2,7 @@
 
 > **This step is MANDATORY for ALL sites.** Most modern sites use JS to drive animations (GSAP, Framer Motion), smooth scroll (Lenis), intro sequences, and state transitions invisible to `getComputedStyle`.
 >
-> **After this step:** produce `transition-spec.json` — see `transition-spec-rules.md`.
+> **After this step:** Step 5c-b (`bundle-verification.md`), then Step 5c-c (`paid-features-detect.sh` → ⛔ Gate: `paid-features`), then Step 5d — produce `transition-spec.json` per `transition-spec-rules.md` (see `pipeline-execution.md`).
 > **Reference patterns:** see `patterns.md` for Canvas/Disc/Lottie/StateMachine/Timer detection.
 
 ## Download ALL loaded chunks (MANDATORY)
@@ -240,7 +240,7 @@ After completing all analysis, produce two documents per `transition-spec-rules.
 1. `bundle-map.json` — which chunk owns which feature
 2. `transition-spec.json` — complete transition specification (DRAFT, to be verified)
 
-Then proceed to **Step 5e: Capture Verification** (in `transition-spec-rules.md`).
+Then, after Steps 5c-b/5c-c and the Step 5d `spec` gate, proceed to **Step 5e: Capture Verification** (in `transition-spec-rules.md`).
 
 ## Fix-iteration helper: bundle-grep
 

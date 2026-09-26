@@ -332,7 +332,7 @@ Note: `status: 'unloaded'` means the font face is registered but its unicode-ran
 A quick check: does the target font have *any* loaded face?
 
 ```bash
-agent-browser --session <s> eval "document.fonts.check('16px \"<Font Family>\"', '<sample-glyphs>')"
+agent-browser --session <s> eval "(() => document.fonts.check('16px \"<Font Family>\"', '<sample-glyphs>'))()"
 # Returns true if the font is available for those characters, false if falling back.
 # For CJK fonts, pass a few characters from the target subset (e.g. one Hangul
 # triplet or three CJK ideographs). For Latin-only fonts, 'ABC' is sufficient.

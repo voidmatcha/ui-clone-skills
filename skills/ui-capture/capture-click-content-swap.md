@@ -6,13 +6,13 @@ Unlike click-toggle (show/hide a panel) or click-cycle (switch between tabs), co
 
 **Detection signal:** Clicking an element changes the URL (pushState), changes column count, or replaces >50% of visible images.
 
-**Safety rule:** trigger clicks with `agent-browser click <selector>`, not
+**Safety rule:** trigger clicks with `agent-browser --session <session>-click-N click <selector>`, not
 `document.querySelector(...).click()`, when capturing user-observable behavior.
 Use an isolated session per candidate. Skip non-HTTP schemes (`mailto:`,
 `tel:`, `javascript:`, `data:`), downloads, and `_blank` targets as declared
 navigation; they are not safe same-page state evidence. If a safe click
 navigates away (external origin, same-origin route, or hash jump), record it as
-navigation and restore with `agent-browser back`; if origin or path restore
+navigation and restore with `agent-browser --session <session>-click-N back`; if origin or path restore
 fails, reopen the reference URL. Do not claim same-page DOM mutation for
 navigation-only clicks.
 

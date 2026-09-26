@@ -68,9 +68,9 @@ Deduplicate. Cap at 200. Save to `tmp/ref/<c>/animation-candidates.json`.
 ### Step 6d-2: Multi-position scroll sampling
 
 ```bash
-agent-browser --session <s> eval "window.scrollTo(0, 0)" && sleep 1.5
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()" && sleep 1.5
 
-TOTAL=$(agent-browser --session <s> eval "document.body.scrollHeight" | tail -1 | tr -d '"')
+TOTAL=$(agent-browser --session <s> eval "(() => document.body.scrollHeight)()" | tail -1 | tr -d '"')
 STEP=$((TOTAL / 10))
 
 # Use Lenis-aware wheel events when scrollEngine != native

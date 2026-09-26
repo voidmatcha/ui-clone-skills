@@ -231,7 +231,7 @@ agent-browser --session <s> screenshot '<selector>' tmp/ref/<component>/transiti
 # css-hover: CDP hover
 agent-browser --session <s> hover <selector>
 # js-class: classList.add
-# agent-browser --session <s> eval "document.querySelector('<sel>').classList.add('<cls>')"
+# agent-browser --session <s> eval "(() => document.querySelector('<sel>').classList.add('<cls>'))()"
 # intersection: classList.add('in-view')
 agent-browser --session <s> wait <transitionDuration + 100>
 agent-browser --session <s> screenshot '<selector>' tmp/ref/<component>/transitions/ref/<name>-active.png

@@ -8,8 +8,8 @@ The scripts are orchestration wrappers. The event source of truth is the live `a
 
 - splash/page-load: open a fresh browser session and observe DOM/class/style state during navigation;
 - scroll: move the real page with `window.scrollTo` or the detected scroll engine inside the browser context, then wait for stability;
-- hover: prefer real pointer hover (`agent-browser hover <selector>`) for settled/visual proof; CSSOM and synthetic mouse events are only candidate/runtime-handler probes;
-- click: use `agent-browser click <selector>` in a throwaway session per safe candidate; record non-HTTP schemes, downloads, and `_blank` targets as declared navigation without activating them.
+- hover: prefer real pointer hover (`agent-browser --session <session> hover <selector>`) for settled/visual proof; CSSOM and synthetic mouse events are only candidate/runtime-handler probes;
+- click: use `agent-browser --session <session>-click-N click <selector>` in a throwaway session per safe candidate; record non-HTTP schemes, downloads, and `_blank` targets as declared navigation without activating them.
 
 Never infer a dynamic state from raw HTML alone. Static HTML/CSS/JS can explain why a state exists, but only browser-observed state artifacts can claim that the state fires.
 
@@ -81,14 +81,14 @@ Click capture must be defensive:
 2. For each candidate, open a fresh `agent-browser` session (`<session>-click-N`).
 3. Skip `mailto:`, `tel:`, `sms:`, `javascript:`, `data:`, `blob:`, `file:`, downloads, and `_blank` targets; write them as `declaredOnly` / `navigationOnly` so they do not open external apps, downloads, or tabs.
 4. Snapshot before click.
-5. Run `agent-browser click <selector>`.
-6. Snapshot after click and read `agent-browser get url`.
+5. Run `agent-browser --session <session>-click-N click <selector>`.
+6. Snapshot after click and read `agent-browser --session <session>-click-N get url`.
 7. If URL changed, classify it:
    - `external`: different origin; record as `navigationOnly`, do not claim DOM mutation.
    - `same-origin-navigation`: different path; record navigation, not same-page state.
    - `hash-navigation`: fragment-only movement; record navigation-only unless DOM mutation is separately observed.
    - `same-page`: eligible for DOM/class/style mutation proof.
-8. Restore via `agent-browser back`; if the origin or path is still wrong, reopen the reference URL.
+8. Restore via `agent-browser --session <session>-click-N back`; if the origin or path is still wrong, reopen the reference URL.
 
 This prevents a click candidate from polluting later candidates or accidentally crawling off-site.
 

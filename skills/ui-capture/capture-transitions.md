@@ -260,7 +260,7 @@ python3 scripts/extract/capture-region-artifacts.py \
   <reference-url> <project> "$OUT_DIR"
 ```
 
-The bridge uses the current `agent-browser screenshot [selector] [path]`
+The bridge uses the current `agent-browser --session <s> screenshot [selector] [path]`
 interface. It writes explicit `artifacts.idle` and
 `artifacts.active` paths plus `capture-region-artifacts-summary.json`.
 When a hover rule is activated on an ancestor but changes a descendant, keep
@@ -316,7 +316,7 @@ or reference frames.
 
 #### Never pair `hover <selector>` with `screenshot <selector>`
 
-`agent-browser screenshot <selector> <path>` is an element-clipped capture, and
+`agent-browser --session <s> screenshot <selector> <path>` is an element-clipped capture, and
 it scrolls the element into view before shooting. Two things follow, and both
 turn a real hover delta into a silently identical PNG pair:
 
@@ -467,7 +467,7 @@ agent-browser --session <project> screenshot '<selector>' \
 
 > **If IntersectionObserver adds its own class:** Check the class name first:
 > ```bash
-> agent-browser --session <project> eval "document.querySelector('<selector>').className"
+> agent-browser --session <project> eval "(() => document.querySelector('<selector>').className)()"
 > # Scroll to trigger in-view, then check again
 > ```
 > Adjust the eval above with the confirmed class name.

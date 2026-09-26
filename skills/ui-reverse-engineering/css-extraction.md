@@ -232,7 +232,7 @@ agent-browser --session <s> eval "
   return 'Observing scroll...';
 })()"
 
-agent-browser scroll down 800
+agent-browser --session <s> scroll down 800
 agent-browser --session <s> wait 2000
 agent-browser --session <s> eval "(() => JSON.stringify(window.__scrollFrames, null, 2))()"
 ```

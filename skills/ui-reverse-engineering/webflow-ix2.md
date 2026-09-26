@@ -131,14 +131,14 @@ For IX2 sites, the bundle JSON tells you what *should* happen but the easiest wa
 
 ```bash
 # Reset to top
-agent-browser --session <s> eval "window.scrollTo(0, 0)"
+agent-browser --session <s> eval "(() => window.scrollTo(0, 0))()"
 sleep 1.5
 
 # Build candidate selector list from webflow-hide-rule.json or animated-detected.json
 SELECTORS='.pill-scroll,.circle-left-scroll,.hex-scroll,.circle-center-scroll,.circle-plus-scroll,.front-folder,.jm-siluete-img,.dark-jm-img,.light-jm-img'
 
 # Sample at N scroll positions across page
-TOTAL=$(agent-browser --session <s> eval "document.body.scrollHeight" | tail -1 | tr -d '"')
+TOTAL=$(agent-browser --session <s> eval "(() => document.body.scrollHeight)()" | tail -1 | tr -d '"')
 STEP=$((TOTAL / 10))
 
 for i in 0 1 2 3 4 5 6 7 8 9; do
