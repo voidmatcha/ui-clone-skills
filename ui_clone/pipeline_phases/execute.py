@@ -826,6 +826,19 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
                     ["bash", str(verification_plan), str(pipeline.ref_dir)],
                     "Phase 2 — verification-plan synthesis",
                 )
+            # Step 5c-d clonability risk report: pure JSON read of the capture
+            # + extraction artifacts above (no browser). Printed here so the
+            # agent relays site traits (intro overlay, WebGL, reveal-heavy
+            # motion, paid fonts, access blockers) right after capture. Never
+            # fatal: pre-generate enforces a current report and blocker
+            # decisions, and the agent re-runs it after 5d/6b-bis.
+            try:
+                from ui_clone import clonability as _clonability
+
+                _report = _clonability.write_report(pipeline.ref_dir)
+                print(f"\n{_clonability.render_table(_report, pipeline.ref_dir)}")
+            except Exception as exc:  # pragma: no cover - advisory producer
+                print(f"  {_YELLOW}⚠{_NC} clonability report skipped: {exc}")
             for gate_name in ("extraction", "bundle"):
                 if not _run_gate(gate_name):
                     print(

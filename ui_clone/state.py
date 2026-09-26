@@ -267,6 +267,11 @@ class PipelineState:
     # the machine-readable lifecycle decision (failed/incomplete/unclonable/
     # abandoned). Empty dict means the run is still active or not yet terminal.
     terminal_state: dict = field(default_factory=dict)
+    # When `python -m ui_clone.clonability` first wrote this run's
+    # clonability report. The clonability gate is soft (legacy) only for a run
+    # that passed pre-generate WITHOUT this record, so deleting the report
+    # later cannot drop the gate to warn-only. Empty = never recorded.
+    clonability_report_at: str = ""
     # Fail-closed state review: transient flag set to True
     # when PipelineState.load() had to quarantine a corrupt pipeline-state.json.
     # mark_failed() reads this to decide between "advance fail count on fresh
@@ -328,6 +333,7 @@ class PipelineState:
                     or data.get("terminal_state")
                     or {}
                 ),
+                clonability_report_at=str(data.get("clonabilityReportAt") or ""),
             )
         except json.JSONDecodeError as exc:
             # State-corruption review: silently returning defaults on a
@@ -396,6 +402,8 @@ class PipelineState:
         if self.terminal_state:
             payload["terminalState"] = self.terminal_state
             payload["terminal_state"] = self.terminal_state
+        if self.clonability_report_at:
+            payload["clonabilityReportAt"] = self.clonability_report_at
         return payload
 
     def _save_unlocked(self, ref_dir: Path) -> None:
@@ -435,6 +443,7 @@ class PipelineState:
         self.impl_root = other.impl_root
         self.closeout_policy = other.closeout_policy
         self.terminal_state = dict(other.terminal_state)
+        self.clonability_report_at = other.clonability_report_at
 
     def _record_terminal_unlocked(
         self,
@@ -877,6 +886,25 @@ class PipelineState:
             authoritative._save_unlocked(ref_dir)
             if authoritative is not self:
                 self._mirror_from(authoritative)
+
+    def record_clonability_report(self, ref_dir: Path) -> None:
+        """Durably record (once) that this run's clonability report was
+        written. No-op without an existing pipeline-state.json: the producer
+        never creates run state."""
+        if not (ref_dir / "pipeline-state.json").is_file():
+            return
+        with _pipeline_state_lock(ref_dir):
+            if not (ref_dir / "pipeline-state.json").is_file():
+                return
+            authoritative = PipelineState.load(ref_dir)
+            if authoritative.load_failed:
+                return
+            if not authoritative.clonability_report_at:
+                authoritative.clonability_report_at = datetime.now(UTC).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                authoritative._save_unlocked(ref_dir)
+            self._mirror_from(authoritative)
 
     def record_unclonable(
         self,

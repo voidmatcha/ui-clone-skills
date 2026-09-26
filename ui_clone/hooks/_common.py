@@ -885,6 +885,8 @@ CANONICAL_REF_ARTIFACTS: frozenset[str] = frozenset(
         "bundle-map.json",
         "paid-features.json",
         "paid-fonts.json",
+        # Step 5c-d clonability risk report (python -m ui_clone.clonability)
+        "clonability-report.json",
         # Phase 5d — Spec + verification plan
         "transition-spec.json",
         "external-sdks.json",

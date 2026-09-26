@@ -225,6 +225,41 @@ def _userprompt_event(
     prompt = _user_prompt(payload)
     if prompt is None:
         return None
+    continuation = _continuation_userprompt(project_root, session_id, prompt)
+    decisions = _clonability_decisions(project_root, session_id, prompt)
+    if decisions is None:
+        return continuation
+    if continuation is None:
+        return _emit_context(_EVENT_USER_PROMPT, decisions)
+    merged = json.loads(continuation)
+    output = merged.setdefault("hookSpecificOutput", {})
+    output["additionalContext"] = f"{decisions}\n\n{output.get('additionalContext', '')}".strip()
+    return json.dumps(merged, ensure_ascii=False, sort_keys=True)
+
+
+def _clonability_decisions(project_root: Path, session_id: str, prompt: str) -> str | None:
+    """`ui-clone decide <risk-id> proceed|stop <note>` lines in the USER's
+    prompt record clonability blocker decisions with user-prompt provenance.
+    This is the only in-session path: agent Bash calls of `--decide` are denied.
+    The one-shot continuation wake is agent-scheduled text, never a user
+    decision, so it is excluded."""
+    from ui_clone import clonability
+
+    if not clonability.DECIDE_PROMPT_RE.search(prompt):
+        return None
+    receipt = _receipt(project_root, session_id)
+    if receipt is not None and _tagged(receipt, prompt):
+        return (
+            "Ignored `ui-clone decide` inside a scheduled continuation prompt: blocker "
+            "decisions are recorded only from a prompt the user typed."
+        )
+    try:
+        return clonability.apply_prompt_decisions(project_root, session_id, prompt)
+    except (OSError, ValueError) as exc:
+        return f"ui-clone decide: NOT recorded: {exc}"
+
+
+def _continuation_userprompt(project_root: Path, session_id: str, prompt: str) -> str | None:
     receipt = _receipt(project_root, session_id)
     state = receipt.get("state") if receipt is not None else None
     if receipt is not None and state in {cc.STATE_ARMED, cc.STATE_CANCELING}:
@@ -245,6 +280,27 @@ def _userprompt_event(
 def _pre_croncreate(
     project_root: Path, session_id: str, tool_input: Mapping[str, object]
 ) -> str | None:
+    from ui_clone.clonability import DECIDE_PROMPT_RE
+
+    prompt = tool_input.get("prompt")
+    if isinstance(prompt, str) and DECIDE_PROMPT_RE.search(prompt):
+        # A scheduled prompt arrives like a user prompt; it must not carry a
+        # clonability decision the user never typed.
+        reason = (
+            "A scheduled prompt cannot carry `ui-clone decide`: clonability blocker "
+            "decisions come only from the user. Ask the user and end the turn."
+        )
+        return json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": _EVENT_PRE,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     receipt = _receipt(project_root, session_id)
     if receipt is None or not _tagged(receipt, tool_input.get("prompt")):
         return None

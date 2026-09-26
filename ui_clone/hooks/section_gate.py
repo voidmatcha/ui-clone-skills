@@ -1756,6 +1756,56 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     return stamp_enforcer(ref_dir)
 
 
+def _awaiting_user_decision(ref_dir: Path) -> str | None:
+    """Release message when a current clonability-report.json has blocker(s)
+    only the user can decide. The skill says to stop and ask here; blocking the
+    Stop would push the agent to decide on its own, which the pre-bash hook
+    denies anyway. A stale, foreign, or stopped report does not qualify (the
+    agent can re-run the producer; a stop is handled by the terminal-state path).
+    Only before generation: once pre-generate passed or an implementation
+    exists, a reopened blocker never releases the Stop (the verify stamp does)."""
+    from ui_clone import clonability as clon
+
+    state = PipelineState.load(ref_dir)
+    if (
+        "pre-generate" in state.completed_steps
+        or state.current_gate not in GATE_ORDER[: GATE_ORDER.index("pre-generate") + 1]
+    ):
+        return None
+    impl_dir = _resolve_impl_dir(ref_dir)
+    if impl_dir is not None and impl_dir.is_dir() and _has_generated_source(impl_dir):
+        return None
+    try:
+        report = clon.load_report(ref_dir)
+        if (
+            report is None
+            or report.get("schemaVersion") != clon.SCHEMA_VERSION
+            or clon._as_dict(report.get("provenance")).get("source") != clon.PRODUCER
+            or clon.stopped_blockers(report)
+            or clon.stale_inputs(ref_dir, report)
+        ):
+            return None
+        pending = clon.open_blockers(report)
+    except (OSError, ValueError):
+        return None
+    if not pending:
+        return None
+    decidable = [str(r.get("id")) for r in pending if not r.get("fromState")]
+    from_state = [str(r.get("id")) for r in pending if r.get("fromState")]
+    parts = [
+        f"ui-clone-skills: {ref_dir.name} is waiting for YOUR decision on clonability "
+        f"blocker(s) {', '.join(str(r.get('id')) for r in pending)} "
+        f"(see {ref_dir}/{clon.REPORT_NAME}); the Stop gate is released so you can answer."
+    ]
+    for r in pending:
+        parts.append(f"- {r.get('id')}: {r.get('title')} -> {r.get('mitigation')}")
+    if decidable:
+        parts.append(clon.decision_instructions(ref_dir, decidable))
+    if from_state:
+        parts.append(clon.recover_instructions(ref_dir, from_state))
+    return "\n".join(parts)
+
+
 def _enforce_scoped_refs(
     search_root: Path, project_root: Path, session_id: str, include_clone_writes: bool
 ) -> bool:
@@ -2172,7 +2222,14 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    awaiting_user: list[str] = []
     for ref_dir in active_dirs:
+        awaiting = _awaiting_user_decision(ref_dir)
+        if awaiting is not None:
+            # Stop-and-ask is the required action: release, and tell the user
+            # exactly what to send.
+            awaiting_user.append(awaiting)
+            continue
         block_reason = _enforce_ref_dir(ref_dir)
         if block_reason:
             block_signature = _block_signature(block_reason)
@@ -2204,6 +2261,9 @@ def main() -> None:
     # gets an empty list, so page-level behavior is unchanged.
     if _enforce_scoped_refs(search_root, project_root, scoped_sid, False):
         sys.exit(0)
+
+    if awaiting_user:
+        print(json.dumps({"systemMessage": "\n\n".join(awaiting_user)}, ensure_ascii=False))
 
     if not _BLOCKED_THIS_RUN:
         # The turn ended clean, so the streak is over.

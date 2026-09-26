@@ -47,6 +47,12 @@ fi
 
 OUT_PATH="$REF_DIR/runtime-dom-parity.json"
 
+# Post-open wait: the measured intro overlay exit (clonability-report.json
+# verification.introSettleMs) when longer than the historical 2500ms floor.
+# shellcheck source=lib/intro-settle.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib/intro-settle.sh"
+OPEN_WAIT_MS="$(intro_settle_wait_ms "$REF_DIR" 2500)"
+
 # Detect ref Lottie evidence — used as a positive-assertion gate
 # trigger.
 HAS_LOTTIE=0
@@ -253,7 +259,7 @@ run_capture() {
   # loaded and is scriptable. Verify the page state instead of treating that
   # timeout as an automatic browser failure.
   agent-browser --session "$sess" open "$url" >/dev/null 2>&1 || open_status=$?
-  agent-browser --session "$sess" wait 2500 >/dev/null 2>&1 || true
+  agent-browser --session "$sess" wait "$OPEN_WAIT_MS" >/dev/null 2>&1 || true
   local href=""
   href="$(agent-browser --session "$sess" eval '(() => location.href)()' 2>/dev/null || true)"
   if [ -z "$href" ] || printf '%s' "$href" | grep -Eiq 'about:blank'; then

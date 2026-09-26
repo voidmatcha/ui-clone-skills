@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from ui_clone import dag as _dag
 
 from .base import CheckResult
+from .clonability_report import check_clonability_report
 from .extraction import _em_conversion_check
 from .pre_generate_checks import (
     _check_audit_artifacts,  # noqa: F401  (re-exported for __init__ rebinding)
@@ -302,6 +303,9 @@ def gate_pre_generate(self: Gate) -> list[CheckResult]:
         )
     )
     results.extend(check_media_inventory_receipts(self.ref_dir))
+    # Step 5c-d: the clonability risk report must be current and every
+    # blocker must carry the user's recorded decision before generation.
+    results.append(check_clonability_report(self.ref_dir))
     # Research1 finding: agent ran asset-download.sh but skipped Phase 7-pre
     # (generation-plan.sh). Without the plan, transition wiring + library
     # installs + ds-components groupings get dropped entirely. Require the

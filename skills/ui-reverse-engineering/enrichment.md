@@ -34,6 +34,7 @@ missing evidence or skipping required enrichment.
 - `tmp/ref/<component>/element-roles.json`, `element-groups.json`, `layout-decisions.json`, `component-map.json` — Step 6c audit
 - `tmp/ref/<component>/asset-substitution.json` — substitution declarations. `font-parity.json` is a post-implementation verification report, not a generation input; use captured styles/CSS for reference font requirements.
 - `tmp/ref/<component>/bundle-extraction.json` — deterministic bundle-parameter extraction (`scripts/extract/bundle-extraction.sh`, produced by the Phase-2 driver; `bundle-analyzer` only merges the `unresolved[]` gaps at Phase 5d); read this for sticky-mechanism decisions
+- `tmp/ref/<component>/clonability-report.json` — copy each `caution` into `clonabilityMitigations[]` as `{riskId, title, mitigation, impact[], components[]}` (first four verbatim from `risks[]`; `components`: affected `componentList` ids or `[]`); Step 7 follows each.
 
 ## Work — fill these gaps in the plan
 

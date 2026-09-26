@@ -189,6 +189,11 @@ def _populate_pre_generate_artifacts(ref_dir: Path) -> None:
     plan_time = time.time() + 1.0
     os.utime(ref_dir / "generation-plan.json", (plan_time, plan_time))
 
+    # Step 5c-d clonability risk report (pre-generate requires it current).
+    from ui_clone import clonability as _clonability
+
+    _clonability.write_report(ref_dir)
+
 
 
 def _bash_input(cmd: str) -> str:

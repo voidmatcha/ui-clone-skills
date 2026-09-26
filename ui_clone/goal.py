@@ -110,7 +110,7 @@ _GOAL_BY_GATE: dict[str, GoalStep] = {
     "pre-generate": GoalStep(
         current_goal="Resolve pre-generation readiness",
         next_action="Finish required audit artifacts, then run python -m ui_clone.gate <ref-dir> pre-generate",
-        required_evidence="extracted.json, transition-coverage.json, section-map.json, hover timing, dom-state-diff.json when needed, component-map",
+        required_evidence="clonability-report.json (current, blockers decided), extracted.json, transition-coverage.json, section-map.json, hover timing, dom-state-diff.json when needed, component-map",
     ),
     "state-coverage": GoalStep(
         current_goal="Verify multi-snapshot state coverage",

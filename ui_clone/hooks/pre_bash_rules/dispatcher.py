@@ -41,6 +41,7 @@ from ui_clone.state import PipelineState
 from .agent_script import _agent_script_target
 from .bash_write import (
     _bash_adhoc_ref_target,
+    _bash_clonability_decide_target,
     _bash_enforcement_state_target,
     _bash_scoped_producers_write_target,
     _bash_scoped_recorder_target,
@@ -387,6 +388,23 @@ def _guard_agent_script(cmd: str, project_root: Path, cwd: Path | None) -> str |
         "`bash $PLUGIN_ROOT/scripts/extract/element-state-capture.sh clip|video ...`, "
         "`python -m ui_clone.scoped_diff <ref-dir>`, and `python -m ui_clone.scoped_check "
         "<ref-dir>` directly; read evidence with `jq`/`cat`."
+    )
+
+
+def _guard_clonability_decide(cmd: str) -> str | None:
+    """Deny an agent Bash call that records a clonability blocker decision:
+    the decision is the user's. Only agent tool calls reach this hook, so the
+    user's own terminal run of `--decide` is unaffected."""
+    target = _bash_clonability_decide_target(cmd)
+    if target is None:
+        return None
+    from ui_clone.clonability import decision_instructions
+
+    return (
+        f"⛔ UI-RE: '{target}' records a clonability blocker decision. That decision "
+        "is the user's, never the agent's. Relay the report summary (python -m "
+        "ui_clone.clonability <ref-dir>) and end your turn with the question. "
+        + decision_instructions("<ref-dir>", [])
     )
 
 
@@ -797,6 +815,7 @@ def main() -> None:
         _guard_scratch_nested_ref,
         _guard_enforcement_state_rm,
         _guard_scoped_recorder,
+        _guard_clonability_decide,
         _guard_verification_plan_ack,
         _guard_adhoc_redirect,
     ):

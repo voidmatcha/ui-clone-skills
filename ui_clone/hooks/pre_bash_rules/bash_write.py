@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 
+from ui_clone.clonability import AGENT_HOST_ENV_MARKERS
 from ui_clone.hooks._common import (
     CMD_POSITION_PREFIX,
     CMD_WRAPPED_POSITION_PREFIX,
@@ -154,6 +155,11 @@ _ENFORCEMENT_STATE_RE = (
     # writes from page-level gates. Its producer, element-evidence.sh, takes the
     # path as a plain argument (no verb/redirect), so only a forge is caught.
     r"|(?<![^/\s'\"])element-target\.json(?![^\s|;&<>()'\"])"
+    # clonability-report.json carries the USER's blocker decisions that
+    # pre-generate trusts. Its producer (`python -m ui_clone.clonability
+    # <ref-dir>`) names the module and ref dir, never the file, so only a
+    # direct overwrite/delete (`jq ... > clonability-report.json`, `rm`) is caught.
+    r"|(?<![^/\s'\"])clonability-report\.json(?![^\s|;&<>()'\"])"
     # Scoped-clone completion evidence that scoped_check trusts only with
     # producer provenance: frames/<side>/capture-manifest.json (written by
     # element-state-capture.sh via ui_clone.element_capture), pixel-perfect-diff.json
@@ -205,6 +211,68 @@ _SEARCH_VERB_RE = re.compile(
 # In a clone project that is the last step of a producer forge; only a
 # checkout of this plugin (maintainer work) may run it. `--check` stays free.
 _SCOPED_PRODUCERS_WRITE_RE = re.compile(r"ui_clone[./\\]scoped_producers\b[^|;&\n]*--write\b")
+
+
+# Blocker decisions in clonability-report.json are the USER's answers. The
+# agent must ask, never record: the CLI form (`python -m ui_clone.clonability
+# <ref> --decide ...`) and an inline/script call of the recording functions are
+# denied. The user runs the CLI in their own terminal (no hook) or sends
+# `ui-clone decide ...` as a Claude prompt (UserPromptSubmit hook).
+# Any `--dec...` option counts (`--decide`, an abbreviation such as `--decid`,
+# the `=` form, `--decision`): the recording CLI is the only use of that
+# prefix. The module is matched anywhere in the text, so a wrapper that hands
+# the CLI a pty (`script -q /dev/null ...`, env, nohup, sudo, `bash -c`) is
+# still caught.
+_CLONABILITY_DECIDE_RE = re.compile(
+    r"ui_clone[./\\]clonability\b[^|;&\n]*?(?<![\w-])--dec[\w-]*"
+)
+_CLONABILITY_RECORD_RE = re.compile(r"\b(?:record_decision|apply_prompt_decisions)\b")
+_CLONABILITY_MODULE_RE = re.compile(r"\bclonability\b")
+_CLONABILITY_INLINE_RE = re.compile(r"(?:^|\s)-(?:c|e)\b|<<|\bimport\b|\brun_module\b")
+_LINE_CONTINUATION_RE = re.compile(r"\\\r?\n")
+_CLONABILITY_REFERENCE_RE = re.compile(r"clonability|\b(?:record_decision|apply_prompt_decisions)\b")
+# Any mention of an agent-host marker (`env -u CLAUDECODE`, `unset CLAUDECODE`,
+# `CLAUDECODE= ...`, `os.environ.pop(...)`) or a whole-environment reset
+# (`env -i`, `env -`, `--ignore-environment`).
+_AGENT_MARKER_TAMPER_RE = re.compile(
+    r"\b(?:" + "|".join(AGENT_HOST_ENV_MARKERS) + r")\b"
+    r"|\benv\s+(?:-\S+\s+)*?(?:-[a-zA-Z]*i[a-zA-Z]*|-|--ignore-environment)(?=\s|$)"
+)
+
+
+def _bash_clonability_decide_target(cmd: str) -> str | None:
+    """Return the match when a Bash command records a clonability blocker
+    decision (CLI `--decide` or a direct record_decision call); search verbs at
+    command position are exempt."""
+    if not cmd or _SEARCH_VERB_RE.match(cmd.lstrip()):
+        return None
+    # The shell removes backslash-newline before splitting words, so
+    # `--\<newline>decide` is `--decide`.
+    cmd = _LINE_CONTINUATION_RE.sub("", cmd)
+    # The shell-words view is built per line: joining words drops newlines,
+    # which would glue a later line's `--dec...` onto an earlier module call.
+    views = [sanitize_command_for_deny(cmd), cmd, _unescape_shell(cmd)]
+    views += [" ".join(_shell_words(line)) for line in cmd.splitlines() if line.strip()]
+    for view in views:
+        m = _CLONABILITY_DECIDE_RE.search(view)
+        if m:
+            return m.group(0).strip()
+    # The CLI refuses --decide under agent-host env markers; clearing or
+    # overriding them next to a clonability call is the forgery attempt.
+    if any(_CLONABILITY_REFERENCE_RE.search(view) for view in views):
+        for view in views:
+            m = _AGENT_MARKER_TAMPER_RE.search(view)
+            if m:
+                return m.group(0).strip()
+    # An inline program (`python -c`, heredoc, `import`) calling the recorder;
+    # a test selector such as `pytest -k record_decision` is not one.
+    if not _CLONABILITY_INLINE_RE.search(cmd):
+        return None
+    for view in (cmd, _unescape_shell(cmd)):
+        m = _CLONABILITY_RECORD_RE.search(view)
+        if m and _CLONABILITY_MODULE_RE.search(view):
+            return m.group(0)
+    return None
 
 
 def _bash_scoped_producers_write_target(cmd: str) -> str | None:
@@ -449,6 +517,72 @@ def _enforcement_state_target_in(cmd: str) -> str | None:
     return None
 
 
+# Glob/prefix forms for the clonability report only (`rm .../clonability-*.json`,
+# `mv .../c*`, `find . -name 'clon*' -delete`): the literal-name matchers above
+# never see the expanded name. Other enforcement files keep literal matching
+# (known gap, see the FROZEN note). A glob token counts when it matches the
+# report's name AND carries a literal beyond the `.json` extension, so a plain
+# `*` / `*.json` cleanup stays allowed.
+_CLONABILITY_REPORT_NAME = "clonability-report.json"
+_GLOB_META_RE = re.compile(r"[*?\[]")
+_GLOB_LITERAL_RE = re.compile(r"\[[^\]]*\]|[*?]|json")
+_GLOB_DESTROY_VERBS = frozenset(
+    {
+        "rm", "rmdir", "unlink", "shred", "trash", "mv", "cp", "ln", "tee", "truncate",
+        "install", "rsync", "chmod", "chown", "chgrp", "chattr", "chflags",
+    }
+)
+_GLOB_WRAPPERS = frozenset(
+    {"command", "builtin", "exec", "sudo", "nice", "time", "nohup", "env", "xargs"}
+)
+_GLOB_FIND_NAME_FLAGS = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename"})
+_SEGMENT_SPLIT_RE = re.compile(r"[;&|\n()`]+")
+
+
+def _glob_names_clonability_report(token: str) -> bool:
+    base = token.rstrip("/").rsplit("/", 1)[-1].lower()
+    if not _GLOB_META_RE.search(base):
+        return False
+    import fnmatch
+
+    if not fnmatch.fnmatchcase(_CLONABILITY_REPORT_NAME, base):
+        return False
+    return bool(re.search(r"[a-z0-9]", _GLOB_LITERAL_RE.sub("", base)))
+
+
+def _clonability_report_glob_target(cmd: str) -> str | None:
+    """The glob token a destructive command (or `find ... -delete|-exec`) aims
+    at clonability-report.json, else None."""
+    import shlex
+
+    for segment in _SEGMENT_SPLIT_RE.split(cmd):
+        try:
+            words = shlex.split(segment, posix=True)
+        except ValueError:
+            words = segment.split()
+        while words and (
+            words[0].lstrip("\\") in _GLOB_WRAPPERS or re.match(r"^\w+=", words[0])
+            or (words[0].startswith("-") and len(words) > 1)
+        ):
+            words = words[1:]
+        if not words:
+            continue
+        verb = words[0].lstrip("\\").rsplit("/", 1)[-1]
+        if verb == "find":
+            if not any(w in ("-delete", "-exec", "-execdir", "-ok") for w in words):
+                continue
+            for i, word in enumerate(words[1:-1], start=1):
+                if word in _GLOB_FIND_NAME_FLAGS and _glob_names_clonability_report(words[i + 1]):
+                    return words[i + 1]
+            continue
+        if verb not in _GLOB_DESTROY_VERBS:
+            continue
+        for word in words[1:]:
+            if _glob_names_clonability_report(word):
+                return word
+    return None
+
+
 def _bash_enforcement_state_target(cmd: str, _depth: int = 0) -> str | None:
     """Return the enforcement-state path a Bash command deletes/truncates/
     overwrites/edits, else None. Catches disabling a guard by destroying its own
@@ -468,6 +602,8 @@ def _bash_enforcement_state_target(cmd: str, _depth: int = 0) -> str | None:
             target = _enforcement_state_target_in(unescaped)
     if target is None:
         target = _inline_program_mention(cmd)
+    if target is None:
+        target = _clonability_report_glob_target(cmd)
     if target is None and _depth < 3:
         for program in _nested_shell_programs(cmd):
             target = _bash_enforcement_state_target(program, _depth + 1)

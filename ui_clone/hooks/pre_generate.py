@@ -116,6 +116,15 @@ _NO_HANDEDIT_CLOSEOUT_NAMES = frozenset(
 # the page-level pre-generate gate (see _common.select_scoped_ref_dir), so it is
 # only produced by scripts/extract/element-evidence.sh against a live session.
 _ELEMENT_TARGET_NAME = "element-target.json"
+# Step 5c-d clonability risk report. Its blocker decisions are the USER's
+# answers (user prompt hook or the user's own terminal), and pre-generate trusts them.
+_CLONABILITY_REPORT_NAME = "clonability-report.json"
+
+
+def _clonability_decision_instructions() -> str:
+    from ui_clone.clonability import decision_instructions
+
+    return decision_instructions("<ref-dir>", [])
 # Scoped-clone completion evidence with script producers only. scoped_check
 # re-validates their provenance (hashes, origins), so a hand write can only
 # produce a rejected artifact — deny it up front with the producer command.
@@ -274,6 +283,13 @@ def _closeout_provenance_block_reason(
                 "check-canvas-replay.sh / register-driver-session.sh) and has no "
                 "hand-edit path — a tool write forges convergence/closeout or a "
                 f"driver identity. {cli_hint}"
+            )
+        if name == _CLONABILITY_REPORT_NAME:
+            return (
+                "UI Reverse Engineering: clonability-report.json is produced only by "
+                "`python -m ui_clone.clonability <ref-dir>`; a blocker decision is the "
+                "user's answer and the agent never records it. Do not hand-write it. "
+                + _clonability_decision_instructions()
             )
         if name == _ELEMENT_TARGET_NAME:
             return (

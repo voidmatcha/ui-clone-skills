@@ -32,6 +32,9 @@ REF_DIR="${3:?Usage: hover-fallback-probe.sh <session> <impl-url> <ref-dir>}"
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../../.." && pwd)"
+# Post-open wait honors the measured intro overlay exit (clonability report).
+# shellcheck source=lib/intro-settle.sh
+. "$SCRIPTS_DIR/lib/intro-settle.sh"
 
 # Provenance (batch-6 ITEM 4 / Attacks 3a/3b): a pass must rest on a REAL
 # runtime scan. Set when this script actually drives agent-browser; env-injected
@@ -54,7 +57,7 @@ if [ -z "$SAMPLES_FILE" ]; then
   ENTRY_COUNT="$(printf '%s' "$PLAN_JSON" | python3 -c "import json,sys;print(len(json.load(sys.stdin)))")"
   if [ "$ENTRY_COUNT" -gt 0 ]; then
     agent-browser --session "$SESSION" open "$IMPL_URL" >/dev/null 2>&1
-    agent-browser --session "$SESSION" wait 2500 >/dev/null 2>&1
+    agent-browser --session "$SESSION" wait "$(intro_settle_wait_ms "$REF_DIR" 2500)" >/dev/null 2>&1
     RUNTIME_SCANNED=1
     for IDX in $(seq 0 $((ENTRY_COUNT - 1))); do
       ENTRY="$(printf '%s' "$PLAN_JSON" | python3 -c "import json,sys;print(json.dumps(json.load(sys.stdin)[$IDX]))")"
