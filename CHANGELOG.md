@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.8.16] - 2026-09-26
+
+### Fixed
+
+- On Linux the hook fast path (`hooks/shim.sh`) could stall for tens of
+  seconds on large payloads, and a hook the host skips leaves enforcement off.
+  The external `agent-browser … open … http` check used a regex that glibc runs
+  in quadratic time (23.6s per run on a 460KB payload); it is now a linear awk
+  scan behind a keyword check (0.03s). The command-field regexes use an
+  equivalent form about 40% faster on glibc. Timing tests use documented
+  budgets that catch super-linear steps on Linux and macOS.
+
 ## [0.8.15] - 2026-09-25
 
 ### Added

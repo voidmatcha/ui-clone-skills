@@ -342,6 +342,17 @@ def test_unowned_session_resume_without_active_marker_skips(tmp_path: Path, fake
     assert _run(project, fake_uv, "ui_clone.hooks.session_resume", _session_start(SESSION)) == []
 
 
+# Time budgets for the multi-MB fast-path tests. They catch super-linear
+# regexes, not slow runners: before the fix the 460KB repeats payload took
+# ~23s per shim run on Linux (glibc regexec rescans from every `agent-browser`),
+# and after it 0.03s on Linux (bash 5.2 + glibc, gawk and mawk) and on macOS
+# (bash 3.2 + BSD awk). The 2MB cases measure ~0.5s on Linux and macOS; a CI
+# runner under pytest-xdist contention has been seen at ~6x that (3.15s), and
+# any quadratic step at 2MB costs tens of seconds, so 5s separates the two.
+LARGE_PAYLOAD_BUDGET_S = 1.0
+MULTI_MB_BUDGET_S = 5.0
+
+
 @pytest.mark.parametrize("with_ref", [False, True])
 @pytest.mark.parametrize("tool", ["Write", "Bash"])
 def test_large_payload_fast_path_is_linear(tmp_path: Path, fake_uv: Path, tool: str, with_ref: bool) -> None:
@@ -354,7 +365,38 @@ def test_large_payload_fast_path_is_linear(tmp_path: Path, fake_uv: Path, tool: 
     )
     start = time.monotonic()
     assert _run(project, fake_uv, "ui_clone.hooks.pre_generate", payload) == []
-    assert time.monotonic() - start < 1.0
+    assert time.monotonic() - start < LARGE_PAYLOAD_BUDGET_S
+
+
+@pytest.mark.parametrize(
+    ("payload", "proceeds"),
+    [
+        (_bash(SESSION, "agent-browser --session s open https://example.org"), True),
+        # Order matters: `open` and `http` before `agent-browser` do not count.
+        (_bash(SESSION, "curl http://x; open y; agent-browser --session s snapshot"), False),
+        (_bash(SESSION, "agent-browser --session s open about:blank"), False),
+        # A pretty-printed payload spans lines; the check does too.
+        (
+            json.dumps(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": SESSION,
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "agent-browser --session s open", "url": "https://example.org"},
+                },
+                indent=2,
+            ),
+            True,
+        ),
+    ],
+    ids=["open-url", "wrong-order", "no-url", "multiline"],
+)
+def test_external_open_detection_order_and_lines(
+    tmp_path: Path, fake_uv: Path, payload: str, proceeds: bool
+) -> None:
+    project = tmp_path / "scratch"
+    project.mkdir()
+    assert len(_run(project, fake_uv, "ui_clone.hooks.pre_bash", payload)) == (1 if proceeds else 0)
 
 
 def test_external_open_still_detected_in_large_payload(tmp_path: Path, fake_uv: Path) -> None:
@@ -457,7 +499,7 @@ def test_multi_megabyte_bash_command_claim_check_stays_linear(tmp_path: Path, fa
     body = 'echo "a\\"b" ; grep -n ui-clone x | ' * 60000  # ~2MB of separators and escaped quotes
     start = time.monotonic()
     assert _run(project, fake_uv, "ui_clone.hooks.pre_bash", _bash(SESSION, body)) == []
-    assert time.monotonic() - start < 3.0
+    assert time.monotonic() - start < MULTI_MB_BUDGET_S
 
 
 # Regression: the strict command-position grammar missed documented runs. A
@@ -548,7 +590,7 @@ def test_multi_megabyte_mentions_stay_linear(tmp_path: Path, fake_uv: Path, comm
     for payload in (_bash(SESSION, command), _codex("exec_command", "cmd", ["bash", "-lc", command])):
         start = time.monotonic()
         assert _run(project, fake_uv, "ui_clone.hooks.pre_bash", payload) == []
-        assert time.monotonic() - start < 3.0
+        assert time.monotonic() - start < MULTI_MB_BUDGET_S
 
 
 @pytest.mark.parametrize(

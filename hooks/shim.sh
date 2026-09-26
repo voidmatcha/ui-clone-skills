@@ -171,10 +171,13 @@ _cmd_runs() {
 }
 _shell_tool_re="\"tool_name\"${_ws}:${_ws}\"(Bash|exec_command|shell)\""
 # First string-valued `"command"`/`"cmd"`; escaped quotes stay inside the
-# capture. A JSON key cannot occur inside a string value unescaped.
-_str_field_re="\"(command|cmd)\"${_ws}:${_ws}\"(([^\"\\\\]|\\\\.)*)\""
+# capture. A JSON key cannot occur inside a string value unescaped. The string
+# body is the unrolled `[^"\\]*(\\.[^"\\]*)*`, not `([^"\\]|\\.)*`: same
+# language, but glibc tracks the inner group once per escape instead of once
+# per character, ~40% less time on a multi-MB command.
+_str_field_re="\"(command|cmd)\"${_ws}:${_ws}\"([^\"\\\\]*(\\\\.[^\"\\\\]*)*)\""
 # First array-valued `"command"`/`"cmd"` (Codex argv form).
-_jstr='"([^"\\]|\\.)*"'
+_jstr='"[^"\\]*(\\.[^"\\]*)*"'
 _arr_field_re="\"(command|cmd)\"${_ws}:${_ws}\\[${_ws}(${_jstr}(${_ws},${_ws}${_jstr})*)${_ws}\\]"
 _claim_memo=""
 # Pre-filters only: the modules still make the exact decision.
@@ -213,12 +216,35 @@ _is_claim_uncached() {
   fi
   return 1
 }
-# Linear-time pre-filter. The equivalent glob `*agent-browser*open*http*`
-# backtracks super-linearly on large payloads (seconds at ~20KB of repeats,
-# minutes on a 460KB Write payload); a POSIX regex match stays linear.
-_ext_open_re='agent-browser.*open.*http'
+# Pre-filter for "agent-browser, later open, later http" (newlines included).
+# Neither `[[ == *agent-browser*open*http* ]]` nor `[[ =~ agent-browser.*open.*http ]]`
+# is linear: the glob backtracks everywhere, and glibc's regexec (Linux bash)
+# rescans to the end of the payload from every `agent-browser` when there is
+# no match — quadratic, ~12s per call on a 460KB payload of repeats, while the
+# macOS regex engine stays linear. A literal `=~` pre-check (first hit wins)
+# gates one awk pass of three index() calls, linear in mawk, gawk and BWK awk.
+# Taking each keyword at its first occurrence after the previous one gives the
+# regex's answer: if any agent-browser..open..http chain exists, one starts at
+# the first `agent-browser`.
+read -r -d '' _ext_open_awk <<'AWK'
+BEGIN { n = split("agent-browser open http", k, " "); i = 1 }
+{
+  s = $0
+  while (i <= n && (p = index(s, k[i]))) { s = substr(s, p + length(k[i])); i++ }
+  if (i > n) exit
+}
+END { exit (i <= n) }
+AWK
+_ext_open_memo=""
 _is_external_open() {
-  [[ "$_payload" =~ $_ext_open_re ]]
+  if [[ -z "$_ext_open_memo" ]]; then
+    _ext_open_memo=0
+    if [[ "$_payload" =~ agent-browser ]] &&
+       { printf '%s\n' "$_payload" 2>/dev/null | awk "$_ext_open_awk"; }; then
+      _ext_open_memo=1
+    fi
+  fi
+  [[ "$_ext_open_memo" == 1 ]]
 }
 _sid=""
 _sid_re="\"(session_id|sessionId)\"${_ws}:${_ws}\"([^\"\\\\]+)\""
