@@ -44,12 +44,9 @@ def _make_dispatch(self: Gate) -> dict[str, Any]:
 
 
 def _dispatch(self: Gate, gate: str) -> list[CheckResult]:
+    # "all" never reaches here: run() recurses per sub-gate so each one is
+    # recorded individually.
     dispatch = self._make_dispatch()
-    if gate == "all":
-        results = []
-        for fn in dispatch.values():
-            results.extend(fn())
-        return results
     if gate not in dispatch:
         return []
     return list(dispatch[gate]())
@@ -129,6 +126,36 @@ def run(self: Gate, gate: str, json_output: bool = False) -> int:
 
     if not json_output:
         print(f"Gate: {gate}")
+
+    # Surface state corruption before anything else loads state: load()
+    # quarantines the corrupt file, so every later load (prerequisites,
+    # mark_failed) would silently see fresh defaults and reset the cursor to
+    # `reference` without an audit entry. Fail closed and record it.
+    if (self.ref_dir / "pipeline-state.json").is_file():
+        loaded = _state.PipelineState.load(self.ref_dir)
+        if loaded.load_failed:
+            try:
+                loaded.record_state_corruption(gate, self.ref_dir)
+            except OSError:
+                pass  # the fail result below still blocks
+            results = [
+                CheckResult(
+                    "pipeline-state.json integrity",
+                    "fail",
+                    "pipeline-state.json was corrupt and has been quarantined "
+                    "(*.json.corrupt.*); a state-corruption blocker was recorded.",
+                    fix=(
+                        "Recover completed_steps / unclonable_reasons from the "
+                        f"quarantine file in {self.ref_dir}, then resume with "
+                        f"python -m ui_clone.goal {self.ref_dir}"
+                    ),
+                )
+            ]
+            if json_output:
+                self._render_json(results)
+            else:
+                self._render_text(results)
+            return 1
 
     state_prereq = self._check_pipeline_state_prerequisites(gate)
     results = [state_prereq] if state_prereq is not None else self._dispatch(gate)

@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from ui_clone.hooks._common import CMD_POSITION_PREFIX, sanitize_command_for_deny
+from ui_clone.hooks._common import CMD_WRAPPED_POSITION_PREFIX, strip_heredoc_bodies
 
 # Command-position anchored (batch-4 review MINOR 4): an unanchored pattern read
 # `grep .../section-compare.sh` (a diagnostic) as a real invocation and blocked
@@ -22,20 +22,44 @@ from ui_clone.hooks._common import CMD_POSITION_PREFIX, sanitize_command_for_den
 # `python -m ui_clone.measure section-compare` at command position. A bare path
 # as a grep/argument is no longer at command position, so it is not matched.
 _SECTION_COMPARE_COMMAND_PATTERNS = re.compile(
-    CMD_POSITION_PREFIX
+    CMD_WRAPPED_POSITION_PREFIX
     + r"(?:(?:ba)?sh\s+)?[^\s;|&]*skills/visual-debug/scripts/section-compare\.sh\b"
     r"|"
-    + CMD_POSITION_PREFIX
-    + r"python(?:3)?\s+-m\s+ui_clone\.measure\s+section-compare\b",
+    + CMD_WRAPPED_POSITION_PREFIX
+    + r"(?:uv\s+run\s+(?:[^\s;|&]+\s+)*?)?"
+    r"python(?:3(?:\.\d+)?)?\s+-m\s+ui_clone\.measure\s+section-compare\b",
     re.IGNORECASE,
 )
+
+_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _command_view(cmd: str) -> str:
+    """Heredoc-stripped command with each quoted string unquoted as ONE word.
+
+    Shell connectors and whitespace inside quotes become `_`, so quoted data
+    (`pgrep -f "bash .../section-compare.sh"`, `echo "; bash ..."`) can never
+    reach command position, while a quoted script path
+    (`bash "$PLUGIN_ROOT/skills/.../section-compare.sh"`) still matches.
+    """
+    return _QUOTED_RE.sub(
+        lambda m: re.sub(r"[\s;&|()`]", "_", m.group(0)[1:-1]),
+        strip_heredoc_bodies(cmd),
+    )
+
+
+def _is_section_compare_command(cmd: str) -> bool:
+    """Single matcher shared by the dispatcher and the precondition gate."""
+    return bool(cmd) and bool(
+        _SECTION_COMPARE_COMMAND_PATTERNS.search(_command_view(cmd).lstrip())
+    )
 
 
 def _section_compare_precondition_reason(ref_dir: Path, cmd: str) -> str | None:
     """Block section-compare while earlier block-severity static gates are missing."""
     # Command-position: a quoted "section-compare.sh" in a diagnostic (pgrep/
     # grep) or a heredoc doc body must not be read as a real invocation.
-    if not _SECTION_COMPARE_COMMAND_PATTERNS.search(sanitize_command_for_deny(cmd)):
+    if not _is_section_compare_command(cmd):
         return None
 
     plan_path = ref_dir / "verification-plan.json"

@@ -16,6 +16,7 @@ from .base import CheckResult
 from .reference import (
     _has_real_detection_provenance,
     _has_resolved_auto_absence_provenance,
+    _load_regions,
     _region_entries,
 )
 
@@ -88,12 +89,16 @@ def _positive_motion_evidence(self: Gate) -> bool:
     ):
         return True
 
-    interactions = self._load_json("interactions-detected.json")
-    rows = interactions.get("interactions") if isinstance(interactions, dict) else None
+    interactions = self._load_json_any("interactions-detected.json")
+    rows = (
+        interactions.get("interactions")
+        if isinstance(interactions, dict)
+        else interactions
+    )
     if isinstance(rows, list) and any(isinstance(row, dict) for row in rows):
         return True
 
-    hover = self._load_json("hover-css-rules.json")
+    hover = self._load_json_any("hover-css-rules.json")
     rules = hover.get("rules") if isinstance(hover, dict) else hover
     if isinstance(rules, list) and any(isinstance(rule, dict) for rule in rules):
         return True
@@ -136,8 +141,18 @@ def _has_typed_static_no_motion_classification(self: Gate) -> bool:
 
 def _check_regions_generation_readiness(self: Gate) -> list[CheckResult]:
     """Block generation unless regions are real or explicitly static-classified."""
-    regions = self._load_json("regions.json")
+    regions = _load_regions(self)
     if not isinstance(regions, dict):
+        if (self.ref_dir / "regions.json").exists():
+            return [
+                CheckResult(
+                    "regions.json generation readiness",
+                    "fail",
+                    "regions.json exists but is not a JSON object or region "
+                    "list; malformed detection output cannot gate generation.",
+                    fix="Re-run ui-capture detection so regions.json is regenerated.",
+                )
+            ]
         return []
     is_placeholder = bool(regions.get("placeholder")) or (
         regions.get("detectionRan") is False
@@ -236,9 +251,20 @@ def _check_transition_coverage(self: Gate, spec: dict[str, Any] | None) -> list[
         )
     )
     cov = self._load_json("transition-coverage.json")
+    if cov is None and (self.ref_dir / "transition-coverage.json").exists():
+        results.append(
+            CheckResult(
+                "transition-coverage animated",
+                "fail",
+                "transition-coverage.json exists but is not a JSON object — "
+                "malformed coverage cannot be audited. Re-run Step 6d.",
+            )
+        )
     if cov is not None:
-        animated_count = len(cov.get("animatedElements", []))
-        is_static = spec is not None and len(spec.get("transitions", [])) == 0
+        animated = cov.get("animatedElements")
+        animated_count = len(animated) if isinstance(animated, list) else 0
+        transitions = spec.get("transitions", []) if spec is not None else None
+        is_static = isinstance(transitions, list) and len(transitions) == 0
         if animated_count > 0:
             results.append(
                 CheckResult(
@@ -411,7 +437,7 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
     is empty but ≥1 upstream source still shows interaction evidence.
     """
     results: list[CheckResult] = []
-    raw = self._load_json("interactions-detected.json")
+    raw = self._load_json_any("interactions-detected.json")
     # Wrapper shape: {"interactions":[...]} OR bare list.
     interactions: list[Any] = []
     if isinstance(raw, list):
@@ -422,7 +448,7 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
             interactions = wrapped
     if interactions:
         return results  # non-empty — fine
-    regions_raw = self._load_json("regions.json")
+    regions_raw = self._load_json_any("regions.json")
     if (
         isinstance(regions_raw, dict)
         and _has_resolved_auto_absence_provenance(self, regions_raw)
@@ -430,7 +456,7 @@ def _check_detection_artifact_integrity(self: Gate) -> list[CheckResult]:
         return results
     # Upstream evidence sources.
     upstream_signals: list[str] = []
-    hover_rules = self._load_json("hover-css-rules.json")
+    hover_rules = self._load_json_any("hover-css-rules.json")
     if isinstance(hover_rules, list) and hover_rules:
         upstream_signals.append(f"hover-css-rules.json[{len(hover_rules)}]")
     elif isinstance(hover_rules, dict):

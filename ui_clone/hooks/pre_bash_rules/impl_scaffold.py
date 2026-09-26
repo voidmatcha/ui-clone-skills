@@ -25,11 +25,14 @@ from .repo_identity import _canonical_repo_root, _is_scratch_nested
 
 _IMPL_SCAFFOLD_PATTERNS = re.compile(
     r"\b(?:npm|pnpm|yarn|bun)\s+create\b"
-    r"|\bnpx\s+create-\S+"
-    r"|\bnpx\s+degit\b"
+    # npx / pnpm dlx / yarn dlx / bunx, with optional flags (`-y`, `--yes`,
+    # `-p pkg`), running a create-* or degit template.
+    r"|(?:\bnpx|\b(?:pnpm|yarn)\s+dlx|\bbunx)\s+"
+    r"(?:(?:-p|--package)\s+\S+\s+|-\S+\s+)*(?:create-\S+|degit\b)"
     r"|\bnpm\s+init\b(?!\s+-y\s+--scope)"  # npm init <tpl>; skip `-y --scope` pure metadata initializers
     r"|\b(?:npm|pnpm|yarn|bun)\s+exec\s+create-\S+"
-    r"|\bgit\s+clone\b[^\n\r]*\s[^\s|;&]*/impl(?:\b|\s|$)",
+    # git clone <url> impl | ./impl | path/to/impl
+    r"|\bgit\s+clone\b[^\n\r]*\s(?:[^\s|;&]*/)?impl/?(?=\s|$|[|;&)])",
     re.IGNORECASE,
 )
 

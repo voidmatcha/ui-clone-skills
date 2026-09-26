@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-from .._common import CMD_POSITION_PREFIX, sanitize_command_for_deny
+from .._common import CMD_WRAPPED_POSITION_PREFIX, sanitize_command_for_deny
 
 # Anchored on CMD_POSITION_PREFIX rather than plain `^\s*`: every other deny
 # matcher in this package uses that prefix precisely because a bare `^\s*`
@@ -26,10 +26,19 @@ from .._common import CMD_POSITION_PREFIX, sanitize_command_for_deny
 # verified to slip past the old anchor — the declaration cascade never ran
 # for the most common real-world chained forms, leaving only the Stop hook
 # (which fires after the commit already landed) as a backstop.
+#
+# CMD_WRAPPED_POSITION_PREFIX (shared with the enforcement-state guard) also
+# admits wrappers (`command|exec|time|nohup git push`), compound keywords
+# (`if ..; then git push; fi`), `{ git push; }` groups and backticks. git's
+# global options (`-C dir`, `-c k=v`, `--no-pager`, `--git-dir=...`) may sit
+# between `git` and the subcommand.
+_GIT_GLOBAL_OPTS = (
+    r"(?:(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path)\s+\S+\s+"
+    r"|--?[\w-]+(?:=\S+)?\s+)*"
+)
 _BLOCK_PATTERNS = re.compile(
-    rf"{CMD_POSITION_PREFIX}(?:"
-    r"git\s+commit\b"
-    r"|git\s+push\b"
+    rf"{CMD_WRAPPED_POSITION_PREFIX}(?:"
+    rf"git\s+{_GIT_GLOBAL_OPTS}(?:commit|push)\b"
     r"|gh\s+pr\s+(?:create|merge|close)\b"
     r")"
 )

@@ -22,7 +22,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from ui_clone import claude_continuation as _continuation
 from ui_clone.goal import build_goal_card
@@ -895,10 +895,8 @@ def _pipeline_state_epoch(ref_dir: Path) -> float | None:
     active ref. pipeline-state.last_updated only moves when the pipeline does
     real work, so it is the correct activity signal.
     """
-    try:
-        state = PipelineState.load(ref_dir)
-    except (OSError, ValueError):
-        return None
+    # load() never raises; corrupt state returns defaults (empty last_updated).
+    state = PipelineState.load(ref_dir)
     raw = (state.last_updated or "").strip()
     if not raw:
         return None
@@ -1265,6 +1263,34 @@ def _has_generated_source(impl_dir: Path) -> bool:
     return False
 
 
+def _load_stamp(stamp_path: Path) -> tuple[dict[str, Any], float] | str:
+    """Load a closeout stamp and its age, or return why it is malformed.
+
+    Fails closed on every shape problem (non-object root, missing/non-string
+    verifiedAt, bad timestamp, unreadable file) so a stamp such as `[]` can
+    never crash the Stop hook into an allow.
+    """
+    import datetime
+
+    try:
+        stamp = json.loads(stamp_path.read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return str(exc)
+    if not isinstance(stamp, dict):
+        return f"stamp root must be a JSON object, got {type(stamp).__name__}"
+    verified_at = stamp.get("verifiedAt")
+    if not isinstance(verified_at, str):
+        return "verifiedAt must be a string timestamp"
+    try:
+        stamped_at = datetime.datetime.strptime(
+            verified_at, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.UTC)
+    except ValueError as exc:
+        return str(exc)
+    age_s = (datetime.datetime.now(datetime.UTC) - stamped_at).total_seconds()
+    return stamp, age_s
+
+
 def _enforce_verify_stamp(ref_dir: Path) -> str | None:
     """Block Stop unless pipeline.execute_verify wrote a fresh stamp.
 
@@ -1326,19 +1352,14 @@ def _enforce_verify_stamp(ref_dir: Path) -> str | None:
             f"on success.\n"
         )
 
-    try:
-        stamp = json.loads(stamp_path.read_text())
-        import datetime
-        stamped_at = datetime.datetime.strptime(
-            stamp["verifiedAt"], "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=datetime.UTC)
-        age_s = (datetime.datetime.now(datetime.UTC) - stamped_at).total_seconds()
-    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+    loaded = _load_stamp(stamp_path)
+    if isinstance(loaded, str):
         return (
             f"⛔ UI-RE Verify-stamp gate: malformed stamp {stamp_path}\n\n"
-            f"{exc}\n\n"
+            f"{loaded}\n\n"
             f"Re-run `python -m ui_clone.pipeline ... verify` to regenerate.\n"
         )
+    stamp, age_s = loaded
     required_gates = set(POST_IMPL_VERIFY_GATES)
     stamped_by = stamp.get("stampedBy")
     gates_passed = stamp.get("gatesPassed")
@@ -1453,19 +1474,14 @@ def _enforce_structural_convergence_stamp(ref_dir: Path) -> str | None:
             f"shows 0 FAIL (STRUCTURAL_ONLY counted as PASS, SKIP doesn't gate).\n"
         )
 
-    try:
-        stamp = json.loads(stamp_path.read_text())
-        import datetime
-        stamped_at = datetime.datetime.strptime(
-            stamp["verifiedAt"], "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=datetime.UTC)
-        age_s = (datetime.datetime.now(datetime.UTC) - stamped_at).total_seconds()
-    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+    loaded = _load_stamp(stamp_path)
+    if isinstance(loaded, str):
         return (
             f"⛔ UI-RE Structural-stamp gate: malformed stamp {stamp_path}\n\n"
-            f"{exc}\n\n"
+            f"{loaded}\n\n"
             f"Re-run `bash scripts/verify/check-converged.sh {ref_dir} --write-stamp`.\n"
         )
+    stamp, age_s = loaded
 
     stamped_by = stamp.get("stampedBy")
     closeout_kind = stamp.get("closeoutKind")
@@ -1574,19 +1590,14 @@ def _enforce_canvas_replay_stamp(ref_dir: Path) -> str | None:
             f"    the operator-facing opt-in workflow + scope boundary.\n"
         )
 
-    try:
-        stamp = json.loads(stamp_path.read_text())
-        import datetime
-        stamped_at = datetime.datetime.strptime(
-            stamp["verifiedAt"], "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=datetime.UTC)
-        age_s = (datetime.datetime.now(datetime.UTC) - stamped_at).total_seconds()
-    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+    loaded = _load_stamp(stamp_path)
+    if isinstance(loaded, str):
         return (
             f"⛔ UI-RE Canvas-replay gate: malformed stamp {stamp_path}\n\n"
-            f"{exc}\n\n"
+            f"{loaded}\n\n"
             f"Re-run `bash scripts/verify/check-canvas-replay.sh {ref_dir} --write-stamp`.\n"
         )
+    stamp, age_s = loaded
 
     stamped_by = stamp.get("stampedBy")
     closeout_kind = stamp.get("closeoutKind")
@@ -1709,7 +1720,12 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
 
     impl_dir = _resolve_impl_dir(ref_dir)
     if impl_dir is not None and impl_dir.is_dir():
-        return stamp_enforcer(ref_dir)
+        stamp_reason = stamp_enforcer(ref_dir)
+        # The stamp enforcers return None pre-generation (an impl root that
+        # only holds Step 6e assets). That None is "not my phase", not a
+        # release: fall through to the current-gate enforcement below.
+        if stamp_reason is not None or _reached_implementation(ref_dir, impl_dir):
+            return stamp_reason
 
     if current_gate in {"section-compare", "done"}:
         gate_result = _run_gate(ref_dir, "section-compare")
@@ -1731,7 +1747,11 @@ def _enforce_ref_dir(ref_dir: Path) -> str | None:
     # brief extraction -> bundle transition into a false completion release.
     # Per-gate PASS only advances pipeline state; it is never Stop evidence.
     impl_dir = _resolve_impl_dir(ref_dir)
-    if impl_dir is None or not impl_dir.is_dir():
+    if (
+        impl_dir is None
+        or not impl_dir.is_dir()
+        or not _reached_implementation(ref_dir, impl_dir)
+    ):
         return _pre_generation_transition_block_reason(current_gate, ref_dir)
     return stamp_enforcer(ref_dir)
 

@@ -136,11 +136,23 @@ def _section_result_freshness(self: Gate, result_file: Path) -> CheckResult | No
     return None
 
 
-def _required_viewports(ref_dir: Path) -> list[str]:
+def _is_section_row(ln: str) -> bool:
+    """A measured section row of sections/result.txt (not header/separator)."""
+    return (
+        ln.startswith("| ")
+        and "---" not in ln
+        and "Section" not in ln
+        and ln.strip() != "|"
+    )
+
+
+def _required_viewports(ref_dir: Path) -> list[str] | None:
     """Plan-declared viewport set, required when the site is responsive.
 
     Returns WxH strings (e.g. ["375x812", ...]) when detected-breakpoints.json
     exists AND verification-plan.json declares >1 viewports; [] otherwise.
+    Returns None when the site is responsive but the plan parses to a
+    non-object root, so the caller can fail instead of crashing.
     """
     if not (ref_dir / "detected-breakpoints.json").is_file():
         return []
@@ -150,6 +162,8 @@ def _required_viewports(ref_dir: Path) -> list[str]:
         )
     except (OSError, json.JSONDecodeError):
         return []
+    if not isinstance(plan, dict):
+        return None
     out: list[str] = []
     for vp in plan.get("viewports") or []:
         try:
@@ -238,7 +252,17 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
     # evidence exists and the verification plan declares a viewport set,
     # result.txt must be the VIEWPORTS fan-out covering every plan viewport.
     required_vps = _required_viewports(self.ref_dir)
-    if required_vps:
+    if required_vps is None:
+        results.append(
+            CheckResult(
+                "sections/viewport-coverage",
+                "fail",
+                "verification-plan.json is not a JSON object, so the required "
+                "viewport set of this responsive site cannot be read.",
+                fix="Run: bash skills/visual-debug/scripts/verification-plan.sh <ref-dir>",
+            )
+        )
+    elif required_vps:
         missing_vps = [vp for vp in required_vps if f"viewport: {vp}" not in content]
         if missing_vps:
             vp_csv = ",".join(required_vps)
@@ -393,10 +417,7 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
                         rejected.append((name, why))
 
                 # Coverage advisory: >30% of sections marked is suspicious.
-                total_sections = sum(
-                    1 for ln in lines
-                    if ln.startswith("| ") and "---" not in ln and "Section" not in ln
-                )
+                total_sections = sum(1 for ln in lines if _is_section_row(ln))
                 if total_sections > 0:
                     cov = len(downgraded) / total_sections
                     if cov > 0.30:
@@ -526,13 +547,7 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
         1 for ln in lines
         if ln.startswith("|") and "STRUCTURAL_ONLY" in ln
     )
-    total_section_rows = sum(
-        1 for ln in lines
-        if ln.startswith("| ")
-        and "---" not in ln
-        and "Section" not in ln
-        and ln.strip() != "|"
-    )
+    total_section_rows = sum(1 for ln in lines if _is_section_row(ln))
     structural_only_excess = (
         total_section_rows > 0
         and structural_only_count >= 3
@@ -576,13 +591,7 @@ def gate_section_compare(self: Gate) -> list[CheckResult]:
         # across the whole file, so a viewport block with exit:0 and ZERO rows
         # would pass on a SIBLING viewport's rows. Require >=1 measured row in
         # THIS viewport's own block.
-        vp_rows = sum(
-            1 for ln in block
-            if ln.startswith("| ")
-            and "---" not in ln
-            and "Section" not in ln
-            and ln.strip() != "|"
-        )
+        vp_rows = sum(1 for ln in block if _is_section_row(ln))
         if not exit_codes:
             incompleteness.append(
                 f"viewport {vp} is incomplete/truncated (no exit line — "

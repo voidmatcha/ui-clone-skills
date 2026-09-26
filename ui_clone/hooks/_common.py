@@ -1382,6 +1382,18 @@ _EXTERNAL_BROWSE_DIR = "tmp/.ui-re-external-browse"
 # KEY=VAL / env tokens; it cannot match a bare tool name (no `=`, not `env`), so
 # the quoted/heredoc/command-v/pgrep-argument exemptions are unaffected.
 CMD_POSITION_PREFIX = r"(?:^|[\n;&|(]\s*|&&\s*|\|\|\s*|\bxargs\s+)(?:(?:\w+=\S*|env)\s+)*"
+# CMD_POSITION_PREFIX plus the shell syntax that still leaves the next word at
+# command position: a backtick substitution, `{ ...; }` groups, compound-
+# statement keywords (`if/then/do/else/...`, `!`), and command wrappers
+# (`command|builtin|exec|sudo|nice|time|nohup`, with their flags, or `\cmd`).
+# Without these a wrapper or keyword shifts the verb off command position and
+# a deny matcher silently misses it.
+CMD_WRAPPED_POSITION_PREFIX = (
+    r"(?:" + CMD_POSITION_PREFIX + r"|`\s*)"
+    r"(?:(?:\{|!|(?:if|then|do|else|elif|while|until)(?=\s))\s*)*"
+    r"(?:(?:\w+=\S*|env)\s+)*"
+    r"(?:\\?(?:command|builtin|exec|sudo|nice|time|nohup)\s+(?:-\S+\s+(?:\d+\s+)?)*)*\\?"
+)
 # Command-position anchor (fixes an orchestrator live-fire false positive):
 # the previous bare `search()` matched the literal trigger string INSIDE a
 # heredoc body (a commission doc written via `cat <<EOF`) and crumbed the

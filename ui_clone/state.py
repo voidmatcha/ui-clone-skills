@@ -751,6 +751,29 @@ class PipelineState:
         )
         return True
 
+    def _record_state_corruption_unlocked(self, gate: str, ref_dir: Path) -> None:
+        """Record a quarantined pipeline-state.json as a canonical terminal
+        `state-corruption` blocker and save. Caller holds the lock."""
+        self._record_unclonable_unlocked(
+            gate=gate,
+            reason=(
+                f"pipeline-state.json was corrupt and quarantined "
+                f"by PipelineState.load(); cannot bump fail counter "
+                f"for gate '{gate}' on fresh state without losing "
+                f"audit trail. Recover unclonable_reasons / "
+                f"completed_steps from the .json.corrupt.* quarantine "
+                f"file in {ref_dir} if needed."
+            ),
+            category="state-corruption",
+        )
+        self._save_unlocked(ref_dir)
+
+    def record_state_corruption(self, gate: str, ref_dir: Path) -> None:
+        """Locked entry point for callers (Gate.run) that observed
+        `load_failed` before any mark_passed/mark_failed could see it."""
+        with _pipeline_state_lock(ref_dir):
+            self._record_state_corruption_unlocked(gate, ref_dir)
+
     def mark_failed(
         self,
         gate: str,
@@ -801,19 +824,7 @@ class PipelineState:
             # unclonable so Stop hook / goal card / benchmark all see one
             # explicit termination signal instead of a phantom no-op.
             if authoritative.load_failed:
-                authoritative._record_unclonable_unlocked(
-                    gate=gate,
-                    reason=(
-                        f"pipeline-state.json was corrupt and quarantined "
-                        f"by PipelineState.load(); cannot bump fail counter "
-                        f"for gate '{gate}' on fresh state without losing "
-                        f"audit trail. Recover unclonable_reasons / "
-                        f"completed_steps from the .json.corrupt.* quarantine "
-                        f"file in {ref_dir} if needed."
-                    ),
-                    category="state-corruption",
-                )
-                authoritative._save_unlocked(ref_dir)
+                authoritative._record_state_corruption_unlocked(gate, ref_dir)
                 if authoritative is not self:
                     self._mirror_from(authoritative)
                 return
@@ -965,7 +976,7 @@ class PipelineState:
                 for r in authoritative.unclonable_reasons
                 if not (r.get("gate") == gate and id(r) in keep_ids)
             ]
-            authoritative.gate_fail_counts.pop(gate, None)
+            had_counters = authoritative.gate_fail_counts.pop(gate, None) is not None
             authoritative.gate_fail_signatures.pop(gate, None)
             authoritative.gate_total_fail_counts.pop(gate, None)
             if (
@@ -988,7 +999,10 @@ class PipelineState:
             authoritative._save_unlocked(ref_dir)
             if authoritative is not self:
                 self._mirror_from(authoritative)
-            return bool(cleared) or True
+            # Reaching here means reasons and/or fail counters existed (the
+            # early return covers "nothing to clear"), so this is the real
+            # change signal, not a constant.
+            return bool(cleared) or had_counters
 
 
 def _last_updated_epoch(state: PipelineState) -> float | None:
@@ -1030,10 +1044,10 @@ def sweep_stale_refs(
             continue
         if (ref_dir / "verify-stamp.json").is_file():
             continue
-        try:
-            state = PipelineState.load(ref_dir)
-        except (OSError, ValueError):
-            continue
+        # load() never raises: corrupt/unreadable state comes back as fresh
+        # defaults with load_failed=True, which has no last_updated and is
+        # therefore skipped by the age check below.
+        state = PipelineState.load(ref_dir)
         if state.terminal_state:
             continue
         epoch = _last_updated_epoch(state)

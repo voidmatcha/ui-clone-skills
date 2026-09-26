@@ -446,7 +446,7 @@ def _transition_evidence_result(self: Gate) -> CheckResult:
     )
     if video_result.status == "pass":
         return video_result
-    regions = self._load_json("regions.json")
+    regions = _load_regions(self)
     if isinstance(regions, dict) and (
         _has_live_capture_provenance(self, regions)
         or _has_inventory_capture_provenance(self, regions)
@@ -531,6 +531,18 @@ def _has_inventory_capture_provenance(self: Gate, regions: dict[str, Any]) -> bo
     return True
 
 
+def _load_regions(self: Gate) -> dict[str, Any] | None:
+    """Load regions.json, normalizing a bare-list root to ``{"regions": [...]}``.
+
+    ``_region_entries`` already walks list roots; coercing them to None here
+    would skip the placeholder/geometry/provenance checks entirely.
+    """
+    data = self._load_json_any("regions.json")
+    if isinstance(data, list):
+        return {"regions": data}
+    return data if isinstance(data, dict) else None
+
+
 def _check_regions_not_placeholder(self: Gate) -> CheckResult | None:
     """Warn on provisional placeholders and fail fabricated real regions.
 
@@ -540,8 +552,16 @@ def _check_regions_not_placeholder(self: Gate) -> CheckResult | None:
     shows motion evidence, detection must actually replace the placeholder
     before generation. Reference acquisition stays nonblocking so Phase 2 can
     run and produce that evidence."""
-    regions = self._load_json("regions.json")
+    regions = _load_regions(self)
     if not isinstance(regions, dict):
+        if (self.ref_dir / "regions.json").exists():
+            return CheckResult(
+                "regions.json from real detection",
+                "fail",
+                "regions.json exists but is not a JSON object or region list; "
+                "malformed detection output cannot be validated.",
+                fix="Re-run ui-capture detection so regions.json is regenerated.",
+            )
         return None
     entries = _region_entries(regions)
     is_placeholder = bool(regions.get("placeholder")) or (

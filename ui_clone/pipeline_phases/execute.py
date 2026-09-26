@@ -403,14 +403,34 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
             extract_asset_metadata = scripts / "extract-asset-metadata.sh"
             resource_mirror = scripts / "resource-mirror.sh"
             scaffold = visual_scripts / "dom-scaffold.sh"
-            if extract_dom.is_file() and not _run(
+            # Abort on a missing required producer like Phase 0A/1 do; a
+            # silently skipped producer leaves the phase "passing" with
+            # stale or absent artifacts.
+            missing_producers = [
+                str(path)
+                for path in (
+                    extract_dom,
+                    extract_section_map,
+                    extract_styles,
+                    resource_mirror,
+                    scaffold,
+                )
+                if not path.is_file()
+            ]
+            if missing_producers:
+                print(
+                    f"\n{_RED}Phase 2 failed: required producer script(s) not "
+                    f"found: {', '.join(missing_producers)}{_NC}"
+                )
+                return 1
+            if not _run(
                 ["bash", str(extract_dom), str(pipeline.ref_dir), pipeline.session, "body"],
                 "Phase 2 — DOM extraction",
             ):
                 return 1
             # section-map.json: agent-browser eval, runs against the
             # same session extract-dom.sh just used.
-            if extract_section_map.is_file() and not _run(
+            if not _run(
                 [
                     "bash",
                     str(extract_section_map),
@@ -483,7 +503,7 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
                 )
             # styles.json: aggregates from the structure.json we just
             # wrote, no browser round-trip.
-            if extract_styles.is_file() and not _run(
+            if not _run(
                 ["bash", str(extract_styles), str(pipeline.ref_dir)],
                 "Phase 2 — styles aggregation",
             ):
@@ -595,7 +615,7 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
                     f"re-snapshot(s) ({readiness['orphanImages']}/"
                     f"{readiness['checkableImages']} images now missing).{_NC}"
                 )
-            if resource_mirror.is_file() and not _run(
+            if not _run(
                 [
                     "bash",
                     str(resource_mirror),
@@ -636,7 +656,7 @@ def execute_phases(pipeline: Pipeline, phases: tuple[str, ...] = ("0A", "1", "2"
                     f"bash {resource_mirror} {pipeline.session} "
                     f"{pipeline.ref_dir} {pipeline.url}"
                 )
-            if scaffold.is_file() and not _run(
+            if not _run(
                 ["bash", str(scaffold), str(pipeline.ref_dir)],
                 "Phase 2 — DOM scaffold",
             ):

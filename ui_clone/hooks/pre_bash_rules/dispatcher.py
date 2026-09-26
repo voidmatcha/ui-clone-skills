@@ -51,12 +51,12 @@ from .bash_write import (
 from .declaration import _is_declaration_command
 from .impl_scaffold import _impl_scaffold_violation
 from .ref_state import (
-    _find_active_ref,
+    _find_active_refs,
     _ref_dir_for_static_guard,
     _state_before_gate,
 )
 from .section_compare import (
-    _SECTION_COMPARE_COMMAND_PATTERNS,
+    _is_section_compare_command,
     _section_compare_precondition_reason,
 )
 from .static_mirror import (
@@ -502,12 +502,13 @@ def _guard_static_server(cmd: str, project_root: Path, payload_cwd: Path | None)
 
 
 def _guard_section_compare(cmd: str, project_root: Path) -> str | None:
-    if not _SECTION_COMPARE_COMMAND_PATTERNS.search(cmd):
+    if not _is_section_compare_command(cmd):
         return None
-    ref_dir = _find_active_ref(project_root / "tmp" / "ref")
-    if ref_dir is None:
-        return None
-    return _section_compare_precondition_reason(ref_dir, cmd)
+    for ref_dir in _find_active_refs(project_root / "tmp" / "ref"):
+        reason = _section_compare_precondition_reason(ref_dir, cmd)
+        if reason is not None:
+            return reason
+    return None
 
 
 def _resolve_ref_dir_for_write(bash_write: str, project_root: Path) -> Path | None:
@@ -653,8 +654,8 @@ def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> N
     or a Bash write to a component file already passed the pre-generate
     gate (the "fall through" case from `_guard_bash_write_component`).
     """
-    ref_dir = _find_active_ref(project_root / "tmp" / "ref")
-    if ref_dir is None:
+    active_refs = _find_active_refs(project_root / "tmp" / "ref")
+    if not active_refs:
         _guard_scoped_declaration(cmd, project_root, session_id, include_clone_writes=True)
         # Off-pipeline completion closure (omx postmortem): the session
         # browsed an external site AND wrote clone-shaped files, but owns no
@@ -662,8 +663,7 @@ def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> N
         # scratch clone no gate ever measured. Same bootstrap guidance and
         # escape hatch as the pre_generate guard.
         if (
-            os.environ.get("UI_RE_SKIP_BASH_GATE") != "1"
-            and os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1"
+            os.environ.get("UI_RE_ALLOW_OFFPIPELINE") != "1"
             and session_id
             and _is_declaration_command(cmd)
             and has_external_browse(project_root, session_id)
@@ -685,12 +685,28 @@ def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> N
             )
             sys.exit(0)
         sys.exit(0)
-    if not should_enforce_ref_for_session(ref_dir, session_id):
+    # Every active page-level run is enforced (the Stop hook iterates all of
+    # them too); checking only the first sorted marker let a second active run
+    # ship through a commit/push/PR.
+    enforced = [
+        ref_dir for ref_dir in active_refs
+        if should_enforce_ref_for_session(ref_dir, session_id)
+    ]
+    if not enforced:
         # Another session's page-level run; this session's own scoped run
         # (if it wrote one) still has to pass scoped_check.
         _guard_scoped_declaration(cmd, project_root, session_id, include_clone_writes=False)
         sys.exit(0)
+    for ref_dir in enforced:
+        reason = _declaration_block_for_ref(cmd, ref_dir)
+        if reason is not None:
+            _emit_block(reason)
+            sys.exit(0)
+    sys.exit(0)
 
+
+def _declaration_block_for_ref(cmd: str, ref_dir: Path) -> str | None:
+    """Block reason for a declaration against one active ref, or None to allow."""
     state = PipelineState.load(ref_dir)
 
     # Always require section-compare result.txt to exist with 0 FAIL / 0 MISSING.
@@ -705,10 +721,9 @@ def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> N
         # Match section_gate.py / gate.py: explicit "⚠️ MISSING impl" marker
         missing_count = text.count("⚠️ MISSING impl")
         if fail_count == 0 and missing_count == 0 and state.current_gate == "done":
-            sys.exit(0)
+            return None
         if fail_count > 0 or missing_count > 0:
-            _emit_block(_build_section_compare_block(cmd, ref_dir, fail_count, missing_count))
-            sys.exit(0)
+            return _build_section_compare_block(cmd, ref_dir, fail_count, missing_count)
 
     # No result.txt at all OR result.txt clean but state isn't done — run the gate
     # and report what's actually missing. This avoids hardcoded message drift.
@@ -724,12 +739,10 @@ def _run_declaration_cascade(cmd: str, project_root: Path, session_id: str) -> N
         # but state didn't say done. Re-load — Gate.run() may have advanced it.
         state = PipelineState.load(ref_dir)
         if state.current_gate == "done":
-            sys.exit(0)
-        _emit_block(_build_pipeline_incomplete_block(cmd, ref_dir, state.current_gate))
-        sys.exit(0)
+            return None
+        return _build_pipeline_incomplete_block(cmd, ref_dir, state.current_gate)
 
-    _emit_block(_build_gate_failure_block(cmd, ref_dir, gate_name, gate_result))
-    sys.exit(0)
+    return _build_gate_failure_block(cmd, ref_dir, gate_name, gate_result)
 
 
 def main() -> None:
@@ -777,65 +790,63 @@ def main() -> None:
     mark_external_browse(cmd, project_root, session_id)
 
     # Each guard returns a block reason string or None. First match wins.
-    skip = os.environ.get("UI_RE_SKIP_BASH_GATE") == "1"
-
-    if not skip:
-        for guard_fn in (
-            _guard_whole_document_mirror,
-            _guard_static_html_mirror,
-            _guard_scratch_nested_ref,
-            _guard_enforcement_state_rm,
-            _guard_scoped_recorder,
-            _guard_verification_plan_ack,
-            _guard_adhoc_redirect,
-        ):
-            reason = guard_fn(cmd)
-            if reason is not None:
-                _emit_block(reason)
-                sys.exit(0)
-
-        # Hook slimming B (Fable+Codex review): the fresh-folder guard is
-        # retired. Out-of-order extraction is self-correcting — pre-generate
-        # blocks component writes without artifacts and every gate fails on
-        # missing artifacts — and the degenerate "mirror the live site into
-        # impl/public" case it partly covered is fully caught by the retained
-        # static-mirror family (verified: wget/curl mirrors still deny). The
-        # guard's cost was a broad ordering-nanny that false-positived on
-        # inspection commands (visual-judge blocked via a persisted cwd). The
-        # onboarding nudge ("run the pipeline driver first") lives in the
-        # SessionStart session_resume path. The _is_fresh_state /
-        # _fresh_state_violation predicates stay (public API, unit-tested).
-
-        reason = _guard_scoped_producers_write(cmd, project_root)
+    # (UI_RE_SKIP_BASH_GATE=1 already returned at the top of main().)
+    for guard_fn in (
+        _guard_whole_document_mirror,
+        _guard_static_html_mirror,
+        _guard_scratch_nested_ref,
+        _guard_enforcement_state_rm,
+        _guard_scoped_recorder,
+        _guard_verification_plan_ack,
+        _guard_adhoc_redirect,
+    ):
+        reason = guard_fn(cmd)
         if reason is not None:
             _emit_block(reason)
             sys.exit(0)
 
-        reason = _guard_agent_script(cmd, project_root, payload_cwd)
-        if reason is not None:
-            _emit_block(reason)
-            sys.exit(0)
+    # Hook slimming B (Fable+Codex review): the fresh-folder guard is
+    # retired. Out-of-order extraction is self-correcting — pre-generate
+    # blocks component writes without artifacts and every gate fails on
+    # missing artifacts — and the degenerate "mirror the live site into
+    # impl/public" case it partly covered is fully caught by the retained
+    # static-mirror family (verified: wget/curl mirrors still deny). The
+    # guard's cost was a broad ordering-nanny that false-positived on
+    # inspection commands (visual-judge blocked via a persisted cwd). The
+    # onboarding nudge ("run the pipeline driver first") lives in the
+    # SessionStart session_resume path. The _is_fresh_state /
+    # _fresh_state_violation predicates stay (public API, unit-tested).
 
-        reason = _impl_scaffold_violation(cmd, project_root, cwd=payload_cwd)
-        if reason is not None:
-            _emit_block(reason)
-            sys.exit(0)
+    reason = _guard_scoped_producers_write(cmd, project_root)
+    if reason is not None:
+        _emit_block(reason)
+        sys.exit(0)
 
-        reason = _guard_static_mirror_download(cmd)
-        if reason is not None:
-            _emit_block(reason)
-            sys.exit(0)
+    reason = _guard_agent_script(cmd, project_root, payload_cwd)
+    if reason is not None:
+        _emit_block(reason)
+        sys.exit(0)
 
-        # Hook slimming B: demoted from a hard block to an advisory warning. A
-        # local server started before post-implement is a verification surface,
-        # not itself a shipped clone — and the real ship-short risk (declaring
-        # done on an HTTP-200 / mirror) is backstopped by the Stop verify-stamp
-        # gate, which still requires a passing verify before closeout. Kept as a
-        # warning (not deleted) because the static-mirror family does NOT cover
-        # "server started too early", so the nudge still has unique value.
-        reason = _guard_static_server(cmd, project_root, payload_cwd)
-        if reason is not None:
-            _emit_warn(reason)
+    reason = _impl_scaffold_violation(cmd, project_root, cwd=payload_cwd)
+    if reason is not None:
+        _emit_block(reason)
+        sys.exit(0)
+
+    reason = _guard_static_mirror_download(cmd)
+    if reason is not None:
+        _emit_block(reason)
+        sys.exit(0)
+
+    # Hook slimming B: demoted from a hard block to an advisory warning. A
+    # local server started before post-implement is a verification surface,
+    # not itself a shipped clone — and the real ship-short risk (declaring
+    # done on an HTTP-200 / mirror) is backstopped by the Stop verify-stamp
+    # gate, which still requires a passing verify before closeout. Kept as a
+    # warning (not deleted) because the static-mirror family does NOT cover
+    # "server started too early", so the nudge still has unique value.
+    reason = _guard_static_server(cmd, project_root, payload_cwd)
+    if reason is not None:
+        _emit_warn(reason)
 
     reason = _guard_section_compare(cmd, project_root)
     if reason is not None:

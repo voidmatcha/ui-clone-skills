@@ -1229,6 +1229,70 @@ def _runtime_text_semantic_error(data: dict[str, object]) -> str | None:
     return None
 
 
+def _nonpass_provenance_error(
+    ref_dir: Path,
+    check_id: str,
+    produces: str,
+    status: str,
+    data: object,
+) -> str | None:
+    """Validate a skip/warn verdict on a provenance-bound block row.
+
+    Returns an error string when the artifact's non-pass status is not one the
+    genuine producer emits for this ref dir, else None. Checks outside the
+    provenance-bound set keep their existing skip/warn handling.
+    """
+    if not isinstance(data, dict):
+        return "artifact is not a JSON object"
+    if check_id == "junk-token":
+        if status == "skip":
+            return "junk-token-check.sh never emits skip"
+        # The producer's only warn: runtime scan attempted but failed.
+        if not (
+            data.get("schemaVersion") == 1
+            and data.get("runtimeAttempted") is True
+            and data.get("runtimeScanned") is False
+            and isinstance(data.get("implSrcDir"), str)
+            and data.get("implSrcDir")
+        ):
+            return (
+                "warn requires schemaVersion=1, runtimeAttempted=true, "
+                "runtimeScanned=false and implSrcDir"
+            )
+        return None
+    if produces == "hover-fallback.json":
+        if status == "warn":
+            return "hover-fallback-probe never emits warn"
+        from ui_clone.gates.hover_probe import build_plan as hover_plan
+
+        try:
+            plans = hover_plan(ref_dir)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return "hover plan could not be re-derived"
+        if plans:
+            return f"skip claimed but the ref declares {len(plans)} hover entr(ies)"
+        return None
+    if produces == "state-reveal.json":
+        from ui_clone.gates.state_reveal import build_plan as reveal_plan
+        from ui_clone.gates.state_reveal import evaluate as reveal_evaluate
+
+        try:
+            empty_verdict = reveal_evaluate(reveal_plan(ref_dir), [])
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            return "state-reveal plan could not be re-derived"
+        nothing_declared = empty_verdict.get("status") == "skip"
+        if status == "skip" and not nothing_declared:
+            return "skip claimed but the ref declares active-state reveals"
+        if status == "warn":
+            unmeasured = data.get("unmeasured")
+            if nothing_declared:
+                return "warn claimed but no active-state reveal is declared"
+            if not (isinstance(unmeasured, list) and unmeasured):
+                return "warn requires a non-empty unmeasured list"
+        return None
+    return None
+
+
 def _runtime_text_provenance_error(
     ref_dir: Path,
     artifact_path: Path,
@@ -1535,6 +1599,19 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
             severity = "block"
 
         if not produces:
+            # A blocking row that names no artifact can never be verified;
+            # dropping it silently would let a plan edit disable the check.
+            if severity == "block":
+                out.append(
+                    CheckResult(
+                        f"required: {check_id}",
+                        "fail",
+                        f"{check_id} — block-severity row declares no "
+                        "`produces` artifact, so it cannot be verified. "
+                        "Regenerate verification-plan.json.",
+                        fix="Run: bash skills/visual-debug/scripts/verification-plan.sh <ref-dir>",
+                    )
+                )
             continue
         artifact = self.ref_dir / produces
         label = f"required: {check_id}"
@@ -1623,9 +1700,24 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
         # ❌ FAIL markers — presence-only would let real failures slip past
         # this gate when section-compare's dedicated parser only watches
         # sections/result.txt, not transitions/result.txt.
+        json_artifact = str(produces).lower().endswith(".json")
         try:
             data = load_strict_json_text(raw)
         except (json.JSONDecodeError, ValueError):
+            if json_artifact and check_id not in {
+                "runtime-text-sequence",
+                "visual-fidelity-judge",
+            }:
+                # A `.json` artifact that does not parse must never fall into
+                # the text branch, where "no ❌ marker" reads as a pass.
+                out.append(
+                    _resolved_issue(
+                        f"{check_id} — {produces} is not valid JSON; a "
+                        "malformed JSON artifact is not check evidence. "
+                        "Re-run the producing script."
+                    )
+                )
+                continue
             if check_id == "runtime-text-sequence":
                 out.append(
                     _resolved_issue(
@@ -1795,6 +1887,15 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
                 out.append(CheckResult(label, "fail", msg, fix=fix))
             continue
 
+        if json_artifact and not isinstance(data, dict):
+            out.append(
+                _resolved_issue(
+                    f"{check_id} — {produces} parsed to "
+                    f"{type(data).__name__}, not a JSON object; required-check "
+                    "artifacts must be objects. Re-run the producing script."
+                )
+            )
+            continue
         status = data.get("status") if isinstance(data, dict) else None
         if check_id == "font-parity" and status is None:
             # font-parity-check.sh predates the generic required-check status
@@ -1857,7 +1958,23 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
         # nothing to mismatch. Floor cross-references section-map.json
         # so a 4-section page doesn't trip the gate.
         if check_id == "tree-diff" and status == "pass" and isinstance(data, dict):
-            walked = int(data.get("elements_walked") or 0)
+            counts = data.get("counts") or {}
+            try:
+                walked = int(data.get("elements_walked") or 0)
+                if isinstance(counts, dict):
+                    unpaired = int(counts.get("unpaired") or 0)
+                    ok = int(counts.get("ok") or 0)
+            except (TypeError, ValueError):
+                out.append(
+                    CheckResult(
+                        label,
+                        "fail",
+                        "tree-diff — elements_walked/counts are not numeric; "
+                        "malformed artifact is not convergence evidence.",
+                        fix=fix,
+                    )
+                )
+                continue
             floor = self._tree_diff_floor()
             if walked < floor:
                 msg = (
@@ -1868,10 +1985,7 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
                 )
                 out.append(CheckResult(label, "fail", msg, fix=fix))
                 continue
-            counts = data.get("counts") or {}
             if isinstance(counts, dict):
-                unpaired = int(counts.get("unpaired") or 0)
-                ok = int(counts.get("ok") or 0)
                 if unpaired >= 3 and unpaired > ok:
                     msg = (
                         f"tree-diff — unpaired majority "
@@ -2279,6 +2393,27 @@ def _check_verification_plan(self: Gate) -> list[CheckResult]:
                     )
                     out.append(_resolved_issue(msg))
                     continue
+
+        # Block rows must not trust a self-declared skip/warn: for the
+        # provenance-bound checks, the non-pass verdict has to match what the
+        # producer would actually emit (re-derived from the ref dir), otherwise
+        # a hand-written {"status":"skip"} downgrades a blocking check.
+        if severity == "block" and str(status).lower() in {"skip", "warn"}:
+            nonpass_error = _nonpass_provenance_error(
+                self.ref_dir, check_id, str(produces), str(status).lower(), data
+            )
+            if nonpass_error is not None:
+                out.append(
+                    CheckResult(
+                        label,
+                        "fail",
+                        f"{check_id} — status={status} lacks producer "
+                        f"provenance ({nonpass_error}). Re-run the producing "
+                        "script against a reachable impl URL.",
+                        fix=fix,
+                    )
+                )
+                continue
 
         if status == "pass":
             out.append(CheckResult(label, "pass", f"{check_id} (status: pass)"))

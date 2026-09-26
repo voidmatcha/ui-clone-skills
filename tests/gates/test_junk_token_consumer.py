@@ -31,6 +31,9 @@ def _artifact(ref: Path, *, status: str, runtime_scanned: bool,
         "staticFindings": [],
         "runtimeFindings": [],
         "runtimeScanned": runtime_scanned,
+        # junk-token-check.sh always records whether the runtime scan was
+        # attempted; its only warn is "attempted but failed".
+        "runtimeAttempted": True,
         "implSrcDir": impl_src_dir,
     }))
 
@@ -97,3 +100,39 @@ def test_warn_without_runtime_scan_stays_warn(tmp_path: Path) -> None:
     results = Gate(ref).gate_post_implement()
     row = next(r for r in results if "junk-token" in r.label)
     assert row.status == "warn", (row.status, row.message)
+
+
+def test_handwritten_skip_or_bare_warn_is_rejected(tmp_path: Path) -> None:
+    """A hand-written {"status":"skip"} / {"status":"warn"} must not downgrade
+    the blocking junk-token row: the producer never emits skip, and its warn
+    always records runtimeAttempted=true + runtimeScanned=false + implSrcDir."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _plan_with_junk_token(ref)
+    for forged in ({"status": "skip"}, {"status": "warn"}):
+        (ref / "junk-token.json").write_text(json.dumps(forged))
+        results = Gate(ref).gate_post_implement()
+        row = next(r for r in results if "junk-token" in r.label)
+        assert row.status == "fail", (forged, row.status, row.message)
+        assert "provenance" in row.message
+
+
+def test_non_object_json_artifact_fails(tmp_path: Path) -> None:
+    """A `.json` artifact that does not parse (or parses to a non-object) must
+    not fall into the text branch where "no ❌ marker" read as a pass."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "requiredChecks": [
+            {"id": "transition-fires", "produces": "transition-fires.json",
+             "severity": "block"},
+        ],
+    }))
+    for raw in ("hello\n", "[]", '"pass"'):
+        (ref / "transition-fires.json").write_text(raw)
+        results = Gate(ref).gate_post_implement()
+        row = next(r for r in results if "transition-fires" in r.label)
+        assert row.status == "fail", (raw, row.status, row.message)

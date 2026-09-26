@@ -18,13 +18,18 @@ from ui_clone.hooks._common import sanitize_command_for_deny, strip_heredoc_bodi
 _STATIC_MIRROR_DOWNLOAD_PATTERNS = re.compile(
     r"\bwget\b"
     r"(?=[^\n\r]*https?://)"
-    r"(?=[^\n\r]*(?:\s-P\s+|--directory-prefix(?:=|\s+))[^\s|;&]*impl/public)"
+    r"(?=[^\n\r]*(?:\s-P\s+|--directory-prefix(?:=|\s+))[^\s|;&]*impl(?:/|\s|$))"
     r"(?=[^\n\r]*(?:\s-p\b|--page-requisites|\s-r\b|--recursive|"
     r"--mirror|\s-E\b|--adjust-extension|\s-k\b|--convert-links))"
+    # Any HTML document downloaded into the impl tree (impl/index.html,
+    # impl/public/index.html, ...) is a static mirror, not only impl/public.
+    r"|\bwget\b"
+    r"(?=[^\n\r]*https?://)"
+    r"(?=[^\n\r]*(?:\s-O\s*|--output-document(?:=|\s+))[^\s|;&]*impl/[^\s|;&]*\.html?\b)"
     r"|\bcurl\b"
     r"(?=[^\n\r]*https?://)"
-    r"(?=[^\n\r]*(?:\s-o\s+|--output(?:=|\s+))[^\s|;&]*impl/public/index\.html)"
-    r"|\bcurl\b[^\n\r]*https?://[^\n\r]*>\s*[^\s|;&]*impl/public/index\.html",
+    r"(?=[^\n\r]*(?:\s-o\s+|--output(?:=|\s+))[^\s|;&]*impl/[^\s|;&]*\.html?\b)"
+    r"|\bcurl\b[^\n\r]*https?://[^\n\r]*>\|?\s*[^\s|;&]*impl/[^\s|;&]*\.html?\b",
     re.IGNORECASE,
 )
 

@@ -33,7 +33,12 @@ _REQUIRED_ARTIFACT_STATES = {
 def gate_bundle(self: Gate) -> list[CheckResult]:
     results = []
     results.append(
-        self.check_dir(self.ref_dir / "bundles", "bundles/ (downloaded JS chunks)", min_files=1)
+        self.check_dir(
+            self.ref_dir / "bundles",
+            "bundles/ (downloaded JS chunks)",
+            min_files=1,
+            pattern="*.js",
+        )
     )
 
     # Advisory: warn if fewer than 3 JS chunks

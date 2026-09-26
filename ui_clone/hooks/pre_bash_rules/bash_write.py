@@ -17,6 +17,7 @@ import re
 
 from ui_clone.hooks._common import (
     CMD_POSITION_PREFIX,
+    CMD_WRAPPED_POSITION_PREFIX,
     is_ad_hoc_ref_artifact,
     is_component_file,
     sanitize_command_for_deny,
@@ -25,7 +26,14 @@ from ui_clone.hooks._common import (
 _BASH_WRITE_PATTERNS = [
     # `cmd > file` or `cmd >> file` — any redirect to a path. Excludes process
     # substitutions (>(...)), fd duplications (>&N), and /dev/* sinks.
-    re.compile(r">>?\s*(?![&(])\s*([^\s|;&<>()]+)"),
+    # `>|` (noclobber override) is the same write.
+    re.compile(r">>?\|?\s*(?![&(])\s*([^\s|;&<>()]+)"),
+    # `cp|install|rsync|mv|ln <src...> <dest>` — the final positional argument
+    # of the pipeline stage is the destination; is_component_file() filters it.
+    re.compile(
+        r"\b(?:cp|install|rsync|mv|ln)\b[^|;&\n]*?\s([^\s|;&<>()]+)"
+        r"(?=\s*(?:$|[|;&\n)]))"
+    ),
     # `tee file` / `tee -a file` — also blocks `tee --append`.
     re.compile(r"\btee\b\s+(?:-a\s+|--append\s+)?([^\s|;&<>()]+)"),
     # `sed -i ... file` — in-place edit. Match the file argument that follows
@@ -224,9 +232,7 @@ def _bash_scoped_recorder_target(cmd: str) -> str | None:
 # `\rm`, `sudo rm`, `builtin/exec/nice/time rm`). CMD_POSITION_PREFIX itself only
 # consumes leading `env`/`KEY=VAL`, so without this a wrapper would shift the verb
 # off command position and bypass the guard.
-_ENFORCEMENT_VERB_PREFIX = (
-    CMD_POSITION_PREFIX + r"(?:\\?(?:command|builtin|exec|sudo|nice|time)\s+)*\\?"
-)
+_ENFORCEMENT_VERB_PREFIX = CMD_WRAPPED_POSITION_PREFIX
 
 # cp/tee/install/rsync/mv/ln match the enforcement token ANYWHERE after the verb.
 # This conservatively also blocks the rare copy/move/link FROM the ledger (a

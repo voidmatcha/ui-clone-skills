@@ -1085,6 +1085,17 @@ def gate_spec(self: Gate) -> list[CheckResult]:
 
     # Validate transition-spec structure
     spec = self._load_json("transition-spec.json")
+    if spec is None and (self.ref_dir / "transition-spec.json").exists():
+        # _load_json coerces malformed / non-object roots to None, which would
+        # otherwise skip every structural check below.
+        results.append(
+            CheckResult(
+                "transition-spec.json parses",
+                "fail",
+                "transition-spec.json exists but is not a JSON object; "
+                "malformed or list-root specs cannot be validated. Re-run Step 5d.",
+            )
+        )
     runtime_capture_result = _check_runtime_capture_integrity(self)
     if runtime_capture_result is not None:
         results.append(runtime_capture_result)
@@ -1151,6 +1162,16 @@ def gate_spec(self: Gate) -> list[CheckResult]:
             "reference_frames",
         )
         for index, transition in enumerate(transitions):
+            if not isinstance(transition, dict):
+                results.append(
+                    CheckResult(
+                        f"transitions[{index}] keys",
+                        "fail",
+                        f"transitions[{index}] must be an object (got "
+                        f"{type(transition).__name__}).",
+                    )
+                )
+                continue
             missing_keys = [k for k in required_transition_keys if k not in transition]
             if missing_keys:
                 results.append(

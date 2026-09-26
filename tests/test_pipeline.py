@@ -1215,6 +1215,16 @@ class TestPipelineRunDriver:
             "printf '/* ui-clone: no CSS custom properties observed in downloaded CSS */\\n' > \"$ref/css/variables.txt\"\n",
             encoding="utf-8",
         )
+        # Phase 2 aborts when a required producer script is missing; tests
+        # that need real behaviour overwrite these no-op stubs.
+        for rel in (
+            "skills/visual-debug/scripts/extract-dom.sh",
+            "skills/visual-debug/scripts/extract-section-map.sh",
+            "skills/visual-debug/scripts/extract-styles.sh",
+            "skills/visual-debug/scripts/dom-scaffold.sh",
+            "scripts/extract/resource-mirror.sh",
+        ):
+            (root / rel).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
         return root
 
     def test_execute_phase_0a_writes_canvas_detection_artifact(
@@ -1285,6 +1295,22 @@ class TestPipelineRunDriver:
         assert "reference" not in state["completed_steps"]
         assert state["current_gate"] == "reference"
 
+    def test_execute_phase_2_aborts_on_missing_producer_script(
+        self,
+        tmp_path: Path,
+        ref_dir_with_artifacts: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A missing required Phase 2 producer aborts like Phase 0A/1 do."""
+        ref_dir = ref_dir_with_artifacts
+        root = self._fake_plugin_root(tmp_path)
+        (root / "skills" / "visual-debug" / "scripts" / "dom-scaffold.sh").unlink()
+        monkeypatch.setenv("PLUGIN_ROOT", str(root))
+        p = self._make_pipeline(tmp_path, ref_dir)
+        assert p.execute_phases(("2",)) == 1
+        assert "dom-scaffold.sh" in capsys.readouterr().out
+
     @pytest.mark.parametrize("color", [None, "", "dark"])
     @pytest.mark.parametrize("namespace", [None, "", "caller-owned"])
     def test_execute_phase_2_marks_extraction_and_bundle_gates(
@@ -1325,7 +1351,9 @@ class TestPipelineRunDriver:
         original_run = subprocess.run
 
         def record_run(cmd: list[str], **kwargs: Any) -> Any:
-            if cmd[0] != "cksum":
+            # Skip cksum and bash_bin()'s `-c 'echo $BASH_VERSINFO'` probe
+            # (both run without the agent-browser child env).
+            if cmd[0] != "cksum" and "-c" not in cmd[1:2]:
                 seen_namespaces.append(kwargs.get("env", {}).get("AGENT_BROWSER_NAMESPACE"))
                 seen_colors.append(kwargs.get("env", {}).get("AGENT_BROWSER_COLOR_SCHEME"))
             return original_run(cmd, **kwargs)

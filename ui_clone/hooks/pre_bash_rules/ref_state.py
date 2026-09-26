@@ -246,10 +246,21 @@ def _fresh_state_violation(cmd: str) -> bool:
     return False
 
 
-def _find_active_ref(search_root: Path) -> Path | None:
+def _find_active_refs(search_root: Path) -> list[Path]:
+    """Every ref dir carrying a `.ui-re-active` marker, sorted by name.
+
+    Guards must evaluate all of them (as the Stop hook does); checking only
+    the first sorted marker lets a second active run escape enforcement.
+    """
     if not search_root.is_dir():
-        return None
-    for d in sorted(search_root.iterdir()):
-        if d.is_dir() and (d / ".ui-re-active").is_file():
-            return d
-    return None
+        return []
+    return [
+        d
+        for d in sorted(search_root.iterdir())
+        if d.is_dir() and (d / ".ui-re-active").is_file()
+    ]
+
+
+def _find_active_ref(search_root: Path) -> Path | None:
+    refs = _find_active_refs(search_root)
+    return refs[0] if refs else None

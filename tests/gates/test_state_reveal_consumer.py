@@ -188,3 +188,72 @@ def test_status_less_hover_fallback_artifact_rejected(tmp_path: Path) -> None:
     row = next(r for r in results if "hover-fallback" in r.label)
     assert row.status == "fail", (row.status, row.message)
     assert "status" in row.message.lower()
+
+
+def _declare_active_reveal(ref: Path) -> None:
+    (ref / "bundle-extraction.json").write_text(json.dumps({
+        "extractions": {"activeStateExpansions": [
+            {"resolvedClassName": "nav-label", "property": "width"},
+        ]},
+    }))
+
+
+def test_state_reveal_handwritten_skip_rejected_when_reveal_declared(tmp_path: Path) -> None:
+    """A hand-written {"status":"skip"} cannot downgrade the blocking row when
+    the ref declares an active-state reveal (the producer would never skip)."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _plan_with_state_reveal(ref)
+    _declare_active_reveal(ref)
+    (ref / "state-reveal.json").write_text(json.dumps({"status": "skip"}))
+    row = _row(ref)
+    assert row.status == "fail", (row.status, row.message)
+    assert "provenance" in row.message
+
+
+def test_state_reveal_bare_warn_rejected_but_producer_warn_kept(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _plan_with_state_reveal(ref)
+    _declare_active_reveal(ref)
+    (ref / "state-reveal.json").write_text(json.dumps({"status": "warn"}))
+    assert _row(ref).status == "fail"
+    _artifact(
+        ref,
+        status="warn",
+        runtimeScanned=False,
+        unmeasured=[{"selector": ".nav-label", "reason": "not engaged"}],
+    )
+    assert _row(ref).status == "warn"
+
+
+def test_state_reveal_producer_skip_passes_when_nothing_declared(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    _plan_with_state_reveal(ref)
+    (ref / "state-reveal.json").write_text(json.dumps({"schemaVersion": 1, "status": "skip"}))
+    assert _row(ref).status == "pass"
+
+
+def test_hover_fallback_handwritten_skip_rejected_when_hover_declared(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    _post_implement_baseline(ref)
+    (ref / "verification-plan.json").write_text(json.dumps({
+        "schemaVersion": 1,
+        "requiredChecks": [
+            {"id": "hover-fallback", "produces": "hover-fallback.json",
+             "reason": "hover cascade fallback", "severity": "block"},
+        ],
+    }))
+    (ref / "transition-spec.json").write_text(json.dumps({"transitions": [
+        {"id": "h1", "trigger": "hover", "target": ".btn",
+         "animation": {"property": "opacity"}},
+    ]}))
+    (ref / "hover-fallback.json").write_text(json.dumps({"status": "skip"}))
+    results = Gate(ref).gate_post_implement()
+    row = next(r for r in results if "hover-fallback" in r.label)
+    assert row.status == "fail", (row.status, row.message)

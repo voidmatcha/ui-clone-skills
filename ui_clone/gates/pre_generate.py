@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from ui_clone import dag as _dag
 
 from .base import CheckResult
+from .extraction import _em_conversion_check
 from .pre_generate_checks import (
     _check_audit_artifacts,  # noqa: F401  (re-exported for __init__ rebinding)
     _check_detection_artifact_integrity,  # noqa: F401
@@ -530,10 +531,9 @@ def gate_pre_generate(self: Gate) -> list[CheckResult]:
         # verification-plan.sh signature-effects dispatch condition exactly.
         vplan_path = self.ref_dir / "verification-plan.json"
         if vplan_path.is_file():
-            try:
-                gp = json.loads(plan_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                gp = {}
+            # plan_data is the already-parsed plan, coerced to {} for a
+            # malformed/list root (which the schema row above fails).
+            gp = plan_data
             se = gp.get("signatureEffects")
             ss = gp.get("scrollScrub") if isinstance(gp.get("scrollScrub"), dict) else {}
             has_se = isinstance(se, list) and bool(se)
@@ -552,7 +552,8 @@ def gate_pre_generate(self: Gate) -> list[CheckResult]:
                         for c in (vplan.get("requiredChecks") or [])
                         if isinstance(c, dict)
                     }
-                except (OSError, ValueError):
+                except (OSError, ValueError, AttributeError, TypeError):
+                    # Non-object plan roots register no rows -> amend row fails.
                     row_ids = set()
                 if "signature-effects-coverage" not in row_ids:
                     results.append(
@@ -658,17 +659,10 @@ def gate_pre_generate(self: Gate) -> list[CheckResult]:
             )
         )
 
-    # Viewport-scaled em check
-    typo = self._load_json("typography.json")
-    if typo:
-        scaling = typo.get("scalingSystem", "")
-        if scaling and any(k in scaling.lower() for k in ("viewport-scaled", "em-based")):
-            results.append(
-                self.check_file(
-                    self.ref_dir / "em-conversion.json",
-                    f"em-conversion.json (REQUIRED for {scaling} sites)",
-                )
-            )
+    # Viewport-scaled em check (shared with the extraction gate)
+    em_conversion = _em_conversion_check(self)
+    if em_conversion is not None:
+        results.append(em_conversion)
 
     # Hover timing + preloader
     interactions_data = self._load_json("interactions-detected.json")

@@ -23,6 +23,27 @@ _DRM_CANVAS_TEXT_CHARS_MAX = 200       # body text < 200 chars → DOM-poor
 _DRM_VIEWPORT_AREA = 1440 * 900
 
 
+def _em_conversion_check(self: Gate) -> CheckResult | None:
+    """Require em-conversion.json for viewport-scaled / em-based typography.
+
+    Shared by the extraction and pre-generate gates.
+    """
+    typo = self._load_json("typography.json")
+    if not typo:
+        return None
+    scaling = typo.get("scalingSystem", "")
+    if not (
+        isinstance(scaling, str)
+        and scaling
+        and any(k in scaling.lower() for k in ("viewport-scaled", "em-based"))
+    ):
+        return None
+    return self.check_file(
+        self.ref_dir / "em-conversion.json",
+        f"em-conversion.json (REQUIRED: scalingSystem={scaling})",
+    )
+
+
 def _check_unclonable_preflight(self: Gate) -> CheckResult | None:
     """Detect terminal-unclonable shapes from structure.json and short-circuit
     via `record_unclonable` BEFORE the pipeline burns iterations.
@@ -241,16 +262,9 @@ def gate_extraction(self: Gate) -> list[CheckResult]:
     )
 
     # Viewport-scaled font em-conversion gate
-    typo = self._load_json("typography.json")
-    if typo:
-        scaling = typo.get("scalingSystem", "")
-        if scaling and any(k in scaling.lower() for k in ("viewport-scaled", "em-based")):
-            results.append(
-                self.check_file(
-                    self.ref_dir / "em-conversion.json",
-                    f"em-conversion.json (REQUIRED: scalingSystem={scaling})",
-                )
-            )
+    em_conversion = _em_conversion_check(self)
+    if em_conversion is not None:
+        results.append(em_conversion)
 
     # Unclonable-preflight fix: early unclonable preflight. Detects auth-
     # gated and DRM-canvas shapes from structure.json so the pipeline
