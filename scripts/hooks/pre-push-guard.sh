@@ -45,40 +45,104 @@ input=$(cat)
 # byte (Codex dev-hook parity design). Falls back to the
 # original compact-JSON grep if python3 or JSON parsing is unavailable, so
 # this never regresses the Claude-only path it replaces.
-hook_command=$(GUARD_INPUT="$input" python3 -c '
-import json, os, sys
-try:
-    print(json.loads(os.environ.get("GUARD_INPUT", "{}")).get("tool_input", {}).get("command", ""))
-except Exception:
-    sys.exit(1)
-' 2>/dev/null) || hook_command=""
-# `git (global-opts)* push`: also catches `git -C <dir> push`,
-# `git -c k=v push`, `git --no-pager push`, `git --git-dir=<d> push`.
-GIT_PUSH_ERE='(^|[^[:alnum:]_-])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[[:alnum:]-]+(=[^[:space:]]+)?|-[[:alpha:]]+))*[[:space:]]+push([^[:alnum:]_-]|$)'
-if [ -n "$hook_command" ]; then
-  printf '%s\n' "$hook_command" | grep -qE "$GIT_PUSH_ERE" || exit 0
-else
-  echo "$input" | grep -qE '"command":[[:space:]]*"[^"]*git([[:space:]]+-[^"[:space:]]+([[:space:]]+[^"[:space:]-][^"[:space:]]*)?)*[[:space:]]+push' || exit 0
-fi
+# Shared word walker for the push detection and the refspec parse below.
+# shellcheck disable=SC2016  # Python source; nothing to expand
+_GIT_PUSH_PY='import os, shlex
+# git global options that take their value as a SEPARATE word. `--exec-path`
+# is not one: without `=` git prints its exec path and exits, so a following
+# word is never a subcommand. Options written `--opt=value` are one word.
+_GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+_GIT_SEPS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&", "&>", ">", "<", ">>"}
+def git_push(cmd):
+    """(dir, push_args) for the first `git [global-opts] push`, else None.
 
-# `git -C <dir> push` pushes <dir>'s repo, not the hook cwd's: check that one.
-_push_dir=$(GUARD_INPUT="$input" python3 -c '
-import json, os, re, sys
+    A word walker, not a regex: skips each global option (and the separate
+    value of a value-taking one) so `git --work-tree X push` and
+    `git --git-dir .git push` resolve by rule, not by accident.
+    """
+    try:
+        lex = shlex.shlex(cmd.replace("\n", " ; "), posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        toks = list(lex)
+    except ValueError:
+        toks = cmd.split()
+    # A simple leading `cd <dir> &&` moves the shell before git runs: a
+    # relative -C resolves against it, not against the hook cwd.
+    base = ""
+    if len(toks) > 2 and toks[0] == "cd" and toks[2] == "&&" and not toks[1].startswith("-"):
+        base = os.path.expandvars(os.path.expanduser(toks[1]))
+    for i, t in enumerate(toks):
+        if os.path.basename(t) != "git":
+            continue
+        j, d = i + 1, ""
+        while j < len(toks) and toks[j] not in _GIT_SEPS:
+            w = toks[j]
+            if w in _GIT_VALUE_OPTS:
+                if w == "-C" and j + 1 < len(toks):
+                    # shlex drops the quotes but not `~`/`$VAR`: expand them
+                    # as the shell would, from the hook environment.
+                    c = os.path.expandvars(os.path.expanduser(toks[j + 1]))
+                    d = c if os.path.isabs(c) or not d else os.path.join(d, c)
+                j += 2
+                continue
+            if w.startswith("-"):
+                j += 1
+                continue
+            if w == "push":
+                args = []
+                for a in toks[j + 1:]:
+                    if a in _GIT_SEPS:
+                        break
+                    args.append(a)
+                if d and base and not os.path.isabs(d):
+                    d = os.path.join(base, d)
+                return d, args
+            break
+    return None
+'
+# Prints "push" and the -C directory on success, "no" for a non-push; exits
+# non-zero only when python3/JSON is unavailable (grep fallback below).
+_push_detect=$(GUARD_INPUT="$input" python3 -c "$_GIT_PUSH_PY"'
+import json, sys
 try:
     cmd = json.loads(os.environ.get("GUARD_INPUT", "{}")).get("tool_input", {}).get("command", "")
 except Exception:
-    sys.exit(0)
-m = re.search(r"\bgit((?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?|-\w+))*)\s+push\b", cmd)
-if not m:
-    sys.exit(0)
-d = ""
-for c in re.findall(r"-C\s+(\S+)", m.group(1)):
-    c = c.strip("\"'"'"'")
-    d = c if os.path.isabs(c) or not d else os.path.join(d, c)
-print(d)
-' 2>/dev/null) || _push_dir=""
-if [ -n "$_push_dir" ]; then
-  cd "$_push_dir" 2>/dev/null || exit 0
+    sys.exit(1)
+if not isinstance(cmd, str) or not cmd:
+    sys.exit(1)
+r = git_push(cmd)
+print("no" if r is None else "push")
+print("" if r is None else r[0])
+' 2>/dev/null) || _push_detect=""
+if [ -n "$_push_detect" ]; then
+  [ "$(printf '%s\n' "$_push_detect" | sed -n '1p')" = "push" ] || exit 0
+  _push_dir=$(printf '%s\n' "$_push_detect" | sed -n '2p')
+else
+  # No python3 / no parsable command: raw-payload grep. The command string is
+  # scanned past JSON escapes (`\"`, `\\`) so an escaped quote before the
+  # push cannot end it early. Value-taking global options (-C/-c/--git-dir/
+  # --work-tree/--namespace/--config-env/--super-prefix) consume their
+  # separate value word.
+  printf '%s\n' "$input" | grep -qE '"command":[[:space:]]*"([^"\\]|\\.)*git([[:space:]]+(-[Cc]|--(git-dir|work-tree|namespace|config-env|super-prefix))[[:space:]]+([^"\\[:space:]]|\\.)+|[[:space:]]+-([^"\\[:space:]]|\\.)+)*[[:space:]]+push([^[:alnum:]_-]|")' || exit 0
+  # Fail closed without python3: every check below (refspec parse, version
+  # sync, bump step) needs it, and running them anyway would pass silently.
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-push-guard: python3 not found — the push checks need it. Install python3 and retry." >&2
+    echo "decision: block" >&2
+    exit 2
+  fi
+  _push_dir=""
+fi
+
+# `git -C <dir> push` pushes <dir>'s repo, not the hook cwd's: check that one.
+# Fail closed when it cannot be entered (e.g. `-C "$dir"` naming a variable
+# this hook cannot see): checking the hook cwd's repo instead could pass a
+# push of a different repository.
+if [ -n "$_push_dir" ] && ! cd "$_push_dir" 2>/dev/null; then
+  echo "pre-push-guard: cannot enter the 'git -C' directory '$_push_dir', so the push checks cannot run. Retry with a literal path (or cd into the repo first)." >&2
+  echo "decision: block" >&2
+  exit 2
 fi
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
@@ -100,28 +164,34 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 # diff/read against hardcoded HEAD, so `git push origin main` (or
 # `origin main:main`) run from a DIFFERENT checked-out branch silently
 # compared and read the WRONG branch's content and diffed nothing.
-_push_parsed=$(GUARD_INPUT="$input" python3 -c '
-import json, os, re, sys
+_push_parsed=$(GUARD_INPUT="$input" python3 -c "$_GIT_PUSH_PY"'
+import json, sys
 try:
     cmd = json.loads(os.environ.get("GUARD_INPUT", "{}")).get("tool_input", {}).get("command", "")
 except Exception:
     cmd = ""
+r = git_push(cmd) if isinstance(cmd, str) else None
+if r is None:
+    sys.exit(0)
+args = r[1]
 
 # --all / --mirror touches every branch — treat as a release push. No single
 # well-defined source branch either; the bash side falls back to the
 # checked-out branch for this case (see _resolve_release_refs).
-GIT_PUSH = r"\bgit(?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?|-\w+))*\s+push"
-if re.search(GIT_PUSH + r"\b.*(?:--all|--mirror)\b", cmd):
+if "--all" in args or "--mirror" in args:
     print("ALL")
     print("")
     print("")
     sys.exit(0)
 
-# Match: git push <flags...> <remote> [<refspec>]
-m = re.search(GIT_PUSH + r"\s+((?:-\S+\s+)*)(\S+)(?:\s+(\S+))?", cmd)
-if not m or m.group(2).startswith("-"):
+# git push <flags...> <remote> [<refspec>]
+k = 0
+while k < len(args) and args[k].startswith("-"):
+    k += 1
+if k >= len(args):
     sys.exit(0)
-refspec = (m.group(3) or "").strip()
+remote = args[k]
+refspec = args[k + 1].strip() if k + 1 < len(args) else ""
 if not refspec or refspec.startswith("-"):
     sys.exit(0)
 parts = refspec.split(":", 1)
@@ -133,10 +203,10 @@ print(dst)
 print(src)
 # Printed so bash can sanity-check it is a REAL configured remote — a flag
 # taking its own separate argument (e.g. `-o ci.skip origin main`,
-# `--push-option`, `--repo`, `--receive-pack`) is not matched by the
-# `(?:-\S+\s+)*` flag-skipping group above and gets misread as "the remote"
-# followed by "the refspec" one token early. Round 5 follow-up review, MINOR.
-print(m.group(2))
+# `--push-option`, `--repo`, `--receive-pack`) is skipped as a lone flag
+# above, so its value gets misread as "the remote" followed by "the
+# refspec" one word early. Round 5 follow-up review, MINOR.
+print(remote)
 ' 2>/dev/null)
 
 target_branch=$(printf '%s\n' "$_push_parsed" | sed -n '1p')

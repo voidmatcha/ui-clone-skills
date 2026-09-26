@@ -82,7 +82,10 @@ def _bash_write_target(cmd: str) -> str | None:
 # early-returns when the ledger is absent OR empty, so destroying OR emptying it
 # releases an un-enforced run), .ui-re-external-browse/* (off-pipeline activation
 # crumbs — the off-pipeline Stop/declaration blocker fires only when these exist),
-# and .ui-re-active (the fresh-active session marker the Stop hook scans). A
+# .ui-re-sessions/* (session ownership records — hooks/shim.sh runs the hook stack
+# for a session only while its record exists, so deleting it switches every guard
+# off for that session), and .ui-re-active (the fresh-active session marker the
+# Stop hook scans). A
 # whole-dir reset (`rm -rf tmp/ref/<c>`) does NOT name these files, so it is not
 # matched — only an operation that singles out an enforcement file is. Beyond
 # rm/mv/find, this covers the cheap ways to empty/overwrite the ledger:
@@ -122,7 +125,7 @@ def _bash_write_target(cmd: str) -> str | None:
 # bypass the guard. Scoped to the filename only — the destructive verbs (rm/cp/...)
 # stay case-sensitive, matching how the shell resolves commands.
 _ENFORCEMENT_STATE_RE = (
-    r"(?i:\.gate-skip-log|\.ui-re-external-browse|\.ui-re-active"
+    r"(?i:\.gate-skip-log|\.ui-re-external-browse|\.ui-re-sessions|\.ui-re-active"
     r"|verify-stamp\.json|pipeline-state\.json"
     # generation-plan.json carries sourceHashes/generatedAt provenance consumed by
     # downstream gates. The canonical writer is scripts/extract/generation-plan.sh,

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -132,7 +133,7 @@ def test_blocks_unbumped_version_still_live_on_origin(tmp_path: Path) -> None:
     assert "already the version live on origin/main" in proc.stderr
 
 
-@pytest.mark.parametrize("form", ["dash_c", "no_pager"])
+@pytest.mark.parametrize("form", ["dash_c", "no_pager", "git_dir_sep", "work_tree_sep", "namespace_sep"])
 def test_push_with_git_global_options_is_still_guarded(tmp_path: Path, form: str) -> None:
     # `git -C <dir> push` / `git --no-pager push` used to bypass the guard: the
     # detection regex required `git` immediately followed by `push`. -C must
@@ -145,6 +146,12 @@ def test_push_with_git_global_options_is_still_guarded(tmp_path: Path, form: str
         outside = tmp_path / "outside"
         outside.mkdir()
         proc = _run_guard(work, None, f"git -C {work} push origin main", cwd=outside)
+    elif form == "git_dir_sep":
+        proc = _run_guard(work, None, "git --git-dir .git push origin main")
+    elif form == "work_tree_sep":
+        proc = _run_guard(work, None, f"git --work-tree {work} push origin main")
+    elif form == "namespace_sep":
+        proc = _run_guard(work, None, "git --namespace ns -c core.pager=cat push origin main")
     else:
         proc = _run_guard(work, None, "git --no-pager push origin main")
     assert proc.returncode == 2, proc.stdout + proc.stderr
@@ -476,3 +483,130 @@ def test_all_and_mirror_push_still_enforces_bump(tmp_path: Path, push_command: s
     )
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "decision: block" in proc.stderr
+
+
+def _walker_source() -> str:
+    text = GUARD.read_text(encoding="utf-8")
+    start = text.index("_GIT_PUSH_PY='") + len("_GIT_PUSH_PY='")
+    return text[start : text.index("\n'\n", start)]
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("git push origin main", ("", ["origin", "main"])),
+        ("git -C /a -C b push origin x", ("/a/b", ["origin", "x"])),
+        ("git --git-dir .git push origin main", ("", ["origin", "main"])),
+        ("git --work-tree /w --namespace ns push -u origin x", ("", ["-u", "origin", "x"])),
+        ("git -c k=v --config-env a=B --super-prefix p/ push", ("", [])),
+        ("git commit -m x && git -C /r push --all; echo done", ("/r", ["--all"])),
+        ("git --work-tree push status", None),
+        ("git -C push log", None),
+        ("git --exec-path /x push", None),
+        ("git log push", None),
+        # A leading `cd <dir> &&` is the base for a relative -C only.
+        ("cd /r && git -C sub push origin x", ("/r/sub", ["origin", "x"])),
+        ("cd /r && git -C /abs push", ("/abs", [])),
+        ("cd /r && git push", ("", [])),
+        ("cd - && git -C sub push", ("sub", [])),
+    ],
+)
+def test_git_push_word_walker(command: str, expected: tuple[str, list[str]] | None) -> None:
+    ns: dict[str, object] = {}
+    exec(_walker_source(), ns)  # noqa: S102 - the guard's own snippet
+    result = ns["git_push"](command)  # type: ignore[operator]
+    assert result == expected
+
+
+def _run_guard_env(cwd: Path, command: str, env: dict[str, str], bash: str = "bash") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [bash, str(GUARD)], cwd=cwd, env=env,
+        input=json.dumps({"tool_input": {"command": command}}, separators=(",", ":")),
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+@pytest.mark.parametrize("form", ["tilde", "env_var", "braced_env_var"])
+def test_dash_c_with_tilde_or_env_var_is_expanded_and_guarded(tmp_path: Path, form: str) -> None:
+    # shlex returns `-C "$dir"` / `-C ~/x` literally; cd used to fail and the
+    # guard exited 0, skipping every check.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path),
+        "GUARD_TEST_WORK": str(work),
+        "UI_CLONE_INSTALLED_PLUGINS_JSON": str(work / "does-not-exist.json"),
+    }
+    command = {
+        "tilde": "git -C ~/work push origin main",
+        "env_var": 'git -C "$GUARD_TEST_WORK" push origin main',
+        "braced_env_var": "git -C ${GUARD_TEST_WORK} push origin main",
+    }[form]
+    proc = _run_guard_env(outside, command, env)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "already the version live on origin/main" in proc.stderr
+
+
+def test_dash_c_directory_that_cannot_be_entered_blocks(tmp_path: Path) -> None:
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    proc = _run_guard(work, None, 'd=/x; git -C "$GUARD_TEST_UNSET_DIR" push origin main')
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "cannot enter the 'git -C' directory" in proc.stderr
+    assert "decision: block" in proc.stderr
+
+
+def _no_python_env(tmp_path: Path) -> dict[str, str]:
+    # PATH with the tools the guard needs before its python3 check, and no python3.
+    fake = tmp_path / "nopy-bin"
+    fake.mkdir()
+    for tool in ("cat", "grep", "sed", "git"):
+        found = shutil.which(tool)
+        assert found
+        (fake / tool).symlink_to(found)
+    return {"PATH": str(fake), "HOME": str(tmp_path)}
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['git commit -m "say \\"hi\\"" && git push origin main', "git -C /r push origin main"],
+)
+def test_without_python3_a_push_is_blocked_past_escaped_quotes(tmp_path: Path, command: str) -> None:
+    # The grep fallback used `[^"]*` and stopped at the first escaped quote.
+    proc = _run_guard_env(tmp_path, command, _no_python_env(tmp_path), bash="/bin/bash")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "python3 not found" in proc.stderr
+
+
+def test_without_python3_a_non_push_passes(tmp_path: Path) -> None:
+    proc = _run_guard_env(tmp_path, 'git commit -m "a \\" push"', _no_python_env(tmp_path), bash="/bin/bash")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_walker_expands_tilde_and_env_in_dash_c(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "/home/u")
+    monkeypatch.setenv("REPO_DIR", "/srv/repo")
+    ns: dict[str, object] = {}
+    exec(_walker_source(), ns)  # noqa: S102 - the guard's own snippet
+    walker = ns["git_push"]
+    assert walker("git -C ~/repo push") == ("/home/u/repo", [])  # type: ignore[operator]
+    assert walker('git -C "$REPO_DIR" push origin main') == ("/srv/repo", ["origin", "main"])  # type: ignore[operator]
+
+
+def test_relative_dash_c_after_leading_cd_is_guarded(tmp_path: Path) -> None:
+    # `cd <dir> && git -C <rel> push` used to resolve <rel> against the hook
+    # cwd, fail to enter it, and block with a misleading message.
+    work = _make_repo_pushed_at(tmp_path, "1.0.0")
+    (work / "README.md").write_text("changed\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "change without bump")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    env = {**os.environ, "UI_CLONE_INSTALLED_PLUGINS_JSON": str(work / "does-not-exist.json")}
+    proc = _run_guard_env(outside, f"cd {work.parent} && git -C {work.name} push origin main", env)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "already the version live on origin/main" in proc.stderr

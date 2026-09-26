@@ -36,6 +36,7 @@ ref exists; nothing otherwise.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,13 @@ from ui_clone.hooks._stop_repeat import forget_session
 from ui_clone.state import PipelineState
 
 SUBDOC_DIR = "skills/ui-reverse-engineering"
+UNCLAIMED_SESSION_NOTICE = (
+    "This session does not own the run yet, so ui-clone guards are off. Re-invoke the "
+    "skill before continuing: /ui-clone-skills:ui-reverse-engineering (or "
+    "/ui-clone-skills:visual-debug) in Claude, or for Codex run the pipeline status "
+    "command (python -m ui_clone.pipeline <url> <component> <session> status --json, "
+    "or node bin/ui-clone pipeline ...). That claims the session."
+)
 
 
 @dataclass(frozen=True)
@@ -293,6 +301,11 @@ def main() -> None:
             parts.append(_build_message(r, event_name))
             parts.append("─" * 40)
         message = "\n".join(parts).rstrip("─\n")
+
+    if os.environ.get("UI_CLONE_SESSION_UNCLAIMED") == "1":
+        # hooks/shim.sh runs this for a session that does not own the run yet
+        # (a tmp/ref/*/.ui-re-active exists); every other guard is off for it.
+        message = f"{UNCLAIMED_SESSION_NOTICE}\n\n{message}"
 
     _emit(message, event_name)
     sys.exit(0)

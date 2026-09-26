@@ -801,6 +801,11 @@ class TestEnforcementStateRmGuard:
     def test_rm_external_browse_crumbs_blocked(self, tmp_path: Path) -> None:
         assert self._denied(self._run("rm -rf tmp/.ui-re-external-browse", tmp_path))
 
+    def test_rm_session_ownership_records_blocked(self, tmp_path: Path) -> None:
+        # Deleting the ownership record makes hooks/shim.sh skip every hook for
+        # the session, so it is enforcement state like the crumbs above.
+        assert self._denied(self._run("rm -rf tmp/.ui-re-sessions", tmp_path))
+
     def test_truncate_gate_skip_log_blocked(self, tmp_path: Path) -> None:
         assert self._denied(self._run(": > tmp/ref/comp/.gate-skip-log", tmp_path))
 

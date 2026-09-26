@@ -28,6 +28,21 @@ are stdlib-only and need no scientific dependencies).
 > Use `npx ui-clone-cli --help` only when intentionally testing the published
 > package compatibility surface.
 
+### Hook activation (session claim)
+
+The plugin's hooks enforce only for the session that claimed a run. Besides
+invoking a skill, running any of these CLI forms from a shell tool claims the
+session (the only route on Codex, which has no Skill or prompt hook event):
+`node bin/ui-clone`, a global or linked `ui-clone`, or `npx ui-clone-cli`, at
+command position, followed by `pipeline`, `gate`, `goal`, `state`,
+`scoped-check`, `scoped-diff`, or the bare `<url> ...` form; and
+`python -m ui_clone` or `python -m ui_clone.{pipeline,gate,goal,state,scoped_check,scoped_diff}`.
+`ui-clone hooks ...` and `--help` do not claim. After `/clear` or in a new
+session, the resume notice still appears for a WIP run but asks you to
+re-invoke the skill (or run one of the commands above, for example
+`status --json`) before continuing, since the guards stay off until then. See
+[README_detail/pipeline.md](../README_detail/pipeline.md) for the full rule.
+
 ## Codex project hooks
 
 The globally enabled Codex plugin is skills-only, so ui-clone hooks do not run

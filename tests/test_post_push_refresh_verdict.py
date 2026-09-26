@@ -66,13 +66,33 @@ def test_multiline_command_with_push_on_a_later_line_is_still_detected() -> None
         "git --no-pager push",
         "git -c core.sshCommand=ssh push -u origin x",
         "git --git-dir=/repo/.git push",
+        "git --git-dir .git push",
+        "git --work-tree /repo push origin main",
+        "git --namespace ns push",
+        "git -C /repo -c k=v --no-pager push",
+        "git --config-env core.sshCommand=SSH_CMD push",
+        "cd /repo && git -C sub push origin main",
     ],
 )
 def test_push_with_git_global_options_is_detected(command: str) -> None:
     assert _verdict({"tool_input": {"command": command}, "exit_code": 0}) == "push-ok"
 
 
-@pytest.mark.parametrize("command", ["git log push", "git pushx", "echo gitpush"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git log push",
+        "git pushx",
+        "echo gitpush",
+        # The value of a value-taking global option is never the subcommand.
+        "git --work-tree push status",
+        "git -C push log",
+        "git --namespace push fetch",
+        "git -c push=1 status",
+        # Without `=`, --exec-path prints the path and exits: no push runs.
+        "git --exec-path /usr/lib/git-core push",
+    ],
+)
 def test_push_lookalikes_are_not_push(command: str) -> None:
     assert _verdict({"tool_input": {"command": command}, "exit_code": 0}) == "not-push"
 
@@ -227,3 +247,69 @@ def test_installed_version_key_falls_back_to_upstream_marketplace(tmp_path: Path
     (root / ".claude-plugin").mkdir(parents=True)
     (root / ".claude-plugin" / "marketplace.json").write_text(json.dumps({"name": "  "}), encoding="utf-8")
     assert _installed_version(installed, root) == "0.8.17"
+
+
+def _installed_json_path(env: dict[str, str]) -> str:
+    text = SCRIPT.read_text(encoding="utf-8")
+    line = next(ln for ln in text.splitlines() if ln.startswith("_claude_installed_json="))
+    proc = subprocess.run(
+        ["bash", "-c", f'{line}\nprintf "%s" "$_claude_installed_json"'],
+        env=env, capture_output=True, text=True, timeout=10, check=True,
+    )
+    return proc.stdout
+
+
+def test_installed_plugins_json_honors_claude_config_dir(tmp_path: Path) -> None:
+    base = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    default = f"{tmp_path}/.claude/plugins/installed_plugins.json"
+    assert _installed_json_path(base) == default
+    assert _installed_json_path({**base, "CLAUDE_CONFIG_DIR": ""}) == default
+    assert _installed_json_path({**base, "CLAUDE_CONFIG_DIR": "/cfg"}) == "/cfg/plugins/installed_plugins.json"
+    override = {**base, "CLAUDE_CONFIG_DIR": "/cfg", "UI_CLONE_INSTALLED_PLUGINS_JSON": "/x.json"}
+    assert _installed_json_path(override) == "/x.json"
+
+
+# ─── parity with pre-push-guard's push walker ───────────────────────────────
+
+GUARD = _project_root() / "scripts" / "hooks" / "pre-push-guard.sh"
+
+
+def _walker_body(text: str) -> str:
+    start = text.index("_GIT_VALUE_OPTS = ")
+    return text[start : text.index("    return None\n", start)]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push",
+        "git push origin main",
+        "git -C /r push origin main",
+        "git -C ~/r push",
+        'git -C "$HOME/r" push',
+        "git --no-pager push",
+        "git --git-dir .git push origin main",
+        "git --work-tree /w --namespace ns push -u origin x",
+        "git -c k=v --config-env a=B --super-prefix p/ push",
+        "git commit -m x && git push --all; echo done",
+        "git commit -q -m x\ngit push origin main",
+        "/usr/bin/git push origin main",
+        "git --work-tree push status",
+        "git -C push log",
+        "git --exec-path /x push",
+        "git log push",
+        "git pushx",
+        "echo git push",
+    ],
+)
+def test_push_detection_matches_pre_push_guard(command: str) -> None:
+    # The verdict walker is a copy of pre-push-guard's; both must detect the
+    # same forms and stay textually identical so a fix lands in both.
+    guard_src = GUARD.read_text(encoding="utf-8")
+    assert _walker_body(_extract_verdict_snippet()) == _walker_body(guard_src)
+    start = guard_src.index("_GIT_PUSH_PY='") + len("_GIT_PUSH_PY='")
+    ns: dict[str, object] = {}
+    exec(guard_src[start : guard_src.index("\n'\n", start)], ns)  # noqa: S102 - the guard's own snippet
+    guard_says_push = ns["git_push"](command) is not None  # type: ignore[operator]
+    verdict = _verdict({"tool_input": {"command": command}, "exit_code": 0})
+    assert (verdict == "push-ok") == guard_says_push

@@ -36,7 +36,60 @@ input=$(cat)
 # afterwards — an earlier version of this hardening printed the raw command
 # on its own line and silently dropped any push hidden past line 1.
 _verdict=$(HOOK_INPUT="$input" python3 -c '
-import json, os, re, sys
+import json, sys
+import os, shlex
+# git global options that take their value as a SEPARATE word. `--exec-path`
+# is not one: without `=` git prints its exec path and exits, so a following
+# word is never a subcommand. Options written `--opt=value` are one word.
+_GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+_GIT_SEPS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&", "&>", ">", "<", ">>"}
+def git_push(cmd):
+    """(dir, push_args) for the first `git [global-opts] push`, else None.
+
+    A word walker, not a regex: skips each global option (and the separate
+    value of a value-taking one) so `git --work-tree X push` and
+    `git --git-dir .git push` resolve by rule, not by accident.
+    """
+    try:
+        lex = shlex.shlex(cmd.replace("\n", " ; "), posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        toks = list(lex)
+    except ValueError:
+        toks = cmd.split()
+    # A simple leading `cd <dir> &&` moves the shell before git runs: a
+    # relative -C resolves against it, not against the hook cwd.
+    base = ""
+    if len(toks) > 2 and toks[0] == "cd" and toks[2] == "&&" and not toks[1].startswith("-"):
+        base = os.path.expandvars(os.path.expanduser(toks[1]))
+    for i, t in enumerate(toks):
+        if os.path.basename(t) != "git":
+            continue
+        j, d = i + 1, ""
+        while j < len(toks) and toks[j] not in _GIT_SEPS:
+            w = toks[j]
+            if w in _GIT_VALUE_OPTS:
+                if w == "-C" and j + 1 < len(toks):
+                    # shlex drops the quotes but not `~`/`$VAR`: expand them
+                    # as the shell would, from the hook environment.
+                    c = os.path.expandvars(os.path.expanduser(toks[j + 1]))
+                    d = c if os.path.isabs(c) or not d else os.path.join(d, c)
+                j += 2
+                continue
+            if w.startswith("-"):
+                j += 1
+                continue
+            if w == "push":
+                args = []
+                for a in toks[j + 1:]:
+                    if a in _GIT_SEPS:
+                        break
+                    args.append(a)
+                if d and base and not os.path.isabs(d):
+                    d = os.path.join(base, d)
+                return d, args
+            break
+    return None
 
 try:
     d = json.loads(os.environ.get("HOOK_INPUT", "{}"))
@@ -45,9 +98,9 @@ except Exception:
 if not isinstance(d, dict):
     sys.exit(1)
 command = d.get("tool_input", {}).get("command", "") if isinstance(d.get("tool_input"), dict) else ""
-# `git (global-opts)* push`: also `git -C <dir> push`, `git --no-pager push`.
-GIT_PUSH = r"\bgit(?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?|-\w+))*\s+push\b"
-if not isinstance(command, str) or not re.search(GIT_PUSH, command):
+# `git (global-opts)* push`: also `git -C <dir> push`, `git --no-pager push`,
+# `git --work-tree <dir> push` (see git_push above).
+if not isinstance(command, str) or git_push(command) is None:
     print("not-push")
     sys.exit(0)
 # exit_code shape is confirmed for Claude Code (top-level "exit_code"); Codex
@@ -64,7 +117,7 @@ print("push-ok" if exit_code == 0 else "push-unconfirmed")
 
 if [ -z "$_verdict" ]; then
   command=$(echo "$input" | grep -o '"command":"[^"]*"' | head -1 | sed 's/"command":"//;s/"$//')
-  if ! printf '%s\n' "$command" | grep -qE '(^|[^[:alnum:]_-])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[[:alnum:]-]+(=[^[:space:]]+)?|-[[:alpha:]]+))*[[:space:]]+push([^[:alnum:]_-]|$)'; then
+  if ! printf '%s\n' "$command" | grep -qE '(^|[^[:alnum:]_-])git([[:space:]]+(-[Cc]|--(git-dir|work-tree|namespace|config-env|super-prefix))[[:space:]]+[^[:space:]]+|[[:space:]]+-[^[:space:]]+)*[[:space:]]+push([^[:alnum:]_-]|$)'; then
     _verdict="not-push"
   elif echo "$input" | grep -q '"exit_code":0'; then
     _verdict="push-ok"
@@ -150,7 +203,9 @@ _resolve_repo_slug() {
 }
 # repo-slug-helpers: end
 
-_claude_installed_json="${UI_CLONE_INSTALLED_PLUGINS_JSON:-$HOME/.claude/plugins/installed_plugins.json}"
+# CLAUDE_CONFIG_DIR relocates installed_plugins.json (install.sh honors it
+# too; an empty value means the default).
+_claude_installed_json="${UI_CLONE_INSTALLED_PLUGINS_JSON:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json}"
 _version_before=$(_read_installed_version "$_claude_installed_json" "$REPO_ROOT")
 
 _download_ok=0

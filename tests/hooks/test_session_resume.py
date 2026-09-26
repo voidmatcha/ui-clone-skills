@@ -228,3 +228,25 @@ class TestSessionResume:
         assert _stop_repeat.was_shown(tmp_path, key_b, "sig")
         assert json.loads(attempts.read_text()) == {f"block|sid-a|{ref_dir}|sig": 2}
 
+
+
+def test_unclaimed_session_notice_leads_only_when_flagged(tmp_path: Path) -> None:
+    """hooks/shim.sh exports UI_CLONE_SESSION_UNCLAIMED=1 when it runs the
+    resume hook for a session that does not own the active run."""
+    ref_dir = make_ref_dir(make_search_root(tmp_path), name="375studio")
+    set_active_marker(ref_dir)
+
+    def _ctx(flag: str) -> str:
+        result = run_hook(
+            "ui_clone.hooks.session_resume",
+            stdin_data="{}",
+            env={"CLAUDE_PROJECT_DIR": str(tmp_path), "UI_CLONE_SESSION_UNCLAIMED": flag},
+        )
+        assert result.returncode == 0, result.stderr
+        return str(json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"])
+
+    notice = "This session does not own the run yet, so ui-clone guards are off."
+    flagged = _ctx("1")
+    assert flagged.startswith(notice)
+    assert "/ui-clone-skills:ui-reverse-engineering" in flagged and "status --json" in flagged
+    assert notice not in _ctx("")

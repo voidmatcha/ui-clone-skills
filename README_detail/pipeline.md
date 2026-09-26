@@ -14,6 +14,37 @@ Manual Codex management is available through `ui-clone hooks status|enable|disab
 | `ui_clone.hooks.devtools_errors` | `PostToolUse` (Bash / Codex exec_command) | Checks browser devtools for console errors after each Bash call |
 | `ui_clone.hooks.section_gate` | `Stop` | Blocks finishing if the current gate hasn't passed. The same block repeating is bounded by `UI_RE_STOP_RETRY_CAP` (default 3, keyed by session + ref + failure signature, so progress or a different failure starts a fresh streak); once spent the stop is allowed but hands back visibly and leaves pipeline state unfinished, so nothing downstream reads the ref as complete. Marker persists past section-compare; `current_gate == "done"` is the canonical complete signal |
 | `ui_clone.hooks.session_resume` | `SessionStart`; Claude Code also `PostCompact` | Reinjects the verification checklist into context after a session resume; Claude Code also reinjects after context compact (empirical: 73% of past verification skips happened within 20 min of a `compact_boundary`). Codex compact-boundary reinjection depends on host hook support. Skipped when state is `done` |
+Activation is per session. `hooks/shim.sh` starts a hook module only for a
+session that owns a ui-clone run: it invoked a public skill (a
+`UserPromptSubmit` prompt naming `ui-clone-skills:<skill>`, `/<skill>` or
+`$<skill>`, a `Skill` call for one of the three skills, or a shell call that
+drives a run, which is the Codex route since Codex has no `Skill` or
+`UserPromptSubmit` event: `python -m ui_clone` or
+`-m ui_clone.pipeline|gate|goal|state|scoped_check|scoped_diff`; the node CLI
+at command position (`node bin/ui-clone`, `ui-clone`, `npx ui-clone-cli`) with
+`pipeline`, `gate`, `goal`, `state`, `scoped-check`, `scoped-diff` or the bare
+`<url> ...` form; or executing a visual-debug script
+(`bash "$SCRIPTS_DIR/<script>.sh"`,
+`bash <root>/skills/visual-debug/scripts/<script>.sh`); `ui-clone hooks ...`
+and `--help` do not claim), which writes
+`tmp/.ui-re-sessions/<sha256(session_id)>`, and run state still exists
+(`tmp/ref/*/` with `pipeline-state.json`, `.ui-re-active`, `extracted.json` or
+`element-target.json`). A session a hook already recorded on a ref dir
+(`tmp/ref/*/.ui-re-sessions/`) also counts as an owner. Any other session exits
+in the shell without starting Python, even in a folder with clone leftovers.
+The off-pipeline detector stays live for every session: an
+`agent-browser open http…` command always reaches `pre_bash`, and a session
+with its own `tmp/.ui-re-external-browse/<sha256>.json` crumb keeps its hooks.
+`claude_continuation` also runs for the session named by its own
+`.ui-re-continuation/<session_id>.json` receipt. `session_resume` also runs
+for an unclaimed session when a WIP run (a ref dir holding `.ui-re-active`)
+exists, so the "UI-RE WIP detected" notice survives `/clear`, a new session,
+and a compact. That is not a claim: the shim sets
+`UI_CLONE_SESSION_UNCLAIMED=1` and the notice tells the agent to re-invoke the
+skill before continuing. A new session resuming an existing run claims it by
+invoking the skill again; until then its guards stay off. A payload with no
+`session_id` keeps the older folder-based activation (`tmp/ref` or the crumb
+directory anywhere in the anchor chain).
 
 ## Goal-driven continuation
 

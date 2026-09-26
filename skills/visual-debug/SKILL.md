@@ -74,6 +74,8 @@ fi
 [ -n "$SCRIPTS_DIR" ] || { echo "Set VISUAL_DEBUG_SCRIPTS_DIR or PLUGIN_ROOT" >&2; exit 1; }
 ```
 
+Run the scripts as `bash "$SCRIPTS_DIR/<script>.sh" ...`. On hosts without a Skill event (Codex), the first such call is what tells the plugin hooks that this session owns the diagnosis.
+
 Pipe large browser JSON to files; do not print it into the model context. Every `agent-browser` command needs `--session <name>`, and every JS eval must be an IIFE.
 
 ## Choose the route
