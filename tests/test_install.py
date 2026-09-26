@@ -2079,6 +2079,7 @@ def _claude_probe_env(tmp_path: Path, home: Path, fake_bin: Path, log: Path) -> 
             "PATH": f"{fake_bin}:{env['PATH']}",
         }
     )
+    env.pop("CLAUDE_CONFIG_DIR", None)
     return env
 
 
@@ -2507,3 +2508,243 @@ def test_install_warns_when_the_plugin_is_installed_but_not_enabled(
     combined = result.stdout + result.stderr
     assert "not enabled" in combined.lower(), combined[-1500:]
     assert "plugin enable" in combined, "must name the exact recovery command"
+
+
+def test_refresh_updates_user_scope_and_keeps_a_user_disable(tmp_path: Path) -> None:
+    """A refresh must not re-enable the plugin: a user-scope disable (enabled
+    only per project) has to survive every reinstall. It must also update the
+    user-scope install, not the project-local one of the cwd."""
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_claude(fake_bin / "claude", populate=True)
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
+    env = _claude_probe_env(tmp_path, home, fake_bin, log)
+
+    first = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+
+    stub = (fake_bin / "claude").read_text(encoding="utf-8")
+    listing = (
+        'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
+        '  printf "  ui-clone-skills@voidmatcha\\n"\n'
+        "fi\n"
+    )
+    _write_executable(fake_bin / "claude", stub + listing)
+    log.write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = log.read_text(encoding="utf-8")
+    assert "plugin update ui-clone-skills@voidmatcha --scope user" in commands, commands
+    assert "plugin enable" not in commands, commands
+
+
+def test_stale_cache_recovery_keeps_a_user_disable(tmp_path: Path) -> None:
+    """The stale-cache recovery reinstalls with `plugin install`, which enables
+    the plugin at user scope. A user-scope disable must survive it, as it
+    survives a plain refresh."""
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_cache_faking_claude(fake_bin / "claude", populate=True)
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
+    env = _claude_probe_env(tmp_path, home, fake_bin, log)
+
+    first = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+
+    version = json.loads((checkout / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))[
+        "version"
+    ]
+    cache_dir = home / ".claude" / "plugins" / "cache" / "voidmatcha" / "ui-clone-skills" / version
+    (cache_dir / "skills" / "ui-capture" / "SKILL.md").write_text("stale\n", encoding="utf-8")
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    key = "ui-clone-skills@voidmatcha"
+    settings.write_text(json.dumps({"enabledPlugins": {key: False}}), encoding="utf-8")
+
+    # `plugin install` re-copies the cache AND enables, like the real CLI;
+    # `plugin disable --scope user` writes the disable back.
+    set_enabled = (
+        '  python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); '
+        "d.setdefault('enabledPlugins', {})['" + key + "']=sys.argv[2]=='1'; "
+        'json.dump(d, open(p, \'w\'))" "$HOME/.claude/settings.json" '
+    )
+    _write_executable(
+        fake_bin / "claude",
+        "#!/usr/bin/env bash\n"
+        'printf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n'
+        'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
+        '  printf "  ui-clone-skills@voidmatcha\\n"\n'
+        "fi\n"
+        'if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then\n'
+        '  src="$(cat "$HOME/.fake-marketplace-src")"\n'
+        '  dst="$HOME/.claude/plugins/cache/voidmatcha/ui-clone-skills/' + version + '"\n'
+        '  mkdir -p "$dst"\n'
+        '  cp -R "$src"/. "$dst"/\n'
+        + set_enabled + "1\n"
+        "fi\n"
+        'if [ "$1" = "plugin" ] && [ "$2" = "disable" ]; then\n'
+        + set_enabled + "0\n"
+        "fi\n",
+    )
+    log.write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "Detected stale cached bytes" in combined, combined
+    assert json.loads(settings.read_text(encoding="utf-8"))["enabledPlugins"][key] is False
+    assert "plugin disable ui-clone-skills@voidmatcha --scope user" in log.read_text(encoding="utf-8")
+
+
+_KEY = "ui-clone-skills@voidmatcha"
+
+
+def _write_listing_claude(path: Path, *, listing: str, list_status: int = 0, update_status: int = 0) -> None:
+    """A `claude` stub whose `plugin list` output/status is scripted.
+
+    `plugin install` copies the source into the (CLAUDE_CONFIG_DIR-aware)
+    cache and writes enabledPlugins[key]=true; `plugin disable` writes false.
+    """
+    cfg = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"'
+    set_enabled = (
+        '  mkdir -p ' + cfg + '; f=' + cfg + '/settings.json; [ -f "$f" ] || echo "{}" > "$f"; '
+        'python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); '
+        "d.setdefault('enabledPlugins', {})['" + _KEY + "']=sys.argv[2]=='1'; "
+        'json.dump(d, open(p, \'w\'))" "$f" '
+    )
+    _write_executable(
+        path,
+        "#!/usr/bin/env bash\n"
+        'printf "claude %s\\n" "$*" >> "$COMMAND_LOG"\n'
+        'if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ] && [ "$3" = "add" ]; then\n'
+        '  printf "%s" "$4" > "$HOME/.fake-marketplace-src"\n'
+        "fi\n"
+        'if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n'
+        f"  cat <<'LISTING'\n{listing}\nLISTING\n"
+        f"  exit {list_status}\n"
+        "fi\n"
+        f'if [ "$1" = "plugin" ] && [ "$2" = "update" ]; then exit {update_status}; fi\n'
+        'if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then\n'
+        '  src="$(cat "$HOME/.fake-marketplace-src")"\n'
+        '  ver="$(sed -n \'s/.*"version": "\\([^"]*\\)".*/\\1/p\' "$src/.claude-plugin/plugin.json" | head -1)"\n'
+        '  dst=' + cfg + '/plugins/cache/voidmatcha/ui-clone-skills/$ver\n'
+        '  mkdir -p "$dst"; cp -R "$src"/. "$dst"/\n'
+        + set_enabled + "1\n"
+        "fi\n"
+        'if [ "$1" = "plugin" ] && [ "$2" = "disable" ]; then\n'
+        + set_enabled + "0\n"
+        "fi\n"
+        'if [ "$1" = "plugin" ] && [ "$2" = "enable" ]; then\n'
+        + set_enabled + "1\n"
+        "fi\n",
+    )
+
+
+def _run_claude_only(tmp_path: Path, env: dict, checkout: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(checkout / "install.sh"), "--no-deps", "--claude-only"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+    )
+
+
+def _listing_setup(tmp_path: Path, **stub: object) -> tuple[Path, Path, Path, dict]:
+    checkout = _probe_checkout(tmp_path)
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "commands.log"
+    _write_python_wrapper(fake_bin / "python3")
+    _write_listing_claude(fake_bin / "claude", **stub)  # type: ignore[arg-type]
+    _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
+    return checkout, home, log, _claude_probe_env(tmp_path, home, fake_bin, log)
+
+
+def test_failed_plugin_list_refreshes_without_enabling(tmp_path: Path) -> None:
+    """A failed/timed-out `plugin list` is not "not installed": the installer
+    must not take the fresh-install path that asserts an enable."""
+    checkout, home, log, env = _listing_setup(tmp_path, listing="", list_status=1)
+    result = _run_claude_only(tmp_path, env, checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = log.read_text(encoding="utf-8")
+    assert f"plugin update {_KEY} --scope user" in commands, commands
+    assert "plugin enable" not in commands, commands
+    assert "plugin install" not in commands, commands
+
+
+def test_failed_plugin_list_and_update_install_keeps_a_user_disable(tmp_path: Path) -> None:
+    checkout, home, log, env = _listing_setup(tmp_path, listing="", list_status=1, update_status=1)
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"enabledPlugins": {_KEY: False}}), encoding="utf-8")
+    result = _run_claude_only(tmp_path, env, checkout)
+    commands = log.read_text(encoding="utf-8")
+    assert f"plugin install {_KEY} --scope user" in commands, commands
+    assert "plugin enable" not in commands, commands
+    assert json.loads(settings.read_text(encoding="utf-8"))["enabledPlugins"][_KEY] is False, (
+        result.stdout + result.stderr
+    )
+
+
+def test_project_scope_only_install_still_gets_a_user_scope_install(tmp_path: Path) -> None:
+    """`plugin list` also prints project/local-scope installs; only a user-scope
+    entry may route to `update --scope user`, which fails against the others."""
+    listing = json.dumps([{"id": _KEY, "scope": "project", "enabled": True, "projectPath": "/p"}])
+    checkout, home, log, env = _listing_setup(tmp_path, listing=listing)
+    result = _run_claude_only(tmp_path, env, checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = log.read_text(encoding="utf-8")
+    assert f"plugin install {_KEY} --scope user" in commands, commands
+    assert "plugin update" not in commands, commands
+
+
+def test_user_scope_json_listing_refreshes(tmp_path: Path) -> None:
+    listing = json.dumps(
+        [
+            {"id": _KEY, "scope": "project", "enabled": False, "projectPath": "/p"},
+            {"id": _KEY, "scope": "user", "enabled": True},
+        ]
+    )
+    checkout, home, log, env = _listing_setup(tmp_path, listing=listing)
+    result = _run_claude_only(tmp_path, env, checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = log.read_text(encoding="utf-8")
+    assert f"plugin update {_KEY} --scope user" in commands, commands
+    assert "plugin install" not in commands, commands
+
+
+def test_user_enabled_state_honors_claude_config_dir(tmp_path: Path) -> None:
+    """With CLAUDE_CONFIG_DIR set, the user settings live there, not in
+    ~/.claude: the stale-cache recovery must read the disable from it."""
+    checkout, home, log, env = _listing_setup(tmp_path, listing="", list_status=1, update_status=1)
+    cfg = tmp_path / "cfg"
+    env["CLAUDE_CONFIG_DIR"] = str(cfg)
+    cfg.mkdir()
+    (cfg / "settings.json").write_text(json.dumps({"enabledPlugins": {_KEY: False}}), encoding="utf-8")
+    decoy = home / ".claude" / "settings.json"
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text(json.dumps({"enabledPlugins": {_KEY: True}}), encoding="utf-8")
+    result = _run_claude_only(tmp_path, env, checkout)
+    commands = log.read_text(encoding="utf-8")
+    assert f"plugin disable {_KEY} --scope user" in commands, result.stdout + result.stderr
+    assert json.loads((cfg / "settings.json").read_text(encoding="utf-8"))["enabledPlugins"][_KEY] is False

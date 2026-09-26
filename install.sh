@@ -501,7 +501,8 @@ remove_legacy_claude_skill_links() {
   # dogfood session read the checkout (or an old projection) instead. Remove
   # only symlinks whose resolved target is one of this project's known roots;
   # real directories and unknown links remain user-owned.
-  local legacy_root="$HOME/.claude/skills"
+  local legacy_root
+  legacy_root="$(claude_config_dir)/skills"
   local skill dst resolved expected
   [ -d "$legacy_root" ] || return 0
 
@@ -564,6 +565,59 @@ remove_legacy_codex_skill_links() {
 # destructive act for an installer that runs on other people's machines.
 # Call this only AFTER this marketplace's own install or update succeeded:
 # switching the other copy off first and then failing leaves nothing enabled.
+# Claude Code's config root: CLAUDE_CONFIG_DIR relocates settings.json, the
+# plugin cache, and installed_plugins.json together (an empty CLAUDE_CONFIG_DIR
+# makes `claude plugin list --json` report [] and writes .claude.json there).
+claude_config_dir() {
+  printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+}
+
+# installed / absent / unknown for THIS plugin at USER scope. `--json` carries
+# a per-entry scope, so a project- or local-scope install of the same plugin
+# (which a plain `plugin list` also prints) does not read as a user install.
+# A CLI without `--json` falls back to the plain listing; a listing that
+# fails outright is "unknown", never "absent": a failed or timed-out list must
+# not send the installer down the fresh-install path that asserts an enable.
+claude_plugin_user_scope_state() {
+  local listing state
+  if listing="$(claude plugin list --json 2>/dev/null)" &&
+     state="$(PLUGIN_KEY="$PLUGIN_NAME@$MARKETPLACE_NAME" python3 -c '
+import json, os, sys
+entries = json.loads(sys.stdin.read())
+if not isinstance(entries, list):
+    sys.exit(1)
+key = os.environ["PLUGIN_KEY"]
+user = any(isinstance(e, dict) and e.get("id") == key and e.get("scope", "user") == "user" for e in entries)
+print("installed" if user else "absent")
+' <<<"$listing" 2>/dev/null)"; then
+    printf '%s\n' "$state"
+    return 0
+  fi
+  if listing="$(claude plugin list 2>/dev/null)"; then
+    if grep -qF "$PLUGIN_NAME@$MARKETPLACE_NAME" <<<"$listing"; then
+      printf 'installed\n'
+    else
+      printf 'absent\n'
+    fi
+    return 0
+  fi
+  printf 'unknown\n'
+}
+
+# `plugin install` enables the plugin at user scope; put a prior user-scope
+# disable back afterwards. Used wherever an install runs over a state the user
+# may have chosen (stale-cache recovery, an unreadable plugin listing).
+claude_install_keeping_disable() {
+  local enabled_before status=0
+  enabled_before="$(claude_user_enabled_state)"
+  claude plugin install "$PLUGIN_NAME@$MARKETPLACE_NAME" --scope user >/dev/null 2>&1 || status=1
+  if [ "$enabled_before" = "false" ] && [ "$(claude_user_enabled_state)" != "false" ]; then
+    claude plugin disable "$PLUGIN_NAME@$MARKETPLACE_NAME" --scope user >/dev/null 2>&1 \
+      || warn "Could not restore the user-scope disable: claude plugin disable $PLUGIN_NAME@$MARKETPLACE_NAME --scope user"
+  fi
+  return "$status"
+}
+
 disable_competing_claude_installs() {
   have claude || return 0
   local listing entry other
@@ -603,9 +657,23 @@ install_claude_plugin() {
   # so 'present in plugin list' means 'cached', not 'current'.
   # Same shape as the Codex listing above, and one plugin-list growth away from the
   # same EPIPE/pipefail failure. Buffer it for the same reason.
-  local claude_listing
-  claude_listing="$(claude plugin list 2>/dev/null || true)"
-  if grep -qF "$PLUGIN_NAME@$MARKETPLACE_NAME" <<<"$claude_listing"; then
+  local user_state
+  user_state="$(claude_plugin_user_scope_state)"
+  if [ "$user_state" = "unknown" ]; then
+    # Installed or not is unknown, so neither path's assumptions hold: try the
+    # refresh (keeps the enable state), then an install that restores a prior
+    # disable, and never assert an enable.
+    warn "claude plugin list failed — refreshing without changing the plugin's enable state"
+    if claude plugin update "$PLUGIN_NAME@$MARKETPLACE_NAME" --scope user >/dev/null 2>&1 ||
+       claude_install_keeping_disable; then
+      ok "Claude plugin refreshed from $CLAUDE_PLUGIN_SRC"
+      disable_competing_claude_installs
+    else
+      warn "claude plugin install failed — run inside the app: /plugin install $PLUGIN_NAME@$MARKETPLACE_NAME"
+    fi
+    return
+  fi
+  if [ "$user_state" = "installed" ]; then
     act "Refreshing installed Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME"
     # `plugin update`, never uninstall+install: uninstall rewrites
     # enabledPlugins in ~/.claude/settings.json, and a failure between the two
@@ -613,23 +681,41 @@ install_claude_plugin() {
     # bare update run from a project with its own local install refreshes that
     # install and leaves the user-scope one at the old version. A same-version
     # cache with stale bytes is replaced by verify_claude_plugin_delivery.
+    # A refresh keeps the user's enable/disable choice: a user-scope disable
+    # (e.g. enabled only per project) must survive every reinstall.
     if claude plugin update "$PLUGIN_NAME@$MARKETPLACE_NAME" --scope user >/dev/null 2>&1; then
       ok "Claude plugin refreshed from $CLAUDE_PLUGIN_SRC"
-      ensure_claude_plugin_enabled
       disable_competing_claude_installs
     else
       warn "claude plugin update failed — run inside the app: /plugin update $PLUGIN_NAME@$MARKETPLACE_NAME"
     fi
     return
   fi
+  # Absent at user scope. A project- or local-scope install of the same plugin
+  # does not count: `update --scope user` would fail against it and leave no
+  # user-scope install at all.
   act "Installing Claude plugin $PLUGIN_NAME@$MARKETPLACE_NAME (user scope)"
-  if claude plugin install "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+  if claude plugin install "$PLUGIN_NAME@$MARKETPLACE_NAME" --scope user >/dev/null 2>&1; then
     ok "Claude plugin installed — new Claude Code sessions load it automatically"
     ensure_claude_plugin_enabled
     disable_competing_claude_installs
   else
     warn "claude plugin install failed — run inside the app: /plugin install $PLUGIN_NAME@$MARKETPLACE_NAME"
   fi
+}
+
+claude_user_enabled_state() {
+  # true / false / unset for the plugin in the user-scope settings file.
+  python3 - "$(claude_config_dir)/settings.json" "$PLUGIN_NAME@$MARKETPLACE_NAME" <<'PY' 2>/dev/null || printf 'unset\n'
+import json
+import sys
+
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8")).get("enabledPlugins", {}).get(sys.argv[2])
+except Exception:
+    value = None
+print({True: "true", False: "false"}.get(value, "unset"))
+PY
 }
 
 plugin_manifest_version() {
@@ -690,7 +776,7 @@ verify_claude_plugin_delivery() {
   local version cache_dir
   version="$(plugin_manifest_version)" || return 0
   [ -n "$version" ] || return 0
-  cache_dir="$HOME/.claude/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME/$version"
+  cache_dir="$(claude_config_dir)/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME/$version"
 
   if [ ! -d "$cache_dir" ]; then
     # The cache layout is the host's private detail; a version we cannot find
@@ -760,7 +846,11 @@ verify_claude_plugin_delivery() {
     if [ -f "$cache_dir/.claude-plugin/plugin.json" ] || [ -f "$cache_dir/hooks/shim.sh" ]; then
       rm -rf "$cache_dir"
     fi
-    claude plugin install "$PLUGIN_NAME@$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+    # `plugin install` enables the plugin at user scope; a user-scope disable
+    # must survive this recovery like it survives a plain refresh. A prior
+    # "unset" is left as the install writes it: the CLI can write only
+    # true/false, and `plugin install` enabling is the host's own default.
+    claude_install_keeping_disable || true
     if [ ! -d "$cache_dir" ]; then
       err "Hook delivery probe FAILED: cache eviction removed $PLUGIN_NAME $version and the reinstall did not recreate it."
       err "  cache: $cache_dir"
@@ -833,7 +923,7 @@ warn_if_plugin_disabled() {
   have python3 || return 0
   local state
   state="$(
-    SETTINGS="$HOME/.claude/settings.json" PLUGIN_KEY="$PLUGIN_NAME@$MARKETPLACE_NAME" \
+    SETTINGS="$(claude_config_dir)/settings.json" PLUGIN_KEY="$PLUGIN_NAME@$MARKETPLACE_NAME" \
       python3 - <<'PY'
 import json
 import os
@@ -872,14 +962,15 @@ prune_superseded_cache_versions() {
   # set is READ from installed_plugins.json rather than assumed to be the
   # manifest version: an install that half-failed can leave the host pointing
   # at an older directory, and deleting that would break a working install.
-  local cache_root="$HOME/.claude/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME"
+  local cache_root
+  cache_root="$(claude_config_dir)/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME"
   [ -d "$cache_root" ] || return 0
   have python3 || return 0
 
   local removed
   removed="$(
     CACHE_ROOT="$cache_root" \
-    INSTALLED_JSON="$HOME/.claude/plugins/installed_plugins.json" \
+    INSTALLED_JSON="$(claude_config_dir)/plugins/installed_plugins.json" \
     VERIFIED_VERSION="$(plugin_manifest_version || true)" \
     PLUGIN_KEY="$PLUGIN_NAME@$MARKETPLACE_NAME" python3 - <<'PY'
 import json
